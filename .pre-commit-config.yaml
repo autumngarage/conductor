@@ -1,0 +1,81 @@
+# Pre-commit hooks — installed via: pre-commit install --install-hooks
+# Docs: https://pre-commit.com
+#
+# Hooks run at two stages:
+#   pre-commit: fast checks on every commit (formatting, secrets, file hygiene)
+#   pre-push:   fast branch checks; AI review only runs for default-branch pushes
+
+repos:
+  # ── Standard file hygiene ──────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+        exclude: tsconfig.*\.json$
+      - id: check-added-large-files
+        args: ['--maxkb=500']
+      - id: detect-private-key
+      - id: no-commit-to-branch
+        args: ['--branch', 'main', '--branch', 'master']
+        stages: [pre-commit]
+      - id: check-merge-conflict
+
+  # ── Secret scanning ────────────────────────────────────────────────────
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.22.1
+    hooks:
+      - id: gitleaks
+
+  # ── Shell script quality ───────────────────────────────────────────────
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.10.0.1
+    hooks:
+      - id: shellcheck
+        args: ['--severity=warning']
+
+  - repo: https://github.com/scop/pre-commit-shfmt
+    rev: v3.10.0-1
+    hooks:
+      - id: shfmt
+        args: ['-i', '2', '-ci']
+
+  # ── Branch naming enforcement ──────────────────────────────────────────
+  - repo: local
+    hooks:
+      - id: branch-naming
+        name: Branch naming convention
+        entry: >-
+          /usr/bin/env bash -c 'branch="$(git rev-parse --abbrev-ref HEAD)";
+          [[ "$branch" == "main" || "$branch" == "master" || "$branch" =~ ^(feat|fix|chore|refactor|docs)/ ]] ||
+          { echo "Branch name must match: feat/, fix/, chore/, refactor/, or docs/"; exit 1; }'
+        language: system
+        stages: [pre-push]
+        always_run: true
+        pass_filenames: false
+
+  # ── AI default-branch push review ──────────────────────────────────────
+  - repo: local
+    hooks:
+      - id: codex-review
+        name: AI default-branch push review
+        entry: /usr/bin/env bash scripts/codex-review.sh
+        language: system
+        stages: [pre-push]
+        always_run: true
+        pass_filenames: false
+
+  # ── Project profile checks ─────────────────────────────────────────────
+  # scripts/touchstone-run.sh reads .touchstone-config and dispatches to the
+  # appropriate Node/TypeScript, Swift, Rust, Python, Go, or monorepo commands.
+  - repo: local
+    hooks:
+      - id: touchstone-validate
+        name: Touchstone project validation
+        entry: /usr/bin/env bash scripts/touchstone-run.sh validate
+        language: system
+        stages: [pre-push]
+        always_run: true
+        pass_filenames: false

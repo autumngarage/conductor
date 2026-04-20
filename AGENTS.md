@@ -1,0 +1,76 @@
+# AGENTS.md — AI Reviewer Guide for conductor
+
+You are reviewing pull requests for **conductor**. Optimize your review for catching the things that bite this repo, not generic style polish.
+
+This file is the source of truth for how AI reviewers (Codex, Claude, etc.) should think about a PR. The companion file `CLAUDE.md` is for the *author* writing the code; this file is for the *reviewer*.
+
+---
+
+## What to prioritize (in order)
+
+{{PRIORITIES — list your project's review priorities in order of importance. Examples:
+
+1. **Data integrity.** Anything that changes how data is written, migrated, or deleted.
+2. **Security.** Auth, input validation, secrets handling, injection risks.
+3. **Silent failures.** New `except: pass`, swallowed exceptions, fallbacks that mask broken state.
+4. **Tests for new failure modes.** Bug fixes must add a test that reproduces the original failure.
+
+Be specific to your project's actual risks. Generic priorities are useless.}}
+
+Style nits, formatting, and theoretical refactors are **out of scope** unless they hide a bug. Do not flag them.
+
+---
+
+## Specific review rules
+
+### High-scrutiny paths
+
+{{HIGH_SCRUTINY_PATHS — list the files/directories where mistakes are most expensive. Examples:
+
+Files: `src/auth/`, `src/payments/`, `migrations/`
+
+Flag any of the following:
+- (specific anti-patterns relevant to your project)
+- (things that have gone wrong before)
+- (invariants that must hold)}}
+
+### Silent failures
+
+Flag any of the following:
+
+- New `except: pass`, `except Exception: pass`, or `except: ...` without logging.
+- New `try / except` that catches a broad exception and continues without logging the exception object.
+- Default values returned on error without a log line.
+- Fallback behavior that masks broken state.
+
+The rule: every exception is either re-raised or logged with enough context to debug from production logs alone.
+
+### Tests
+
+- Bug fixes must include a test that reproduces the original failure mode.
+- Tests should use relative values (percentages, ratios) not absolute values where applicable.
+- Integration tests should hit real infrastructure for critical paths (mocks have masked real bugs in the past).
+
+---
+
+## What NOT to flag
+
+- Formatting, whitespace, import order — pre-commit hooks handle these.
+- Type annotations on existing untyped code.
+- "You could refactor this for clarity" — only if the unclarity hides a bug.
+- Missing docstrings on small private functions.
+- Speculative future-proofing — don't suggest abstractions for hypothetical future requirements.
+- Naming preferences absent a clear convention violation.
+
+If you find yourself writing "consider" or "you might want to" without a concrete bug or risk attached, delete the comment.
+
+---
+
+## Output format
+
+1. **Summary** — one paragraph: what this PR does and your overall verdict (approve / request changes / comment).
+2. **Blocking issues** — bugs or risks that must be fixed before merge. Each item: file:line, what's wrong, why it matters, suggested fix.
+3. **Non-blocking observations** — things worth noting but not blocking. Keep this section short.
+4. **Tests** — does this PR add tests for the changed behavior? If not, is that OK?
+
+If there are zero blocking issues, the review is just: "LGTM."

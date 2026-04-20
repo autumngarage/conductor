@@ -1,0 +1,51 @@
+# Touchstone-provided starter CI workflow. Runs the same pre-commit hygiene
+# checks and `scripts/touchstone-run.sh validate` path that gate local pre-push.
+# A CI failure here means the same thing a pre-push rejection would mean locally.
+#
+# `touchstone-run.sh validate` silently skips when profile linters/tests are
+# absent (correct runtime UX). In CI that's useless — install your profile's
+# toolchain in the block below before the validate step, or CI will pass on
+# gaps pre-push would catch.
+
+name: validate
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # --- Add profile-specific toolchain steps here ---
+      # Node:
+      #   - uses: actions/setup-node@v4
+      #     with:
+      #       node-version: '20'
+      #       cache: 'pnpm'
+      # Python:
+      #   - uses: actions/setup-python@v5
+      #     with:
+      #       python-version: '3.12'
+      # Rust:
+      #   - uses: dtolnay/rust-toolchain@stable
+      # Go:
+      #   - uses: actions/setup-go@v5
+      #     with:
+      #       go-version: '1.23'
+      # Swift:
+      #   - uses: swift-actions/setup-swift@v2
+
+      - name: Install pre-commit
+        run: pipx install pre-commit
+
+      - name: Run pre-commit hygiene
+        run: pre-commit run --all-files --hook-stage pre-commit --show-diff-on-failure
+
+      - name: Run touchstone validate
+        run: bash scripts/touchstone-run.sh validate

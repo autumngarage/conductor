@@ -1,0 +1,12 @@
+# touchstone project profile. Commit this file so all clones use the same commands.
+project_type=python
+package_manager=auto
+monorepo=false
+targets=
+git_workflow=git
+gitbutler_mcp=false
+lint_command=
+typecheck_command=
+build_command=
+test_command=
+validate_command=

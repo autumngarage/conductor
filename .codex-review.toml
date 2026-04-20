@@ -1,0 +1,128 @@
+# .codex-review.toml — per-project configuration for the AI review hook.
+#
+# Place this file at the repo root. The hook reads it automatically.
+# If this file is missing, the hook uses conservative defaults (all paths unsafe).
+
+[codex_review]
+# Maximum iterations of the review → fix → re-review loop.
+# After this many rounds without converging on CLEAN, the push aborts.
+max_iterations = 3
+
+# Maximum diff size (in lines) before the hook skips review entirely.
+# Very large diffs take too long and produce noisy reviews.
+max_diff_lines = 5000
+
+# Cache exact-input CODEX_REVIEW_CLEAN results locally under .git/.
+# This skips repeated reviewer calls when you push the same branch diff again.
+# Set CODEX_REVIEW_DISABLE_CACHE=1 to force a fresh review for one push.
+cache_clean_reviews = true
+
+# Default auto-fix policy for paths not listed in unsafe_paths.
+#   true  = the reviewer may auto-fix issues in any path not explicitly listed as unsafe
+#   false = the reviewer will NOT auto-fix anything unless you add safe path logic (conservative)
+#
+# For new projects, start with false and gradually opt in as you gain confidence.
+safe_by_default = false
+
+# Review mode — controls what the reviewer is allowed to do.
+# Enforced at the wrapper level (tool restrictions, sandboxes), not just in the prompt.
+#   "fix"         — full access: read, run commands, edit files, commit fixes (default)
+#   "review-only" — read + run commands, no file edits or commits
+#   "diff-only"   — read-only: no commands, no edits
+#   "no-tests"    — read + edit + commit, no command execution (skip test runs)
+#
+# Override for a single run with: CODEX_REVIEW_MODE=review-only git push
+mode = "review-only"
+
+# Wall-clock timeout per reviewer invocation, in seconds. 0 = no timeout.
+# If the reviewer doesn't finish in time, the hook exits per on_error policy.
+# timeout = 300
+
+# What to do when the reviewer fails (crash, timeout, malformed output).
+# "fail-open"   = exit 0, allow push (default — infrastructure errors don't block)
+# "fail-closed" = exit 1, block push (use in CI or for strict review gates)
+# on_error = "fail-open"
+
+# Paths where the reviewer must NEVER auto-fix — it reports findings but does not edit.
+# Use these for high-scrutiny areas where auto-fixes could cause damage.
+# Paths are matched as prefixes (e.g., "src/auth/" matches "src/auth/login.py").
+unsafe_paths = [
+  # "src/auth/",
+  # "src/payments/",
+  # "migrations/",
+  # "src/core/config.py",
+]
+
+# --------------------------------------------------------------------------
+# Reviewer cascade (optional)
+# --------------------------------------------------------------------------
+# The [review] section configures whether review is enabled and which AI
+# reviewers to try in what order.
+# The hook tries each reviewer in sequence; the first one that is installed
+# and authenticated runs the review.
+#
+# Valid reviewer IDs: "codex", "claude", "gemini", "local"
+#
+# If this section is absent, the hook defaults to ["codex"] (backward compatible).
+# Override for a single run with: TOUCHSTONE_REVIEWER=claude git push
+
+# [review]
+# enabled = true
+# reviewers = ["claude", "codex", "gemini"]
+#
+# Optional routing by diff size:
+# Use this when you want small changes reviewed by a local model first, but
+# larger changes reviewed by a stronger hosted model. The small reviewer list
+# can include a hosted fallback so review still runs if the local command is not
+# configured on a clone.
+#
+# [review.routing]
+# enabled = false
+# small_max_diff_lines = 400
+# small_reviewers = ["local", "codex"]
+# large_reviewers = ["codex"]
+#
+# Local reviewer support:
+# Use this when you want a local model or your own wrapper script to perform
+# review. The command receives the full review prompt on stdin and must print
+# CODEX_REVIEW_CLEAN, CODEX_REVIEW_FIXED, or CODEX_REVIEW_BLOCKED as its last
+# line. Keep mode = "review-only" unless your local command is intentionally
+# allowed to edit files.
+#
+# [review.local]
+# command = "ollama run YOUR_MODEL"
+# auth_command = ""
+
+# Optional peer assistance for larger or high-risk changes. When enabled, the
+# primary reviewer can request one focused second opinion from another reviewer
+# by emitting a TOUCHSTONE_HELP_REQUEST block before its final decision.
+# The helper runs in read-only/diff-only mode and cannot edit files.
+#
+# [review.assist]
+# enabled = false
+# helpers = ["codex", "gemini"]
+# timeout = 60
+# max_rounds = 1
+
+# --------------------------------------------------------------------------
+# Repo-provided review context (optional)
+# --------------------------------------------------------------------------
+# Place a .codex-review-context.md at the repo root (or .github/) to provide
+# additional context to the reviewer. This is appended to the prompt automatically.
+#
+# Example content:
+#   - "CI already runs linting and type-checking; do not re-run them."
+#   - "The payments module is being migrated; ignore legacy patterns in src/payments/."
+#
+# File search order:
+#   1. .codex-review-context.md
+#   2. .github/codex-review-context.md
+
+# Touchstone onboarding choices. You can edit these later.
+[review]
+enabled = true
+reviewers = ["codex"]
+
+[review.assist]
+enabled = false
+helpers = ["codex", "gemini", "claude", "local"]

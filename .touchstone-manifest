@@ -1,0 +1,15 @@
+# Managed by touchstone. These paths may be updated by `touchstone update`.
+.touchstone-manifest
+.touchstone-version
+principles/audit-weak-points.md
+principles/documentation-ownership.md
+principles/engineering-principles.md
+principles/git-workflow.md
+principles/pre-implementation-checklist.md
+principles/README.md
+scripts/codex-review.sh
+scripts/touchstone-run.sh
+scripts/open-pr.sh
+scripts/merge-pr.sh
+scripts/cleanup-branches.sh
+scripts/run-pytest-in-venv.sh
