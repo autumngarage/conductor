@@ -1,0 +1,124 @@
+"""Ollama provider — local LLM via the Ollama HTTP API.
+
+Defaults to ``http://localhost:11434`` (Ollama's standard port). Override via
+the ``OLLAMA_BASE_URL`` env var for remote Ollama servers, LM Studio
+installations, or any other OpenAI/Ollama-compatible local server.
+
+No auth (local-only by design). This is the second HTTP-shape adapter
+(alongside ``kimi``); the other three (claude, codex, gemini) shell out
+to their respective CLIs.
+"""
+
+from __future__ import annotations
+
+import os
+import time
+from typing import Optional
+
+import httpx
+
+from conductor.providers.interface import (
+    CallResponse,
+    ProviderConfigError,
+    ProviderHTTPError,
+)
+
+OLLAMA_BASE_URL_ENV = "OLLAMA_BASE_URL"
+OLLAMA_DEFAULT_BASE_URL = "http://localhost:11434"
+OLLAMA_DEFAULT_MODEL = "qwen2.5-coder:14b"
+OLLAMA_REQUEST_TIMEOUT_SEC = 180.0
+
+
+class OllamaProvider:
+    name = "ollama"
+    tags = ["cheap", "local", "offline"]
+    default_model = OLLAMA_DEFAULT_MODEL
+
+    def __init__(
+        self,
+        *,
+        base_url: Optional[str] = None,
+        timeout_sec: float = OLLAMA_REQUEST_TIMEOUT_SEC,
+    ) -> None:
+        self._base_url_override = base_url
+        self._timeout_sec = timeout_sec
+
+    def _base_url(self) -> str:
+        return (
+            self._base_url_override
+            or os.environ.get(OLLAMA_BASE_URL_ENV)
+            or OLLAMA_DEFAULT_BASE_URL
+        ).rstrip("/")
+
+    def configured(self) -> tuple[bool, Optional[str]]:
+        # "Configured" here means the server responds. Ollama has no auth,
+        # so there's nothing to check for credentials — the liveness of the
+        # endpoint is the only meaningful signal.
+        try:
+            with httpx.Client(timeout=5) as client:
+                resp = client.get(f"{self._base_url()}/api/tags")
+        except httpx.HTTPError as e:
+            return False, (
+                f"cannot reach Ollama at {self._base_url()}: {e}. "
+                "Install with `brew install ollama`, run `ollama serve`, "
+                f"and `ollama pull {self.default_model}`."
+            )
+        if resp.status_code != 200:
+            return False, (
+                f"Ollama at {self._base_url()} returned {resp.status_code} — "
+                "is the server healthy?"
+            )
+        return True, None
+
+    def smoke(self) -> tuple[bool, Optional[str]]:
+        return self.configured()
+
+    def call(self, task: str, model: Optional[str] = None) -> CallResponse:
+        model = model or self.default_model
+        url = f"{self._base_url()}/api/chat"
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": task}],
+            "stream": False,
+        }
+
+        start = time.monotonic()
+        try:
+            with httpx.Client(timeout=self._timeout_sec) as client:
+                resp = client.post(url, json=payload)
+        except httpx.HTTPError as e:
+            raise ProviderConfigError(
+                f"cannot reach Ollama at {self._base_url()}: {e}"
+            ) from e
+        duration_ms = int((time.monotonic() - start) * 1000)
+
+        if resp.status_code != 200:
+            raise ProviderHTTPError(
+                f"Ollama returned HTTP {resp.status_code}: {resp.text[:500]}"
+            )
+        try:
+            data = resp.json()
+        except ValueError as e:
+            raise ProviderHTTPError(f"Ollama response was not JSON: {e}") from e
+
+        message = data.get("message") or {}
+        text = message.get("content")
+        if text is None:
+            raise ProviderHTTPError(
+                f"Ollama response missing message.content: {data!r:.500}"
+            )
+
+        # total_duration is reported in nanoseconds; normalize to ms.
+        server_duration_ms = (data.get("total_duration") or 0) // 1_000_000 or duration_ms
+        return CallResponse(
+            text=text,
+            provider=self.name,
+            model=data.get("model", model),
+            duration_ms=server_duration_ms,
+            usage={
+                "input_tokens": data.get("prompt_eval_count"),
+                "output_tokens": data.get("eval_count"),
+                "cached_tokens": None,
+            },
+            raw=data,
+        )
