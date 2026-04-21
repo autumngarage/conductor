@@ -21,7 +21,11 @@ Brew tap (`autumngarage/conductor/conductor`) ships with v0.1.0.
 ## Quick start
 
 ```sh
-export MOONSHOT_API_KEY=sk-...   # get one at https://platform.moonshot.ai/console/api-keys
+# Conductor calls Kimi K2.6 via Cloudflare Workers AI. Get a token at
+#   https://dash.cloudflare.com/profile/api-tokens   (needs Workers AI read)
+# and find your account ID in the Cloudflare dashboard sidebar.
+export CLOUDFLARE_API_TOKEN=cf-...
+export CLOUDFLARE_ACCOUNT_ID=...
 
 # Manual mode: pick a specific provider
 conductor call --with kimi --task "What is 2+2?"
@@ -29,8 +33,8 @@ conductor call --with kimi --task "What is 2+2?"
 # Pipe content as the task
 cat README.md | conductor call --with kimi --task "Summarize this in one sentence."
 
-# Override the default model
-conductor call --with kimi --model kimi-k2-thinking --task "..."
+# Override the default model (default: @cf/moonshotai/kimi-k2.6)
+conductor call --with kimi --model @cf/moonshotai/kimi-k2.5 --task "..."
 
 # Get the full response as JSON (for scripting)
 conductor call --with kimi --task "ping" --json

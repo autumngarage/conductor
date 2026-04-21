@@ -1,29 +1,36 @@
-"""Kimi (Moonshot AI) provider — OpenAI-compatible HTTP at api.moonshot.ai.
+"""Kimi (Moonshot AI K2.6) provider — hosted on Cloudflare Workers AI.
 
-This is the first Conductor provider that touches an API key directly. Every
-other adapter at v0.1 either shells out to a CLI that owns its own auth
-(claude, codex, gemini) or talks to a local endpoint with no auth (ollama).
-Moonshot has no scriptable CLI — the official `kimi` CLI is interactive-only —
-so the OpenAI-compatible HTTP path is the only viable shape.
+Conductor calls Kimi K2.6 via Cloudflare's OpenAI-compatible endpoint rather
+than Moonshot's own api.moonshot.ai. Cloudflare added native Kimi K2.6 hosting
+on 2026-04-20 with Day 0 support from Moonshot, which gives us:
 
-Quirks vs. vanilla OpenAI Chat Completions, per Moonshot's migration guide
-(https://platform.kimi.ai/docs/guide/migrating-from-openai-to-kimi):
+  - one credential surface (Cloudflare API token + account ID) that will serve
+    future CF-hosted models too, without the user ever creating a Moonshot
+    account;
+  - lowest-latency inference (CF's edge network);
+  - unified billing on the Cloudflare bill.
 
-  - `temperature` is clamped to [0, 1] (OpenAI accepts [0, 2]). The CLI
-    surface doesn't expose temperature today, so we don't enforce this — but
-    a future v0.2 that adds `--temperature` MUST clamp before sending.
-  - `tool_choice="required"` is not supported. v0.1 doesn't issue tool calls
-    so this isn't reachable.
-  - Streaming responses omit `usage` unless the request includes
-    `stream_options={"include_usage": true}`. v0.1 is non-streaming so the
-    `usage` block is always present in the response body.
-  - Multi-turn tool calls with thinking models (kimi-k2-thinking) require
-    echoing the assistant's `reasoning_content` back on subsequent turns or
-    the API rejects with 400. v0.1 doesn't support tool use; if/when it
-    does, see LiteLLM #21672 for the canonical writeup of the failure mode.
+Endpoint:
+  POST https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1/chat/completions
 
-The default model `kimi-k2.6` is set per autumn-garage/integration/providers.md.
-Override per-call via the `model` argument.
+Auth:
+  Authorization: Bearer {CLOUDFLARE_API_TOKEN}
+
+Model ID is Cloudflare's namespaced form: ``@cf/moonshotai/kimi-k2.6``.
+
+Quirks (inherited from Moonshot; may or may not be enforced by the Cloudflare
+frontend — test before sending):
+  - ``temperature`` expected in [0, 1] per Moonshot's spec (OpenAI allows [0, 2]).
+    v0.1 doesn't expose temperature so this isn't reachable; when a future
+    version does, clamp before sending.
+  - ``tool_choice="required"`` not supported by Moonshot.
+  - Multi-turn tool calls with thinking variants require echoing
+    ``reasoning_content`` back on subsequent turns.
+
+If a future consumer needs the direct Moonshot backend (own API key, own
+billing), that lands as a second backend option on this provider — not a
+new provider identifier. ``kimi`` is the model family; the backend is a
+detail of how Conductor reaches it.
 """
 
 from __future__ import annotations
@@ -40,9 +47,12 @@ from conductor.providers.interface import (
     ProviderHTTPError,
 )
 
-KIMI_BASE_URL = "https://api.moonshot.ai/v1"
-KIMI_DEFAULT_MODEL = "kimi-k2.6"
-KIMI_API_KEY_ENV = "MOONSHOT_API_KEY"
+CLOUDFLARE_API_TOKEN_ENV = "CLOUDFLARE_API_TOKEN"
+CLOUDFLARE_ACCOUNT_ID_ENV = "CLOUDFLARE_ACCOUNT_ID"
+KIMI_DEFAULT_MODEL = "@cf/moonshotai/kimi-k2.6"
+KIMI_BASE_URL_TEMPLATE = (
+    "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1"
+)
 KIMI_REQUEST_TIMEOUT_SEC = 120.0
 
 
@@ -54,56 +64,100 @@ class KimiProvider:
     def __init__(
         self,
         *,
-        api_key: Optional[str] = None,
-        base_url: str = KIMI_BASE_URL,
+        api_token: Optional[str] = None,
+        account_id: Optional[str] = None,
+        base_url_template: str = KIMI_BASE_URL_TEMPLATE,
         timeout_sec: float = KIMI_REQUEST_TIMEOUT_SEC,
     ) -> None:
-        self._api_key = api_key
-        self._base_url = base_url.rstrip("/")
+        self._api_token = api_token
+        self._account_id = account_id
+        self._base_url_template = base_url_template
         self._timeout_sec = timeout_sec
 
-    def _resolve_key(self) -> str:
-        key = self._api_key or os.environ.get(KIMI_API_KEY_ENV)
-        if not key:
+    def _resolve_token(self) -> str:
+        token = self._api_token or os.environ.get(CLOUDFLARE_API_TOKEN_ENV)
+        if not token:
             raise ProviderConfigError(
-                f"{KIMI_API_KEY_ENV} is not set. "
-                "Get a key from https://platform.moonshot.ai/console/api-keys "
-                f"and export {KIMI_API_KEY_ENV}=... in your shell."
+                f"{CLOUDFLARE_API_TOKEN_ENV} is not set. "
+                "Create a Cloudflare API token with Workers AI read permission "
+                "at https://dash.cloudflare.com/profile/api-tokens "
+                f"and export {CLOUDFLARE_API_TOKEN_ENV}=... in your shell."
             )
-        return key
+        return token
+
+    def _resolve_account_id(self) -> str:
+        account_id = self._account_id or os.environ.get(CLOUDFLARE_ACCOUNT_ID_ENV)
+        if not account_id:
+            raise ProviderConfigError(
+                f"{CLOUDFLARE_ACCOUNT_ID_ENV} is not set. "
+                "Find your account ID on the right sidebar of any zone page in "
+                "https://dash.cloudflare.com/ (or run `wrangler whoami`) "
+                f"and export {CLOUDFLARE_ACCOUNT_ID_ENV}=... in your shell."
+            )
+        return account_id
+
+    def _base_url(self) -> str:
+        return self._base_url_template.format(account_id=self._resolve_account_id())
 
     def _headers(self) -> dict[str, str]:
         return {
-            "Authorization": f"Bearer {self._resolve_key()}",
+            "Authorization": f"Bearer {self._resolve_token()}",
             "Content-Type": "application/json",
         }
 
     def configured(self) -> tuple[bool, Optional[str]]:
-        if self._api_key or os.environ.get(KIMI_API_KEY_ENV):
-            return True, None
-        return False, f"{KIMI_API_KEY_ENV} is not set"
+        missing = [
+            var
+            for var in (CLOUDFLARE_API_TOKEN_ENV, CLOUDFLARE_ACCOUNT_ID_ENV)
+            if not os.environ.get(var)
+        ]
+        if self._api_token and CLOUDFLARE_API_TOKEN_ENV in missing:
+            missing.remove(CLOUDFLARE_API_TOKEN_ENV)
+        if self._account_id and CLOUDFLARE_ACCOUNT_ID_ENV in missing:
+            missing.remove(CLOUDFLARE_ACCOUNT_ID_ENV)
+        if missing:
+            return False, f"missing env var(s): {', '.join(missing)}"
+        return True, None
 
     def smoke(self) -> tuple[bool, Optional[str]]:
+        # No /models endpoint on CF's Workers AI OpenAI-compat surface today;
+        # a 1-token chat completion is the cheapest round-trip that proves
+        # auth + account + model are all reachable.
         try:
-            with httpx.Client(timeout=self._timeout_sec) as client:
-                resp = client.get(
-                    f"{self._base_url}/models",
-                    headers=self._headers(),
-                )
+            response = self._post_chat(
+                {
+                    "model": self.default_model,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "max_tokens": 1,
+                }
+            )
         except ProviderConfigError as e:
             return False, str(e)
+        except ProviderHTTPError as e:
+            return False, str(e)
+        if "choices" not in response:
+            return False, f"unexpected response shape: {sorted(response)[:5]}"
+        return True, None
+
+    def _post_chat(self, payload: dict) -> dict:
+        try:
+            with httpx.Client(timeout=self._timeout_sec) as client:
+                resp = client.post(
+                    f"{self._base_url()}/chat/completions",
+                    headers=self._headers(),
+                    json=payload,
+                )
         except httpx.HTTPError as e:
-            return False, f"network error: {e}"
+            raise ProviderHTTPError(f"network error calling Cloudflare: {e}") from e
 
         if resp.status_code != 200:
-            return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
+            raise ProviderHTTPError(
+                f"Cloudflare returned HTTP {resp.status_code}: {resp.text[:500]}"
+            )
         try:
-            data = resp.json()
-        except ValueError:
-            return False, "response was not JSON"
-        if "data" not in data:
-            return False, f"unexpected response shape: {sorted(data)[:5]}"
-        return True, None
+            return resp.json()
+        except ValueError as e:
+            raise ProviderHTTPError(f"Cloudflare response was not JSON: {e}") from e
 
     def call(self, task: str, model: Optional[str] = None) -> CallResponse:
         model = model or self.default_model
@@ -112,31 +166,14 @@ class KimiProvider:
             "messages": [{"role": "user", "content": task}],
         }
         start = time.monotonic()
-        try:
-            with httpx.Client(timeout=self._timeout_sec) as client:
-                resp = client.post(
-                    f"{self._base_url}/chat/completions",
-                    headers=self._headers(),
-                    json=payload,
-                )
-        except httpx.HTTPError as e:
-            raise ProviderHTTPError(f"network error calling Kimi: {e}") from e
+        body = self._post_chat(payload)
         duration_ms = int((time.monotonic() - start) * 1000)
-
-        if resp.status_code != 200:
-            raise ProviderHTTPError(
-                f"Kimi returned HTTP {resp.status_code}: {resp.text[:500]}"
-            )
-        try:
-            body = resp.json()
-        except ValueError as e:
-            raise ProviderHTTPError(f"Kimi response was not JSON: {e}") from e
 
         try:
             text = body["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as e:
             raise ProviderHTTPError(
-                f"Kimi response missing choices[0].message.content: {body!r:.500}"
+                f"Cloudflare response missing choices[0].message.content: {body!r:.500}"
             ) from e
 
         usage = body.get("usage") or {}

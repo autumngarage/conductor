@@ -7,7 +7,17 @@ import respx
 from click.testing import CliRunner
 
 from conductor.cli import main
-from conductor.providers.kimi import KIMI_API_KEY_ENV, KIMI_BASE_URL
+from conductor.providers.kimi import (
+    CLOUDFLARE_ACCOUNT_ID_ENV,
+    CLOUDFLARE_API_TOKEN_ENV,
+    KIMI_DEFAULT_MODEL,
+)
+
+_TEST_ACCOUNT_ID = "acct-test-1234"
+_CF_CHAT_URL = (
+    f"https://api.cloudflare.com/client/v4/accounts/{_TEST_ACCOUNT_ID}"
+    "/ai/v1/chat/completions"
+)
 
 
 def test_call_unknown_provider_shows_usage_error():
@@ -26,13 +36,14 @@ def test_call_missing_task_and_no_stdin_errors():
 
 
 def test_call_kimi_happy_path(monkeypatch):
-    monkeypatch.setenv(KIMI_API_KEY_ENV, "sk-test")
-    with respx.mock(base_url=KIMI_BASE_URL) as router:
-        router.post("/chat/completions").mock(
+    monkeypatch.setenv(CLOUDFLARE_API_TOKEN_ENV, "cf-test-token")
+    monkeypatch.setenv(CLOUDFLARE_ACCOUNT_ID_ENV, _TEST_ACCOUNT_ID)
+    with respx.mock() as router:
+        router.post(_CF_CHAT_URL).mock(
             return_value=httpx.Response(
                 200,
                 json={
-                    "model": "kimi-k2.6",
+                    "model": KIMI_DEFAULT_MODEL,
                     "choices": [{"message": {"content": "hello back"}}],
                     "usage": {"prompt_tokens": 1, "completion_tokens": 2},
                 },
@@ -44,21 +55,31 @@ def test_call_kimi_happy_path(monkeypatch):
     assert "hello back" in result.output
 
 
-def test_call_kimi_missing_key_exits_2(monkeypatch):
-    monkeypatch.delenv(KIMI_API_KEY_ENV, raising=False)
+def test_call_kimi_missing_token_exits_2(monkeypatch):
+    monkeypatch.delenv(CLOUDFLARE_API_TOKEN_ENV, raising=False)
+    monkeypatch.setenv(CLOUDFLARE_ACCOUNT_ID_ENV, _TEST_ACCOUNT_ID)
     result = CliRunner().invoke(main, ["call", "--with", "kimi", "--task", "hi"])
     assert result.exit_code == 2
-    assert KIMI_API_KEY_ENV in result.output
+    assert CLOUDFLARE_API_TOKEN_ENV in result.output
+
+
+def test_call_kimi_missing_account_exits_2(monkeypatch):
+    monkeypatch.setenv(CLOUDFLARE_API_TOKEN_ENV, "cf-test-token")
+    monkeypatch.delenv(CLOUDFLARE_ACCOUNT_ID_ENV, raising=False)
+    result = CliRunner().invoke(main, ["call", "--with", "kimi", "--task", "hi"])
+    assert result.exit_code == 2
+    assert CLOUDFLARE_ACCOUNT_ID_ENV in result.output
 
 
 def test_call_json_output(monkeypatch):
-    monkeypatch.setenv(KIMI_API_KEY_ENV, "sk-test")
-    with respx.mock(base_url=KIMI_BASE_URL) as router:
-        router.post("/chat/completions").mock(
+    monkeypatch.setenv(CLOUDFLARE_API_TOKEN_ENV, "cf-test-token")
+    monkeypatch.setenv(CLOUDFLARE_ACCOUNT_ID_ENV, _TEST_ACCOUNT_ID)
+    with respx.mock() as router:
+        router.post(_CF_CHAT_URL).mock(
             return_value=httpx.Response(
                 200,
                 json={
-                    "model": "kimi-k2.6",
+                    "model": KIMI_DEFAULT_MODEL,
                     "choices": [{"message": {"content": "ok"}}],
                     "usage": {},
                 },

@@ -119,7 +119,7 @@ Deferred (see `~/Repos/autumn-garage/.cortex/plans/conductor-bootstrap.md` for t
 ## State & Config
 
 - **No project-level config in v0.1.** Config support (`~/.config/conductor/config.toml`) lands with the auto-mode router and `conductor init` wizard.
-- **API keys come from the environment.** Kimi reads `MOONSHOT_API_KEY`. Future adapters read their own provider's standard env var (never aliased — see `~/Repos/autumn-garage/integration/providers.md` for the canonical mapping).
+- **API credentials come from the environment.** Kimi reads `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` because Conductor calls Kimi K2.6 via Cloudflare Workers AI (Cloudflare added Day 0 Kimi hosting on 2026-04-20; the direct Moonshot backend is deferred as a future config option per autumn-garage journal `2026-04-21-kimi-via-cloudflare.md`). Future adapters read their own provider's standard env var — see `~/Repos/autumn-garage/integration/providers.md` for the canonical mapping.
 - **No persistent state.** v0.1 is single-call: no caches, no logs, no usage aggregation. Consumers that want aggregation parse the `--json` output themselves.
 
 ## Hard-Won Lessons (v0.1 baseline — extend as we learn)
