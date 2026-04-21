@@ -41,6 +41,7 @@ from typing import Optional
 
 import httpx
 
+from conductor import credentials
 from conductor.providers.interface import (
     CallResponse,
     ProviderConfigError,
@@ -75,24 +76,26 @@ class KimiProvider:
         self._timeout_sec = timeout_sec
 
     def _resolve_token(self) -> str:
-        token = self._api_token or os.environ.get(CLOUDFLARE_API_TOKEN_ENV)
+        token = self._api_token or credentials.get(CLOUDFLARE_API_TOKEN_ENV)
         if not token:
             raise ProviderConfigError(
                 f"{CLOUDFLARE_API_TOKEN_ENV} is not set. "
                 "Create a Cloudflare API token with Workers AI read permission "
                 "at https://dash.cloudflare.com/profile/api-tokens "
-                f"and export {CLOUDFLARE_API_TOKEN_ENV}=... in your shell."
+                "and set it via `conductor init` or "
+                f"`export {CLOUDFLARE_API_TOKEN_ENV}=...`."
             )
         return token
 
     def _resolve_account_id(self) -> str:
-        account_id = self._account_id or os.environ.get(CLOUDFLARE_ACCOUNT_ID_ENV)
+        account_id = self._account_id or credentials.get(CLOUDFLARE_ACCOUNT_ID_ENV)
         if not account_id:
             raise ProviderConfigError(
                 f"{CLOUDFLARE_ACCOUNT_ID_ENV} is not set. "
                 "Find your account ID on the right sidebar of any zone page in "
                 "https://dash.cloudflare.com/ (or run `wrangler whoami`) "
-                f"and export {CLOUDFLARE_ACCOUNT_ID_ENV}=... in your shell."
+                "and set it via `conductor init` or "
+                f"`export {CLOUDFLARE_ACCOUNT_ID_ENV}=...`."
             )
         return account_id
 
@@ -106,17 +109,16 @@ class KimiProvider:
         }
 
     def configured(self) -> tuple[bool, Optional[str]]:
-        missing = [
-            var
-            for var in (CLOUDFLARE_API_TOKEN_ENV, CLOUDFLARE_ACCOUNT_ID_ENV)
-            if not os.environ.get(var)
-        ]
-        if self._api_token and CLOUDFLARE_API_TOKEN_ENV in missing:
-            missing.remove(CLOUDFLARE_API_TOKEN_ENV)
-        if self._account_id and CLOUDFLARE_ACCOUNT_ID_ENV in missing:
-            missing.remove(CLOUDFLARE_ACCOUNT_ID_ENV)
+        missing = []
+        if not (self._api_token or credentials.get(CLOUDFLARE_API_TOKEN_ENV)):
+            missing.append(CLOUDFLARE_API_TOKEN_ENV)
+        if not (self._account_id or credentials.get(CLOUDFLARE_ACCOUNT_ID_ENV)):
+            missing.append(CLOUDFLARE_ACCOUNT_ID_ENV)
         if missing:
-            return False, f"missing env var(s): {', '.join(missing)}"
+            return False, (
+                f"missing credential(s): {', '.join(missing)}. "
+                "Set via `conductor init` or export as env vars."
+            )
         return True, None
 
     def smoke(self) -> tuple[bool, Optional[str]]:

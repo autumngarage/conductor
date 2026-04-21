@@ -44,17 +44,21 @@ conductor call --with kimi --task "ping" --json
 
 Shipped:
 
-- `conductor call --with kimi --task "..."` — manual mode for the Kimi (Moonshot AI) provider via OpenAI-compatible HTTP at `api.moonshot.ai/v1`.
-- `--task` flag or stdin for input. `--json` for structured output. `--model` to override the default.
-- Test suite covers the happy path, missing key, non-200 responses, and malformed responses with mocked httpx.
+- Five provider adapters: `kimi` (Cloudflare Workers AI HTTP), `claude` / `codex` / `gemini` (CLI shell-out), `ollama` (local HTTP).
+- `conductor call --with <id> --task "..."` — manual mode for any provider.
+- `conductor call --auto [--tags a,b,c] --task "..."` — rule-based router picks the best configured provider for the task's tags.
+- `conductor list [--json]` — shows every provider with ready/not-ready status, default model, and capability tags.
+- `conductor smoke <id>` / `conductor smoke --all [--json]` — proves a provider's auth + endpoint work (cheapest round-trip that exercises the full path).
+- `conductor doctor [--json]` — diagnostic report: which providers are configured, which env vars are set, what's in the macOS Keychain.
+- `conductor init [-y]` — interactive first-run wizard (TTY-detected, `--yes` for non-TTY). For providers needing credentials (today just `kimi`), prompts, offers macOS Keychain / direnv `.envrc` / print-only storage, runs the smoke test, prints the equivalent non-interactive setup.
+- Credentials resolver (`conductor.credentials`): env var first, then macOS Keychain under service `conductor`.
 
-Deferred to subsequent phases (see `autumn-garage/.cortex/plans/conductor-bootstrap.md`):
+Deferred (see `autumn-garage/.cortex/plans/conductor-bootstrap.md`):
 
-- Adapters for `claude`, `codex`, `gemini` (CLI shell-out) and `ollama` (HTTP).
-- Auto mode (`--auto` with rule-based routing on task tags + provider capabilities).
-- Discovery commands: `conductor list`, `conductor smoke <id>`, `conductor doctor`.
-- Interactive setup wizard: `conductor init` (per Doctrine 0002).
 - Streaming, tool use, cost aggregation — all post-v0.1.
+- LLM-based meta-routing for `--auto` (today: rule-based tag scoring).
+- 1Password (`op run`) storage backend for `conductor init`.
+- Brew tap for `brew install autumngarage/conductor/conductor`.
 
 ## How Sentinel and Touchstone use it
 
