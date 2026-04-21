@@ -74,3 +74,11 @@ If you find yourself writing "consider" or "you might want to" without a concret
 4. **Tests** — does this PR add tests for the changed behavior? If not, is that OK?
 
 If there are zero blocking issues, the review is just: "LGTM."
+
+## Current state (read this first)
+
+@.cortex/state.md
+
+## Cortex Protocol
+
+@.cortex/protocol.md

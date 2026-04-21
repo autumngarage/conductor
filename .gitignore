@@ -36,3 +36,5 @@ out/
 
 # Touchstone
 *.bak
+.cortex/.index.json
+.cortex/pending/
