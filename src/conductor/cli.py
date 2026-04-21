@@ -1,8 +1,8 @@
-"""Conductor CLI — `conductor call --with <provider> --task "..."`.
+"""Conductor CLI — ``conductor call [--with <id> | --auto] --task "..."``.
 
-v0.1 ships only the `call` command in manual mode (`--with <id>`). Auto mode,
-`list`, `smoke`, `init`, and `doctor` land in subsequent phases per
-autumn-garage/.cortex/plans/conductor-bootstrap.md.
+v0.1 ships the ``call`` command in both manual mode (``--with <id>``) and auto
+mode (``--auto``, router picks). ``list``, ``smoke``, ``init``, and ``doctor``
+land in Phase 5 per autumn-garage/.cortex/plans/conductor-bootstrap.md.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from conductor.providers import (
     ProviderError,
     get_provider,
 )
+from conductor.router import NoConfiguredProvider, RouteDecision, pick
 
 
 def _read_task(task: Optional[str]) -> str:
@@ -43,9 +44,23 @@ def _read_task(task: Optional[str]) -> str:
     return body
 
 
-def _emit(response: CallResponse, *, as_json: bool) -> None:
+def _parse_tags(raw: Optional[str]) -> list[str]:
+    if not raw:
+        return []
+    return [t.strip() for t in raw.split(",") if t.strip()]
+
+
+def _emit(
+    response: CallResponse,
+    *,
+    as_json: bool,
+    decision: Optional[RouteDecision] = None,
+) -> None:
     if as_json:
-        click.echo(json.dumps(asdict(response), default=str, indent=2))
+        payload = asdict(response)
+        if decision is not None:
+            payload["route"] = asdict(decision)
+        click.echo(json.dumps(payload, default=str, indent=2))
     else:
         click.echo(response.text)
 
@@ -60,8 +75,21 @@ def main() -> None:
 @click.option(
     "--with",
     "provider_id",
-    required=True,
-    help="Provider identifier (kimi, claude, codex, gemini, ollama).",
+    default=None,
+    help="Provider identifier (kimi, claude, codex, gemini, ollama). "
+    "Mutually exclusive with --auto.",
+)
+@click.option(
+    "--auto",
+    is_flag=True,
+    default=False,
+    help="Let the router pick based on --tags and configured providers.",
+)
+@click.option(
+    "--tags",
+    default=None,
+    help="Comma-separated task tags for --auto routing "
+    "(e.g. 'long-context,cheap'). Ignored in --with mode.",
 )
 @click.option(
     "--task",
@@ -78,20 +106,36 @@ def main() -> None:
     "as_json",
     is_flag=True,
     default=False,
-    help="Emit the full CallResponse as JSON instead of plain text.",
+    help="Emit the full CallResponse as JSON (with routing info when --auto).",
 )
 def call(
-    provider_id: str,
+    provider_id: Optional[str],
+    auto: bool,
+    tags: Optional[str],
     task: Optional[str],
     model: Optional[str],
     as_json: bool,
 ) -> None:
-    """Send a task to a specific provider and print the response."""
+    """Send a task to a provider and print the response."""
+    if auto and provider_id:
+        raise click.UsageError("--with and --auto are mutually exclusive.")
+    if not auto and not provider_id:
+        raise click.UsageError("pass --with <id> or --auto.")
+
     body = _read_task(task)
-    try:
-        provider = get_provider(provider_id)
-    except KeyError as e:
-        raise click.UsageError(str(e)) from e
+
+    decision: Optional[RouteDecision] = None
+    if auto:
+        try:
+            provider, decision = pick(_parse_tags(tags))
+        except NoConfiguredProvider as e:
+            click.echo(f"conductor: {e}", err=True)
+            sys.exit(2)
+    else:
+        try:
+            provider = get_provider(provider_id)
+        except KeyError as e:
+            raise click.UsageError(str(e)) from e
 
     try:
         response = provider.call(body, model=model)
@@ -102,7 +146,7 @@ def call(
         click.echo(f"conductor: {e}", err=True)
         sys.exit(1)
 
-    _emit(response, as_json=as_json)
+    _emit(response, as_json=as_json, decision=decision)
 
 
 if __name__ == "__main__":
