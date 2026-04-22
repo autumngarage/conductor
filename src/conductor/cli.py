@@ -41,6 +41,8 @@ from conductor.router import (
     InvalidRouterRequest,
     NoConfiguredProvider,
     RouteDecision,
+    mark_outcome,
+    mark_rate_limited,
     pick,
 )
 from conductor.wizard import run_init_wizard
@@ -140,6 +142,109 @@ def _closest(query: str, options: tuple[str, ...]) -> str:
 
     match = get_close_matches(query, options, n=1, cutoff=0.3)
     return match[0] if match else options[0]
+
+
+_RETRYABLE_ERROR_SIGNALS = (
+    " 5",              # 5xx HTTP codes in error strings (e.g., "HTTP 503:")
+    "429",             # rate-limit
+    "overloaded",      # anthropic 529 wording
+    "timed out",       # subprocess + httpx
+    "timeout",
+    "rate limit",
+    "ratelimit",
+    "upstream",
+)
+
+
+def _is_retryable(err: Exception) -> tuple[bool, str]:
+    """Classify an error as retryable-with-fallback or fatal.
+
+    Returns (retryable, category) — category is "rate-limit" | "5xx" |
+    "timeout" | "other" for health-tracking purposes.
+    """
+    msg = str(err).lower()
+    if "429" in msg or "rate limit" in msg or "ratelimit" in msg:
+        return True, "rate-limit"
+    if "timed out" in msg or "timeout" in msg:
+        return True, "timeout"
+    # HTTP 5xx — check for " 5" preceded by "http" or a similar prefix so
+    # we don't match arbitrary "5" digits. Cheap heuristic; acceptable.
+    if any(sig in msg for sig in ("http 5", "returned http 5", "exited 5", "overloaded", "upstream")):
+        return True, "5xx"
+    return False, "other"
+
+
+def _invoke_with_fallback(
+    decision: RouteDecision,
+    *,
+    mode: str,  # "call" | "exec"
+    task: str,
+    model: Optional[str],
+    effort: str | int,
+    tools: frozenset[str],
+    sandbox: str,
+    cwd: Optional[str],
+    timeout_sec: int,
+    silent: bool,
+) -> tuple[CallResponse, list[str]]:
+    """Try the decision's ranked providers in order; one-hop fallback on 5xx.
+
+    Returns (response, fallbacks_used). fallbacks_used is the list of
+    provider names attempted before the successful one (excluding the final).
+
+    Raises the last ProviderError if every candidate fails.
+    """
+    last_exc: Optional[Exception] = None
+    fallbacks: list[str] = []
+
+    for idx, candidate in enumerate(decision.ranked):
+        provider = get_provider(candidate.name)
+        try:
+            if mode == "exec":
+                response = provider.exec(
+                    task,
+                    model=model,
+                    effort=effort,
+                    tools=tools,
+                    sandbox=sandbox,
+                    cwd=cwd,
+                    timeout_sec=timeout_sec,
+                )
+            else:
+                response = provider.call(task, model=model, effort=effort)
+            mark_outcome(candidate.name, "success")
+            return response, fallbacks
+        except ProviderConfigError:
+            # Config problems don't recover with a different provider using
+            # the same config. Re-raise immediately.
+            raise
+        except UnsupportedCapability:
+            # Router filter should prevent this; if it leaks through, skip.
+            fallbacks.append(candidate.name)
+            continue
+        except ProviderError as e:
+            retryable, category = _is_retryable(e)
+            if category == "rate-limit":
+                mark_rate_limited(candidate.name)
+            mark_outcome(candidate.name, category)
+            last_exc = e
+            if not retryable:
+                raise
+            fallbacks.append(candidate.name)
+            if idx + 1 < len(decision.ranked):
+                next_name = decision.ranked[idx + 1].name
+                if not silent:
+                    click.echo(
+                        f"[conductor] {candidate.name} failed ({category}) · "
+                        f"falling back → {next_name}",
+                        err=True,
+                    )
+            # Try next candidate.
+            continue
+
+    # Exhausted every candidate; re-raise the last error for user visibility.
+    assert last_exc is not None  # at least one attempt must have happened
+    raise last_exc
 
 
 def _emit_call(
@@ -345,6 +450,26 @@ def call(
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
         _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
+
+        try:
+            response, _fallbacks = _invoke_with_fallback(
+                decision,
+                mode="call",
+                task=body,
+                model=model,
+                effort=effort_value,
+                tools=frozenset(),
+                sandbox="none",
+                cwd=None,
+                timeout_sec=300,
+                silent=silent_route or as_json,
+            )
+        except ProviderConfigError as e:
+            click.echo(f"conductor: {e}", err=True)
+            sys.exit(2)
+        except ProviderError as e:
+            click.echo(f"conductor: {e}", err=True)
+            sys.exit(1)
     else:
         if prefer is not None:
             raise click.UsageError("--prefer is only meaningful with --auto.")
@@ -352,15 +477,14 @@ def call(
             provider = get_provider(provider_id)
         except KeyError as e:
             raise click.UsageError(str(e)) from e
-
-    try:
-        response = provider.call(body, model=model, effort=effort_value)
-    except ProviderConfigError as e:
-        click.echo(f"conductor: {e}", err=True)
-        sys.exit(2)
-    except ProviderError as e:
-        click.echo(f"conductor: {e}", err=True)
-        sys.exit(1)
+        try:
+            response = provider.call(body, model=model, effort=effort_value)
+        except ProviderConfigError as e:
+            click.echo(f"conductor: {e}", err=True)
+            sys.exit(2)
+        except ProviderError as e:
+            click.echo(f"conductor: {e}", err=True)
+            sys.exit(1)
 
     if auto and not as_json:
         _emit_usage_log(response, silent=silent_route)
@@ -477,31 +601,53 @@ def exec_cmd(
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
         _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
+
+        try:
+            response, _fallbacks = _invoke_with_fallback(
+                decision,
+                mode="exec",
+                task=body,
+                model=model,
+                effort=effort_value,
+                tools=tools_set,
+                sandbox=sandbox_value,
+                cwd=cwd,
+                timeout_sec=timeout_sec,
+                silent=silent_route or as_json,
+            )
+        except UnsupportedCapability as e:
+            click.echo(f"conductor: {e}", err=True)
+            sys.exit(2)
+        except ProviderConfigError as e:
+            click.echo(f"conductor: {e}", err=True)
+            sys.exit(2)
+        except ProviderError as e:
+            click.echo(f"conductor: {e}", err=True)
+            sys.exit(1)
     else:
         try:
             provider = get_provider(provider_id)
         except KeyError as e:
             raise click.UsageError(str(e)) from e
-
-    try:
-        response = provider.exec(
-            body,
-            model=model,
-            effort=effort_value,
-            tools=tools_set,
-            sandbox=sandbox_value,
-            cwd=cwd,
-            timeout_sec=timeout_sec,
-        )
-    except UnsupportedCapability as e:
-        click.echo(f"conductor: {e}", err=True)
-        sys.exit(2)
-    except ProviderConfigError as e:
-        click.echo(f"conductor: {e}", err=True)
-        sys.exit(2)
-    except ProviderError as e:
-        click.echo(f"conductor: {e}", err=True)
-        sys.exit(1)
+        try:
+            response = provider.exec(
+                body,
+                model=model,
+                effort=effort_value,
+                tools=tools_set,
+                sandbox=sandbox_value,
+                cwd=cwd,
+                timeout_sec=timeout_sec,
+            )
+        except UnsupportedCapability as e:
+            click.echo(f"conductor: {e}", err=True)
+            sys.exit(2)
+        except ProviderConfigError as e:
+            click.echo(f"conductor: {e}", err=True)
+            sys.exit(2)
+        except ProviderError as e:
+            click.echo(f"conductor: {e}", err=True)
+            sys.exit(1)
 
     if auto and not as_json:
         _emit_usage_log(response, silent=silent_route)

@@ -336,3 +336,126 @@ def test_config_show_json():
     payload = json.loads(result.output)
     assert payload["effective"]["prefer"] == "balanced"
     assert payload["known_providers"]  # non-empty list
+
+
+# ---------------------------------------------------------------------------
+# call/exec — graceful 5xx fallback
+# ---------------------------------------------------------------------------
+
+
+def test_call_fallback_on_5xx(mocker):
+    from conductor.providers.interface import ProviderHTTPError
+
+    _stub_all_configured(mocker, {"claude", "codex"})
+    # claude fails with 5xx; codex succeeds.
+    mocker.patch.object(
+        ClaudeProvider,
+        "call",
+        side_effect=ProviderHTTPError("HTTP 503: service unavailable"),
+    )
+    mocker.patch.object(
+        CodexProvider, "call", return_value=_fake_response("codex")
+    )
+
+    result = CliRunner().invoke(
+        main, ["call", "--auto", "--prefer", "best", "--task", "hi"]
+    )
+
+    assert result.exit_code == 0
+    assert "hello" in result.stdout
+    # Fallback message on stderr.
+    assert "claude failed" in result.stderr
+    assert "falling back" in result.stderr
+    assert "→ codex" in result.stderr
+
+
+def test_call_fallback_on_rate_limit(mocker):
+    from conductor.providers.interface import ProviderHTTPError
+
+    _stub_all_configured(mocker, {"claude", "codex"})
+    mocker.patch.object(
+        ClaudeProvider,
+        "call",
+        side_effect=ProviderHTTPError("Anthropic returned 429 rate limit"),
+    )
+    mocker.patch.object(
+        CodexProvider, "call", return_value=_fake_response("codex")
+    )
+
+    result = CliRunner().invoke(
+        main, ["call", "--auto", "--prefer", "best", "--task", "hi"]
+    )
+
+    assert result.exit_code == 0
+    assert "claude failed (rate-limit)" in result.stderr
+
+
+def test_call_no_fallback_on_auth_error(mocker):
+    from conductor.providers.interface import ProviderConfigError
+
+    _stub_all_configured(mocker, {"claude", "codex"})
+    # Config errors never trigger fallback — they indicate the user's setup
+    # is broken, not a transient outage.
+    mocker.patch.object(
+        ClaudeProvider,
+        "call",
+        side_effect=ProviderConfigError("claude login required"),
+    )
+    codex_call = mocker.patch.object(
+        CodexProvider, "call", return_value=_fake_response("codex")
+    )
+
+    result = CliRunner().invoke(
+        main, ["call", "--auto", "--prefer", "best", "--task", "hi"]
+    )
+
+    assert result.exit_code == 2
+    assert "login required" in result.stderr
+    assert not codex_call.called  # no fallback attempted
+
+
+def test_call_fallback_exhausted_propagates_last_error(mocker):
+    from conductor.providers.interface import ProviderHTTPError
+
+    _stub_all_configured(mocker, {"claude", "codex"})
+    mocker.patch.object(
+        ClaudeProvider,
+        "call",
+        side_effect=ProviderHTTPError("HTTP 503: unavailable"),
+    )
+    mocker.patch.object(
+        CodexProvider,
+        "call",
+        side_effect=ProviderHTTPError("HTTP 502: bad gateway"),
+    )
+
+    result = CliRunner().invoke(
+        main, ["call", "--auto", "--prefer", "best", "--task", "hi"]
+    )
+
+    assert result.exit_code == 1
+    # Last error (from codex) should surface to the user.
+    assert "502" in result.stderr or "bad gateway" in result.stderr
+
+
+def test_call_with_single_provider_does_not_retry(mocker):
+    """--with disables fallback (user picked explicitly)."""
+    from conductor.providers.interface import ProviderHTTPError
+
+    mocker.patch.object(
+        ClaudeProvider,
+        "configured",
+        return_value=(True, None),
+    )
+    mocker.patch.object(
+        ClaudeProvider,
+        "call",
+        side_effect=ProviderHTTPError("HTTP 503: unavailable"),
+    )
+
+    result = CliRunner().invoke(
+        main, ["call", "--with", "claude", "--task", "hi"]
+    )
+
+    assert result.exit_code == 1
+    assert "503" in result.stderr
