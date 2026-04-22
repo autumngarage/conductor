@@ -25,9 +25,12 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass
-from typing import Callable
+from typing import TYPE_CHECKING
 
 import click
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from conductor import credentials
 from conductor.providers import get_provider, known_providers
@@ -243,7 +246,7 @@ def run_init_wizard(
     return 1 if aborted else 0
 
 
-class _AbortSetup(Exception):
+class _AbortSetup(Exception):  # noqa: N818  — sentinel, never caught outside this module
     """User pressed [q]uit during a provider flow — stop the walk."""
 
 
@@ -489,7 +492,7 @@ def _prompt_menu(
 def _append_envrc(path: str, values: dict[str, str]) -> None:
     existing = ""
     if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             existing = f.read()
     with open(path, "a", encoding="utf-8") as f:
         if existing and not existing.endswith("\n"):

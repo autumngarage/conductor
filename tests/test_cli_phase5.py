@@ -26,7 +26,10 @@ def _stub_all_unconfigured(mocker):
         OllamaProvider,
     ):
         mocker.patch.object(
-            cls, "configured", lambda self: (False, f"stub: {cls.__name__} unset")
+            cls,
+            "configured",
+            # Default-arg binds cls into the closure per iteration (fixes B023).
+            lambda self, _cls=cls: (False, f"stub: {_cls.__name__} unset"),
         )
 
 

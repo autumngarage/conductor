@@ -15,7 +15,6 @@ import json
 import shutil
 import subprocess
 import time
-from typing import Optional
 
 from conductor.providers.interface import (
     CallResponse,
@@ -61,7 +60,7 @@ class ClaudeProvider:
         self._cli = cli_command
         self._timeout_sec = timeout_sec
 
-    def configured(self) -> tuple[bool, Optional[str]]:
+    def configured(self) -> tuple[bool, str | None]:
         if not shutil.which(self._cli):
             return False, (
                 f"`{self._cli}` CLI not found on PATH. "
@@ -69,7 +68,7 @@ class ClaudeProvider:
             )
         return True, None
 
-    def smoke(self) -> tuple[bool, Optional[str]]:
+    def smoke(self) -> tuple[bool, str | None]:
         ok, reason = self.configured()
         if not ok:
             return False, reason
@@ -92,7 +91,7 @@ class ClaudeProvider:
     def call(
         self,
         task: str,
-        model: Optional[str] = None,
+        model: str | None = None,
         *,
         effort: str | int = "medium",
     ) -> CallResponse:
@@ -107,12 +106,12 @@ class ClaudeProvider:
     def exec(
         self,
         task: str,
-        model: Optional[str] = None,
+        model: str | None = None,
         *,
         effort: str | int = "medium",
         tools: frozenset[str] = frozenset(),
         sandbox: str = "none",
-        cwd: Optional[str] = None,
+        cwd: str | None = None,
         timeout_sec: int = 300,
     ) -> CallResponse:
         # Claude's `--allowedTools` is fine-grained; passing an empty set
@@ -126,7 +125,7 @@ class ClaudeProvider:
             "read-only": "plan",
             "workspace-write": "acceptEdits",
             "none": None,
-        }.get(sandbox, None)
+        }.get(sandbox)
         return self._run(
             task,
             model=model,
@@ -141,12 +140,12 @@ class ClaudeProvider:
         self,
         task: str,
         *,
-        model: Optional[str],
+        model: str | None,
         effort: str | int,
-        allowed_tools: Optional[str],
-        permission_mode: Optional[str],
-        cwd: Optional[str] = None,
-        timeout_sec_override: Optional[float] = None,
+        allowed_tools: str | None,
+        permission_mode: str | None,
+        cwd: str | None = None,
+        timeout_sec_override: float | None = None,
     ) -> CallResponse:
         ok, reason = self.configured()
         if not ok:

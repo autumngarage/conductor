@@ -18,7 +18,6 @@ import json
 import shutil
 import subprocess
 import time
-from typing import Optional
 
 from conductor.providers.interface import (
     CallResponse,
@@ -73,7 +72,7 @@ class CodexProvider:
         self._cli = cli_command
         self._timeout_sec = timeout_sec
 
-    def configured(self) -> tuple[bool, Optional[str]]:
+    def configured(self) -> tuple[bool, str | None]:
         if not shutil.which(self._cli):
             return False, (
                 f"`{self._cli}` CLI not found on PATH. "
@@ -81,7 +80,7 @@ class CodexProvider:
             )
         return True, None
 
-    def smoke(self) -> tuple[bool, Optional[str]]:
+    def smoke(self) -> tuple[bool, str | None]:
         ok, reason = self.configured()
         if not ok:
             return False, reason
@@ -101,11 +100,11 @@ class CodexProvider:
             )
         return True, None
 
-    def _parse_ndjson(self, stdout: str) -> tuple[str, Optional[int], Optional[int]]:
+    def _parse_ndjson(self, stdout: str) -> tuple[str, int | None, int | None]:
         """Parse NDJSON events. Return (content, input_tokens, output_tokens)."""
         content = ""
-        input_tokens: Optional[int] = None
-        output_tokens: Optional[int] = None
+        input_tokens: int | None = None
+        output_tokens: int | None = None
         for line in stdout.splitlines():
             line = line.strip()
             if not line:
@@ -128,7 +127,7 @@ class CodexProvider:
     def call(
         self,
         task: str,
-        model: Optional[str] = None,
+        model: str | None = None,
         *,
         effort: str | int = "medium",
     ) -> CallResponse:
@@ -142,12 +141,12 @@ class CodexProvider:
     def exec(
         self,
         task: str,
-        model: Optional[str] = None,
+        model: str | None = None,
         *,
         effort: str | int = "medium",
         tools: frozenset[str] = frozenset(),
         sandbox: str = "none",
-        cwd: Optional[str] = None,
+        cwd: str | None = None,
         timeout_sec: int = 300,
     ) -> CallResponse:
         # Codex has two sandboxes: read-only (no fs writes), workspace-write
@@ -173,11 +172,11 @@ class CodexProvider:
         self,
         task: str,
         *,
-        model: Optional[str],
+        model: str | None,
         effort: str | int,
         sandbox: str,
-        cwd: Optional[str] = None,
-        timeout_sec_override: Optional[float] = None,
+        cwd: str | None = None,
+        timeout_sec_override: float | None = None,
     ) -> CallResponse:
         ok, reason = self.configured()
         if not ok:

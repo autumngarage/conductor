@@ -26,12 +26,11 @@ import os
 import shutil
 import subprocess
 import sys
-from typing import Optional
 
 CONDUCTOR_KEYCHAIN_SERVICE = "conductor"
 
 
-def get(key: str) -> Optional[str]:
+def get(key: str) -> str | None:
     """Resolve a credential by name; return None if not found anywhere.
 
     Order: env var, then macOS Keychain (if available), then None.
@@ -102,7 +101,7 @@ def keychain_has(key: str) -> bool:
     return _keychain_find(key) is not None
 
 
-def _keychain_find(key: str) -> Optional[str]:
+def _keychain_find(key: str) -> str | None:
     if not shutil.which("security"):
         return None
     result = subprocess.run(

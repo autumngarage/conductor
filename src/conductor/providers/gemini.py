@@ -16,7 +16,6 @@ import json
 import shutil
 import subprocess
 import time
-from typing import Optional
 
 from conductor.providers.interface import (
     CallResponse,
@@ -61,7 +60,7 @@ class GeminiProvider:
         self._cli = cli_command
         self._timeout_sec = timeout_sec
 
-    def configured(self) -> tuple[bool, Optional[str]]:
+    def configured(self) -> tuple[bool, str | None]:
         if not shutil.which(self._cli):
             return False, (
                 f"`{self._cli}` CLI not found on PATH. "
@@ -70,7 +69,7 @@ class GeminiProvider:
             )
         return True, None
 
-    def smoke(self) -> tuple[bool, Optional[str]]:
+    def smoke(self) -> tuple[bool, str | None]:
         ok, reason = self.configured()
         if not ok:
             return False, reason
@@ -93,7 +92,7 @@ class GeminiProvider:
     def call(
         self,
         task: str,
-        model: Optional[str] = None,
+        model: str | None = None,
         *,
         effort: str | int = "medium",
     ) -> CallResponse:
@@ -107,12 +106,12 @@ class GeminiProvider:
     def exec(
         self,
         task: str,
-        model: Optional[str] = None,
+        model: str | None = None,
         *,
         effort: str | int = "medium",
         tools: frozenset[str] = frozenset(),
         sandbox: str = "none",
-        cwd: Optional[str] = None,
+        cwd: str | None = None,
         timeout_sec: int = 300,
     ) -> CallResponse:
         # Gemini's --approval-mode: "plan" (read-only) vs "yolo" (all writes
@@ -135,11 +134,11 @@ class GeminiProvider:
         self,
         task: str,
         *,
-        model: Optional[str],
+        model: str | None,
         effort: str | int,
         approval_mode: str,
-        cwd: Optional[str] = None,
-        timeout_sec_override: Optional[float] = None,
+        cwd: str | None = None,
+        timeout_sec_override: float | None = None,
     ) -> CallResponse:
         ok, reason = self.configured()
         if not ok:
@@ -195,7 +194,7 @@ class GeminiProvider:
             data = json.loads(stdout)
         except json.JSONDecodeError:
             if not stdout:
-                raise ProviderHTTPError("gemini produced empty stdout")
+                raise ProviderHTTPError("gemini produced empty stdout") from None
             return CallResponse(
                 text=stdout,
                 provider=self.name,
@@ -230,7 +229,7 @@ class GeminiProvider:
         )
 
     @staticmethod
-    def _sum_usage(data: dict) -> tuple[Optional[int], Optional[int]]:
+    def _sum_usage(data: dict) -> tuple[int | None, int | None]:
         stats = data.get("stats") or {}
         models = (stats.get("models") or {}).values()
         total_input = 0

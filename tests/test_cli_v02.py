@@ -26,7 +26,6 @@ from conductor.providers import (
     GeminiProvider,
     KimiProvider,
     OllamaProvider,
-    UnsupportedCapability,
 )
 from conductor.router import reset_health
 

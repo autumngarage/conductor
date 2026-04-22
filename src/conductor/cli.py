@@ -22,7 +22,6 @@ import json
 import os
 import sys
 from dataclasses import asdict
-from typing import Optional
 
 import click
 
@@ -34,7 +33,6 @@ from conductor.providers import (
     UnsupportedCapability,
     get_provider,
     known_providers,
-    resolve_effort_tokens,
 )
 from conductor.router import (
     VALID_PREFER_MODES,
@@ -57,7 +55,7 @@ VALID_EFFORT_LEVELS = ("minimal", "low", "medium", "high", "max")
 # --------------------------------------------------------------------------- #
 
 
-def _read_task(task: Optional[str]) -> str:
+def _read_task(task: str | None) -> str:
     if task is not None:
         body = task
     elif not sys.stdin.isatty():
@@ -72,13 +70,13 @@ def _read_task(task: Optional[str]) -> str:
     return body
 
 
-def _parse_csv(raw: Optional[str]) -> list[str]:
+def _parse_csv(raw: str | None) -> list[str]:
     if not raw:
         return []
     return [t.strip() for t in raw.split(",") if t.strip()]
 
 
-def _parse_effort(raw: Optional[str]) -> str | int:
+def _parse_effort(raw: str | None) -> str | int:
     if raw is None:
         return "medium"
     raw = raw.strip()
@@ -100,7 +98,7 @@ def _parse_effort(raw: Optional[str]) -> str | int:
     return raw
 
 
-def _validate_tools(raw: Optional[str]) -> frozenset[str]:
+def _validate_tools(raw: str | None) -> frozenset[str]:
     tools = _parse_csv(raw)
     unknown = [t for t in tools if t not in VALID_TOOLS]
     if unknown:
@@ -111,7 +109,7 @@ def _validate_tools(raw: Optional[str]) -> frozenset[str]:
     return frozenset(tools)
 
 
-def _validate_sandbox(raw: Optional[str]) -> str:
+def _validate_sandbox(raw: str | None) -> str:
     if raw is None:
         return "none"
     if raw not in VALID_SANDBOXES:
@@ -124,7 +122,7 @@ def _validate_sandbox(raw: Optional[str]) -> str:
     return raw
 
 
-def _validate_prefer(raw: Optional[str]) -> str:
+def _validate_prefer(raw: str | None) -> str:
     if raw is None:
         return "balanced"
     if raw not in VALID_PREFER_MODES:
@@ -169,7 +167,8 @@ def _is_retryable(err: Exception) -> tuple[bool, str]:
         return True, "timeout"
     # HTTP 5xx — check for " 5" preceded by "http" or a similar prefix so
     # we don't match arbitrary "5" digits. Cheap heuristic; acceptable.
-    if any(sig in msg for sig in ("http 5", "returned http 5", "exited 5", "overloaded", "upstream")):
+    signals = ("http 5", "returned http 5", "exited 5", "overloaded", "upstream")
+    if any(sig in msg for sig in signals):
         return True, "5xx"
     return False, "other"
 
@@ -179,11 +178,11 @@ def _invoke_with_fallback(
     *,
     mode: str,  # "call" | "exec"
     task: str,
-    model: Optional[str],
+    model: str | None,
     effort: str | int,
     tools: frozenset[str],
     sandbox: str,
-    cwd: Optional[str],
+    cwd: str | None,
     timeout_sec: int,
     silent: bool,
 ) -> tuple[CallResponse, list[str]]:
@@ -194,7 +193,7 @@ def _invoke_with_fallback(
 
     Raises the last ProviderError if every candidate fails.
     """
-    last_exc: Optional[Exception] = None
+    last_exc: Exception | None = None
     fallbacks: list[str] = []
 
     for idx, candidate in enumerate(decision.ranked):
@@ -251,7 +250,7 @@ def _emit_call(
     response: CallResponse,
     *,
     as_json: bool,
-    decision: Optional[RouteDecision] = None,
+    decision: RouteDecision | None = None,
 ) -> None:
     if as_json:
         payload = asdict(response)
@@ -410,14 +409,14 @@ def main() -> None:
     help="Suppress the default route-log line (useful for clean stdout piping).",
 )
 def call(
-    provider_id: Optional[str],
+    provider_id: str | None,
     auto: bool,
-    tags: Optional[str],
-    prefer: Optional[str],
-    effort: Optional[str],
-    exclude: Optional[str],
-    task: Optional[str],
-    model: Optional[str],
+    tags: str | None,
+    prefer: str | None,
+    effort: str | None,
+    exclude: str | None,
+    task: str | None,
+    model: str | None,
     as_json: bool,
     verbose_route: bool,
     silent_route: bool,
@@ -437,7 +436,7 @@ def call(
     body = _read_task(task)
     effort_value = _parse_effort(effort)
 
-    decision: Optional[RouteDecision] = None
+    decision: RouteDecision | None = None
     if auto:
         try:
             provider, decision = pick(
@@ -559,18 +558,18 @@ def call(
 @click.option("--verbose-route", is_flag=True, default=False)
 @click.option("--silent-route", is_flag=True, default=False)
 def exec_cmd(
-    provider_id: Optional[str],
+    provider_id: str | None,
     auto: bool,
-    tags: Optional[str],
-    prefer: Optional[str],
-    effort: Optional[str],
-    tools: Optional[str],
-    sandbox: Optional[str],
-    exclude: Optional[str],
-    cwd: Optional[str],
+    tags: str | None,
+    prefer: str | None,
+    effort: str | None,
+    tools: str | None,
+    sandbox: str | None,
+    exclude: str | None,
+    cwd: str | None,
     timeout_sec: int,
-    task: Optional[str],
-    model: Optional[str],
+    task: str | None,
+    model: str | None,
     as_json: bool,
     verbose_route: bool,
     silent_route: bool,
@@ -586,7 +585,7 @@ def exec_cmd(
     sandbox_value = _validate_sandbox(sandbox)
     effort_value = _parse_effort(effort)
 
-    decision: Optional[RouteDecision] = None
+    decision: RouteDecision | None = None
     if auto:
         try:
             provider, decision = pick(
@@ -676,12 +675,12 @@ def exec_cmd(
 @click.option("--exclude", default=None, help="Comma-separated providers to exclude.")
 @click.option("--json", "as_json", is_flag=True, default=False)
 def route(
-    tags: Optional[str],
-    prefer: Optional[str],
-    effort: Optional[str],
-    tools: Optional[str],
-    sandbox: Optional[str],
-    exclude: Optional[str],
+    tags: str | None,
+    prefer: str | None,
+    effort: str | None,
+    tools: str | None,
+    sandbox: str | None,
+    exclude: str | None,
     as_json: bool,
 ) -> None:
     """Dry-run the router: show which provider would be picked and why.
@@ -867,7 +866,7 @@ def list_cmd(as_json: bool) -> None:
     default=False,
     help="Emit results as JSON.",
 )
-def smoke(provider_id: Optional[str], run_all: bool, as_json: bool) -> None:
+def smoke(provider_id: str | None, run_all: bool, as_json: bool) -> None:
     """Prove a provider's auth + endpoint actually work."""
     if provider_id and run_all:
         raise click.UsageError("pass a provider id OR --all, not both.")
@@ -1032,7 +1031,7 @@ def doctor(as_json: bool) -> None:
     default=False,
     help="Resume setup with only the not-yet-configured providers.",
 )
-def init(accept_defaults: bool, only: Optional[str], remaining: bool) -> None:
+def init(accept_defaults: bool, only: str | None, remaining: bool) -> None:
     """Interactively configure Conductor for first use."""
     if only and remaining:
         raise click.UsageError("--only and --remaining are mutually exclusive.")

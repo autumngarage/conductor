@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Literal
 
 from conductor.providers import (
     TIER_RANK,
@@ -53,11 +53,11 @@ PreferMode = Literal["best", "cheapest", "fastest", "balanced"]
 VALID_PREFER_MODES: tuple[str, ...] = ("best", "cheapest", "fastest", "balanced")
 
 
-class NoConfiguredProvider(ProviderError):
+class NoConfiguredProvider(ProviderError):  # noqa: N818  — public API name; preserved from v0.1
     """Raised when no provider in the registry is configured enough to call."""
 
 
-class InvalidRouterRequest(ProviderError):
+class InvalidRouterRequest(ProviderError):  # noqa: N818  — public API name, symmetry with NoConfiguredProvider
     """Raised when the caller passes an invalid combination (e.g. unknown prefer mode)."""
 
 
@@ -70,8 +70,8 @@ _RATE_LIMIT_COOLDOWN_SEC = 60.0
 
 @dataclass
 class _HealthState:
-    last_rate_limited_at: Optional[float] = None
-    last_auth_failed_at: Optional[float] = None
+    last_rate_limited_at: float | None = None
+    last_auth_failed_at: float | None = None
     recent_outcomes: list[str] = field(default_factory=list)  # success / 5xx / timeout
 
 
@@ -99,7 +99,7 @@ def mark_outcome(name: str, outcome: str) -> None:
         h.recent_outcomes = h.recent_outcomes[-20:]
 
 
-def reset_health(name: Optional[str] = None) -> None:
+def reset_health(name: str | None = None) -> None:
     """Test helper; reset one provider's health or everything."""
     if name is None:
         _HEALTH.clear()
@@ -107,7 +107,7 @@ def reset_health(name: Optional[str] = None) -> None:
         del _HEALTH[name]
 
 
-def _health_filter(name: str) -> Optional[str]:
+def _health_filter(name: str) -> str | None:
     """Return None if the provider passes, else a skip reason."""
     h = _HEALTH.get(name)
     if h is None:
@@ -189,13 +189,13 @@ class RouteDecision:
 
 
 def pick(
-    task_tags: Optional[list[str]] = None,
+    task_tags: list[str] | None = None,
     *,
     prefer: str = "balanced",
     effort: str | int = "medium",
-    tools: Optional[frozenset[str] | set[str] | list[str]] = None,
+    tools: frozenset[str] | set[str] | list[str] | None = None,
     sandbox: str = "none",
-    exclude: Optional[frozenset[str] | set[str] | list[str]] = None,
+    exclude: frozenset[str] | set[str] | list[str] | None = None,
     priority: tuple[str, ...] = DEFAULT_PRIORITY,
 ) -> tuple[Provider, RouteDecision]:
     """Pick the best provider for ``task_tags`` under the given preferences.

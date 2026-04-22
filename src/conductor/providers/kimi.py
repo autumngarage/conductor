@@ -35,9 +35,7 @@ detail of how Conductor reaches it.
 
 from __future__ import annotations
 
-import os
 import time
-from typing import Optional
 
 import httpx
 
@@ -86,8 +84,8 @@ class KimiProvider:
     def __init__(
         self,
         *,
-        api_token: Optional[str] = None,
-        account_id: Optional[str] = None,
+        api_token: str | None = None,
+        account_id: str | None = None,
         base_url_template: str = KIMI_BASE_URL_TEMPLATE,
         timeout_sec: float = KIMI_REQUEST_TIMEOUT_SEC,
     ) -> None:
@@ -129,7 +127,7 @@ class KimiProvider:
             "Content-Type": "application/json",
         }
 
-    def configured(self) -> tuple[bool, Optional[str]]:
+    def configured(self) -> tuple[bool, str | None]:
         missing = []
         if not (self._api_token or credentials.get(CLOUDFLARE_API_TOKEN_ENV)):
             missing.append(CLOUDFLARE_API_TOKEN_ENV)
@@ -142,7 +140,7 @@ class KimiProvider:
             )
         return True, None
 
-    def smoke(self) -> tuple[bool, Optional[str]]:
+    def smoke(self) -> tuple[bool, str | None]:
         # No /models endpoint on CF's Workers AI OpenAI-compat surface today;
         # a 1-token chat completion is the cheapest round-trip that proves
         # auth + account + model are all reachable.
@@ -185,7 +183,7 @@ class KimiProvider:
     def call(
         self,
         task: str,
-        model: Optional[str] = None,
+        model: str | None = None,
         *,
         effort: str | int = "medium",
     ) -> CallResponse:
@@ -237,12 +235,12 @@ class KimiProvider:
     def exec(
         self,
         task: str,
-        model: Optional[str] = None,
+        model: str | None = None,
         *,
         effort: str | int = "medium",
         tools: frozenset[str] = frozenset(),
         sandbox: str = "none",
-        cwd: Optional[str] = None,
+        cwd: str | None = None,
         timeout_sec: int = 300,
     ) -> CallResponse:
         if tools:

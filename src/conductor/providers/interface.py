@@ -29,7 +29,7 @@ supported_sandboxes against the caller's request, then scores by `prefer`.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 # --------------------------------------------------------------------------- #
 # Effort levels — symbolic dial for "how hard should this provider think".
@@ -71,7 +71,7 @@ class ProviderHTTPError(ProviderError):
     (non-2xx, malformed JSON, timeout)."""
 
 
-class UnsupportedCapability(ProviderError):
+class UnsupportedCapability(ProviderError):  # noqa: N818  — public API name; renaming to -Error breaks callers
     """Raised when a provider cannot satisfy the requested capability —
     e.g., tool-use requested but the provider only supports single-turn
     call() (kimi/ollama in v0.2 pre-tool-use-loop).
@@ -95,7 +95,7 @@ class CallResponse:
     model: str
     duration_ms: int
     usage: dict = field(default_factory=dict)
-    cost_usd: Optional[float] = None
+    cost_usd: float | None = None
     raw: dict = field(default_factory=dict)
 
 
@@ -120,16 +120,16 @@ class Provider(Protocol):
     typical_p50_ms: int
 
     # --- core methods ------------------------------------------------------ #
-    def configured(self) -> tuple[bool, Optional[str]]:
+    def configured(self) -> tuple[bool, str | None]:
         """Return (True, None) if the provider can run, else (False, reason)."""
 
-    def smoke(self) -> tuple[bool, Optional[str]]:
+    def smoke(self) -> tuple[bool, str | None]:
         """Cheapest possible round-trip that proves auth + endpoint work."""
 
     def call(
         self,
         task: str,
-        model: Optional[str] = None,
+        model: str | None = None,
         *,
         effort: str = "medium",
     ) -> CallResponse:
@@ -143,12 +143,12 @@ class Provider(Protocol):
     def exec(
         self,
         task: str,
-        model: Optional[str] = None,
+        model: str | None = None,
         *,
         effort: str = "medium",
         tools: frozenset[str] = frozenset(),
         sandbox: str = "none",
-        cwd: Optional[str] = None,
+        cwd: str | None = None,
         timeout_sec: int = 300,
     ) -> CallResponse:
         """Multi-turn agent session with tool access.
