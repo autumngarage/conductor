@@ -88,7 +88,11 @@ def test_call_returns_normalized_response(configured):
     assert response.text == "4"
     assert response.provider == "kimi"
     assert response.model == KIMI_DEFAULT_MODEL
-    assert response.usage == {"input_tokens": 7, "output_tokens": 1, "cached_tokens": 0}
+    assert response.usage["input_tokens"] == 7
+    assert response.usage["output_tokens"] == 1
+    assert response.usage["cached_tokens"] == 0
+    assert response.usage["effort"] == "medium"
+    assert response.usage["thinking_budget"] == 4_000
     assert response.duration_ms >= 0
     assert response.raw == body
 

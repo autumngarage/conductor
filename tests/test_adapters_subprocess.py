@@ -63,11 +63,11 @@ def test_claude_call_returns_normalized_response(mocker):
     assert response.text == "hello from claude"
     assert response.provider == "claude"
     assert response.model == "sonnet"
-    assert response.usage == {
-        "input_tokens": 10,
-        "output_tokens": 3,
-        "cached_tokens": 2,
-    }
+    assert response.usage["input_tokens"] == 10
+    assert response.usage["output_tokens"] == 3
+    assert response.usage["cached_tokens"] == 2
+    assert response.usage["effort"] == "medium"
+    assert response.usage["thinking_budget"] == 8_000
     assert response.cost_usd == 0.002
     assert response.duration_ms == 1234
 

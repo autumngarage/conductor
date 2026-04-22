@@ -22,6 +22,7 @@ from conductor.providers.interface import (
     ProviderConfigError,
     ProviderError,
     ProviderHTTPError,
+    resolve_effort_tokens,
 )
 
 CLAUDE_DEFAULT_MODEL = "sonnet"
@@ -32,6 +33,24 @@ class ClaudeProvider:
     name = "claude"
     tags = ["strong-reasoning", "long-context", "tool-use", "code-review"]
     default_model = CLAUDE_DEFAULT_MODEL
+
+    # Capability declarations (see interface.py)
+    quality_tier = "frontier"
+    supported_tools = frozenset({"Read", "Grep", "Glob", "Edit", "Write", "Bash"})
+    supported_sandboxes = frozenset({"read-only", "workspace-write", "none"})
+    supports_effort = True
+    effort_to_thinking = {
+        "minimal": 0,
+        "low": 2_000,
+        "medium": 8_000,
+        "high": 24_000,
+        "max": 64_000,
+    }
+    # Pricing for claude sonnet as of 2026-04; maintained alongside tier.
+    cost_per_1k_in = 0.003
+    cost_per_1k_out = 0.015
+    cost_per_1k_thinking = 0.003
+    typical_p50_ms = 2500
 
     def __init__(
         self,
@@ -70,12 +89,72 @@ class ClaudeProvider:
             )
         return True, None
 
-    def call(self, task: str, model: Optional[str] = None) -> CallResponse:
+    def call(
+        self,
+        task: str,
+        model: Optional[str] = None,
+        *,
+        effort: str | int = "medium",
+    ) -> CallResponse:
+        return self._run(
+            task,
+            model=model,
+            effort=effort,
+            allowed_tools=None,
+            permission_mode=None,
+        )
+
+    def exec(
+        self,
+        task: str,
+        model: Optional[str] = None,
+        *,
+        effort: str | int = "medium",
+        tools: frozenset[str] = frozenset(),
+        sandbox: str = "none",
+        cwd: Optional[str] = None,
+        timeout_sec: int = 300,
+    ) -> CallResponse:
+        # Claude's `--allowedTools` is fine-grained; passing an empty set
+        # is effectively "no tools permitted" (single-turn).
+        allowed = ",".join(sorted(tools)) if tools else None
+        # Sandbox to claude's permission model:
+        #   read-only       → "plan" (no writes, no bash effects)
+        #   workspace-write → "acceptEdits" (file edits auto-accepted, bash requires accept)
+        #   none            → None (default interactive permissions)
+        permission_mode = {
+            "read-only": "plan",
+            "workspace-write": "acceptEdits",
+            "none": None,
+        }.get(sandbox, None)
+        return self._run(
+            task,
+            model=model,
+            effort=effort,
+            allowed_tools=allowed,
+            permission_mode=permission_mode,
+            cwd=cwd,
+            timeout_sec_override=timeout_sec,
+        )
+
+    def _run(
+        self,
+        task: str,
+        *,
+        model: Optional[str],
+        effort: str | int,
+        allowed_tools: Optional[str],
+        permission_mode: Optional[str],
+        cwd: Optional[str] = None,
+        timeout_sec_override: Optional[float] = None,
+    ) -> CallResponse:
         ok, reason = self.configured()
         if not ok:
             raise ProviderConfigError(reason or "claude not configured")
 
         model = model or self.default_model
+        thinking_budget = resolve_effort_tokens(effort, self.effort_to_thinking)
+
         args = [
             self._cli,
             "-p",
@@ -85,17 +164,31 @@ class ClaudeProvider:
             "--model",
             model,
         ]
+        if allowed_tools is not None:
+            args.extend(["--allowedTools", allowed_tools])
+        if permission_mode is not None:
+            args.extend(["--permission-mode", permission_mode])
+        # NOTE: Claude CLI's exact flag for thinking budget is version-dependent;
+        # we pass via the MAX_THINKING_TOKENS env var (safe fallback: ignored
+        # by older CLI versions). Wire to a proper CLI flag when stable.
+        env_overrides = {"MAX_THINKING_TOKENS": str(thinking_budget)} if thinking_budget else {}
+
+        timeout = timeout_sec_override if timeout_sec_override is not None else self._timeout_sec
         start = time.monotonic()
         try:
+            import os as _os
+            proc_env = {**_os.environ, **env_overrides} if env_overrides else None
             result = subprocess.run(
                 args,
                 capture_output=True,
                 text=True,
-                timeout=self._timeout_sec,
+                timeout=timeout,
+                cwd=cwd,
+                env=proc_env,
             )
         except subprocess.TimeoutExpired as e:
             raise ProviderError(
-                f"claude CLI timed out after {self._timeout_sec:.0f}s"
+                f"claude CLI timed out after {timeout:.0f}s"
             ) from e
         duration_ms = int((time.monotonic() - start) * 1000)
 
@@ -127,6 +220,9 @@ class ClaudeProvider:
                 "input_tokens": usage.get("input_tokens"),
                 "output_tokens": usage.get("output_tokens"),
                 "cached_tokens": usage.get("cache_read_input_tokens"),
+                "thinking_tokens": usage.get("thinking_tokens"),
+                "effort": effort if isinstance(effort, str) else None,
+                "thinking_budget": thinking_budget,
             },
             cost_usd=data.get("total_cost_usd"),
             raw=data,

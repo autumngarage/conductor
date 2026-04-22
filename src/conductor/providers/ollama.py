@@ -21,6 +21,7 @@ from conductor.providers.interface import (
     CallResponse,
     ProviderConfigError,
     ProviderHTTPError,
+    UnsupportedCapability,
 )
 
 OLLAMA_BASE_URL_ENV = "OLLAMA_BASE_URL"
@@ -31,8 +32,20 @@ OLLAMA_REQUEST_TIMEOUT_SEC = 180.0
 
 class OllamaProvider:
     name = "ollama"
-    tags = ["cheap", "local", "offline"]
+    tags = ["cheap", "local", "offline", "code-review"]
     default_model = OLLAMA_DEFAULT_MODEL
+
+    # Capability declarations (see interface.py)
+    quality_tier = "local"
+    # Tool-use lands in Stage 3 (HTTP-side tool-use loop).
+    supported_tools: frozenset[str] = frozenset()
+    supported_sandboxes: frozenset[str] = frozenset({"none"})
+    supports_effort = False  # base ollama models don't expose a thinking dial
+    effort_to_thinking: dict[str, int] = {}
+    cost_per_1k_in = 0.0
+    cost_per_1k_out = 0.0
+    cost_per_1k_thinking = 0.0
+    typical_p50_ms = 5000  # local inference, CPU/GPU dependent
 
     def __init__(
         self,
@@ -73,7 +86,15 @@ class OllamaProvider:
     def smoke(self) -> tuple[bool, Optional[str]]:
         return self.configured()
 
-    def call(self, task: str, model: Optional[str] = None) -> CallResponse:
+    def call(
+        self,
+        task: str,
+        model: Optional[str] = None,
+        *,
+        effort: str | int = "medium",
+    ) -> CallResponse:
+        # Effort is a silent no-op here — base ollama models don't expose a
+        # thinking dial. Tag noted in usage for observability.
         model = model or self.default_model
         url = f"{self._base_url()}/api/chat"
         payload = {
@@ -119,6 +140,32 @@ class OllamaProvider:
                 "input_tokens": data.get("prompt_eval_count"),
                 "output_tokens": data.get("eval_count"),
                 "cached_tokens": None,
+                "thinking_tokens": None,
+                "effort": effort if isinstance(effort, str) else None,
+                "thinking_budget": 0,  # ollama doesn't support effort
             },
             raw=data,
         )
+
+    def exec(
+        self,
+        task: str,
+        model: Optional[str] = None,
+        *,
+        effort: str | int = "medium",
+        tools: frozenset[str] = frozenset(),
+        sandbox: str = "none",
+        cwd: Optional[str] = None,
+        timeout_sec: int = 300,
+    ) -> CallResponse:
+        if tools:
+            raise UnsupportedCapability(
+                "ollama.exec() with tools is not supported in v0.2 (HTTP tool-use "
+                "loop lands in Stage 3). Router should filter ollama out when "
+                f"tools are requested; got tools={sorted(tools)}."
+            )
+        if sandbox not in ("", "none"):
+            raise UnsupportedCapability(
+                f"ollama.exec() sandbox={sandbox!r} not meaningful without tool-use."
+            )
+        return self.call(task, model=model, effort=effort)

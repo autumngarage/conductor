@@ -46,6 +46,8 @@ from conductor.providers.interface import (
     CallResponse,
     ProviderConfigError,
     ProviderHTTPError,
+    UnsupportedCapability,
+    resolve_effort_tokens,
 )
 
 CLOUDFLARE_API_TOKEN_ENV = "CLOUDFLARE_API_TOKEN"
@@ -59,8 +61,27 @@ KIMI_REQUEST_TIMEOUT_SEC = 120.0
 
 class KimiProvider:
     name = "kimi"
-    tags = ["long-context", "cheap", "tool-use", "vision"]
+    tags = ["long-context", "cheap", "vision", "code-review"]
     default_model = KIMI_DEFAULT_MODEL
+
+    # Capability declarations (see interface.py)
+    quality_tier = "strong"
+    # Tool-use lands in Stage 3 (HTTP-side tool-use loop).
+    # Until then kimi.exec() with non-empty tools raises UnsupportedCapability.
+    supported_tools: frozenset[str] = frozenset()
+    supported_sandboxes: frozenset[str] = frozenset({"none"})
+    supports_effort = True
+    effort_to_thinking = {
+        "minimal": 0,
+        "low": 2_000,
+        "medium": 4_000,
+        "high": 8_000,
+        "max": 16_000,
+    }
+    cost_per_1k_in = 0.00015
+    cost_per_1k_out = 0.00075
+    cost_per_1k_thinking = 0.00015
+    typical_p50_ms = 3500
 
     def __init__(
         self,
@@ -161,12 +182,26 @@ class KimiProvider:
         except ValueError as e:
             raise ProviderHTTPError(f"Cloudflare response was not JSON: {e}") from e
 
-    def call(self, task: str, model: Optional[str] = None) -> CallResponse:
+    def call(
+        self,
+        task: str,
+        model: Optional[str] = None,
+        *,
+        effort: str | int = "medium",
+    ) -> CallResponse:
         model = model or self.default_model
-        payload = {
+        thinking_budget = resolve_effort_tokens(effort, self.effort_to_thinking)
+
+        payload: dict = {
             "model": model,
             "messages": [{"role": "user", "content": task}],
         }
+        # Moonshot/Kimi exposes reasoning via `reasoning_content` in streaming;
+        # the non-streaming contract accepts a thinking budget hint through
+        # the `thinking` object per OpenAI-ish convention where supported.
+        if thinking_budget > 0:
+            payload["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
+
         start = time.monotonic()
         body = self._post_chat(payload)
         duration_ms = int((time.monotonic() - start) * 1000)
@@ -190,6 +225,36 @@ class KimiProvider:
                 "cached_tokens": (usage.get("prompt_tokens_details") or {}).get(
                     "cached_tokens"
                 ),
+                "thinking_tokens": (usage.get("completion_tokens_details") or {}).get(
+                    "reasoning_tokens"
+                ),
+                "effort": effort if isinstance(effort, str) else None,
+                "thinking_budget": thinking_budget,
             },
             raw=body,
         )
+
+    def exec(
+        self,
+        task: str,
+        model: Optional[str] = None,
+        *,
+        effort: str | int = "medium",
+        tools: frozenset[str] = frozenset(),
+        sandbox: str = "none",
+        cwd: Optional[str] = None,
+        timeout_sec: int = 300,
+    ) -> CallResponse:
+        if tools:
+            raise UnsupportedCapability(
+                "kimi.exec() with tools is not supported in v0.2 (HTTP tool-use loop "
+                "lands in Stage 3). Router should filter kimi out when tools are "
+                f"requested; got tools={sorted(tools)}."
+            )
+        if sandbox not in ("", "none"):
+            raise UnsupportedCapability(
+                f"kimi.exec() sandbox={sandbox!r} not meaningful without tool-use; "
+                "use sandbox='none' or filter kimi from routing when sandbox required."
+            )
+        # No tools, no sandbox → equivalent to single-turn call.
+        return self.call(task, model=model, effort=effort)

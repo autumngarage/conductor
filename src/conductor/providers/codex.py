@@ -25,16 +25,44 @@ from conductor.providers.interface import (
     ProviderConfigError,
     ProviderError,
     ProviderHTTPError,
+    resolve_effort_tokens,
 )
 
 CODEX_DEFAULT_MODEL = "gpt-5.4"
 CODEX_REQUEST_TIMEOUT_SEC = 180.0
+
+# Map symbolic effort → codex --effort flag value.
+# Codex natively exposes minimal|low|medium|high.
+_EFFORT_TO_CODEX_FLAG = {
+    "minimal": "minimal",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "max": "high",  # codex's ceiling
+}
 
 
 class CodexProvider:
     name = "codex"
     tags = ["strong-reasoning", "code-review", "tool-use"]
     default_model = CODEX_DEFAULT_MODEL
+
+    # Capability declarations (see interface.py)
+    quality_tier = "frontier"
+    supported_tools = frozenset({"Read", "Grep", "Glob", "Edit", "Write", "Bash"})
+    supported_sandboxes = frozenset({"read-only", "workspace-write", "none"})
+    supports_effort = True
+    effort_to_thinking = {
+        "minimal": 0,
+        "low": 2_000,
+        "medium": 8_000,
+        "high": 24_000,
+        "max": 32_000,
+    }
+    cost_per_1k_in = 0.010
+    cost_per_1k_out = 0.040
+    cost_per_1k_thinking = 0.010
+    typical_p50_ms = 2000
 
     def __init__(
         self,
@@ -97,24 +125,95 @@ class CodexProvider:
                 output_tokens = (output_tokens or 0) + (usage.get("output_tokens") or 0)
         return content, input_tokens, output_tokens
 
-    def call(self, task: str, model: Optional[str] = None) -> CallResponse:
+    def call(
+        self,
+        task: str,
+        model: Optional[str] = None,
+        *,
+        effort: str | int = "medium",
+    ) -> CallResponse:
+        return self._run(
+            task,
+            model=model,
+            effort=effort,
+            sandbox="read-only",
+        )
+
+    def exec(
+        self,
+        task: str,
+        model: Optional[str] = None,
+        *,
+        effort: str | int = "medium",
+        tools: frozenset[str] = frozenset(),
+        sandbox: str = "none",
+        cwd: Optional[str] = None,
+        timeout_sec: int = 300,
+    ) -> CallResponse:
+        # Codex has two sandboxes: read-only (no fs writes), workspace-write
+        # (edits allowed). "none" is ambiguous in codex; we treat it as
+        # read-only since there's no meaningful "no sandbox" in codex exec.
+        codex_sandbox = {
+            "read-only": "read-only",
+            "workspace-write": "workspace-write",
+            "none": "read-only",
+        }.get(sandbox, "read-only")
+        # Tool filtering in codex is sandbox-based, not fine-grained.
+        # `tools` is advisory for logging; sandbox does the enforcing.
+        return self._run(
+            task,
+            model=model,
+            effort=effort,
+            sandbox=codex_sandbox,
+            cwd=cwd,
+            timeout_sec_override=timeout_sec,
+        )
+
+    def _run(
+        self,
+        task: str,
+        *,
+        model: Optional[str],
+        effort: str | int,
+        sandbox: str,
+        cwd: Optional[str] = None,
+        timeout_sec_override: Optional[float] = None,
+    ) -> CallResponse:
         ok, reason = self.configured()
         if not ok:
             raise ProviderConfigError(reason or "codex not configured")
 
         model = model or self.default_model
-        args = [self._cli, "exec", task, "--json", "--ephemeral"]
+        thinking_budget = resolve_effort_tokens(effort, self.effort_to_thinking)
+        codex_effort_flag = (
+            _EFFORT_TO_CODEX_FLAG.get(effort) if isinstance(effort, str) else None
+        )
+
+        args = [
+            self._cli,
+            "exec",
+            task,
+            "--json",
+            "--ephemeral",
+            "--sandbox",
+            sandbox,
+        ]
+        if codex_effort_flag:
+            args.extend(["--effort", codex_effort_flag])
+
+        timeout = timeout_sec_override if timeout_sec_override is not None else self._timeout_sec
         start = time.monotonic()
         try:
             result = subprocess.run(
                 args,
                 capture_output=True,
                 text=True,
-                timeout=self._timeout_sec,
+                timeout=timeout,
+                cwd=cwd,
             )
         except subprocess.TimeoutExpired as e:
             raise ProviderError(
-                f"codex CLI timed out after {self._timeout_sec:.0f}s"
+                f"codex CLI timed out after {timeout:.0f}s"
             ) from e
         duration_ms = int((time.monotonic() - start) * 1000)
 
@@ -138,6 +237,9 @@ class CodexProvider:
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "cached_tokens": None,
+                "thinking_tokens": None,  # codex doesn't surface separately today
+                "effort": effort if isinstance(effort, str) else None,
+                "thinking_budget": thinking_budget,
             },
             raw={"stdout": result.stdout},
         )

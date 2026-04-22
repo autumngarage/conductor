@@ -67,11 +67,10 @@ def test_call_returns_normalized_response():
     assert response.text == "hello from ollama"
     assert response.provider == "ollama"
     assert response.model == "qwen2.5-coder:14b"
-    assert response.usage == {
-        "input_tokens": 8,
-        "output_tokens": 3,
-        "cached_tokens": None,
-    }
+    assert response.usage["input_tokens"] == 8
+    assert response.usage["output_tokens"] == 3
+    assert response.usage["cached_tokens"] is None
+    assert response.usage["thinking_budget"] == 0
     assert response.duration_ms == 1500
 
 
