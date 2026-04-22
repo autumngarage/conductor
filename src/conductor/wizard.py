@@ -60,8 +60,18 @@ def _is_tty() -> bool:
     return sys.stdin.isatty()
 
 
-def run_init_wizard(*, accept_defaults: bool = False) -> int:
+def run_init_wizard(
+    *,
+    accept_defaults: bool = False,
+    only: str | None = None,
+    remaining: bool = False,
+) -> int:
     """Walk the user through configuring every provider that needs it.
+
+    Args:
+        accept_defaults: non-interactive mode; report state without prompting.
+        only: configure only this one provider; skip the rest.
+        remaining: skip providers that are already configured (resume flow).
 
     Returns a shell exit code: 0 on success, non-zero if the user
     explicitly aborted.
@@ -79,11 +89,16 @@ def run_init_wizard(*, accept_defaults: bool = False) -> int:
 
     outcomes: list[WizardOutcome] = []
 
-    for name in known_providers():
+    names_to_walk = [only] if only else known_providers()
+
+    for name in names_to_walk:
         provider = get_provider(name)
         click.echo(f"── {name} ──")
         ok, reason = provider.configured()
         if ok:
+            if remaining:
+                # Resume mode: silently skip already-configured providers.
+                continue
             click.echo("  already configured. (conductor smoke {0} to verify.)".format(name))
             outcomes.append(WizardOutcome(name, "ok", "already configured"))
             click.echo("")
