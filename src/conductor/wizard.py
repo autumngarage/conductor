@@ -53,6 +53,7 @@ class _ProviderInfo:
     description: str
     install_cmds: list[str]
     auth_cmds: list[str]
+    troubleshoot_tips: list[str]
     credential_source_url: str | None = None
 
 
@@ -71,6 +72,12 @@ _INFO: dict[str, _ProviderInfo] = {
         auth_cmds=[
             "claude /login    # opens a browser for subscription OAuth",
         ],
+        troubleshoot_tips=[
+            "`claude /login` opens a browser — won't work in a headless env.",
+            "Verify with `claude --version` (need >= 1.0); then `claude -p 'hi'`.",
+            "Subscription status: https://claude.ai/plans — Pro or Team required.",
+            "Behind a proxy? auth uses auth0; check $HTTP_PROXY / firewall rules.",
+        ],
     ),
     "codex": _ProviderInfo(
         tagline="OpenAI's coding agent (Codex).",
@@ -85,6 +92,12 @@ _INFO: dict[str, _ProviderInfo] = {
         ],
         auth_cmds=[
             "codex login    # opens a browser, signs in via ChatGPT",
+        ],
+        troubleshoot_tips=[
+            "`codex login` requires a ChatGPT Plus/Team/Enterprise subscription.",
+            "Verify with `codex --version` (need >= 0.20) and `codex exec --help`.",
+            "Browser fails to open? try `codex login --no-browser` and follow URL.",
+            "Session expired? `codex logout && codex login` forces a fresh auth.",
         ],
     ),
     "gemini": _ProviderInfo(
@@ -103,6 +116,12 @@ _INFO: dict[str, _ProviderInfo] = {
             "gcloud auth application-default login",
         ],
         credential_source_url="https://aistudio.google.com/apikey",
+        troubleshoot_tips=[
+            "GEMINI_API_KEY must be in the current shell — restart your terminal after adding to ~/.zshrc.",
+            "Validate the key: https://aistudio.google.com/apikey (regenerate if unsure).",
+            "Using gcloud ADC instead? run `gcloud auth application-default print-access-token` to confirm.",
+            "Free tier has a daily quota — 429 errors mean you hit the limit.",
+        ],
     ),
     "kimi": _ProviderInfo(
         tagline="Moonshot Kimi K2.6 via Cloudflare Workers AI.",
@@ -121,6 +140,12 @@ _INFO: dict[str, _ProviderInfo] = {
             "# CLOUDFLARE_ACCOUNT_ID and store them in Keychain / direnv.",
         ],
         credential_source_url="https://dash.cloudflare.com/profile/api-tokens",
+        troubleshoot_tips=[
+            "The token needs 'Workers AI:Read' permission — create a scoped token, not a global API key.",
+            "Account ID is the hex string on the right sidebar of dash.cloudflare.com — NOT your email.",
+            "Quick check: curl -H 'Authorization: Bearer $TOKEN' https://api.cloudflare.com/client/v4/accounts/$ACCOUNT/ai/models/search",
+            "Free tier = 10k tokens/day; 429 errors mean you've hit the cap.",
+        ],
     ),
     "ollama": _ProviderInfo(
         tagline="Local models via Ollama.",
@@ -138,6 +163,12 @@ _INFO: dict[str, _ProviderInfo] = {
             "ollama pull qwen2.5-coder:14b              # pull a code-review model",
             "# or heavier:",
             "ollama pull llama3.3:70b                   # ~40 GB, needs ~48 GB RAM",
+        ],
+        troubleshoot_tips=[
+            "Daemon must be running: `ollama serve` in a separate terminal (or `brew services start ollama`).",
+            "Default model is qwen2.5-coder:14b — if you don't have it, `ollama pull qwen2.5-coder:14b` (~9 GB).",
+            "Check what's installed locally: `ollama list`.",
+            "Connection refused on 11434? port conflict; check `lsof -iTCP:11434 -sTCP:LISTEN`.",
         ],
     ),
 }
@@ -189,14 +220,23 @@ def run_init_wizard(
     outcomes: list[WizardOutcome] = []
     aborted = False
 
-    for idx, name in enumerate(names_to_walk, start=1):
+    # While-loop with explicit index so [b]ack can decrement. The previous
+    # provider's outcome (if any) gets popped on rewind so the rewalk is
+    # authoritative.
+    idx = 0
+    total = len(names_to_walk)
+    while idx < total:
+        name = names_to_walk[idx]
         provider = get_provider(name)
         ok, reason = provider.configured()
 
         if ok and remaining:
+            idx += 1
             continue
 
-        click.echo(_section_header(name, idx, len(names_to_walk)))
+        can_back = idx > 0
+
+        click.echo(_section_header(name, idx + 1, total))
         info = _INFO.get(name)
         if info:
             click.echo(f"  {info.tagline}")
@@ -212,6 +252,7 @@ def run_init_wizard(
             )
             outcomes.append(WizardOutcome(name, "ok", "already configured"))
             click.echo("")
+            idx += 1
             continue
 
         # Not configured — enter the per-provider setup flow.
@@ -228,18 +269,27 @@ def run_init_wizard(
                 WizardOutcome(name, "skipped", reason or "needs interactive setup")
             )
             click.echo("")
+            idx += 1
             continue
 
-        flow: Callable[[], WizardOutcome] = _FLOWS.get(name, _default_cli_flow(name))
+        flow = _FLOWS.get(name, _default_cli_flow(name))
         try:
-            outcome = flow()
+            outcome = flow(can_back=can_back)
         except _AbortSetup:
             aborted = True
             outcomes.append(WizardOutcome(name, "skipped", "user quit setup"))
             click.echo("")
             break
+        except _GoBack:
+            # Drop the previous provider's outcome so the rewalk replaces it.
+            if outcomes:
+                outcomes.pop()
+            idx -= 1
+            click.echo("")
+            continue
         outcomes.append(outcome)
         click.echo("")
+        idx += 1
 
     _print_summary(outcomes)
     _print_next_steps(outcomes)
@@ -248,6 +298,10 @@ def run_init_wizard(
 
 class _AbortSetup(Exception):  # noqa: N818  — sentinel, never caught outside this module
     """User pressed [q]uit during a provider flow — stop the walk."""
+
+
+class _GoBack(Exception):  # noqa: N818  — sentinel, never caught outside this module
+    """User pressed [b]ack — rewind to the previous provider."""
 
 
 # --------------------------------------------------------------------------- #
@@ -301,31 +355,49 @@ def _print_install_block(info: _ProviderInfo | None, *, indent: str = "  ") -> N
         click.echo(f"{indent}Credential source: {info.credential_source_url}")
 
 
+def _print_troubleshoot_tips(info: _ProviderInfo | None, *, indent: str = "  ") -> None:
+    if info is None or not info.troubleshoot_tips:
+        click.echo(f"{indent}(no troubleshoot tips available)")
+        return
+    click.echo(f"{indent}Common fixes:")
+    for tip in info.troubleshoot_tips:
+        click.echo(f"{indent}  • {tip}")
+    click.echo("")
+
+
 # --------------------------------------------------------------------------- #
 # Per-provider flows.
 # --------------------------------------------------------------------------- #
 
 
-def _default_cli_flow(name: str) -> Callable[[], WizardOutcome]:
+def _default_cli_flow(name: str) -> Callable[..., WizardOutcome]:
     """Shared flow for CLI-wrapped providers that don't take API keys."""
 
-    def flow() -> WizardOutcome:
+    def flow(*, can_back: bool = False) -> WizardOutcome:
         info = _INFO.get(name)
         _print_install_block(info)
         click.echo("")
+        just_failed = False  # `[h]elp` only offered after a failure.
         while True:
-            choice = _prompt_menu(
-                options=[
-                    ("t", "test now — I've installed and authed"),
-                    ("s", "skip this provider"),
-                    ("q", "quit setup"),
-                ],
-                default="s",
-            )
+            options = [
+                ("t", "test now — I've installed and authed"),
+                ("s", "skip this provider"),
+            ]
+            if just_failed:
+                options.append(("h", "help — common fixes for this provider"))
+            if can_back:
+                options.append(("b", "back — redo the previous provider"))
+            options.append(("q", "quit setup"))
+            choice = _prompt_menu(options=options, default="s")
             if choice == "s":
                 return WizardOutcome(name, "skipped", "user skipped")
             if choice == "q":
                 raise _AbortSetup()
+            if choice == "b":
+                raise _GoBack()
+            if choice == "h":
+                _print_troubleshoot_tips(info)
+                continue  # keep just_failed=True so [h] stays available
             # "t": re-check configured() + smoke.
             provider = get_provider(name)
             ok, reason = provider.configured()
@@ -333,6 +405,7 @@ def _default_cli_flow(name: str) -> Callable[[], WizardOutcome]:
                 click.echo(f"  ✗ still not configured: {reason}")
                 click.echo("  Retry the install/auth commands above, then [t]est again.")
                 click.echo("")
+                just_failed = True
                 continue
             click.echo("  ✓ CLI detected")
             smoke_ok, smoke_reason = provider.smoke()
@@ -340,15 +413,34 @@ def _default_cli_flow(name: str) -> Callable[[], WizardOutcome]:
                 click.echo("  ✓ smoke test passed")
                 return WizardOutcome(name, "ok", "configured + smoke passed")
             click.echo(f"  ✗ smoke test failed: {smoke_reason}")
-            click.echo("  → configured but not healthy; fix and [t]est again or [s]kip.")
+            click.echo("  → configured but not healthy; [t]est again, [h]elp for tips, or [s]kip.")
             click.echo("")
+            just_failed = True
 
     return flow
 
 
-def _kimi_flow() -> WizardOutcome:
+def _kimi_flow(*, can_back: bool = False) -> WizardOutcome:
     """API-key flow with credential collection + storage choice."""
     info = _INFO["kimi"]
+    if can_back:
+        # Offer [b]ack before prompting for sensitive credentials so the user
+        # can bail out to the previous provider without being forced to type
+        # a token or hit Ctrl-C.
+        options = [
+            ("c", "continue — enter credentials now"),
+            ("s", "skip this provider"),
+            ("b", "back — redo the previous provider"),
+            ("q", "quit setup"),
+        ]
+        entry = _prompt_menu(options=options, default="c")
+        if entry == "s":
+            return WizardOutcome("kimi", "skipped", "user skipped")
+        if entry == "q":
+            raise _AbortSetup()
+        if entry == "b":
+            raise _GoBack()
+        click.echo("")
     click.echo(f"  Get credentials: {info.credential_source_url}")
     click.echo("  You need two values:")
     click.echo("    1. CLOUDFLARE_API_TOKEN — API token with Workers AI:Read permission")
@@ -434,7 +526,7 @@ def _kimi_flow() -> WizardOutcome:
     return WizardOutcome("kimi", "failed", f"stored via {storage}, smoke failed: {reason}")
 
 
-_FLOWS: dict[str, Callable[[], WizardOutcome]] = {
+_FLOWS: dict[str, Callable[..., WizardOutcome]] = {
     "kimi": _kimi_flow,
 }
 
@@ -532,7 +624,14 @@ def _print_next_steps(outcomes: list[WizardOutcome]) -> None:
 
     click.echo("")
     click.echo(
-        "Default routing preference: prefer=balanced, effort=medium. "
-        "Override with --prefer / --effort on conductor call/exec, "
-        "or set CONDUCTOR_PREFER / CONDUCTOR_EFFORT env vars."
+        "Conductor baseline routing: prefer=balanced, effort=medium. "
+        "Callers override per invocation (e.g. Touchstone's pre-push review "
+        "uses prefer=best, effort=max)."
+    )
+    click.echo(
+        "  tune: --prefer / --effort on call/exec, or CONDUCTOR_PREFER / "
+        "CONDUCTOR_EFFORT env vars."
+    )
+    click.echo(
+        "  inspect: `conductor config show` to see effective config and provenance."
     )

@@ -334,7 +334,32 @@ def test_config_show_json():
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["effective"]["prefer"] == "balanced"
+    assert payload["effective"]["tags"] == []
+    assert payload["effective"]["with"] is None
     assert payload["known_providers"]  # non-empty list
+
+
+def test_config_show_includes_tags_and_with(monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_TAGS", "code-review,long-context")
+    monkeypatch.setenv("CONDUCTOR_WITH", "claude")
+    result = CliRunner().invoke(main, ["config", "show"])
+    assert result.exit_code == 0
+    assert "tags" in result.output
+    assert "code-review,long-context" in result.output
+    assert "with" in result.output
+    assert "claude" in result.output
+
+
+def test_config_show_json_tracks_all_env_sources(monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_TAGS", "code-review")
+    monkeypatch.setenv("CONDUCTOR_WITH", "codex")
+    result = CliRunner().invoke(main, ["config", "show", "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["effective"]["tags"] == ["code-review"]
+    assert payload["effective"]["with"] == "codex"
+    assert payload["sources"]["CONDUCTOR_TAGS"] == "env"
+    assert payload["sources"]["CONDUCTOR_WITH"] == "env"
 
 
 # ---------------------------------------------------------------------------

@@ -85,6 +85,36 @@ class OllamaProvider:
     def smoke(self) -> tuple[bool, str | None]:
         return self.configured()
 
+    def default_model_available(self) -> tuple[bool, str | None]:
+        """Check whether ``default_model`` is pulled on the running daemon.
+
+        Returns (True, None) when the model is present, (False, reason)
+        otherwise. The daemon must be reachable — callers should only run
+        this after ``configured()`` returns True. Returns (False, reason)
+        if the API call fails, so the caller can warn without crashing.
+        """
+        try:
+            with httpx.Client(timeout=5) as client:
+                resp = client.get(f"{self._base_url()}/api/tags")
+        except httpx.HTTPError as e:
+            return False, f"cannot query {self._base_url()}/api/tags: {e}"
+        if resp.status_code != 200:
+            return False, f"{self._base_url()}/api/tags returned {resp.status_code}"
+        try:
+            data = resp.json()
+        except ValueError as e:
+            return False, f"/api/tags response was not JSON: {e}"
+        installed = {m.get("name") for m in data.get("models") or []}
+        if self.default_model in installed:
+            return True, None
+        pulled = sorted(n for n in installed if n)
+        hint = f"pull with `ollama pull {self.default_model}`"
+        if pulled:
+            hint += f"; locally installed: {', '.join(pulled)}"
+        return False, (
+            f"default model '{self.default_model}' is not pulled on this daemon. {hint}."
+        )
+
     def call(
         self,
         task: str,

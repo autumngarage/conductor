@@ -749,11 +749,15 @@ def config(subcommand: str, as_json: bool) -> None:
     env_overrides = {
         "CONDUCTOR_PREFER": os.environ.get("CONDUCTOR_PREFER"),
         "CONDUCTOR_EFFORT": os.environ.get("CONDUCTOR_EFFORT"),
+        "CONDUCTOR_TAGS": os.environ.get("CONDUCTOR_TAGS"),
+        "CONDUCTOR_WITH": os.environ.get("CONDUCTOR_WITH"),
         "CONDUCTOR_EXCLUDE": os.environ.get("CONDUCTOR_EXCLUDE"),
     }
     effective = {
         "prefer": env_overrides["CONDUCTOR_PREFER"] or "balanced",
         "effort": env_overrides["CONDUCTOR_EFFORT"] or "medium",
+        "tags": _parse_csv(env_overrides["CONDUCTOR_TAGS"]),
+        "with": env_overrides["CONDUCTOR_WITH"] or None,
         "exclude": _parse_csv(env_overrides["CONDUCTOR_EXCLUDE"]),
     }
 
@@ -775,7 +779,12 @@ def config(subcommand: str, as_json: bool) -> None:
     click.echo("")
     for key, val in effective.items():
         src = payload["sources"][f"CONDUCTOR_{key.upper()}"]
-        val_str = val if not isinstance(val, list) else (",".join(val) or "(none)")
+        if isinstance(val, list):
+            val_str = ",".join(val) or "(none)"
+        elif val is None:
+            val_str = "(unset)"
+        else:
+            val_str = val
         click.echo(f"  {key:<8} = {val_str:<20}  (from: {src})")
     click.echo("")
     click.echo(f"Known providers: {', '.join(payload['known_providers'])}")
@@ -923,9 +932,23 @@ _DIAGNOSTIC_ENV_VARS = (
 
 def _diagnostic_payload() -> dict:
     providers_info = []
+    warnings: list[dict] = []
     for name in known_providers():
         provider = get_provider(name)
         ok, reason = provider.configured()
+        provider_warnings: list[str] = []
+
+        # Provider-specific health probes: daemon up but default model missing,
+        # token nearly expired, etc. Kept in the CLI layer so each provider's
+        # core interface stays minimal.
+        if ok and hasattr(provider, "default_model_available"):
+            model_ok, model_reason = provider.default_model_available()
+            if not model_ok:
+                provider_warnings.append(model_reason or "default model unavailable")
+                warnings.append(
+                    {"provider": name, "level": "warning", "message": model_reason}
+                )
+
         providers_info.append(
             {
                 "provider": name,
@@ -935,6 +958,7 @@ def _diagnostic_payload() -> dict:
                 "tags": list(provider.tags),
                 "quality_tier": provider.quality_tier,
                 "supports_effort": provider.supports_effort,
+                "warnings": provider_warnings,
             }
         )
 
@@ -952,6 +976,7 @@ def _diagnostic_payload() -> dict:
         "python": sys.version.split()[0],
         "providers": providers_info,
         "credentials": env_info,
+        "warnings": warnings,
     }
 
 
@@ -988,6 +1013,8 @@ def doctor(as_json: bool) -> None:
         )
         if not p["configured"]:
             click.echo(f"      └─ {p['reason']}")
+        for w in p.get("warnings") or []:
+            click.echo(f"      ⚠ {w}")
 
     click.echo("")
     click.echo("Credentials (env / keychain):")

@@ -219,6 +219,99 @@ def test_init_only_and_remaining_mutually_exclusive():
     assert "mutually exclusive" in result.output.lower()
 
 
+def test_init_help_surfaces_troubleshoot_tips_after_smoke_failure(mocker):
+    """[h]elp appears after a smoke failure and prints provider-specific tips."""
+    from conductor.providers import ClaudeProvider
+
+    mocker.patch("conductor.wizard._is_tty", return_value=True)
+    # First call (main-loop precheck): unconfigured → enter flow.
+    # Subsequent calls (inside flow after [t]): configured.
+    configured_seq = iter([(False, "missing CLI"), (True, None), (True, None)])
+    mocker.patch.object(
+        ClaudeProvider, "configured", lambda self: next(configured_seq)
+    )
+    mocker.patch.object(
+        ClaudeProvider, "smoke", return_value=(False, "simulated smoke failure")
+    )
+
+    # Input: test (smoke fails) → help (prints tips) → skip.
+    result = CliRunner().invoke(
+        main, ["init", "--only", "claude"], input="t\nh\ns\n"
+    )
+    assert result.exit_code == 0
+    assert "smoke test failed" in result.output.lower()
+    assert "[h]" in result.output
+    assert "Common fixes:" in result.output
+    # At least one claude-specific tip should appear.
+    assert "claude.ai" in result.output.lower() or "claude /login" in result.output.lower()
+
+
+def test_init_help_not_shown_before_any_failure(mocker):
+    """Initial menu (no failures yet) should not include [h]elp."""
+    from conductor.providers import ClaudeProvider
+
+    mocker.patch("conductor.wizard._is_tty", return_value=True)
+    mocker.patch.object(
+        ClaudeProvider, "configured", lambda self: (False, "missing")
+    )
+
+    result = CliRunner().invoke(main, ["init", "--only", "claude"], input="s\n")
+    # Pre-failure menu has no [h]elp.
+    pre_skip, _, _ = result.output.partition("Summary")
+    assert "[h]" not in pre_skip
+
+
+def test_init_first_provider_has_no_back_option(mocker):
+    """[b]ack doesn't appear on the first provider's menu (nothing to go back to)."""
+    from conductor.providers import (
+        ClaudeProvider,
+        CodexProvider,
+        GeminiProvider,
+        KimiProvider,
+        OllamaProvider,
+    )
+
+    mocker.patch("conductor.wizard._is_tty", return_value=True)
+    for cls in (
+        ClaudeProvider, CodexProvider, GeminiProvider, KimiProvider, OllamaProvider
+    ):
+        mocker.patch.object(cls, "configured", lambda self: (False, "nope"))
+
+    # Skip claude immediately → wizard continues to codex where [b] should appear.
+    result = CliRunner().invoke(main, ["init"], input="s\nq\n")
+    # The claude section should not have offered [b]ack.
+    claude_section, _, rest = result.output.partition("[2/5]")
+    assert "[b]" not in claude_section
+    # The codex section (rest) should offer [b]ack.
+    assert "[b]" in rest
+
+
+def test_init_back_rewinds_previous_provider(mocker):
+    """Pressing [b]ack from provider 2 rewalks provider 1 and drops its outcome."""
+    from conductor.providers import (
+        ClaudeProvider,
+        CodexProvider,
+        GeminiProvider,
+        KimiProvider,
+        OllamaProvider,
+    )
+
+    mocker.patch("conductor.wizard._is_tty", return_value=True)
+    for cls in (
+        ClaudeProvider, CodexProvider, GeminiProvider, KimiProvider, OllamaProvider
+    ):
+        mocker.patch.object(cls, "configured", lambda self: (False, "nope"))
+
+    # Input: claude→skip, codex→back, claude(rewalk)→skip, codex→skip,
+    # gemini→skip, kimi prompt→empty (skip), ollama→skip.
+    result = CliRunner().invoke(
+        main, ["init"], input="s\nb\ns\ns\ns\n\ns\n"
+    )
+    assert result.exit_code == 0
+    # The claude section header should appear twice (original + rewalk).
+    assert result.output.count("[1/5]  claude") == 2
+
+
 def test_init_summary_and_next_steps_printed(mocker):
     from conductor.providers import (
         ClaudeProvider,
@@ -239,6 +332,7 @@ def test_init_summary_and_next_steps_printed(mocker):
     assert "Next steps:" in result.output
     assert "conductor list" in result.output
     assert "conductor smoke --all" in result.output
-    # Default routing preferences mentioned at the end.
+    # Baseline routing preferences mentioned; callers (touchstone) override.
     assert "prefer=balanced" in result.output
     assert "effort=medium" in result.output
+    assert "Touchstone" in result.output  # callers override example

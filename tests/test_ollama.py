@@ -42,6 +42,42 @@ def test_configured_false_when_server_unreachable():
     assert "Ollama" in reason
 
 
+def test_default_model_available_true_when_pulled():
+    with respx.mock() as router:
+        router.get(TAGS_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={"models": [{"name": "qwen2.5-coder:14b"}, {"name": "other:1b"}]},
+            )
+        )
+        ok, reason = OllamaProvider().default_model_available()
+    assert ok is True and reason is None
+
+
+def test_default_model_available_false_lists_alternatives():
+    with respx.mock() as router:
+        router.get(TAGS_URL).mock(
+            return_value=httpx.Response(
+                200, json={"models": [{"name": "qwen2.5-coder:7b"}]}
+            )
+        )
+        ok, reason = OllamaProvider().default_model_available()
+    assert ok is False
+    assert "qwen2.5-coder:14b" in reason
+    assert "ollama pull" in reason
+    assert "qwen2.5-coder:7b" in reason  # shows locally installed alternatives
+
+
+def test_default_model_available_false_when_no_models_pulled():
+    with respx.mock() as router:
+        router.get(TAGS_URL).mock(
+            return_value=httpx.Response(200, json={"models": []})
+        )
+        ok, reason = OllamaProvider().default_model_available()
+    assert ok is False
+    assert "ollama pull qwen2.5-coder:14b" in reason
+
+
 def test_configured_honors_env_override(monkeypatch):
     monkeypatch.setenv(OLLAMA_BASE_URL_ENV, "http://ollama.internal:11434")
     with respx.mock() as router:
