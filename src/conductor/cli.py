@@ -27,6 +27,7 @@ import click
 
 from conductor import __version__, credentials
 from conductor.providers import (
+    QUALITY_TIERS,
     CallResponse,
     ProviderConfigError,
     ProviderError,
@@ -1110,6 +1111,195 @@ def init(accept_defaults: bool, only: str | None, remaining: bool) -> None:
         remaining=remaining,
     )
     sys.exit(exit_code)
+
+
+# --------------------------------------------------------------------------- #
+# providers — manage user-local custom (shell-command) providers
+# --------------------------------------------------------------------------- #
+
+
+@main.group()
+def providers() -> None:
+    """Manage user-local custom providers (shell-command integrations).
+
+    Custom providers let you register an arbitrary CLI — your own
+    internal LLM wrapper, a different model's inference script, a local
+    model server's CLI frontend — as a first-class Conductor provider.
+    Once registered, it appears in `conductor list`, participates in
+    auto-routing, and is callable via `conductor call --with <name>`.
+
+    Custom providers are single-turn (no tool-use) and stateless (no
+    resume). For CLIs that run their own agent loop internally, that
+    happens inside the shell command, not through Conductor's router.
+    """
+
+
+@providers.command("add")
+@click.option(
+    "--name",
+    required=True,
+    help="Identifier used for --with and auto-routing. Must be unique, not a built-in name.",
+)
+@click.option(
+    "--shell",
+    required=True,
+    help="The shell command to run. First token must be on PATH (shutil.which). "
+    "Supports quoted arguments via standard shell quoting.",
+)
+@click.option(
+    "--accepts",
+    type=click.Choice(["stdin", "argv"]),
+    default="stdin",
+    show_default=True,
+    help="How the prompt reaches the command. `stdin`: piped on stdin (default). "
+    "`argv`: appended as the last positional argument.",
+)
+@click.option(
+    "--tags",
+    default="",
+    help="Comma-separated capability tags for auto-routing (e.g. 'code-review,offline').",
+)
+@click.option(
+    "--tier",
+    type=click.Choice(list(QUALITY_TIERS)),
+    default="local",
+    show_default=True,
+    help="Quality tier for prefer=best scoring.",
+)
+@click.option(
+    "--cost-per-1k-in",
+    type=float,
+    default=0.0,
+    help="Input cost in USD per 1,000 tokens (for prefer=cheapest scoring).",
+)
+@click.option(
+    "--cost-per-1k-out",
+    type=float,
+    default=0.0,
+    help="Output cost in USD per 1,000 tokens.",
+)
+@click.option(
+    "--typical-p50-ms",
+    type=int,
+    default=3000,
+    show_default=True,
+    help="Typical p50 latency in milliseconds (for prefer=fastest scoring).",
+)
+def providers_add(
+    name: str,
+    shell: str,
+    accepts: str,
+    tags: str,
+    tier: str,
+    cost_per_1k_in: float,
+    cost_per_1k_out: float,
+    typical_p50_ms: int,
+) -> None:
+    """Register a custom shell-command provider."""
+    from conductor.custom_providers import CustomProviderError, add_spec
+    from conductor.providers.shell import ShellProviderSpec
+
+    try:
+        spec = ShellProviderSpec(
+            name=name,
+            shell=shell,
+            accepts=accepts,  # type: ignore[arg-type]
+            tags=tuple(t.strip() for t in tags.split(",") if t.strip()),
+            quality_tier=tier,
+            cost_per_1k_in=cost_per_1k_in,
+            cost_per_1k_out=cost_per_1k_out,
+            typical_p50_ms=typical_p50_ms,
+        )
+    except (TypeError, ValueError) as e:
+        raise click.UsageError(f"invalid provider spec: {e}") from e
+
+    # Guard against shadowing built-ins — the loader does the same check
+    # when reading the file, but catching it here gives a friendlier error
+    # before the file is touched.
+    if name in {"kimi", "claude", "codex", "gemini", "ollama"}:
+        raise click.UsageError(
+            f"`{name}` is a built-in provider identifier. Pick a different name."
+        )
+
+    try:
+        path = add_spec(spec)
+    except CustomProviderError as e:
+        raise click.UsageError(str(e)) from e
+
+    click.echo(f"==> registered custom provider `{name}`")
+    click.echo(f"    shell:   {shell}")
+    click.echo(f"    accepts: {accepts}")
+    click.echo(f"    tier:    {tier}")
+    if spec.tags:
+        click.echo(f"    tags:    {', '.join(spec.tags)}")
+    click.echo(f"    file:    {path}")
+    click.echo("")
+    click.echo(f"Try it: conductor smoke {name}")
+    click.echo(f"Use it: conductor call --with {name} --task 'hello'")
+
+
+@providers.command("remove")
+@click.argument("name")
+def providers_remove(name: str) -> None:
+    """Remove a custom provider by name."""
+    from conductor.custom_providers import remove_spec
+
+    path, removed = remove_spec(name)
+    if not removed:
+        click.echo(f"conductor: no custom provider `{name}` (check {path})", err=True)
+        sys.exit(1)
+    click.echo(f"==> removed custom provider `{name}` from {path}")
+
+
+@providers.command("list")
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Emit the custom-provider list as JSON.",
+)
+def providers_list(as_json: bool) -> None:
+    """Show only custom providers (built-ins are in `conductor list`)."""
+    from conductor.custom_providers import load_specs, providers_file_path
+
+    specs = load_specs()
+    if as_json:
+        payload = [
+            {
+                "name": s.name,
+                "shell": s.shell,
+                "accepts": s.accepts,
+                "tags": list(s.tags),
+                "tier": s.quality_tier,
+                "cost_per_1k_in": s.cost_per_1k_in,
+                "cost_per_1k_out": s.cost_per_1k_out,
+                "typical_p50_ms": s.typical_p50_ms,
+            }
+            for s in specs
+        ]
+        click.echo(json.dumps(payload, indent=2))
+        return
+
+    path = providers_file_path()
+    if not specs:
+        click.echo("(no custom providers; register via `conductor providers add`)")
+        click.echo(f"file: {path} {'(not yet created)' if not path.exists() else ''}")
+        return
+
+    click.echo(f"Custom providers ({path}):")
+    click.echo("")
+    for s in specs:
+        click.echo(f"  {s.name}")
+        click.echo(f"    shell:    {s.shell}")
+        click.echo(f"    accepts:  {s.accepts}")
+        click.echo(f"    tier:     {s.quality_tier}")
+        if s.tags:
+            click.echo(f"    tags:     {', '.join(s.tags)}")
+        if s.cost_per_1k_in or s.cost_per_1k_out:
+            click.echo(
+                f"    cost:     ${s.cost_per_1k_in}/1k in, ${s.cost_per_1k_out}/1k out"
+            )
 
 
 if __name__ == "__main__":
