@@ -224,5 +224,6 @@ class ClaudeProvider:
                 "thinking_budget": thinking_budget,
             },
             cost_usd=data.get("total_cost_usd"),
+            session_id=data.get("session_id"),
             raw=data,
         )

@@ -100,11 +100,22 @@ class CodexProvider:
             )
         return True, None
 
-    def _parse_ndjson(self, stdout: str) -> tuple[str, int | None, int | None]:
-        """Parse NDJSON events. Return (content, input_tokens, output_tokens)."""
+    def _parse_ndjson(
+        self, stdout: str
+    ) -> tuple[str, int | None, int | None, str | None]:
+        """Parse NDJSON events.
+
+        Return (content, input_tokens, output_tokens, session_id).
+        Codex emits a ``session.created`` event near the start with the
+        session UUID; we capture it for resume support. The session ID
+        survives even after ``--ephemeral`` runs (the flag controls
+        persistence to ``~/.codex/sessions/`` for interactive resume,
+        but the in-band ID is always emitted).
+        """
         content = ""
         input_tokens: int | None = None
         output_tokens: int | None = None
+        session_id: str | None = None
         for line in stdout.splitlines():
             line = line.strip()
             if not line:
@@ -114,7 +125,9 @@ class CodexProvider:
             except json.JSONDecodeError:
                 continue
             kind = event.get("type")
-            if kind == "item.completed":
+            if kind == "session.created":
+                session_id = event.get("session_id") or event.get("id")
+            elif kind == "item.completed":
                 item = event.get("item") or {}
                 if item.get("type") == "agent_message":
                     content = item.get("text", "")
@@ -122,7 +135,7 @@ class CodexProvider:
                 usage = event.get("usage") or {}
                 input_tokens = (input_tokens or 0) + (usage.get("input_tokens") or 0)
                 output_tokens = (output_tokens or 0) + (usage.get("output_tokens") or 0)
-        return content, input_tokens, output_tokens
+        return content, input_tokens, output_tokens, session_id
 
     def call(
         self,
@@ -222,7 +235,9 @@ class CodexProvider:
                 f"{(result.stderr or result.stdout).strip()[:500]}"
             )
 
-        content, input_tokens, output_tokens = self._parse_ndjson(result.stdout)
+        content, input_tokens, output_tokens, session_id = self._parse_ndjson(
+            result.stdout
+        )
         if not content:
             raise ProviderHTTPError(
                 f"codex NDJSON stream had no agent_message: {result.stdout[:500]!r}"
@@ -240,5 +255,6 @@ class CodexProvider:
                 "effort": effort if isinstance(effort, str) else None,
                 "thinking_budget": thinking_budget,
             },
+            session_id=session_id,
             raw={"stdout": result.stdout},
         )

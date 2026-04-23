@@ -212,6 +212,17 @@ class GeminiProvider:
             )
 
         input_tokens, output_tokens = self._sum_usage(data)
+        # Gemini's JSON output may carry a session identifier under one of
+        # several keys depending on CLI version (`session_id` is the
+        # post-0.36 field; older builds used `conversationId` / `chatId`).
+        # Best-effort extraction; None is OK when absent.
+        session_id = (
+            data.get("session_id")
+            or data.get("conversation_id")
+            or data.get("conversationId")
+            or data.get("chat_id")
+            or data.get("chatId")
+        )
         return CallResponse(
             text=data.get("response", ""),
             provider=self.name,
@@ -225,6 +236,7 @@ class GeminiProvider:
                 "effort": effort if isinstance(effort, str) else None,
                 "thinking_budget": thinking_budget,
             },
+            session_id=session_id,
             raw=data,
         )
 

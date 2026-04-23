@@ -88,6 +88,12 @@ class CallResponse:
     For exec() calls that run a multi-turn tool-use loop, ``text`` holds the
     final agent message; ``usage`` includes ``thinking_tokens`` and
     ``tool_use_iterations`` when available.
+
+    ``session_id`` is the underlying CLI's identifier for this conversation
+    when one exists (claude/codex/gemini all assign one per call). HTTP
+    providers (kimi, ollama) leave it None — they're stateless. Callers
+    can persist this and pass it back via ``resume_session_id`` to resume
+    a multi-turn conversation; routing-layer use is opaque.
     """
 
     text: str
@@ -96,6 +102,7 @@ class CallResponse:
     duration_ms: int
     usage: dict = field(default_factory=dict)
     cost_usd: float | None = None
+    session_id: str | None = None
     raw: dict = field(default_factory=dict)
 
 
