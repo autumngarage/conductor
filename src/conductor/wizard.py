@@ -117,9 +117,11 @@ _INFO: dict[str, _ProviderInfo] = {
         ],
         credential_source_url="https://aistudio.google.com/apikey",
         troubleshoot_tips=[
-            "GEMINI_API_KEY must be in the current shell — restart your terminal after adding to ~/.zshrc.",
+            "GEMINI_API_KEY must be in the current shell — restart your terminal "
+            "after adding to ~/.zshrc.",
             "Validate the key: https://aistudio.google.com/apikey (regenerate if unsure).",
-            "Using gcloud ADC instead? run `gcloud auth application-default print-access-token` to confirm.",
+            "Using gcloud ADC instead? run "
+            "`gcloud auth application-default print-access-token` to confirm.",
             "Free tier has a daily quota — 429 errors mean you hit the limit.",
         ],
     ),
@@ -141,9 +143,12 @@ _INFO: dict[str, _ProviderInfo] = {
         ],
         credential_source_url="https://dash.cloudflare.com/profile/api-tokens",
         troubleshoot_tips=[
-            "The token needs 'Workers AI:Read' permission — create a scoped token, not a global API key.",
-            "Account ID is the hex string on the right sidebar of dash.cloudflare.com — NOT your email.",
-            "Quick check: curl -H 'Authorization: Bearer $TOKEN' https://api.cloudflare.com/client/v4/accounts/$ACCOUNT/ai/models/search",
+            "The token needs 'Workers AI:Read' permission — create a scoped token, "
+            "not a global API key.",
+            "Account ID is the hex string on the right sidebar of dash.cloudflare.com "
+            "— NOT your email.",
+            "Quick check: curl -H 'Authorization: Bearer $TOKEN' "
+            "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT/ai/models/search",
             "Free tier = 10k tokens/day; 429 errors mean you've hit the cap.",
         ],
     ),
@@ -165,10 +170,13 @@ _INFO: dict[str, _ProviderInfo] = {
             "ollama pull llama3.3:70b                   # ~40 GB, needs ~48 GB RAM",
         ],
         troubleshoot_tips=[
-            "Daemon must be running: `ollama serve` in a separate terminal (or `brew services start ollama`).",
-            "Default model is qwen2.5-coder:14b — if you don't have it, `ollama pull qwen2.5-coder:14b` (~9 GB).",
+            "Daemon must be running: `ollama serve` in a separate terminal "
+            "(or `brew services start ollama`).",
+            "Default model is qwen2.5-coder:14b — if you don't have it, "
+            "`ollama pull qwen2.5-coder:14b` (~9 GB).",
             "Check what's installed locally: `ollama list`.",
-            "Connection refused on 11434? port conflict; check `lsof -iTCP:11434 -sTCP:LISTEN`.",
+            "Connection refused on 11434? port conflict; "
+            "check `lsof -iTCP:11434 -sTCP:LISTEN`.",
         ],
     ),
 }
