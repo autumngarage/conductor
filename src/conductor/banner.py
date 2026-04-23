@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import Sequence
 
 # Rendered once from `figlet -f standard CONDUCTOR` and embedded here so
 # we don't take a dependency on figlet at runtime. Keep the glyphs
