@@ -4,9 +4,19 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from click.testing import CliRunner
 
 from conductor.cli import main
+
+
+@pytest.fixture(autouse=True)
+def _isolated_agent_homes(tmp_path, monkeypatch):
+    """doctor now reports agent-integration state; isolate so tests don't
+    depend on the developer's real ~/.claude/ or ~/.conductor/ contents."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path / ".conductor"))
+    monkeypatch.setenv("CLAUDE_HOME", str(tmp_path / ".claude"))
+    monkeypatch.setattr("shutil.which", lambda _cmd: None)
 
 
 def _stub_all_unconfigured(mocker):
@@ -172,6 +182,67 @@ def test_doctor_json_shape(mocker, monkeypatch):
     cred_map = {c["name"]: c for c in payload["credentials"]}
     assert cred_map["CLOUDFLARE_API_TOKEN"]["in_env"] is True
     assert cred_map["CLOUDFLARE_ACCOUNT_ID"]["in_env"] is False
+
+
+def test_doctor_reports_agent_integration_not_detected(mocker, monkeypatch):
+    """With no ~/.claude/ and no claude CLI, doctor reports 'not detected'."""
+    _stub_all_unconfigured(mocker)
+    for var in ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "OLLAMA_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+
+    result = CliRunner().invoke(main, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "Agent integration:" in result.output
+    assert "not detected" in result.output.lower()
+
+
+def test_doctor_reports_agent_integration_detected_not_wired(mocker, monkeypatch, tmp_path):
+    """~/.claude/ present but no managed files → detected, not wired."""
+    _stub_all_unconfigured(mocker)
+    (tmp_path / ".claude").mkdir()
+    for var in ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "OLLAMA_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+
+    result = CliRunner().invoke(main, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "not wired" in result.output.lower()
+    assert "conductor init" in result.output
+
+
+def test_doctor_reports_agent_integration_wired(mocker, monkeypatch, tmp_path):
+    """After wiring, doctor reports managed files with their paths."""
+    _stub_all_unconfigured(mocker)
+    (tmp_path / ".claude").mkdir()
+    for var in ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "OLLAMA_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+
+    from conductor import agent_wiring
+    agent_wiring.wire_claude_code("0.3.2", patch_claude_md=True)
+
+    result = CliRunner().invoke(main, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "wired" in result.output.lower()
+    assert "managed files" in result.output.lower()
+    assert "guidance" in result.output.lower()
+    assert "slash-command" in result.output.lower()
+    assert "subagent" in result.output.lower()
+
+
+def test_doctor_json_includes_agent_integration(mocker, monkeypatch, tmp_path):
+    _stub_all_unconfigured(mocker)
+    (tmp_path / ".claude").mkdir()
+    for var in ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "OLLAMA_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+    mocker.patch("conductor.cli.credentials.keychain_has", return_value=False)
+
+    result = CliRunner().invoke(main, ["doctor", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert "agent_integration" in payload
+    ai = payload["agent_integration"]
+    assert ai["claude_detected"] is True
+    assert ai["claude_home_exists"] is True
+    assert ai["managed_files"] == []
 
 
 def test_doctor_warns_when_ollama_default_model_missing(mocker, monkeypatch):

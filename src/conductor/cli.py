@@ -1015,7 +1015,26 @@ def _diagnostic_payload() -> dict:
         "python": sys.version.split()[0],
         "providers": providers_info,
         "credentials": env_info,
+        "agent_integration": _agent_integration_payload(),
         "warnings": warnings,
+    }
+
+
+def _agent_integration_payload() -> dict:
+    """Summarize the state of agent-integration wiring (see agent_wiring.py)."""
+    from conductor.agent_wiring import detect
+
+    detection = detect()
+    return {
+        "claude_detected": detection.claude_detected,
+        "claude_cli_on_path": detection.claude_cli_on_path,
+        "claude_home": str(detection.claude_home),
+        "claude_home_exists": detection.claude_home_exists,
+        "conductor_home": str(detection.conductor_home),
+        "managed_files": [
+            {"path": str(a.path), "kind": a.kind, "version": a.version}
+            for a in detection.managed
+        ],
     }
 
 
@@ -1064,6 +1083,21 @@ def doctor(as_json: bool) -> None:
         click.echo(f"  {c['name']:<24}  {in_env:<4}  {in_kc}")
 
     click.echo("")
+    click.echo("Agent integration:")
+    ai = payload["agent_integration"]
+    if not ai["claude_detected"]:
+        click.echo("  Claude Code: not detected")
+    elif not ai["managed_files"]:
+        click.echo("  Claude Code: detected, not wired (run `conductor init`)")
+    else:
+        click.echo(
+            f"  Claude Code: wired — {len(ai['managed_files'])} managed files"
+        )
+        for f in ai["managed_files"]:
+            version_note = f" v{f['version']}" if f["version"] else ""
+            click.echo(f"    {f['kind']:<15}  {f['path']}{version_note}")
+
+    click.echo("")
     click.echo("Next steps:")
     not_configured = [p for p in payload["providers"] if not p["configured"]]
     if not not_configured:
@@ -1098,8 +1132,42 @@ def doctor(as_json: bool) -> None:
     default=False,
     help="Resume setup with only the not-yet-configured providers.",
 )
-def init(accept_defaults: bool, only: str | None, remaining: bool) -> None:
+@click.option(
+    "--wire-agents",
+    type=click.Choice(["yes", "no", "ask"]),
+    default=None,
+    help="Wire conductor into detected agent tools (Claude Code today). "
+    "Default: ask on TTY, skip on non-TTY.",
+)
+@click.option(
+    "--patch-claude-md",
+    type=click.Choice(["yes", "no", "ask"]),
+    default=None,
+    help="Add the delegation-guidance @import line to ~/.claude/CLAUDE.md. "
+    "Default: ask on TTY, skip on non-TTY.",
+)
+@click.option(
+    "--unwire",
+    is_flag=True,
+    default=False,
+    help="Remove every conductor-managed agent integration artifact and exit.",
+)
+def init(
+    accept_defaults: bool,
+    only: str | None,
+    remaining: bool,
+    wire_agents: str | None,
+    patch_claude_md: str | None,
+    unwire: bool,
+) -> None:
     """Interactively configure Conductor for first use."""
+    if unwire:
+        if only or remaining or wire_agents or patch_claude_md:
+            raise click.UsageError(
+                "--unwire can't be combined with provider or wiring flags."
+            )
+        sys.exit(_run_unwire())
+
     if only and remaining:
         raise click.UsageError("--only and --remaining are mutually exclusive.")
     if only and only not in known_providers():
@@ -1110,8 +1178,31 @@ def init(accept_defaults: bool, only: str | None, remaining: bool) -> None:
         accept_defaults=accept_defaults,
         only=only,
         remaining=remaining,
+        wire_agents=wire_agents,
+        patch_claude_md=patch_claude_md,
     )
     sys.exit(exit_code)
+
+
+def _run_unwire() -> int:
+    """Remove every managed agent-integration artifact. Returns an exit code."""
+    from conductor.agent_wiring import unwire
+
+    report = unwire()
+    if not report.removed and not report.skipped:
+        click.echo("No conductor-managed agent integration files found.")
+        return 0
+
+    if report.removed:
+        click.echo("Removed:")
+        for p in report.removed:
+            click.echo(f"  {p}")
+    if report.skipped:
+        click.echo("")
+        click.echo("Skipped (not conductor-managed):")
+        for path, reason in report.skipped:
+            click.echo(f"  {path}  — {reason}")
+    return 0
 
 
 # --------------------------------------------------------------------------- #
