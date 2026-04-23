@@ -327,10 +327,10 @@ def test_exec_rejects_unsupported_tool_set(configured):
 
 
 def test_exec_rejects_unsupported_sandbox(configured):
-    # `strict` is Slice C (subprocess) — not in kimi's declared sandboxes yet.
+    # Hypothetical future sandbox level outside kimi's declared set.
     with pytest.raises(UnsupportedCapability) as exc:
         KimiProvider().exec(
-            "hi", tools=frozenset({"Read"}), sandbox="strict"
+            "hi", tools=frozenset({"Read"}), sandbox="nuclear"
         )
     assert "does not support" in str(exc.value)
 
@@ -436,6 +436,82 @@ def test_exec_hits_iteration_cap_on_runaway_model(configured, tmp_path):
     assert resp.usage["tool_iterations"] == 10
     assert "max iterations" in resp.text.lower()
     assert route.call_count == 10
+
+
+def test_exec_hits_context_budget(configured, tmp_path, monkeypatch):
+    # Pin kimi's context window tiny so a single turn blows through the
+    # safety margin; loop must stop with hit_context_budget=True.
+    monkeypatch.setattr(KimiProvider, "max_context_tokens", 100)
+    (tmp_path / "f.txt").write_text("x")
+    turn = _tool_turn("Read", '{"path": "f.txt"}', call_id="c1")
+    turn["usage"] = {"prompt_tokens": 95, "completion_tokens": 1}
+    with respx.mock() as router:
+        route = router.post(CF_CHAT_URL).mock(
+            return_value=httpx.Response(200, json=turn)
+        )
+        resp = KimiProvider().exec(
+            "long thing",
+            tools=frozenset({"Read"}),
+            sandbox="read-only",
+            cwd=str(tmp_path),
+        )
+    assert resp.usage["hit_context_budget"] is True
+    assert resp.usage["hit_iteration_cap"] is False
+    # Should stop after 1 iteration — the context check runs before the
+    # second HTTP call is made.
+    assert route.call_count == 1
+    assert "context budget" in resp.text.lower()
+
+
+def test_exec_reports_per_iteration_log(configured, tmp_path):
+    (tmp_path / "a.txt").write_text("one")
+    turn1 = _tool_turn("Read", '{"path": "a.txt"}', call_id="c1")
+    turn1["usage"] = {
+        "prompt_tokens": 10,
+        "completion_tokens": 3,
+        "completion_tokens_details": {"reasoning_tokens": 1},
+    }
+    final = _terminal("done")
+    final["usage"] = {"prompt_tokens": 20, "completion_tokens": 5}
+    with respx.mock() as router:
+        router.post(CF_CHAT_URL).mock(
+            side_effect=[
+                httpx.Response(200, json=turn1),
+                httpx.Response(200, json=final),
+            ]
+        )
+        resp = KimiProvider().exec(
+            "go",
+            tools=frozenset({"Read"}),
+            sandbox="read-only",
+            cwd=str(tmp_path),
+        )
+    iters = resp.usage["iterations"]
+    assert len(iters) == 2
+    assert iters[0]["iteration"] == 1
+    assert iters[0]["prompt_tokens"] == 10
+    assert iters[0]["completion_tokens"] == 3
+    assert iters[0]["cost_usd"] > 0
+    assert iters[1]["iteration"] == 2
+    assert iters[1]["prompt_tokens"] == 20
+
+
+def test_exec_accepts_strict_sandbox(configured, tmp_path):
+    # kimi now declares support for sandbox="strict"; a simple text-only
+    # answer should round-trip without error.
+    (tmp_path / "a.txt").write_text("hi")
+    final = _terminal("direct answer")
+    with respx.mock() as router:
+        router.post(CF_CHAT_URL).mock(
+            return_value=httpx.Response(200, json=final)
+        )
+        resp = KimiProvider().exec(
+            "read a.txt",
+            tools=frozenset({"Read"}),
+            sandbox="strict",
+            cwd=str(tmp_path),
+        )
+    assert resp.text == "direct answer"
 
 
 def test_exec_accumulates_tokens_across_iterations(configured, tmp_path):

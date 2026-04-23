@@ -47,7 +47,7 @@ from conductor.router import (
 from conductor.wizard import run_init_wizard
 
 VALID_TOOLS = ("Read", "Grep", "Glob", "Edit", "Write", "Bash")
-VALID_SANDBOXES = ("read-only", "workspace-write", "none")
+VALID_SANDBOXES = ("read-only", "workspace-write", "strict", "none")
 VALID_EFFORT_LEVELS = ("minimal", "low", "medium", "high", "max")
 
 

@@ -371,3 +371,65 @@ def test_exec_workspace_write_runs_edit(tmp_path):
 def test_exec_session_id_raises():
     with pytest.raises(UnsupportedCapability):
         OllamaProvider().exec("hi", resume_session_id="abc")
+
+
+def test_exec_hits_context_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr(OllamaProvider, "max_context_tokens", 100)
+    (tmp_path / "f.txt").write_text("x")
+    turn = _ollama_tool_turn("Read", {"path": "f.txt"}, call_id="c1")
+    turn["prompt_eval_count"] = 95
+    with respx.mock() as router:
+        route = router.post(CHAT_URL).mock(
+            return_value=httpx.Response(200, json=turn)
+        )
+        resp = OllamaProvider().exec(
+            "long",
+            tools=frozenset({"Read"}),
+            sandbox="read-only",
+            cwd=str(tmp_path),
+        )
+    assert resp.usage["hit_context_budget"] is True
+    assert route.call_count == 1
+    assert "context budget" in resp.text.lower()
+
+
+def test_exec_reports_per_iteration_log(tmp_path):
+    (tmp_path / "a.txt").write_text("one")
+    turn1 = _ollama_tool_turn("Read", {"path": "a.txt"}, call_id="c1")
+    turn1["prompt_eval_count"] = 10
+    turn1["eval_count"] = 3
+    final = _ollama_terminal("done")
+    final["prompt_eval_count"] = 20
+    final["eval_count"] = 5
+    with respx.mock() as router:
+        router.post(CHAT_URL).mock(
+            side_effect=[
+                httpx.Response(200, json=turn1),
+                httpx.Response(200, json=final),
+            ]
+        )
+        resp = OllamaProvider().exec(
+            "go",
+            tools=frozenset({"Read"}),
+            sandbox="read-only",
+            cwd=str(tmp_path),
+        )
+    iters = resp.usage["iterations"]
+    assert len(iters) == 2
+    assert iters[0]["prompt_tokens"] == 10
+    assert iters[1]["prompt_tokens"] == 20
+
+
+def test_exec_accepts_strict_sandbox(tmp_path):
+    final = _ollama_terminal("direct answer")
+    with respx.mock() as router:
+        router.post(CHAT_URL).mock(
+            return_value=httpx.Response(200, json=final)
+        )
+        resp = OllamaProvider().exec(
+            "read a.txt",
+            tools=frozenset({"Read"}),
+            sandbox="strict",
+            cwd=str(tmp_path),
+        )
+    assert resp.text == "direct answer"

@@ -56,6 +56,10 @@ from conductor.tools import (
 )
 
 KIMI_MAX_TOOL_ITERATIONS = 10
+# Stop the tool-use loop when the last-reported prompt tokens leaves
+# less than this fraction of the model's context free. The next turn's
+# growth tends to exceed that margin.
+KIMI_CONTEXT_SAFETY_MARGIN = 0.1
 
 CLOUDFLARE_API_TOKEN_ENV = "CLOUDFLARE_API_TOKEN"
 CLOUDFLARE_ACCOUNT_ID_ENV = "CLOUDFLARE_ACCOUNT_ID"
@@ -80,7 +84,7 @@ class KimiProvider:
         {"Read", "Grep", "Glob", "Edit", "Write", "Bash"}
     )
     supported_sandboxes: frozenset[str] = frozenset(
-        {"none", "read-only", "workspace-write"}
+        {"none", "read-only", "workspace-write", "strict"}
     )
     supports_effort = True
     effort_to_thinking = {
@@ -94,6 +98,8 @@ class KimiProvider:
     cost_per_1k_out = 0.00075
     cost_per_1k_thinking = 0.00015
     typical_p50_ms = 3500
+    # Kimi K2.6 ships 256K context on Cloudflare Workers AI.
+    max_context_tokens = 256_000
 
     def __init__(
         self,
@@ -314,9 +320,14 @@ class KimiProvider:
             "cached_tokens": 0,
             "thinking_tokens": 0,
         }
+        iterations_log: list[dict] = []
         final_text = ""
         final_body: dict = {}
         hit_cap = False
+        hit_context_budget = False
+        context_ceiling = int(
+            self.max_context_tokens * (1 - KIMI_CONTEXT_SAFETY_MARGIN)
+        )
 
         start = time.monotonic()
         while iteration < KIMI_MAX_TOOL_ITERATIONS:
@@ -343,20 +354,45 @@ class KimiProvider:
                 ) from e
 
             usage = body.get("usage") or {}
-            totals["input_tokens"] += int(usage.get("prompt_tokens") or 0)
-            totals["output_tokens"] += int(usage.get("completion_tokens") or 0)
-            totals["cached_tokens"] += int(
+            prompt_tokens = int(usage.get("prompt_tokens") or 0)
+            completion_tokens = int(usage.get("completion_tokens") or 0)
+            cached_tokens = int(
                 (usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
             )
-            totals["thinking_tokens"] += int(
+            reasoning_tokens = int(
                 (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
                 or 0
+            )
+            totals["input_tokens"] += prompt_tokens
+            totals["output_tokens"] += completion_tokens
+            totals["cached_tokens"] += cached_tokens
+            totals["thinking_tokens"] += reasoning_tokens
+            iteration_cost = (
+                prompt_tokens / 1000 * self.cost_per_1k_in
+                + completion_tokens / 1000 * self.cost_per_1k_out
+                + reasoning_tokens / 1000 * self.cost_per_1k_thinking
+            )
+            iterations_log.append(
+                {
+                    "iteration": iteration,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "reasoning_tokens": reasoning_tokens,
+                    "cached_tokens": cached_tokens,
+                    "cost_usd": round(iteration_cost, 6),
+                }
             )
 
             tool_calls = msg.get("tool_calls") or []
             final_text = msg.get("content") or ""
 
             if not tool_calls:
+                break
+
+            # Context-budget guard: if the next turn would start near the
+            # model's context ceiling, break before we make a call that 413s.
+            if prompt_tokens >= context_ceiling:
+                hit_context_budget = True
                 break
 
             # Echo assistant turn (content may be None when only tool_calls).
@@ -414,6 +450,13 @@ class KimiProvider:
                 f"({KIMI_MAX_TOOL_ITERATIONS}); model kept requesting tools. "
                 "Re-run with a narrower task or a larger budget.]"
             )
+        if hit_context_budget:
+            final_text = (final_text or "(no content)") + (
+                f"\n\n[conductor: context budget exhausted "
+                f"({prompt_tokens}/{self.max_context_tokens} tokens used, "
+                f"safety margin {int(KIMI_CONTEXT_SAFETY_MARGIN * 100)}%). "
+                "Re-run with a narrower task or a larger-context model.]"
+            )
 
         duration_ms = int((time.monotonic() - start) * 1000)
         return CallResponse(
@@ -431,6 +474,8 @@ class KimiProvider:
                 "tool_iterations": iteration,
                 "tool_names": sorted(tools),
                 "hit_iteration_cap": hit_cap,
+                "hit_context_budget": hit_context_budget,
+                "iterations": iterations_log,
             },
             raw=final_body,
         )

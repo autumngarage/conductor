@@ -35,6 +35,7 @@ OLLAMA_DEFAULT_BASE_URL = "http://localhost:11434"
 OLLAMA_DEFAULT_MODEL = "qwen2.5-coder:14b"
 OLLAMA_REQUEST_TIMEOUT_SEC = 180.0
 OLLAMA_MAX_TOOL_ITERATIONS = 10
+OLLAMA_CONTEXT_SAFETY_MARGIN = 0.1
 
 
 class OllamaProvider:
@@ -51,7 +52,7 @@ class OllamaProvider:
         {"Read", "Grep", "Glob", "Edit", "Write", "Bash"}
     )
     supported_sandboxes: frozenset[str] = frozenset(
-        {"none", "read-only", "workspace-write"}
+        {"none", "read-only", "workspace-write", "strict"}
     )
     supports_effort = False  # base ollama models don't expose a thinking dial
     effort_to_thinking: dict[str, int] = {}
@@ -59,6 +60,9 @@ class OllamaProvider:
     cost_per_1k_out = 0.0
     cost_per_1k_thinking = 0.0
     typical_p50_ms = 5000  # local inference, CPU/GPU dependent
+    # Conservative floor — qwen2.5-coder ships 32K; many base models run
+    # 4-8K. Users on a long-context local model can override per-request.
+    max_context_tokens = 32_000
 
     def __init__(
         self,
@@ -251,9 +255,15 @@ class OllamaProvider:
         messages: list[dict] = [{"role": "user", "content": task}]
         iteration = 0
         totals = {"input_tokens": 0, "output_tokens": 0}
+        iterations_log: list[dict] = []
         final_text = ""
         final_body: dict = {}
         hit_cap = False
+        hit_context_budget = False
+        prompt_tokens = 0
+        context_ceiling = int(
+            self.max_context_tokens * (1 - OLLAMA_CONTEXT_SAFETY_MARGIN)
+        )
 
         start = time.monotonic()
         while iteration < OLLAMA_MAX_TOOL_ITERATIONS:
@@ -284,13 +294,27 @@ class OllamaProvider:
             final_body = body
 
             message = body.get("message") or {}
-            totals["input_tokens"] += int(body.get("prompt_eval_count") or 0)
-            totals["output_tokens"] += int(body.get("eval_count") or 0)
+            prompt_tokens = int(body.get("prompt_eval_count") or 0)
+            completion_tokens = int(body.get("eval_count") or 0)
+            totals["input_tokens"] += prompt_tokens
+            totals["output_tokens"] += completion_tokens
+            iterations_log.append(
+                {
+                    "iteration": iteration,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "cost_usd": 0.0,  # ollama is free
+                }
+            )
 
             tool_calls = message.get("tool_calls") or []
             final_text = message.get("content") or ""
 
             if not tool_calls:
+                break
+
+            if prompt_tokens >= context_ceiling:
+                hit_context_budget = True
                 break
 
             assistant_entry: dict = {
@@ -350,6 +374,14 @@ class OllamaProvider:
                 f"({OLLAMA_MAX_TOOL_ITERATIONS}); model kept requesting tools. "
                 "Re-run with a narrower task or a larger budget.]"
             )
+        if hit_context_budget:
+            final_text = (final_text or "(no content)") + (
+                f"\n\n[conductor: context budget exhausted "
+                f"({prompt_tokens}/{self.max_context_tokens} tokens used, "
+                f"safety margin {int(OLLAMA_CONTEXT_SAFETY_MARGIN * 100)}%). "
+                "Re-run with a narrower task, a larger-context local model, "
+                "or override max_context_tokens.]"
+            )
 
         duration_ms = int((time.monotonic() - start) * 1000)
         return CallResponse(
@@ -367,6 +399,8 @@ class OllamaProvider:
                 "tool_iterations": iteration,
                 "tool_names": sorted(tools),
                 "hit_iteration_cap": hit_cap,
+                "hit_context_budget": hit_context_budget,
+                "iterations": iterations_log,
             },
             raw=final_body,
         )
