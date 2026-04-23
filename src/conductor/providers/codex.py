@@ -62,6 +62,8 @@ class CodexProvider:
     cost_per_1k_out = 0.040
     cost_per_1k_thinking = 0.010
     typical_p50_ms = 2000
+    # GPT-5-codex ships 400K context via the `codex` CLI.
+    max_context_tokens = 400_000
 
     def __init__(
         self,

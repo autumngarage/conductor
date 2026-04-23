@@ -50,6 +50,8 @@ class ClaudeProvider:
     cost_per_1k_out = 0.015
     cost_per_1k_thinking = 0.003
     typical_p50_ms = 2500
+    # Claude Sonnet 4.6 ships 1M context via the CLI's long-context mode.
+    max_context_tokens = 1_000_000
 
     def __init__(
         self,

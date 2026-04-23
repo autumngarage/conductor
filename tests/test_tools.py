@@ -526,3 +526,37 @@ def test_bash_tool_truncates_huge_output(tmp_path: Path):
         {"command": "yes hello | head -c 300000"}, cwd=tmp_path
     )
     assert "truncated" in out
+
+
+# --------------------------------------------------------------------------- #
+# strict sandbox (Slice C)
+# --------------------------------------------------------------------------- #
+
+
+def test_bash_tool_strict_tags_output(tmp_path: Path):
+    tool = get_tool("Bash")
+    out = tool.execute({"command": "true"}, cwd=tmp_path, sandbox="strict")
+    assert "[strict sandbox]" in out
+
+
+def test_executor_strict_satisfies_workspace_write(tmp_path: Path):
+    # Tools that require workspace-write still work under strict.
+    executor = ToolExecutor(cwd=tmp_path, sandbox="strict")
+    out = executor.run("Write", {"path": "a.txt", "content": "hi"})
+    assert "wrote" in out or "overwrote" in out
+    assert (tmp_path / "a.txt").read_text() == "hi"
+
+
+def test_executor_strict_passes_sandbox_to_bash(tmp_path: Path):
+    executor = ToolExecutor(cwd=tmp_path, sandbox="strict")
+    out = executor.run("Bash", {"command": "echo hello"})
+    assert "[strict sandbox]" in out
+    assert "hello" in out
+
+
+def test_executor_strict_still_blocks_path_escape(tmp_path: Path):
+    # Strict doesn't loosen path validation — still cwd-scoped.
+    executor = ToolExecutor(cwd=tmp_path, sandbox="strict")
+    with pytest.raises(ToolExecutionError) as exc:
+        executor.run("Write", {"path": "../outside.txt", "content": "x"})
+    assert "escapes" in str(exc.value)

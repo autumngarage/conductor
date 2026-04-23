@@ -50,6 +50,8 @@ class GeminiProvider:
     cost_per_1k_out = 0.005
     cost_per_1k_thinking = 0.005
     typical_p50_ms = 1800
+    # Gemini 2.5 Pro ships a 2M context window.
+    max_context_tokens = 2_000_000
 
     def __init__(
         self,
