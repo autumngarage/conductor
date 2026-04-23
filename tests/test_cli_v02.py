@@ -175,6 +175,30 @@ def test_call_prefer_without_auto_errors():
     assert "only meaningful with --auto" in result.output
 
 
+def test_call_resume_requires_with(mocker):
+    _stub_all_configured(mocker, {"claude"})
+    mocker.patch.object(ClaudeProvider, "call", return_value=_fake_response("claude"))
+    result = CliRunner().invoke(
+        main, ["call", "--auto", "--resume", "abc-123", "--task", "hi"]
+    )
+    assert result.exit_code == 2
+    assert "--resume requires --with" in result.output
+
+
+def test_call_resume_passes_session_id_to_provider(mocker):
+    _stub_all_configured(mocker, {"claude"})
+    call_mock = mocker.patch.object(
+        ClaudeProvider, "call", return_value=_fake_response("claude")
+    )
+    result = CliRunner().invoke(
+        main,
+        ["call", "--with", "claude", "--resume", "sess-xyz", "--task", "hi"],
+    )
+    assert result.exit_code == 0
+    # Verify resume_session_id was forwarded as a kwarg.
+    assert call_mock.call_args.kwargs["resume_session_id"] == "sess-xyz"
+
+
 def test_call_silent_route_suppresses_log(mocker):
     _stub_all_configured(mocker, {"claude"})
     mocker.patch.object(ClaudeProvider, "call", return_value=_fake_response("claude"))

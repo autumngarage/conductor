@@ -186,7 +186,13 @@ class KimiProvider:
         model: str | None = None,
         *,
         effort: str | int = "medium",
+        resume_session_id: str | None = None,
     ) -> CallResponse:
+        if resume_session_id:
+            raise UnsupportedCapability(
+                "kimi has no session model — each Cloudflare Workers AI call is "
+                "stateless. To replay context, prepend the prior turns to `task`."
+            )
         model = model or self.default_model
         thinking_budget = resolve_effort_tokens(effort, self.effort_to_thinking)
 
@@ -242,7 +248,13 @@ class KimiProvider:
         sandbox: str = "none",
         cwd: str | None = None,
         timeout_sec: int = 300,
+        resume_session_id: str | None = None,
     ) -> CallResponse:
+        if resume_session_id:
+            raise UnsupportedCapability(
+                "kimi has no session model — each Cloudflare Workers AI call is "
+                "stateless. To replay context, prepend the prior turns to `task`."
+            )
         if tools:
             raise UnsupportedCapability(
                 "kimi.exec() with tools is not supported in v0.2 (HTTP tool-use loop "

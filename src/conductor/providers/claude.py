@@ -94,6 +94,7 @@ class ClaudeProvider:
         model: str | None = None,
         *,
         effort: str | int = "medium",
+        resume_session_id: str | None = None,
     ) -> CallResponse:
         return self._run(
             task,
@@ -101,6 +102,7 @@ class ClaudeProvider:
             effort=effort,
             allowed_tools=None,
             permission_mode=None,
+            resume_session_id=resume_session_id,
         )
 
     def exec(
@@ -113,6 +115,7 @@ class ClaudeProvider:
         sandbox: str = "none",
         cwd: str | None = None,
         timeout_sec: int = 300,
+        resume_session_id: str | None = None,
     ) -> CallResponse:
         # Claude's `--allowedTools` is fine-grained; passing an empty set
         # is effectively "no tools permitted" (single-turn).
@@ -134,6 +137,7 @@ class ClaudeProvider:
             permission_mode=permission_mode,
             cwd=cwd,
             timeout_sec_override=timeout_sec,
+            resume_session_id=resume_session_id,
         )
 
     def _run(
@@ -146,6 +150,7 @@ class ClaudeProvider:
         permission_mode: str | None,
         cwd: str | None = None,
         timeout_sec_override: float | None = None,
+        resume_session_id: str | None = None,
     ) -> CallResponse:
         ok, reason = self.configured()
         if not ok:
@@ -167,6 +172,11 @@ class ClaudeProvider:
             args.extend(["--allowedTools", allowed_tools])
         if permission_mode is not None:
             args.extend(["--permission-mode", permission_mode])
+        if resume_session_id:
+            # Claude Code resumes a prior session via UUID. The previous
+            # CallResponse.session_id is the canonical handle; the new
+            # prompt layers on top of the existing conversation.
+            args.extend(["--resume", resume_session_id])
         # NOTE: Claude CLI's exact flag for thinking budget is version-dependent;
         # we pass via the MAX_THINKING_TOKENS env var (safe fallback: ignored
         # by older CLI versions). Wire to a proper CLI flag when stable.

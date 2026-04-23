@@ -139,10 +139,16 @@ class Provider(Protocol):
         model: str | None = None,
         *,
         effort: str = "medium",
+        resume_session_id: str | None = None,
     ) -> CallResponse:
         """Single-turn call. `effort` is a symbolic dial (see EFFORT_LEVELS)
         or an integer thinking-token budget. Providers without effort
         support silently accept and no-op.
+
+        ``resume_session_id`` resumes a prior conversation when supported
+        by the underlying CLI (claude, codex, gemini). Providers without
+        a session model (kimi, ollama) raise UnsupportedCapability if a
+        non-None value is passed.
 
         Raises ProviderError on failure.
         """
@@ -157,11 +163,15 @@ class Provider(Protocol):
         sandbox: str = "none",
         cwd: str | None = None,
         timeout_sec: int = 300,
+        resume_session_id: str | None = None,
     ) -> CallResponse:
         """Multi-turn agent session with tool access.
 
+        ``resume_session_id`` semantics match ``call()``.
+
         Raises UnsupportedCapability if the provider cannot drive the
-        requested tools or sandbox. Raises ProviderError on runtime failure.
+        requested tools or sandbox, or cannot resume sessions when one
+        is requested. Raises ProviderError on runtime failure.
         """
 
 

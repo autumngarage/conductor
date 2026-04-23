@@ -121,7 +121,13 @@ class OllamaProvider:
         model: str | None = None,
         *,
         effort: str | int = "medium",
+        resume_session_id: str | None = None,
     ) -> CallResponse:
+        if resume_session_id:
+            raise UnsupportedCapability(
+                "ollama has no session model — each /api/chat call is stateless. "
+                "To replay context, prepend the prior turns to `task`."
+            )
         # Effort is a silent no-op here — base ollama models don't expose a
         # thinking dial. Tag noted in usage for observability.
         model = model or self.default_model
@@ -186,7 +192,13 @@ class OllamaProvider:
         sandbox: str = "none",
         cwd: str | None = None,
         timeout_sec: int = 300,
+        resume_session_id: str | None = None,
     ) -> CallResponse:
+        if resume_session_id:
+            raise UnsupportedCapability(
+                "ollama has no session model — each /api/chat call is stateless. "
+                "To replay context, prepend the prior turns to `task`."
+            )
         if tools:
             raise UnsupportedCapability(
                 "ollama.exec() with tools is not supported in v0.2 (HTTP tool-use "

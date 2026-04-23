@@ -95,12 +95,14 @@ class GeminiProvider:
         model: str | None = None,
         *,
         effort: str | int = "medium",
+        resume_session_id: str | None = None,
     ) -> CallResponse:
         return self._run(
             task,
             model=model,
             effort=effort,
             approval_mode="plan",
+            resume_session_id=resume_session_id,
         )
 
     def exec(
@@ -113,6 +115,7 @@ class GeminiProvider:
         sandbox: str = "none",
         cwd: str | None = None,
         timeout_sec: int = 300,
+        resume_session_id: str | None = None,
     ) -> CallResponse:
         # Gemini's --approval-mode: "plan" (read-only) vs "yolo" (all writes
         # auto-approved). No finer granularity; tools set is advisory.
@@ -128,6 +131,7 @@ class GeminiProvider:
             approval_mode=approval_mode,
             cwd=cwd,
             timeout_sec_override=timeout_sec,
+            resume_session_id=resume_session_id,
         )
 
     def _run(
@@ -139,6 +143,7 @@ class GeminiProvider:
         approval_mode: str,
         cwd: str | None = None,
         timeout_sec_override: float | None = None,
+        resume_session_id: str | None = None,
     ) -> CallResponse:
         ok, reason = self.configured()
         if not ok:
@@ -158,6 +163,12 @@ class GeminiProvider:
         ]
         if model and model != "auto":
             args.extend(["-m", model])
+        if resume_session_id:
+            # Gemini's --resume takes either "latest" or a positional index
+            # into its own session storage; the session_id we captured may
+            # be either a true ID (newer Gemini) or an opaque index. Pass
+            # whatever we got — Gemini errors clearly if it can't resolve.
+            args.extend(["--resume", resume_session_id])
         # Gemini CLI thinking budget support is evolving; pass via env var as
         # a forward-compatible hook. Ignored by versions that don't read it.
         import os as _os

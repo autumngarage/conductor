@@ -185,6 +185,7 @@ def _invoke_with_fallback(
     cwd: str | None,
     timeout_sec: int,
     silent: bool,
+    resume_session_id: str | None = None,
 ) -> tuple[CallResponse, list[str]]:
     """Try the decision's ranked providers in order; one-hop fallback on 5xx.
 
@@ -208,9 +209,15 @@ def _invoke_with_fallback(
                     sandbox=sandbox,
                     cwd=cwd,
                     timeout_sec=timeout_sec,
+                    resume_session_id=resume_session_id,
                 )
             else:
-                response = provider.call(task, model=model, effort=effort)
+                response = provider.call(
+                    task,
+                    model=model,
+                    effort=effort,
+                    resume_session_id=resume_session_id,
+                )
             mark_outcome(candidate.name, "success")
             return response, fallbacks
         except ProviderConfigError:
@@ -408,6 +415,12 @@ def main() -> None:
     default=False,
     help="Suppress the default route-log line (useful for clean stdout piping).",
 )
+@click.option(
+    "--resume",
+    "resume_session_id",
+    default=None,
+    help="Resume a prior session by ID (claude/codex/gemini only). Requires --with.",
+)
 def call(
     provider_id: str | None,
     auto: bool,
@@ -420,12 +433,17 @@ def call(
     as_json: bool,
     verbose_route: bool,
     silent_route: bool,
+    resume_session_id: str | None,
 ) -> None:
     """Send a task to a provider and print the response."""
     if auto and provider_id:
         raise click.UsageError("--with and --auto are mutually exclusive.")
     if not auto and not provider_id:
         raise click.UsageError("pass --with <id> or --auto.")
+    if resume_session_id and auto:
+        raise click.UsageError(
+            "--resume requires --with <provider> (sessions are provider-specific)."
+        )
 
     # When --with is used with --exclude, it's a contradiction:
     if provider_id and exclude and provider_id in _parse_csv(exclude):
@@ -477,8 +495,16 @@ def call(
         except KeyError as e:
             raise click.UsageError(str(e)) from e
         try:
-            response = provider.call(body, model=model, effort=effort_value)
+            response = provider.call(
+                body,
+                model=model,
+                effort=effort_value,
+                resume_session_id=resume_session_id,
+            )
         except ProviderConfigError as e:
+            click.echo(f"conductor: {e}", err=True)
+            sys.exit(2)
+        except UnsupportedCapability as e:
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
         except ProviderError as e:
@@ -557,6 +583,12 @@ def call(
 )
 @click.option("--verbose-route", is_flag=True, default=False)
 @click.option("--silent-route", is_flag=True, default=False)
+@click.option(
+    "--resume",
+    "resume_session_id",
+    default=None,
+    help="Resume a prior session by ID (claude/codex/gemini only). Requires --with.",
+)
 def exec_cmd(
     provider_id: str | None,
     auto: bool,
@@ -573,12 +605,17 @@ def exec_cmd(
     as_json: bool,
     verbose_route: bool,
     silent_route: bool,
+    resume_session_id: str | None,
 ) -> None:
     """Run a task as an agent session with tool access (exec mode)."""
     if auto and provider_id:
         raise click.UsageError("--with and --auto are mutually exclusive.")
     if not auto and not provider_id:
         raise click.UsageError("pass --with <id> or --auto.")
+    if resume_session_id and auto:
+        raise click.UsageError(
+            "--resume requires --with <provider> (sessions are provider-specific)."
+        )
 
     body = _read_task(task)
     tools_set = _validate_tools(tools)
@@ -637,6 +674,7 @@ def exec_cmd(
                 sandbox=sandbox_value,
                 cwd=cwd,
                 timeout_sec=timeout_sec,
+                resume_session_id=resume_session_id,
             )
         except UnsupportedCapability as e:
             click.echo(f"conductor: {e}", err=True)

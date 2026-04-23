@@ -70,6 +70,30 @@ def test_claude_call_returns_normalized_response(mocker):
     assert response.usage["thinking_budget"] == 8_000
     assert response.cost_usd == 0.002
     assert response.duration_ms == 1234
+    assert response.session_id == "abc"
+
+
+def test_claude_call_passes_resume_session_id_as_resume_flag(mocker):
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    captured = mocker.patch(
+        "conductor.providers.claude.subprocess.run",
+        return_value=_fake_completed(stdout=CLAUDE_JSON),
+    )
+    ClaudeProvider().call("hi", resume_session_id="abc-123")
+    args = captured.call_args.args[0]
+    assert "--resume" in args
+    assert args[args.index("--resume") + 1] == "abc-123"
+
+
+def test_claude_call_omits_resume_flag_when_session_id_none(mocker):
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    captured = mocker.patch(
+        "conductor.providers.claude.subprocess.run",
+        return_value=_fake_completed(stdout=CLAUDE_JSON),
+    )
+    ClaudeProvider().call("hi")
+    args = captured.call_args.args[0]
+    assert "--resume" not in args
 
 
 def test_claude_call_raises_config_error_when_cli_missing(mocker):
@@ -129,6 +153,7 @@ def test_claude_timeout_maps_to_provider_error(mocker):
 # ---------------------------------------------------------------------------
 
 CODEX_NDJSON = (
+    '{"type":"session.created","session_id":"sess-codex-1"}\n'
     '{"type":"item.started","item":{"type":"agent_message"}}\n'
     '{"type":"item.completed","item":{"type":"agent_message","text":"hello from codex"}}\n'
     '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":2}}\n'
@@ -154,6 +179,23 @@ def test_codex_call_parses_ndjson_and_usage(mocker):
     assert response.provider == "codex"
     assert response.usage["input_tokens"] == 5
     assert response.usage["output_tokens"] == 2
+    assert response.session_id == "sess-codex-1"
+
+
+def test_codex_call_with_resume_uses_resume_subcommand(mocker):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    captured = mocker.patch(
+        "conductor.providers.codex.subprocess.run",
+        return_value=_fake_completed(stdout=CODEX_NDJSON),
+    )
+    CodexProvider().call("follow-up", resume_session_id="sess-codex-1")
+    args = captured.call_args.args[0]
+    # `codex exec resume <id> "<prompt>"` is the documented shape
+    assert args[1] == "exec" and args[2] == "resume"
+    assert args[3] == "sess-codex-1"
+    assert args[4] == "follow-up"
+    # When resuming, --ephemeral does not apply (resume implies persistence).
+    assert "--ephemeral" not in args
 
 
 def test_codex_call_raises_when_no_agent_message(mocker):
@@ -214,6 +256,19 @@ def test_gemini_call_parses_json_and_usage(mocker):
     assert response.provider == "gemini"
     assert response.usage["input_tokens"] == 12
     assert response.usage["output_tokens"] == 4
+    assert response.session_id == "xyz"
+
+
+def test_gemini_call_with_resume_passes_resume_flag(mocker):
+    mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
+    captured = mocker.patch(
+        "conductor.providers.gemini.subprocess.run",
+        return_value=_fake_completed(stdout=GEMINI_JSON),
+    )
+    GeminiProvider().call("follow-up", resume_session_id="latest")
+    args = captured.call_args.args[0]
+    assert "--resume" in args
+    assert args[args.index("--resume") + 1] == "latest"
 
 
 def test_gemini_call_falls_back_to_plain_text(mocker):

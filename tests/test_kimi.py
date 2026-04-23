@@ -10,6 +10,7 @@ from conductor.providers.interface import (
     CallResponse,
     ProviderConfigError,
     ProviderHTTPError,
+    UnsupportedCapability,
 )
 from conductor.providers.kimi import (
     CLOUDFLARE_ACCOUNT_ID_ENV,
@@ -216,6 +217,33 @@ def test_smoke_fails_on_unauthorized(configured):
         ok, reason = KimiProvider().smoke()
     assert ok is False
     assert "401" in reason
+
+
+def test_call_with_resume_session_id_raises_unsupported(configured):
+    with pytest.raises(UnsupportedCapability) as exc:
+        KimiProvider().call("hi", resume_session_id="any-id")
+    assert "stateless" in str(exc.value)
+
+
+def test_exec_with_resume_session_id_raises_unsupported(configured):
+    with pytest.raises(UnsupportedCapability) as exc:
+        KimiProvider().exec("hi", resume_session_id="any-id")
+    assert "stateless" in str(exc.value)
+
+
+def test_call_session_id_is_none_for_kimi(configured):
+    with respx.mock() as router:
+        router.post(CF_CHAT_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": "ok"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+                },
+            )
+        )
+        response = KimiProvider().call("hi")
+    assert response.session_id is None
 
 
 def test_smoke_fails_when_not_configured(nothing_set):

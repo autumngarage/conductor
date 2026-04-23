@@ -143,12 +143,14 @@ class CodexProvider:
         model: str | None = None,
         *,
         effort: str | int = "medium",
+        resume_session_id: str | None = None,
     ) -> CallResponse:
         return self._run(
             task,
             model=model,
             effort=effort,
             sandbox="read-only",
+            resume_session_id=resume_session_id,
         )
 
     def exec(
@@ -161,6 +163,7 @@ class CodexProvider:
         sandbox: str = "none",
         cwd: str | None = None,
         timeout_sec: int = 300,
+        resume_session_id: str | None = None,
     ) -> CallResponse:
         # Codex has two sandboxes: read-only (no fs writes), workspace-write
         # (edits allowed). "none" is ambiguous in codex; we treat it as
@@ -179,6 +182,7 @@ class CodexProvider:
             sandbox=codex_sandbox,
             cwd=cwd,
             timeout_sec_override=timeout_sec,
+            resume_session_id=resume_session_id,
         )
 
     def _run(
@@ -190,6 +194,7 @@ class CodexProvider:
         sandbox: str,
         cwd: str | None = None,
         timeout_sec_override: float | None = None,
+        resume_session_id: str | None = None,
     ) -> CallResponse:
         ok, reason = self.configured()
         if not ok:
@@ -201,15 +206,29 @@ class CodexProvider:
             _EFFORT_TO_CODEX_FLAG.get(effort) if isinstance(effort, str) else None
         )
 
-        args = [
-            self._cli,
-            "exec",
-            task,
-            "--json",
-            "--ephemeral",
-            "--sandbox",
-            sandbox,
-        ]
+        # Codex resume uses a subcommand: `codex exec resume <id> "<prompt>"`.
+        # Build argv accordingly when we have a session to resume.
+        if resume_session_id:
+            args = [
+                self._cli,
+                "exec",
+                "resume",
+                resume_session_id,
+                task,
+                "--json",
+                "--sandbox",
+                sandbox,
+            ]
+        else:
+            args = [
+                self._cli,
+                "exec",
+                task,
+                "--json",
+                "--ephemeral",
+                "--sandbox",
+                sandbox,
+            ]
         if codex_effort_flag:
             args.extend(["--effort", codex_effort_flag])
 

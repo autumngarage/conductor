@@ -9,6 +9,7 @@ import respx
 from conductor.providers.interface import (
     ProviderConfigError,
     ProviderHTTPError,
+    UnsupportedCapability,
 )
 from conductor.providers.ollama import (
     OLLAMA_BASE_URL_ENV,
@@ -133,3 +134,32 @@ def test_call_raises_on_missing_content():
         with pytest.raises(ProviderHTTPError) as exc:
             OllamaProvider().call("hi")
     assert "content" in str(exc.value)
+
+
+def test_call_with_resume_session_id_raises_unsupported():
+    with pytest.raises(UnsupportedCapability) as exc:
+        OllamaProvider().call("hi", resume_session_id="any-id")
+    assert "stateless" in str(exc.value)
+
+
+def test_exec_with_resume_session_id_raises_unsupported():
+    with pytest.raises(UnsupportedCapability) as exc:
+        OllamaProvider().exec("hi", resume_session_id="any-id")
+    assert "stateless" in str(exc.value)
+
+
+def test_call_session_id_is_none_for_ollama():
+    with respx.mock() as router:
+        router.post(CHAT_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "message": {"content": "ok"},
+                    "model": "qwen2.5-coder:14b",
+                    "prompt_eval_count": 1,
+                    "eval_count": 1,
+                },
+            )
+        )
+        response = OllamaProvider().call("hi")
+    assert response.session_id is None
