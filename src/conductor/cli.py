@@ -1035,10 +1035,11 @@ def doctor(as_json: bool) -> None:
         click.echo(json.dumps(payload, indent=2))
         return
 
+    from conductor.banner import SUBTITLE_DOCTOR, print_banner
+
+    print_banner(SUBTITLE_DOCTOR, payload["version"])
     click.echo(
-        f"conductor v{payload['version']}  ·  "
-        f"{payload['platform']}  ·  "
-        f"python {payload['python']}"
+        f"{payload['platform']}  ·  python {payload['python']}"
     )
     click.echo("")
     click.echo("Providers:")

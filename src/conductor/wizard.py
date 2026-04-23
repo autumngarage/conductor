@@ -318,6 +318,13 @@ class _GoBack(Exception):  # noqa: N818  — sentinel, never caught outside this
 
 
 def _print_intro(interactive: bool, *, only: str | None, remaining: bool) -> None:
+    from conductor.banner import (
+        SUBTITLE_INIT,
+        conductor_version,
+        print_banner,
+    )
+
+    print_banner(SUBTITLE_INIT, conductor_version())
     click.echo("conductor init — provider setup")
     click.echo("─" * 60)
     if only:
