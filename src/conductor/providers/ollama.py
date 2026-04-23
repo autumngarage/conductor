@@ -11,8 +11,10 @@ to their respective CLIs.
 
 from __future__ import annotations
 
+import json
 import os
 import time
+from pathlib import Path
 
 import httpx
 
@@ -22,11 +24,17 @@ from conductor.providers.interface import (
     ProviderHTTPError,
     UnsupportedCapability,
 )
+from conductor.tools import (
+    ToolExecutionError,
+    ToolExecutor,
+    build_tool_specs,
+)
 
 OLLAMA_BASE_URL_ENV = "OLLAMA_BASE_URL"
 OLLAMA_DEFAULT_BASE_URL = "http://localhost:11434"
 OLLAMA_DEFAULT_MODEL = "qwen2.5-coder:14b"
 OLLAMA_REQUEST_TIMEOUT_SEC = 180.0
+OLLAMA_MAX_TOOL_ITERATIONS = 10
 
 
 class OllamaProvider:
@@ -36,9 +44,15 @@ class OllamaProvider:
 
     # Capability declarations (see interface.py)
     quality_tier = "local"
-    # Tool-use lands in Stage 3 (HTTP-side tool-use loop).
-    supported_tools: frozenset[str] = frozenset()
-    supported_sandboxes: frozenset[str] = frozenset({"none"})
+    # Tool-use landed in v0.3.1 via the HTTP tool-use loop (same shape as
+    # kimi, against Ollama's /api/chat endpoint). Subprocess sandbox
+    # (`--sandbox strict`) lands in v0.3.2.
+    supported_tools: frozenset[str] = frozenset(
+        {"Read", "Grep", "Glob", "Edit", "Write", "Bash"}
+    )
+    supported_sandboxes: frozenset[str] = frozenset(
+        {"none", "read-only", "workspace-write"}
+    )
     supports_effort = False  # base ollama models don't expose a thinking dial
     effort_to_thinking: dict[str, int] = {}
     cost_per_1k_in = 0.0
@@ -199,14 +213,160 @@ class OllamaProvider:
                 "ollama has no session model — each /api/chat call is stateless. "
                 "To replay context, prepend the prior turns to `task`."
             )
-        if tools:
+        if sandbox == "":
+            sandbox = "none"
+
+        if not tools:
+            if sandbox != "none":
+                raise UnsupportedCapability(
+                    f"ollama.exec() sandbox={sandbox!r} is not meaningful "
+                    "without tools. Use sandbox='none' for a text-only exec, "
+                    "or pass --tools with a supported tool set."
+                )
+            return self.call(task, model=model, effort=effort)
+
+        unknown = tools - self.supported_tools
+        if unknown:
             raise UnsupportedCapability(
-                "ollama.exec() with tools is not supported in v0.2 (HTTP tool-use "
-                "loop lands in Stage 3). Router should filter ollama out when "
-                f"tools are requested; got tools={sorted(tools)}."
+                f"ollama does not support tools {sorted(unknown)} "
+                f"(supported: {sorted(self.supported_tools)})."
             )
-        if sandbox not in ("", "none"):
+        if sandbox not in self.supported_sandboxes:
             raise UnsupportedCapability(
-                f"ollama.exec() sandbox={sandbox!r} not meaningful without tool-use."
+                f"ollama does not support sandbox={sandbox!r} "
+                f"(supported: {sorted(self.supported_sandboxes)})."
             )
-        return self.call(task, model=model, effort=effort)
+        if sandbox == "none":
+            raise UnsupportedCapability(
+                "ollama.exec() with tools requires at least sandbox='read-only'."
+            )
+
+        workdir = Path(cwd) if cwd else Path.cwd()
+        executor = ToolExecutor(cwd=workdir, sandbox=sandbox)
+        tool_specs = build_tool_specs(tools)
+
+        model = model or self.default_model
+        url = f"{self._base_url()}/api/chat"
+
+        messages: list[dict] = [{"role": "user", "content": task}]
+        iteration = 0
+        totals = {"input_tokens": 0, "output_tokens": 0}
+        final_text = ""
+        final_body: dict = {}
+        hit_cap = False
+
+        start = time.monotonic()
+        while iteration < OLLAMA_MAX_TOOL_ITERATIONS:
+            iteration += 1
+            payload: dict = {
+                "model": model,
+                "messages": messages,
+                "tools": tool_specs,
+                "stream": False,
+            }
+
+            try:
+                with httpx.Client(timeout=self._timeout_sec) as client:
+                    resp = client.post(url, json=payload)
+            except httpx.HTTPError as e:
+                raise ProviderConfigError(
+                    f"cannot reach Ollama at {self._base_url()}: {e}"
+                ) from e
+
+            if resp.status_code != 200:
+                raise ProviderHTTPError(
+                    f"Ollama returned HTTP {resp.status_code}: {resp.text[:500]}"
+                )
+            try:
+                body = resp.json()
+            except ValueError as e:
+                raise ProviderHTTPError(f"Ollama response was not JSON: {e}") from e
+            final_body = body
+
+            message = body.get("message") or {}
+            totals["input_tokens"] += int(body.get("prompt_eval_count") or 0)
+            totals["output_tokens"] += int(body.get("eval_count") or 0)
+
+            tool_calls = message.get("tool_calls") or []
+            final_text = message.get("content") or ""
+
+            if not tool_calls:
+                break
+
+            assistant_entry: dict = {
+                "role": "assistant",
+                "content": message.get("content") or "",
+                "tool_calls": tool_calls,
+            }
+            messages.append(assistant_entry)
+
+            for idx, call in enumerate(tool_calls):
+                fn = call.get("function") or {}
+                name = fn.get("name") or ""
+                raw_args = fn.get("arguments")
+                # Ollama emits arguments as a dict (not a string like OpenAI).
+                # Handle both shapes so mocks written either way still work.
+                if isinstance(raw_args, dict):
+                    args = raw_args
+                    result = None
+                elif isinstance(raw_args, str):
+                    try:
+                        args = json.loads(raw_args) if raw_args.strip() else {}
+                        result = None
+                    except json.JSONDecodeError as e:
+                        args = None
+                        result = (
+                            f"error: tool `{name}` arguments were not valid "
+                            f"JSON: {e}"
+                        )
+                else:
+                    args = {}
+                    result = None
+
+                if args is not None:
+                    try:
+                        result = executor.run(name, args)
+                    except ToolExecutionError as e:
+                        result = f"error: {e}"
+
+                # Ollama does not always emit `id`; fall back to a synthesized one.
+                tool_msg: dict = {
+                    "role": "tool",
+                    "name": name,
+                    "content": result,
+                }
+                call_id = call.get("id")
+                if call_id:
+                    tool_msg["tool_call_id"] = call_id
+                else:
+                    tool_msg["tool_call_id"] = f"call_{iteration}_{idx}"
+                messages.append(tool_msg)
+        else:
+            hit_cap = True
+
+        if hit_cap:
+            final_text = (final_text or "(no content)") + (
+                f"\n\n[conductor: tool-use loop hit max iterations "
+                f"({OLLAMA_MAX_TOOL_ITERATIONS}); model kept requesting tools. "
+                "Re-run with a narrower task or a larger budget.]"
+            )
+
+        duration_ms = int((time.monotonic() - start) * 1000)
+        return CallResponse(
+            text=final_text,
+            provider=self.name,
+            model=final_body.get("model", model) if final_body else model,
+            duration_ms=duration_ms,
+            usage={
+                "input_tokens": totals["input_tokens"],
+                "output_tokens": totals["output_tokens"],
+                "cached_tokens": None,
+                "thinking_tokens": None,
+                "effort": effort if isinstance(effort, str) else None,
+                "thinking_budget": 0,
+                "tool_iterations": iteration,
+                "tool_names": sorted(tools),
+                "hit_iteration_cap": hit_cap,
+            },
+            raw=final_body,
+        )

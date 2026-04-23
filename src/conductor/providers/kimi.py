@@ -73,11 +73,15 @@ class KimiProvider:
 
     # Capability declarations (see interface.py)
     quality_tier = "strong"
-    # Read-only tool-use landed in v0.3.0 via the HTTP tool-use loop.
-    # Edit/Write/Bash land in v0.3.1; the router filters based on the
-    # declared set so exec(tools={Edit}) still gets routed away until then.
-    supported_tools: frozenset[str] = frozenset({"Read", "Grep", "Glob"})
-    supported_sandboxes: frozenset[str] = frozenset({"none", "read-only"})
+    # Full tool-use landed in v0.3.1 (Edit/Write/Bash + workspace-write
+    # sandbox). v0.3.0 shipped the read-only half. Subprocess sandbox
+    # (`--sandbox strict`) lands in v0.3.2.
+    supported_tools: frozenset[str] = frozenset(
+        {"Read", "Grep", "Glob", "Edit", "Write", "Bash"}
+    )
+    supported_sandboxes: frozenset[str] = frozenset(
+        {"none", "read-only", "workspace-write"}
+    )
     supports_effort = True
     effort_to_thinking = {
         "minimal": 0,
@@ -282,15 +286,13 @@ class KimiProvider:
         unknown = tools - self.supported_tools
         if unknown:
             raise UnsupportedCapability(
-                f"kimi does not support tools {sorted(unknown)} in this release "
-                f"(supported: {sorted(self.supported_tools)}). "
-                "Edit/Write/Bash land in v0.3.1."
+                f"kimi does not support tools {sorted(unknown)} "
+                f"(supported: {sorted(self.supported_tools)})."
             )
         if sandbox not in self.supported_sandboxes:
             raise UnsupportedCapability(
-                f"kimi does not support sandbox={sandbox!r} in this release "
-                f"(supported: {sorted(self.supported_sandboxes)}). "
-                "workspace-write lands in v0.3.1."
+                f"kimi does not support sandbox={sandbox!r} "
+                f"(supported: {sorted(self.supported_sandboxes)})."
             )
         if sandbox == "none":
             raise UnsupportedCapability(

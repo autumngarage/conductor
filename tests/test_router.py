@@ -181,9 +181,16 @@ def test_invalid_prefer_raises_with_fix_it_hint():
 # ---------------------------------------------------------------------------
 
 
-def test_tools_filter_excludes_providers_without_capability(mocker):
-    # kimi and ollama have supported_tools=frozenset() (no tool-use in v0.2).
-    # Requesting tools={Edit} should exclude them.
+def test_tools_filter_excludes_providers_without_capability(mocker, monkeypatch):
+    # Simulate a pre-v0.3.1 kimi/ollama (empty supported_tools) so the
+    # capability filter visibly removes them. After v0.3.1 both providers
+    # support the full tool set, but the filter logic itself must still
+    # kick in for any provider that genuinely lacks a requested tool.
+    from conductor.providers.kimi import KimiProvider
+    from conductor.providers.ollama import OllamaProvider
+
+    monkeypatch.setattr(KimiProvider, "supported_tools", frozenset())
+    monkeypatch.setattr(OllamaProvider, "supported_tools", frozenset())
     _stub_configured(mocker, {"claude": True, "kimi": True, "ollama": True})
     provider, decision = pick([], tools={"Edit"})
     assert provider.name == "claude"
@@ -192,8 +199,15 @@ def test_tools_filter_excludes_providers_without_capability(mocker):
     assert "ollama" in skipped_names
 
 
-def test_sandbox_filter_excludes_providers_without_capability(mocker):
-    # ollama only supports sandbox="none". Requesting workspace-write excludes it.
+def test_sandbox_filter_excludes_providers_without_capability(mocker, monkeypatch):
+    # Simulate a provider that only supports sandbox="none" so the
+    # filter removes it when workspace-write is requested. Uses ollama
+    # pinned to the v0.3.0 capability set for a deterministic check.
+    from conductor.providers.ollama import OllamaProvider
+
+    monkeypatch.setattr(
+        OllamaProvider, "supported_sandboxes", frozenset({"none"})
+    )
     _stub_configured(mocker, {"claude": True, "ollama": True})
     _provider, decision = pick([], sandbox="workspace-write")
     skipped_names = {name for name, _ in decision.candidates_skipped}

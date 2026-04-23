@@ -12,8 +12,15 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any, Protocol
+
+# Default per-command timeout for BashTool when the caller doesn't set one.
+# Kept modest so a runaway shell doesn't wedge the tool-use loop.
+_BASH_DEFAULT_TIMEOUT_SEC = 60
+_BASH_MAX_TIMEOUT_SEC = 600
+_BASH_MAX_OUTPUT_BYTES = 256_000
 
 # --------------------------------------------------------------------------- #
 # Public error types
@@ -326,6 +333,223 @@ GlobTool.parameters_schema = {
 
 
 # --------------------------------------------------------------------------- #
+# Tool implementations — workspace-write
+# --------------------------------------------------------------------------- #
+
+
+class EditTool:
+    name = "Edit"
+    description = (
+        "Replace an exact string in a file under the workspace. By default "
+        "requires the match to be unique; set `replace_all` to replace "
+        "every occurrence. Refuses paths that escape the workspace."
+    )
+    parameters_schema: dict  # assigned below
+
+    def requires_sandbox(self) -> str:
+        return "workspace-write"
+
+    def execute(self, params: dict, *, cwd: Path) -> str:
+        path = _require_str(params, "path")
+        old_string = params.get("old_string")
+        new_string = params.get("new_string")
+        replace_all = bool(params.get("replace_all") or False)
+        if not isinstance(old_string, str) or old_string == "":
+            raise ToolSchemaError("`old_string` must be a non-empty string.")
+        if not isinstance(new_string, str):
+            raise ToolSchemaError("`new_string` must be a string.")
+        if old_string == new_string:
+            raise ToolSchemaError(
+                "`old_string` and `new_string` must differ (nothing to do)."
+            )
+        target = _resolve_in_cwd(path, cwd)
+        if not target.exists():
+            raise ToolExecutionError(f"no such file: {path}")
+        if target.is_dir():
+            raise ToolExecutionError(f"{path} is a directory, not a file")
+        try:
+            content = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError as e:
+            raise ToolExecutionError(
+                f"{path} is not valid UTF-8; Edit only supports text files "
+                f"({e})."
+            ) from e
+        except OSError as e:
+            raise ToolExecutionError(f"cannot read {path}: {e}") from e
+
+        count = content.count(old_string)
+        if count == 0:
+            raise ToolExecutionError(
+                f"`old_string` not found in {path}. No changes made. "
+                "Read the file first and provide an exact match."
+            )
+        if count > 1 and not replace_all:
+            raise ToolExecutionError(
+                f"`old_string` appears {count} times in {path}. Either "
+                "extend it with surrounding context to make it unique, or "
+                "pass `replace_all: true`."
+            )
+        new_content = (
+            content.replace(old_string, new_string)
+            if replace_all
+            else content.replace(old_string, new_string, 1)
+        )
+        try:
+            target.write_text(new_content, encoding="utf-8")
+        except OSError as e:
+            raise ToolExecutionError(f"cannot write {path}: {e}") from e
+        return f"Edited {path} ({count} replacement{'s' if count != 1 else ''})."
+
+
+EditTool.parameters_schema = {
+    "type": "object",
+    "properties": {
+        "path": {"type": "string", "description": "File path relative to the workspace."},
+        "old_string": {
+            "type": "string",
+            "description": "Exact text to find. Must match uniquely unless replace_all=true.",
+        },
+        "new_string": {
+            "type": "string",
+            "description": "Replacement text. May be empty to delete.",
+        },
+        "replace_all": {
+            "type": "boolean",
+            "description": "Replace every occurrence (default false).",
+            "default": False,
+        },
+    },
+    "required": ["path", "old_string", "new_string"],
+}
+
+
+class WriteTool:
+    name = "Write"
+    description = (
+        "Create or overwrite a file with the given contents. Parent "
+        "directories are created as needed. Refuses paths that escape "
+        "the workspace."
+    )
+    parameters_schema: dict  # assigned below
+
+    def requires_sandbox(self) -> str:
+        return "workspace-write"
+
+    def execute(self, params: dict, *, cwd: Path) -> str:
+        path = _require_str(params, "path")
+        content = params.get("content")
+        if not isinstance(content, str):
+            raise ToolSchemaError("`content` must be a string (possibly empty).")
+        target = _resolve_in_cwd(path, cwd)
+        if target.is_dir():
+            raise ToolExecutionError(f"{path} is a directory, not a file")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        except OSError as e:
+            raise ToolExecutionError(f"cannot write {path}: {e}") from e
+        size = len(content.encode("utf-8"))
+        existed = "overwrote" if target.exists() else "wrote"
+        return f"{existed} {path} ({size} bytes)."
+
+
+WriteTool.parameters_schema = {
+    "type": "object",
+    "properties": {
+        "path": {"type": "string", "description": "File path relative to the workspace."},
+        "content": {
+            "type": "string",
+            "description": "Full file contents. Overwrites any existing file.",
+        },
+    },
+    "required": ["path", "content"],
+}
+
+
+class BashTool:
+    name = "Bash"
+    description = (
+        "Run a shell command inside the workspace. The command's working "
+        "directory is pinned to the workspace root; you cannot cd outside "
+        "it. Output is captured up to 256KB. Per-command timeout is 60 "
+        "seconds by default (configurable up to 600)."
+    )
+    parameters_schema: dict  # assigned below
+
+    def requires_sandbox(self) -> str:
+        return "workspace-write"
+
+    def execute(self, params: dict, *, cwd: Path) -> str:
+        command = _require_str(params, "command")
+        timeout_raw = params.get("timeout_sec")
+        timeout = (
+            int(timeout_raw) if timeout_raw is not None else _BASH_DEFAULT_TIMEOUT_SEC
+        )
+        if timeout <= 0 or timeout > _BASH_MAX_TIMEOUT_SEC:
+            raise ToolSchemaError(
+                f"timeout_sec must be 1..{_BASH_MAX_TIMEOUT_SEC} (got {timeout})."
+            )
+        try:
+            completed = subprocess.run(  # noqa: S602 — shell=True is intentional; tool exists to run shell
+                command,
+                cwd=str(cwd),
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as e:
+            stdout = (e.stdout or "")[: _BASH_MAX_OUTPUT_BYTES // 2]
+            stderr = (e.stderr or "")[: _BASH_MAX_OUTPUT_BYTES // 2]
+            return (
+                f"TIMEOUT after {timeout}s. "
+                f"stdout (partial):\n{stdout}\n"
+                f"stderr (partial):\n{stderr}"
+            )
+        except OSError as err:
+            raise ToolExecutionError(f"failed to spawn shell: {err}") from err
+
+        stdout = completed.stdout or ""
+        stderr = completed.stderr or ""
+        if len(stdout) > _BASH_MAX_OUTPUT_BYTES:
+            stdout = (
+                stdout[:_BASH_MAX_OUTPUT_BYTES]
+                + f"\n[truncated at {_BASH_MAX_OUTPUT_BYTES} bytes]"
+            )
+        if len(stderr) > _BASH_MAX_OUTPUT_BYTES:
+            stderr = (
+                stderr[:_BASH_MAX_OUTPUT_BYTES]
+                + f"\n[truncated at {_BASH_MAX_OUTPUT_BYTES} bytes]"
+            )
+        return (
+            f"exit={completed.returncode}\n"
+            f"--- stdout ---\n{stdout}"
+            + (f"\n--- stderr ---\n{stderr}" if stderr else "")
+        )
+
+
+BashTool.parameters_schema = {
+    "type": "object",
+    "properties": {
+        "command": {
+            "type": "string",
+            "description": "Shell command to run (interpreted by /bin/sh).",
+        },
+        "timeout_sec": {
+            "type": "integer",
+            "description": (
+                f"Per-command timeout in seconds "
+                f"(default {_BASH_DEFAULT_TIMEOUT_SEC}, "
+                f"max {_BASH_MAX_TIMEOUT_SEC})."
+            ),
+            "default": _BASH_DEFAULT_TIMEOUT_SEC,
+        },
+    },
+    "required": ["command"],
+}
+
+
+# --------------------------------------------------------------------------- #
 # Registry + executor
 # --------------------------------------------------------------------------- #
 
@@ -334,6 +558,9 @@ _BUILTIN_TOOLS: dict[str, Tool] = {
     "Read": ReadTool(),
     "Grep": GrepTool(),
     "Glob": GlobTool(),
+    "Edit": EditTool(),
+    "Write": WriteTool(),
+    "Bash": BashTool(),
 }
 
 READ_ONLY_TOOL_NAMES = frozenset({"Read", "Grep", "Glob"})
@@ -344,8 +571,7 @@ ALL_TOOL_NAMES = READ_ONLY_TOOL_NAMES | WORKSPACE_WRITE_TOOL_NAMES
 def get_tool(name: str) -> Tool:
     if name not in _BUILTIN_TOOLS:
         raise KeyError(
-            f"unknown tool {name!r}; known: {sorted(_BUILTIN_TOOLS)}. "
-            f"(Write/Edit/Bash tools land in the next slice.)"
+            f"unknown tool {name!r}; known: {sorted(_BUILTIN_TOOLS)}."
         )
     return _BUILTIN_TOOLS[name]
 
