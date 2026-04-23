@@ -35,7 +35,9 @@ detail of how Conductor reaches it.
 
 from __future__ import annotations
 
+import json
 import time
+from pathlib import Path
 
 import httpx
 
@@ -47,6 +49,13 @@ from conductor.providers.interface import (
     UnsupportedCapability,
     resolve_effort_tokens,
 )
+from conductor.tools import (
+    ToolExecutionError,
+    ToolExecutor,
+    build_tool_specs,
+)
+
+KIMI_MAX_TOOL_ITERATIONS = 10
 
 CLOUDFLARE_API_TOKEN_ENV = "CLOUDFLARE_API_TOKEN"
 CLOUDFLARE_ACCOUNT_ID_ENV = "CLOUDFLARE_ACCOUNT_ID"
@@ -64,10 +73,11 @@ class KimiProvider:
 
     # Capability declarations (see interface.py)
     quality_tier = "strong"
-    # Tool-use lands in Stage 3 (HTTP-side tool-use loop).
-    # Until then kimi.exec() with non-empty tools raises UnsupportedCapability.
-    supported_tools: frozenset[str] = frozenset()
-    supported_sandboxes: frozenset[str] = frozenset({"none"})
+    # Read-only tool-use landed in v0.3.0 via the HTTP tool-use loop.
+    # Edit/Write/Bash land in v0.3.1; the router filters based on the
+    # declared set so exec(tools={Edit}) still gets routed away until then.
+    supported_tools: frozenset[str] = frozenset({"Read", "Grep", "Glob"})
+    supported_sandboxes: frozenset[str] = frozenset({"none", "read-only"})
     supports_effort = True
     effort_to_thinking = {
         "minimal": 0,
@@ -255,16 +265,170 @@ class KimiProvider:
                 "kimi has no session model — each Cloudflare Workers AI call is "
                 "stateless. To replay context, prepend the prior turns to `task`."
             )
-        if tools:
+        if sandbox == "":
+            sandbox = "none"
+
+        # No tools → stateless single-turn call, sandbox must be "none".
+        if not tools:
+            if sandbox != "none":
+                raise UnsupportedCapability(
+                    f"kimi.exec() sandbox={sandbox!r} is not meaningful without "
+                    "tools. Use sandbox='none' for a text-only exec, or pass "
+                    "--tools with a supported tool set."
+                )
+            return self.call(task, model=model, effort=effort)
+
+        # Tools requested → defence in depth on router filters.
+        unknown = tools - self.supported_tools
+        if unknown:
             raise UnsupportedCapability(
-                "kimi.exec() with tools is not supported in v0.2 (HTTP tool-use loop "
-                "lands in Stage 3). Router should filter kimi out when tools are "
-                f"requested; got tools={sorted(tools)}."
+                f"kimi does not support tools {sorted(unknown)} in this release "
+                f"(supported: {sorted(self.supported_tools)}). "
+                "Edit/Write/Bash land in v0.3.1."
             )
-        if sandbox not in ("", "none"):
+        if sandbox not in self.supported_sandboxes:
             raise UnsupportedCapability(
-                f"kimi.exec() sandbox={sandbox!r} not meaningful without tool-use; "
-                "use sandbox='none' or filter kimi from routing when sandbox required."
+                f"kimi does not support sandbox={sandbox!r} in this release "
+                f"(supported: {sorted(self.supported_sandboxes)}). "
+                "workspace-write lands in v0.3.1."
             )
-        # No tools, no sandbox → equivalent to single-turn call.
-        return self.call(task, model=model, effort=effort)
+        if sandbox == "none":
+            raise UnsupportedCapability(
+                "kimi.exec() with tools requires at least sandbox='read-only'."
+            )
+
+        workdir = Path(cwd) if cwd else Path.cwd()
+        executor = ToolExecutor(cwd=workdir, sandbox=sandbox)
+        tool_specs = build_tool_specs(tools)
+
+        model = model or self.default_model
+        thinking_budget = resolve_effort_tokens(effort, self.effort_to_thinking)
+
+        messages: list[dict] = [{"role": "user", "content": task}]
+        iteration = 0
+        totals = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_tokens": 0,
+            "thinking_tokens": 0,
+        }
+        final_text = ""
+        final_body: dict = {}
+        hit_cap = False
+
+        start = time.monotonic()
+        while iteration < KIMI_MAX_TOOL_ITERATIONS:
+            iteration += 1
+            payload: dict = {
+                "model": model,
+                "messages": messages,
+                "tools": tool_specs,
+            }
+            if thinking_budget > 0:
+                payload["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": thinking_budget,
+                }
+
+            body = self._post_chat(payload)
+            final_body = body
+
+            try:
+                msg = body["choices"][0]["message"]
+            except (KeyError, IndexError, TypeError) as e:
+                raise ProviderHTTPError(
+                    f"Cloudflare response missing choices[0].message: {body!r:.500}"
+                ) from e
+
+            usage = body.get("usage") or {}
+            totals["input_tokens"] += int(usage.get("prompt_tokens") or 0)
+            totals["output_tokens"] += int(usage.get("completion_tokens") or 0)
+            totals["cached_tokens"] += int(
+                (usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
+            )
+            totals["thinking_tokens"] += int(
+                (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+                or 0
+            )
+
+            tool_calls = msg.get("tool_calls") or []
+            final_text = msg.get("content") or ""
+
+            if not tool_calls:
+                break
+
+            # Echo assistant turn (content may be None when only tool_calls).
+            assistant_entry: dict = {
+                "role": "assistant",
+                "content": msg.get("content"),
+                "tool_calls": tool_calls,
+            }
+            # Moonshot/Kimi thinking variants require reasoning_content to be
+            # echoed on subsequent turns for multi-turn tool calls.
+            if msg.get("reasoning_content"):
+                assistant_entry["reasoning_content"] = msg["reasoning_content"]
+            messages.append(assistant_entry)
+
+            for idx, call in enumerate(tool_calls):
+                call_id = call.get("id") or f"call_{iteration}_{idx}"
+                fn = call.get("function") or {}
+                name = fn.get("name") or ""
+                raw_args = fn.get("arguments")
+                if isinstance(raw_args, str):
+                    try:
+                        args = json.loads(raw_args) if raw_args.strip() else {}
+                    except json.JSONDecodeError as e:
+                        args = None
+                        result = (
+                            f"error: tool `{name}` arguments were not valid JSON: {e}"
+                        )
+                elif isinstance(raw_args, dict):
+                    args = raw_args
+                    result = None
+                else:
+                    args = {}
+                    result = None
+
+                if args is not None:
+                    try:
+                        result = executor.run(name, args)
+                    except ToolExecutionError as e:
+                        result = f"error: {e}"
+
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "name": name,
+                        "content": result,
+                    }
+                )
+        else:
+            hit_cap = True
+
+        if hit_cap:
+            final_text = (final_text or "(no content)") + (
+                f"\n\n[conductor: tool-use loop hit max iterations "
+                f"({KIMI_MAX_TOOL_ITERATIONS}); model kept requesting tools. "
+                "Re-run with a narrower task or a larger budget.]"
+            )
+
+        duration_ms = int((time.monotonic() - start) * 1000)
+        return CallResponse(
+            text=final_text,
+            provider=self.name,
+            model=final_body.get("model", model) if final_body else model,
+            duration_ms=duration_ms,
+            usage={
+                "input_tokens": totals["input_tokens"],
+                "output_tokens": totals["output_tokens"],
+                "cached_tokens": totals["cached_tokens"],
+                "thinking_tokens": totals["thinking_tokens"],
+                "effort": effort if isinstance(effort, str) else None,
+                "thinking_budget": thinking_budget,
+                "tool_iterations": iteration,
+                "tool_names": sorted(tools),
+                "hit_iteration_cap": hit_cap,
+            },
+            raw=final_body,
+        )

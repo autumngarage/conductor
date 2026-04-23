@@ -287,9 +287,13 @@ def test_exec_with_kimi_tools_raises_unsupported(mocker):
         ["exec", "--with", "kimi", "--tools", "Edit", "--task", "hi"],
     )
 
-    # kimi's exec() raises UnsupportedCapability on tools — exit 2.
+    # Edit lands in v0.3.1 — kimi.exec raises UnsupportedCapability on it.
     assert result.exit_code == 2
-    assert "UnsupportedCapability" in result.stderr or "not supported" in result.stderr
+    assert (
+        "UnsupportedCapability" in result.stderr
+        or "not supported" in result.stderr
+        or "does not support" in result.stderr
+    )
 
 
 # ---------------------------------------------------------------------------
