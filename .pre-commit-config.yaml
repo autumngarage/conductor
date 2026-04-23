@@ -25,7 +25,10 @@ repos:
 
   # ── Secret scanning ────────────────────────────────────────────────────
   - repo: https://github.com/gitleaks/gitleaks
-    rev: v8.22.1
+    # Bumped from v8.22.1 to v8.30.1 to fix a CI-specific go-re2 WASM panic
+    # ("invalid table access" on Linux runners) that surfaced during
+    # v0.2 CI. The panic was regex-engine-init time, not a detection issue.
+    rev: v8.30.1
     hooks:
       - id: gitleaks
 

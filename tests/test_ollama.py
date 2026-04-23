@@ -9,6 +9,7 @@ import respx
 from conductor.providers.interface import (
     ProviderConfigError,
     ProviderHTTPError,
+    UnsupportedCapability,
 )
 from conductor.providers.ollama import (
     OLLAMA_BASE_URL_ENV,
@@ -42,6 +43,42 @@ def test_configured_false_when_server_unreachable():
     assert "Ollama" in reason
 
 
+def test_default_model_available_true_when_pulled():
+    with respx.mock() as router:
+        router.get(TAGS_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={"models": [{"name": "qwen2.5-coder:14b"}, {"name": "other:1b"}]},
+            )
+        )
+        ok, reason = OllamaProvider().default_model_available()
+    assert ok is True and reason is None
+
+
+def test_default_model_available_false_lists_alternatives():
+    with respx.mock() as router:
+        router.get(TAGS_URL).mock(
+            return_value=httpx.Response(
+                200, json={"models": [{"name": "qwen2.5-coder:7b"}]}
+            )
+        )
+        ok, reason = OllamaProvider().default_model_available()
+    assert ok is False
+    assert "qwen2.5-coder:14b" in reason
+    assert "ollama pull" in reason
+    assert "qwen2.5-coder:7b" in reason  # shows locally installed alternatives
+
+
+def test_default_model_available_false_when_no_models_pulled():
+    with respx.mock() as router:
+        router.get(TAGS_URL).mock(
+            return_value=httpx.Response(200, json={"models": []})
+        )
+        ok, reason = OllamaProvider().default_model_available()
+    assert ok is False
+    assert "ollama pull qwen2.5-coder:14b" in reason
+
+
 def test_configured_honors_env_override(monkeypatch):
     monkeypatch.setenv(OLLAMA_BASE_URL_ENV, "http://ollama.internal:11434")
     with respx.mock() as router:
@@ -67,11 +104,10 @@ def test_call_returns_normalized_response():
     assert response.text == "hello from ollama"
     assert response.provider == "ollama"
     assert response.model == "qwen2.5-coder:14b"
-    assert response.usage == {
-        "input_tokens": 8,
-        "output_tokens": 3,
-        "cached_tokens": None,
-    }
+    assert response.usage["input_tokens"] == 8
+    assert response.usage["output_tokens"] == 3
+    assert response.usage["cached_tokens"] is None
+    assert response.usage["thinking_budget"] == 0
     assert response.duration_ms == 1500
 
 
@@ -98,3 +134,32 @@ def test_call_raises_on_missing_content():
         with pytest.raises(ProviderHTTPError) as exc:
             OllamaProvider().call("hi")
     assert "content" in str(exc.value)
+
+
+def test_call_with_resume_session_id_raises_unsupported():
+    with pytest.raises(UnsupportedCapability) as exc:
+        OllamaProvider().call("hi", resume_session_id="any-id")
+    assert "stateless" in str(exc.value)
+
+
+def test_exec_with_resume_session_id_raises_unsupported():
+    with pytest.raises(UnsupportedCapability) as exc:
+        OllamaProvider().exec("hi", resume_session_id="any-id")
+    assert "stateless" in str(exc.value)
+
+
+def test_call_session_id_is_none_for_ollama():
+    with respx.mock() as router:
+        router.post(CHAT_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "message": {"content": "ok"},
+                    "model": "qwen2.5-coder:14b",
+                    "prompt_eval_count": 1,
+                    "eval_count": 1,
+                },
+            )
+        )
+        response = OllamaProvider().call("hi")
+    assert response.session_id is None

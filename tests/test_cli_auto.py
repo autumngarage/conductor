@@ -123,4 +123,4 @@ def test_call_auto_with_no_configured_providers_exits_2(mocker):
         main, ["call", "--auto", "--tags", "cheap", "--task", "hi"]
     )
     assert result.exit_code == 2
-    assert "no provider is configured" in result.output.lower()
+    assert "no provider satisfies" in result.output.lower()

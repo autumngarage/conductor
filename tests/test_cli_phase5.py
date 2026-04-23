@@ -26,7 +26,10 @@ def _stub_all_unconfigured(mocker):
         OllamaProvider,
     ):
         mocker.patch.object(
-            cls, "configured", lambda self: (False, f"stub: {cls.__name__} unset")
+            cls,
+            "configured",
+            # Default-arg binds cls into the closure per iteration (fixes B023).
+            lambda self, _cls=cls: (False, f"stub: {_cls.__name__} unset"),
         )
 
 
@@ -162,8 +165,47 @@ def test_doctor_json_shape(mocker, monkeypatch):
     result = CliRunner().invoke(main, ["doctor", "--json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert set(payload.keys()) >= {"version", "platform", "python", "providers", "credentials"}
+    assert set(payload.keys()) >= {
+        "version", "platform", "python", "providers", "credentials", "warnings"
+    }
     assert len(payload["providers"]) == 5
     cred_map = {c["name"]: c for c in payload["credentials"]}
     assert cred_map["CLOUDFLARE_API_TOKEN"]["in_env"] is True
     assert cred_map["CLOUDFLARE_ACCOUNT_ID"]["in_env"] is False
+
+
+def test_doctor_warns_when_ollama_default_model_missing(mocker, monkeypatch):
+    from conductor.providers import (
+        ClaudeProvider,
+        CodexProvider,
+        GeminiProvider,
+        KimiProvider,
+        OllamaProvider,
+    )
+
+    # Everyone else skipped-out as "not configured"; ollama is configured
+    # but reports its default model missing.
+    for cls in (ClaudeProvider, CodexProvider, GeminiProvider, KimiProvider):
+        mocker.patch.object(cls, "configured", lambda self: (False, "nope"))
+    mocker.patch.object(OllamaProvider, "configured", lambda self: (True, None))
+    mocker.patch.object(
+        OllamaProvider,
+        "default_model_available",
+        lambda self: (False, "default model 'qwen2.5-coder:14b' is not pulled"),
+    )
+    for var in ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "OLLAMA_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+    mocker.patch("conductor.cli.credentials.keychain_has", return_value=False)
+
+    result = CliRunner().invoke(main, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "⚠" in result.output
+    assert "qwen2.5-coder:14b" in result.output
+    assert "not pulled" in result.output
+
+    # JSON carries the same warning on the ollama provider entry + top-level.
+    result_json = CliRunner().invoke(main, ["doctor", "--json"])
+    payload = json.loads(result_json.output)
+    ollama_entry = next(p for p in payload["providers"] if p["provider"] == "ollama")
+    assert ollama_entry["warnings"]
+    assert any(w["provider"] == "ollama" for w in payload["warnings"])
