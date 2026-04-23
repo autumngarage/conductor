@@ -17,6 +17,7 @@ from conductor.providers.interface import (
 )
 from conductor.providers.kimi import KimiProvider
 from conductor.providers.ollama import OllamaProvider
+from conductor.providers.shell import ShellProvider, ShellProviderSpec
 
 __all__ = [
     "EFFORT_LEVELS",
@@ -34,13 +35,15 @@ __all__ = [
     "ProviderConfigError",
     "ProviderError",
     "ProviderHTTPError",
+    "ShellProvider",
+    "ShellProviderSpec",
     "UnsupportedCapability",
     "get_provider",
     "known_providers",
     "resolve_effort_tokens",
 ]
 
-_REGISTRY: dict[str, type[Provider]] = {
+_BUILTIN_REGISTRY: dict[str, type[Provider]] = {
     "kimi": KimiProvider,
     "claude": ClaudeProvider,
     "codex": CodexProvider,
@@ -50,17 +53,52 @@ _REGISTRY: dict[str, type[Provider]] = {
 
 
 def known_providers() -> list[str]:
-    """Return the sorted list of canonical provider identifiers."""
-    return sorted(_REGISTRY)
+    """Return the sorted list of all provider identifiers (built-in + custom)."""
+    names = set(_BUILTIN_REGISTRY)
+    names.update(_custom_spec_names())
+    return sorted(names)
 
 
 def get_provider(name: str) -> Provider:
     """Return a provider instance by canonical identifier.
 
+    Checks the built-in registry first, then the user-local custom
+    providers (loaded fresh each call so `conductor providers add`
+    doesn't require a restart).
+
     Raises KeyError if the identifier is not registered.
     """
-    if name not in _REGISTRY:
-        raise KeyError(
-            f"unknown provider {name!r}; known: {known_providers()}"
-        )
-    return _REGISTRY[name]()
+    if name in _BUILTIN_REGISTRY:
+        return _BUILTIN_REGISTRY[name]()
+
+    for spec in _custom_specs():
+        if spec.name == name:
+            return ShellProvider(spec)
+
+    raise KeyError(
+        f"unknown provider {name!r}; known: {known_providers()}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Custom-provider loading. Wrapped in a function so the import-time cost of
+# reading the TOML file only fires when the registry is actually queried,
+# and imports don't cycle (conductor.custom_providers imports from here for
+# QUALITY_TIERS validation).
+# --------------------------------------------------------------------------- #
+
+
+def _custom_specs() -> list[ShellProviderSpec]:
+    from conductor.custom_providers import CustomProviderError, load_specs
+
+    try:
+        return load_specs()
+    except CustomProviderError:
+        # A corrupt user-local file should not brick the whole CLI.
+        # `conductor doctor` surfaces the error with a clear pointer; other
+        # commands skip custom providers silently in this path.
+        return []
+
+
+def _custom_spec_names() -> list[str]:
+    return [s.name for s in _custom_specs()]
