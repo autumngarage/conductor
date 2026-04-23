@@ -318,17 +318,19 @@ def test_exec_with_tools_needs_at_least_read_only(configured):
 
 
 def test_exec_rejects_unsupported_tool_set(configured):
+    # Hypothetical future tool outside kimi's declared set.
     with pytest.raises(UnsupportedCapability) as exc:
         KimiProvider().exec(
-            "hi", tools=frozenset({"Edit"}), sandbox="read-only"
+            "hi", tools=frozenset({"Telepathy"}), sandbox="read-only"
         )
     assert "does not support" in str(exc.value)
 
 
 def test_exec_rejects_unsupported_sandbox(configured):
+    # `strict` is Slice C (subprocess) — not in kimi's declared sandboxes yet.
     with pytest.raises(UnsupportedCapability) as exc:
         KimiProvider().exec(
-            "hi", tools=frozenset({"Read"}), sandbox="workspace-write"
+            "hi", tools=frozenset({"Read"}), sandbox="strict"
         )
     assert "does not support" in str(exc.value)
 

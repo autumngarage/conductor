@@ -48,11 +48,11 @@ def test_get_tool_rejects_unknown():
         get_tool("NotATool")
 
 
-def test_get_tool_rejects_not_yet_implemented_workspace_write():
-    # Edit/Write/Bash names exist in WORKSPACE_WRITE_TOOL_NAMES but aren't
-    # registered until Slice B. get_tool() still raises.
-    with pytest.raises(KeyError):
-        get_tool("Edit")
+def test_get_tool_returns_every_declared_tool():
+    # ALL_TOOL_NAMES should map 1:1 to registered tools.
+    for name in sorted(ALL_TOOL_NAMES):
+        tool = get_tool(name)
+        assert tool.name == name
 
 
 def test_build_tool_specs_shape_is_openai_compatible():
@@ -325,3 +325,204 @@ def test_executor_workspace_write_satisfies_read_only(tmp_path: Path):
     (tmp_path / "w.txt").write_text("hi")
     executor = ToolExecutor(cwd=tmp_path, sandbox="workspace-write")
     assert executor.run("Read", {"path": "w.txt"}) == "hi"
+
+
+# --------------------------------------------------------------------------- #
+# EditTool
+# --------------------------------------------------------------------------- #
+
+
+def test_edit_tool_unique_replace(tmp_path: Path):
+    (tmp_path / "a.py").write_text("hello world\n")
+    tool = get_tool("Edit")
+    out = tool.execute(
+        {"path": "a.py", "old_string": "world", "new_string": "universe"},
+        cwd=tmp_path,
+    )
+    assert "Edited" in out
+    assert (tmp_path / "a.py").read_text() == "hello universe\n"
+
+
+def test_edit_tool_rejects_ambiguous_match(tmp_path: Path):
+    (tmp_path / "dup.py").write_text("x\nx\n")
+    tool = get_tool("Edit")
+    with pytest.raises(ToolExecutionError) as exc:
+        tool.execute(
+            {"path": "dup.py", "old_string": "x", "new_string": "y"},
+            cwd=tmp_path,
+        )
+    assert "2 times" in str(exc.value) or "appears" in str(exc.value)
+
+
+def test_edit_tool_replace_all_when_requested(tmp_path: Path):
+    (tmp_path / "dup.py").write_text("x\nx\n")
+    tool = get_tool("Edit")
+    out = tool.execute(
+        {
+            "path": "dup.py",
+            "old_string": "x",
+            "new_string": "y",
+            "replace_all": True,
+        },
+        cwd=tmp_path,
+    )
+    assert "2 replacement" in out
+    assert (tmp_path / "dup.py").read_text() == "y\ny\n"
+
+
+def test_edit_tool_rejects_no_match(tmp_path: Path):
+    (tmp_path / "a.py").write_text("abc")
+    tool = get_tool("Edit")
+    with pytest.raises(ToolExecutionError) as exc:
+        tool.execute(
+            {"path": "a.py", "old_string": "xyz", "new_string": "q"},
+            cwd=tmp_path,
+        )
+    assert "not found" in str(exc.value)
+
+
+def test_edit_tool_rejects_same_strings(tmp_path: Path):
+    (tmp_path / "a.py").write_text("abc")
+    tool = get_tool("Edit")
+    with pytest.raises(ToolSchemaError):
+        tool.execute(
+            {"path": "a.py", "old_string": "abc", "new_string": "abc"},
+            cwd=tmp_path,
+        )
+
+
+def test_edit_tool_requires_workspace_write(tmp_path: Path):
+    (tmp_path / "a.txt").write_text("hello")
+    executor = ToolExecutor(cwd=tmp_path, sandbox="read-only")
+    with pytest.raises(ToolExecutionError) as exc:
+        executor.run(
+            "Edit", {"path": "a.txt", "old_string": "hello", "new_string": "bye"}
+        )
+    assert "sandbox" in str(exc.value)
+
+
+def test_edit_tool_rejects_escape(tmp_path: Path):
+    tool = get_tool("Edit")
+    with pytest.raises(ToolExecutionError):
+        tool.execute(
+            {
+                "path": "../outside.txt",
+                "old_string": "a",
+                "new_string": "b",
+            },
+            cwd=tmp_path,
+        )
+
+
+# --------------------------------------------------------------------------- #
+# WriteTool
+# --------------------------------------------------------------------------- #
+
+
+def test_write_tool_creates_new_file(tmp_path: Path):
+    tool = get_tool("Write")
+    out = tool.execute(
+        {"path": "new.txt", "content": "hello\n"}, cwd=tmp_path
+    )
+    assert "new.txt" in out
+    assert (tmp_path / "new.txt").read_text() == "hello\n"
+
+
+def test_write_tool_creates_parent_dirs(tmp_path: Path):
+    tool = get_tool("Write")
+    tool.execute(
+        {"path": "a/b/c/nested.txt", "content": "x"}, cwd=tmp_path
+    )
+    assert (tmp_path / "a" / "b" / "c" / "nested.txt").read_text() == "x"
+
+
+def test_write_tool_overwrites_existing(tmp_path: Path):
+    (tmp_path / "e.txt").write_text("old")
+    tool = get_tool("Write")
+    tool.execute({"path": "e.txt", "content": "new"}, cwd=tmp_path)
+    assert (tmp_path / "e.txt").read_text() == "new"
+
+
+def test_write_tool_requires_workspace_write(tmp_path: Path):
+    executor = ToolExecutor(cwd=tmp_path, sandbox="read-only")
+    with pytest.raises(ToolExecutionError) as exc:
+        executor.run("Write", {"path": "x.txt", "content": "y"})
+    assert "sandbox" in str(exc.value)
+
+
+def test_write_tool_rejects_escape(tmp_path: Path):
+    tool = get_tool("Write")
+    with pytest.raises(ToolExecutionError):
+        tool.execute(
+            {"path": "../evil.txt", "content": "x"}, cwd=tmp_path
+        )
+
+
+def test_write_tool_rejects_directory_path(tmp_path: Path):
+    (tmp_path / "subdir").mkdir()
+    tool = get_tool("Write")
+    with pytest.raises(ToolExecutionError) as exc:
+        tool.execute({"path": "subdir", "content": "x"}, cwd=tmp_path)
+    assert "directory" in str(exc.value)
+
+
+# --------------------------------------------------------------------------- #
+# BashTool
+# --------------------------------------------------------------------------- #
+
+
+def test_bash_tool_runs_command(tmp_path: Path):
+    (tmp_path / "a.txt").write_text("content")
+    tool = get_tool("Bash")
+    out = tool.execute({"command": "ls a.txt"}, cwd=tmp_path)
+    assert "exit=0" in out
+    assert "a.txt" in out
+
+
+def test_bash_tool_captures_nonzero_exit(tmp_path: Path):
+    tool = get_tool("Bash")
+    out = tool.execute({"command": "false"}, cwd=tmp_path)
+    assert "exit=1" in out
+
+
+def test_bash_tool_captures_stderr(tmp_path: Path):
+    tool = get_tool("Bash")
+    out = tool.execute({"command": "echo oops >&2; false"}, cwd=tmp_path)
+    assert "stderr" in out
+    assert "oops" in out
+
+
+def test_bash_tool_times_out(tmp_path: Path):
+    tool = get_tool("Bash")
+    out = tool.execute({"command": "sleep 5", "timeout_sec": 1}, cwd=tmp_path)
+    assert "TIMEOUT" in out
+
+
+def test_bash_tool_pins_cwd(tmp_path: Path):
+    # pwd should report the resolved workspace path.
+    tool = get_tool("Bash")
+    out = tool.execute({"command": "pwd"}, cwd=tmp_path)
+    assert str(tmp_path.resolve()) in out
+
+
+def test_bash_tool_rejects_bad_timeout(tmp_path: Path):
+    tool = get_tool("Bash")
+    with pytest.raises(ToolSchemaError):
+        tool.execute({"command": "true", "timeout_sec": 0}, cwd=tmp_path)
+    with pytest.raises(ToolSchemaError):
+        tool.execute({"command": "true", "timeout_sec": 99999}, cwd=tmp_path)
+
+
+def test_bash_tool_requires_workspace_write(tmp_path: Path):
+    executor = ToolExecutor(cwd=tmp_path, sandbox="read-only")
+    with pytest.raises(ToolExecutionError) as exc:
+        executor.run("Bash", {"command": "true"})
+    assert "sandbox" in str(exc.value)
+
+
+def test_bash_tool_truncates_huge_output(tmp_path: Path):
+    tool = get_tool("Bash")
+    out = tool.execute(
+        {"command": "yes hello | head -c 300000"}, cwd=tmp_path
+    )
+    assert "truncated" in out

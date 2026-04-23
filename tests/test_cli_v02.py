@@ -279,7 +279,14 @@ def test_exec_unknown_sandbox_errors_with_hint():
     assert "read-only" in result.output
 
 
-def test_exec_with_kimi_tools_raises_unsupported(mocker):
+def test_exec_with_kimi_tools_raises_unsupported(mocker, monkeypatch):
+    # Pin kimi to its pre-v0.3.0 capability set so --tools Edit is
+    # guaranteed to land in the UnsupportedCapability branch. Post-v0.3.1
+    # all six tools are supported, so exercising the error path needs
+    # a synthetic "this tool isn't in the supported set" scenario.
+    from conductor.providers.kimi import KimiProvider
+
+    monkeypatch.setattr(KimiProvider, "supported_tools", frozenset())
     _stub_all_configured(mocker, {"kimi"})
 
     result = CliRunner().invoke(
@@ -287,7 +294,6 @@ def test_exec_with_kimi_tools_raises_unsupported(mocker):
         ["exec", "--with", "kimi", "--tools", "Edit", "--task", "hi"],
     )
 
-    # Edit lands in v0.3.1 — kimi.exec raises UnsupportedCapability on it.
     assert result.exit_code == 2
     assert (
         "UnsupportedCapability" in result.stderr

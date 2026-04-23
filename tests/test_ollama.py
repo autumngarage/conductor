@@ -163,3 +163,211 @@ def test_call_session_id_is_none_for_ollama():
         )
         response = OllamaProvider().call("hi")
     assert response.session_id is None
+
+
+# --------------------------------------------------------------------------- #
+# exec() — tool-use loop (v0.3.1 / Slice B)
+# --------------------------------------------------------------------------- #
+
+
+import json as _json  # noqa: E402 — grouped near the exec tests
+
+
+def _ollama_terminal(content: str) -> dict:
+    return {
+        "model": "qwen2.5-coder:14b",
+        "message": {"role": "assistant", "content": content},
+        "prompt_eval_count": 5,
+        "eval_count": 2,
+        "done": True,
+    }
+
+
+def _ollama_tool_turn(name: str, arguments: dict, call_id: str | None = None) -> dict:
+    call: dict = {
+        "type": "function",
+        "function": {"name": name, "arguments": arguments},
+    }
+    if call_id is not None:
+        call["id"] = call_id
+    return {
+        "model": "qwen2.5-coder:14b",
+        "message": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [call],
+        },
+        "prompt_eval_count": 3,
+        "eval_count": 4,
+        "done": False,
+    }
+
+
+def test_exec_without_tools_delegates_to_call():
+    with respx.mock() as router:
+        router.post(CHAT_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "message": {"content": "just text"},
+                    "prompt_eval_count": 1,
+                    "eval_count": 1,
+                },
+            )
+        )
+        resp = OllamaProvider().exec("hi")
+    assert resp.text == "just text"
+    assert "tool_iterations" not in resp.usage
+
+
+def test_exec_rejects_non_none_sandbox_without_tools():
+    with pytest.raises(UnsupportedCapability) as exc:
+        OllamaProvider().exec("hi", sandbox="read-only")
+    assert "without tools" in str(exc.value)
+
+
+def test_exec_with_tools_requires_at_least_read_only():
+    with pytest.raises(UnsupportedCapability) as exc:
+        OllamaProvider().exec(
+            "hi", tools=frozenset({"Read"}), sandbox="none"
+        )
+    assert "read-only" in str(exc.value)
+
+
+def test_exec_rejects_unsupported_tool():
+    with pytest.raises(UnsupportedCapability) as exc:
+        OllamaProvider().exec(
+            "hi", tools=frozenset({"Telepathy"}), sandbox="read-only"
+        )
+    assert "does not support" in str(exc.value)
+
+
+def test_exec_runs_single_tool_call_then_answers(tmp_path):
+    (tmp_path / "note.txt").write_text("the answer is 42")
+    tool_turn = _ollama_tool_turn("Read", {"path": "note.txt"}, call_id="c1")
+    final = _ollama_terminal("The file says 42.")
+    with respx.mock() as router:
+        route = router.post(CHAT_URL).mock(
+            side_effect=[
+                httpx.Response(200, json=tool_turn),
+                httpx.Response(200, json=final),
+            ]
+        )
+        resp = OllamaProvider().exec(
+            "read note.txt",
+            tools=frozenset({"Read"}),
+            sandbox="read-only",
+            cwd=str(tmp_path),
+        )
+
+    assert resp.text == "The file says 42."
+    assert resp.usage["tool_iterations"] == 2
+    assert resp.usage["hit_iteration_cap"] is False
+    assert route.call_count == 2
+
+    final_request = route.calls[-1].request
+    payload = _json.loads(final_request.read())
+    roles = [m["role"] for m in payload["messages"]]
+    assert roles == ["user", "assistant", "tool"]
+    assert payload["messages"][2]["content"] == "the answer is 42"
+
+
+def test_exec_handles_ollama_string_args(tmp_path):
+    # Ollama nominally emits arguments as dict, but the provider accepts
+    # either shape — round-trip stringified JSON just in case.
+    (tmp_path / "f.txt").write_text("hello")
+    tool_turn = _ollama_tool_turn("Read", {"path": "f.txt"}, call_id="c1")
+    tool_turn["message"]["tool_calls"][0]["function"]["arguments"] = (
+        '{"path": "f.txt"}'
+    )
+    final = _ollama_terminal("got it")
+    with respx.mock() as router:
+        router.post(CHAT_URL).mock(
+            side_effect=[
+                httpx.Response(200, json=tool_turn),
+                httpx.Response(200, json=final),
+            ]
+        )
+        resp = OllamaProvider().exec(
+            "go",
+            tools=frozenset({"Read"}),
+            sandbox="read-only",
+            cwd=str(tmp_path),
+        )
+    assert resp.text == "got it"
+
+
+def test_exec_tool_error_feeds_back(tmp_path):
+    tool_turn = _ollama_tool_turn(
+        "Read", {"path": "../../../etc/passwd"}, call_id="x"
+    )
+    final = _ollama_terminal("refused, summarizing from memory")
+    with respx.mock() as router:
+        route = router.post(CHAT_URL).mock(
+            side_effect=[
+                httpx.Response(200, json=tool_turn),
+                httpx.Response(200, json=final),
+            ]
+        )
+        resp = OllamaProvider().exec(
+            "read secret",
+            tools=frozenset({"Read"}),
+            sandbox="read-only",
+            cwd=str(tmp_path),
+        )
+    assert "refused" in resp.text
+    payload = _json.loads(route.calls[-1].request.read())
+    tool_msg = [m for m in payload["messages"] if m["role"] == "tool"][0]
+    assert tool_msg["content"].startswith("error:")
+
+
+def test_exec_iteration_cap(tmp_path):
+    (tmp_path / "f.txt").write_text("x")
+    loop = _ollama_tool_turn("Read", {"path": "f.txt"})
+    with respx.mock() as router:
+        route = router.post(CHAT_URL).mock(
+            return_value=httpx.Response(200, json=loop)
+        )
+        resp = OllamaProvider().exec(
+            "never",
+            tools=frozenset({"Read"}),
+            sandbox="read-only",
+            cwd=str(tmp_path),
+        )
+    assert resp.usage["hit_iteration_cap"] is True
+    assert resp.usage["tool_iterations"] == 10
+    assert route.call_count == 10
+    assert "max iterations" in resp.text.lower()
+
+
+def test_exec_workspace_write_runs_edit(tmp_path):
+    (tmp_path / "a.py").write_text("hello world\n")
+    tool_turn = _ollama_tool_turn(
+        "Edit",
+        {
+            "path": "a.py",
+            "old_string": "world",
+            "new_string": "galaxy",
+        },
+        call_id="c",
+    )
+    final = _ollama_terminal("done")
+    with respx.mock() as router:
+        router.post(CHAT_URL).mock(
+            side_effect=[
+                httpx.Response(200, json=tool_turn),
+                httpx.Response(200, json=final),
+            ]
+        )
+        OllamaProvider().exec(
+            "swap world→galaxy",
+            tools=frozenset({"Edit"}),
+            sandbox="workspace-write",
+            cwd=str(tmp_path),
+        )
+    assert (tmp_path / "a.py").read_text() == "hello galaxy\n"
+
+
+def test_exec_session_id_raises():
+    with pytest.raises(UnsupportedCapability):
+        OllamaProvider().exec("hi", resume_session_id="abc")
