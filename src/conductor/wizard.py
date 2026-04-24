@@ -212,6 +212,9 @@ def run_init_wizard(
     wire_agents: str | None = None,
     patch_claude_md: str | None = None,
     patch_agents_md: str | None = None,
+    patch_gemini_md: str | None = None,
+    patch_claude_md_repo: str | None = None,
+    wire_cursor_flag: str | None = None,
 ) -> int:
     """Walk the user through configuring every provider that needs it.
 
@@ -326,6 +329,9 @@ def run_init_wizard(
             wire_agents=wire_agents,
             patch_claude_md=patch_claude_md,
             patch_agents_md=patch_agents_md,
+            patch_gemini_md=patch_gemini_md,
+            patch_claude_md_repo=patch_claude_md_repo,
+            wire_cursor_flag=wire_cursor_flag,
         )
 
     _print_summary(outcomes)
@@ -669,6 +675,9 @@ def _maybe_wire_agents(
     wire_agents: str | None,
     patch_claude_md: str | None,
     patch_agents_md: str | None = None,
+    patch_gemini_md: str | None = None,
+    patch_claude_md_repo: str | None = None,
+    wire_cursor_flag: str | None = None,
 ) -> bool:
     """Offer to wire conductor into detected agent tools (Claude Code
     user-scope + repo-scope ``AGENTS.md``).
@@ -685,19 +694,25 @@ def _maybe_wire_agents(
     detection = detect()
 
     claude_detected = detection.claude_detected
-    agents_md_detected = detection.agents_md_exists
 
     # Decide the top-level wire-agents decision.
     decision = wire_agents if wire_agents is not None else ("ask" if interactive else "no")
     if decision == "no":
         return True
 
-    # If nothing's detected AND the user didn't explicitly force a patch,
-    # short-circuit with an informational message. A user who explicitly
-    # passed --patch-agents-md=yes wants the file created even on a bare
-    # machine; don't silently swallow that intent.
-    user_forced_agents_md = patch_agents_md == "yes"
-    if not claude_detected and not agents_md_detected and not user_forced_agents_md:
+    # Per-section "this section runs" flags. A section runs if its artifact
+    # is detected OR the user explicitly forced creation via a flag.
+    run_agents_md = detection.agents_md_exists or patch_agents_md == "yes"
+    run_gemini_md = detection.gemini_md_exists or patch_gemini_md == "yes"
+    run_claude_md_repo = (
+        detection.claude_md_repo_exists or patch_claude_md_repo == "yes"
+    )
+    run_cursor = detection.cursor_rules_dir_exists or wire_cursor_flag == "yes"
+    any_detected_or_forced = any(
+        (claude_detected, run_agents_md, run_gemini_md, run_claude_md_repo, run_cursor)
+    )
+
+    if not any_detected_or_forced:
         if interactive:
             click.echo("")
             click.echo("─" * 60)
@@ -705,38 +720,68 @@ def _maybe_wire_agents(
             click.echo("─" * 60)
             click.echo(
                 "  No agent tools detected in this environment "
-                "(no ~/.claude/, no ./AGENTS.md)."
+                "(no ~/.claude/, no ./AGENTS.md, no ./GEMINI.md, no ./.cursor/)."
             )
             click.echo(
-                "  (re-run `conductor init` in a repo with AGENTS.md, or after "
-                "installing Claude Code)"
+                "  (re-run `conductor init` in a repo with one of the above, "
+                "or after installing Claude Code)"
             )
             click.echo("")
         return True
 
-    claude_ok = True
+    results: list[bool] = []
     if claude_detected:
-        claude_ok = _wire_claude_code_section(
-            detection=detection,
-            version=__version__,
-            interactive=interactive,
-            decision=decision,
-            patch_claude_md=patch_claude_md,
+        results.append(
+            _wire_claude_code_section(
+                detection=detection,
+                version=__version__,
+                interactive=interactive,
+                decision=decision,
+                patch_claude_md=patch_claude_md,
+            )
+        )
+    if run_agents_md:
+        results.append(
+            _wire_agents_md_section(
+                detection=detection,
+                version=__version__,
+                interactive=interactive,
+                decision=decision,
+                patch_agents_md=patch_agents_md,
+            )
+        )
+    if run_gemini_md:
+        results.append(
+            _wire_gemini_md_section(
+                detection=detection,
+                version=__version__,
+                interactive=interactive,
+                decision=decision,
+                patch_gemini_md=patch_gemini_md,
+            )
+        )
+    if run_claude_md_repo:
+        results.append(
+            _wire_claude_md_repo_section(
+                detection=detection,
+                version=__version__,
+                interactive=interactive,
+                decision=decision,
+                patch_claude_md_repo=patch_claude_md_repo,
+            )
+        )
+    if run_cursor:
+        results.append(
+            _wire_cursor_section(
+                detection=detection,
+                version=__version__,
+                interactive=interactive,
+                decision=decision,
+                wire_cursor_flag=wire_cursor_flag,
+            )
         )
 
-    agents_ok = True
-    # AGENTS.md section runs if the file exists (natural fit) or the user
-    # explicitly forced creation via --patch-agents-md=yes.
-    if agents_md_detected or user_forced_agents_md:
-        agents_ok = _wire_agents_md_section(
-            detection=detection,
-            version=__version__,
-            interactive=interactive,
-            decision=decision,
-            patch_agents_md=patch_agents_md,
-        )
-
-    return claude_ok and agents_ok
+    return all(results)
 
 
 def _wire_claude_code_section(
@@ -845,63 +890,54 @@ def _wire_claude_code_section(
     return not (report.skipped and not report.written)
 
 
-def _wire_agents_md_section(
+def _wire_sentinel_section(
     *,
-    detection,
+    title: str,
+    filename: str,
+    path,
+    path_exists: bool,
+    already_wired: bool,
+    wire_fn,
     version: str,
     interactive: bool,
-    decision: str,
-    patch_agents_md: str | None,
+    patch_flag: str | None,
 ) -> bool:
-    """Repo-scope AGENTS.md sentinel-block injection.
+    """Generic prompt + wire for any sentinel-block-style patch.
 
-    Works regardless of Claude Code detection — Codex / Cursor / Zed users
-    who don't have Claude Code installed get the AGENTS.md patch on its
-    own. Idempotent: the inject helper replaces an existing conductor
-    block in place, so re-running bumps the version and never duplicates.
+    Shared by AGENTS.md, GEMINI.md, and repo-scope CLAUDE.md — all three
+    are user-owned files where conductor owns only the sentinel block.
+    Idempotent: the underlying ``inject_sentinel_block`` helper replaces
+    an existing conductor block in place, so re-running bumps the
+    version and never duplicates.
     """
-    from conductor.agent_wiring import wire_agents_md
-
-    already_blocked = any(a.kind == "agents-md-import" for a in detection.managed)
-
     click.echo("")
     click.echo("─" * 60)
-    click.echo("Agent integration — AGENTS.md (repo-scoped)")
+    click.echo(f"Agent integration — {title}")
     click.echo("─" * 60)
-    if detection.agents_md_exists:
-        if already_blocked:
-            click.echo(f"  {detection.agents_md} already has a conductor block.")
+    if path_exists:
+        if already_wired:
+            click.echo(f"  {path} already has a conductor block.")
             click.echo("  Re-running will refresh it to the current version.")
         else:
-            click.echo(f"  {detection.agents_md} found — conductor can inject a")
-            click.echo("  delegation-guidance block (sentinel-bounded, fully removable).")
+            click.echo(f"  {path} found — conductor can inject a")
+            click.echo("  delegation block (sentinel-bounded, fully removable).")
     else:
         click.echo(
-            f"  No AGENTS.md in {detection.agents_md.parent}. Conductor will create"
+            f"  No {filename} in {path.parent}. Conductor can create one"
         )
-        click.echo("  one containing only the delegation block — not recommended")
-        click.echo("  unless this repo is intended to use AGENTS.md going forward.")
+        click.echo("  containing only the delegation block — not recommended")
+        click.echo(f"  unless this repo is intended to use {filename} going forward.")
     click.echo("")
 
-    # `decision` is the top-level wire-agents decision. It gated us into
-    # this function (yes/ask). For the per-file patch, we honor
-    # `patch_agents_md` with the same tri-state semantics as patch_claude_md.
-    pam = (
-        patch_agents_md
-        if patch_agents_md is not None
-        else ("ask" if interactive else "no")
-    )
+    pam = patch_flag if patch_flag is not None else ("ask" if interactive else "no")
     if pam == "ask":
-        verb = "refresh" if already_blocked else (
-            "patch" if detection.agents_md_exists else "create"
-        )
-        noun = "AGENTS.md"
+        verb = "refresh" if already_wired else ("patch" if path_exists else "create")
         choice = _prompt_menu(
             options=[
-                ("y", f"yes — {verb} {noun}"),
-                ("n", "no — skip AGENTS.md"),
+                ("y", f"yes — {verb} {filename}"),
+                ("n", f"no — skip {filename}"),
             ],
-            default="y" if detection.agents_md_exists else "n",
+            default="y" if path_exists else "n",
         )
         if choice == "n":
             return True
@@ -913,12 +949,159 @@ def _wire_agents_md_section(
         return True
 
     try:
-        report = wire_agents_md(version=version)
+        report = wire_fn(version=version)
     except Exception as exc:  # noqa: BLE001 — surface any unexpected failure
-        click.echo(f"  ✗ AGENTS.md patch failed: {exc}")
+        click.echo(f"  ✗ {filename} patch failed: {exc}")
         return False
 
     click.echo(f"  ✓ patched {report.path} (sentinel block)")
+    click.echo("")
+    return True
+
+
+def _wire_agents_md_section(
+    *,
+    detection,
+    version: str,
+    interactive: bool,
+    decision: str,
+    patch_agents_md: str | None,
+) -> bool:
+    """Repo-scope AGENTS.md — Codex / Cursor / Zed shared convention."""
+    from conductor.agent_wiring import wire_agents_md
+
+    already = any(a.kind == "agents-md-import" for a in detection.managed)
+    return _wire_sentinel_section(
+        title="AGENTS.md (repo-scoped)",
+        filename="AGENTS.md",
+        path=detection.agents_md,
+        path_exists=detection.agents_md_exists,
+        already_wired=already,
+        wire_fn=wire_agents_md,
+        version=version,
+        interactive=interactive,
+        patch_flag=patch_agents_md,
+    )
+
+
+def _wire_gemini_md_section(
+    *,
+    detection,
+    version: str,
+    interactive: bool,
+    decision: str,
+    patch_gemini_md: str | None,
+) -> bool:
+    """Repo-scope GEMINI.md — Gemini CLI convention."""
+    from conductor.agent_wiring import wire_gemini_md
+
+    already = any(a.kind == "gemini-md-import" for a in detection.managed)
+    return _wire_sentinel_section(
+        title="GEMINI.md (repo-scoped)",
+        filename="GEMINI.md",
+        path=detection.gemini_md,
+        path_exists=detection.gemini_md_exists,
+        already_wired=already,
+        wire_fn=wire_gemini_md,
+        version=version,
+        interactive=interactive,
+        patch_flag=patch_gemini_md,
+    )
+
+
+def _wire_claude_md_repo_section(
+    *,
+    detection,
+    version: str,
+    interactive: bool,
+    decision: str,
+    patch_claude_md_repo: str | None,
+) -> bool:
+    """Repo-scope ./CLAUDE.md — parallel to user-scope ~/.claude/CLAUDE.md."""
+    from conductor.agent_wiring import wire_claude_md_repo
+
+    already = any(a.kind == "claude-md-repo-import" for a in detection.managed)
+    return _wire_sentinel_section(
+        title="CLAUDE.md (repo-scoped)",
+        filename="CLAUDE.md",
+        path=detection.claude_md_repo,
+        path_exists=detection.claude_md_repo_exists,
+        already_wired=already,
+        wire_fn=wire_claude_md_repo,
+        version=version,
+        interactive=interactive,
+        patch_flag=patch_claude_md_repo,
+    )
+
+
+def _wire_cursor_section(
+    *,
+    detection,
+    version: str,
+    interactive: bool,
+    decision: str,
+    wire_cursor_flag: str | None,
+) -> bool:
+    """Cursor rule at <repo>/.cursor/rules/conductor-delegation.md.
+
+    Unlike the sentinel-block cases, this is a fully-managed file —
+    conductor owns it whole. ``unwire`` deletes it.
+    """
+    from conductor.agent_wiring import wire_cursor
+
+    already_written = any(a.kind == "cursor-rule" for a in detection.managed)
+
+    click.echo("")
+    click.echo("─" * 60)
+    click.echo("Agent integration — Cursor rule (repo-scoped)")
+    click.echo("─" * 60)
+    rule_path = detection.cursor_rules_dir / "conductor-delegation.md"
+    if detection.cursor_rules_dir_exists:
+        if already_written:
+            click.echo(f"  {rule_path} already exists (managed by conductor).")
+            click.echo("  Re-running will refresh it to the current version.")
+        else:
+            click.echo("  Cursor rules dir found — conductor can write")
+            click.echo(f"    {rule_path}")
+            click.echo("  as a fully-managed rule (removable via --unwire).")
+    else:
+        click.echo(
+            f"  No .cursor/rules/ dir in {detection.cursor_rules_dir.parent}."
+        )
+        click.echo("  Conductor can create it and write the delegation rule —")
+        click.echo("  only useful if this repo is intended to use Cursor.")
+    click.echo("")
+
+    wc = (
+        wire_cursor_flag
+        if wire_cursor_flag is not None
+        else ("ask" if interactive else "no")
+    )
+    if wc == "ask":
+        verb = "refresh" if already_written else "write"
+        choice = _prompt_menu(
+            options=[
+                ("y", f"yes — {verb} the Cursor rule"),
+                ("n", "no — skip Cursor"),
+            ],
+            default="y" if detection.cursor_rules_dir_exists else "n",
+        )
+        if choice == "n":
+            return True
+        do_write = True
+    else:
+        do_write = wc == "yes"
+
+    if not do_write:
+        return True
+
+    try:
+        report = wire_cursor(version=version)
+    except Exception as exc:  # noqa: BLE001 — surface any unexpected failure
+        click.echo(f"  ✗ Cursor rule write failed: {exc}")
+        return False
+
+    click.echo(f"  ✓ wrote {report.path} (managed file)")
     click.echo("")
     return True
 

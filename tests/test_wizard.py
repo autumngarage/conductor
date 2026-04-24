@@ -612,6 +612,142 @@ def test_init_unwire_rejects_new_patch_agents_md_flag():
     assert "unwire" in result.output.lower()
 
 
+# ---------------------------------------------------------------------------
+# Slice C — GEMINI.md / repo CLAUDE.md / Cursor rule
+# ---------------------------------------------------------------------------
+
+
+def test_init_patch_gemini_md_yes_creates_block(mocker, tmp_path):
+    _stub_all_providers_unconfigured(mocker)
+    result = CliRunner().invoke(
+        main,
+        ["init", "--yes", "--wire-agents", "yes", "--patch-gemini-md", "yes"],
+    )
+    assert result.exit_code == 0, result.output
+    gemini_md = tmp_path / "repo" / "GEMINI.md"
+    assert gemini_md.exists()
+    text = gemini_md.read_text(encoding="utf-8")
+    assert "conductor:begin" in text
+    assert "Conductor delegation" in text
+
+
+def test_init_patch_claude_md_repo_yes_creates_import(mocker, tmp_path):
+    _stub_all_providers_unconfigured(mocker)
+    result = CliRunner().invoke(
+        main,
+        ["init", "--yes", "--wire-agents", "yes", "--patch-claude-md-repo", "yes"],
+    )
+    assert result.exit_code == 0, result.output
+    repo_claude = tmp_path / "repo" / "CLAUDE.md"
+    assert repo_claude.exists()
+    text = repo_claude.read_text(encoding="utf-8")
+    assert "conductor:begin" in text
+    assert "@" in text and "delegation-guidance.md" in text
+
+
+def test_init_wire_cursor_yes_writes_rule(mocker, tmp_path):
+    _stub_all_providers_unconfigured(mocker)
+    result = CliRunner().invoke(
+        main,
+        ["init", "--yes", "--wire-agents", "yes", "--wire-cursor", "yes"],
+    )
+    assert result.exit_code == 0, result.output
+    rule = tmp_path / "repo" / ".cursor" / "rules" / "conductor-delegation.md"
+    assert rule.exists()
+    text = rule.read_text(encoding="utf-8")
+    assert "managed-by: conductor" in text
+    assert "Conductor delegation" in text
+
+
+def test_init_all_slice_c_flags_yes_wires_everything(mocker, tmp_path):
+    _stub_all_providers_unconfigured(mocker)
+    result = CliRunner().invoke(
+        main,
+        [
+            "init", "--yes",
+            "--wire-agents", "yes",
+            "--patch-gemini-md", "yes",
+            "--patch-claude-md-repo", "yes",
+            "--wire-cursor", "yes",
+            "--patch-agents-md", "yes",
+            "--patch-claude-md", "no",  # skip user-scope to keep the test local
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    repo = tmp_path / "repo"
+    assert (repo / "AGENTS.md").exists()
+    assert (repo / "GEMINI.md").exists()
+    assert (repo / "CLAUDE.md").exists()
+    assert (repo / ".cursor" / "rules" / "conductor-delegation.md").exists()
+
+
+def test_init_slice_c_unwire_removes_all(mocker, tmp_path):
+    _stub_all_providers_unconfigured(mocker)
+    # Wire everything.
+    CliRunner().invoke(
+        main,
+        [
+            "init", "--yes",
+            "--wire-agents", "yes",
+            "--patch-gemini-md", "yes",
+            "--patch-claude-md-repo", "yes",
+            "--wire-cursor", "yes",
+        ],
+    )
+    repo = tmp_path / "repo"
+    assert (repo / "GEMINI.md").exists()
+
+    # Unwire removes all of it.
+    result = CliRunner().invoke(main, ["init", "--unwire"])
+    assert result.exit_code == 0, result.output
+    assert not (repo / "GEMINI.md").exists()
+    assert not (repo / "CLAUDE.md").exists()
+    assert not (repo / ".cursor" / "rules" / "conductor-delegation.md").exists()
+
+
+def test_init_unwire_rejects_slice_c_flags():
+    """--unwire must refuse combination with any Slice C wiring flag."""
+    for flag, value in [
+        ("--patch-gemini-md", "yes"),
+        ("--patch-claude-md-repo", "yes"),
+        ("--wire-cursor", "yes"),
+    ]:
+        result = CliRunner().invoke(main, ["init", "--unwire", flag, value])
+        assert result.exit_code == 2, f"{flag}: {result.output}"
+        assert "unwire" in result.output.lower()
+
+
+def test_init_slice_c_preserves_user_content(mocker, tmp_path):
+    """GEMINI.md and CLAUDE.md with existing user content must have that
+    content preserved through wire + unwire."""
+    _stub_all_providers_unconfigured(mocker)
+    repo = tmp_path / "repo"
+    (repo / "GEMINI.md").write_text("# My Gemini\n\nRule.\n", encoding="utf-8")
+    (repo / "CLAUDE.md").write_text("# My Claude\n\nRule.\n", encoding="utf-8")
+
+    CliRunner().invoke(
+        main,
+        [
+            "init", "--yes",
+            "--wire-agents", "yes",
+            "--patch-gemini-md", "yes",
+            "--patch-claude-md-repo", "yes",
+            "--patch-claude-md", "no",
+        ],
+    )
+    CliRunner().invoke(main, ["init", "--unwire"])
+
+    gemini_text = (repo / "GEMINI.md").read_text(encoding="utf-8")
+    assert "# My Gemini" in gemini_text
+    assert "Rule." in gemini_text
+    assert "conductor:begin" not in gemini_text
+
+    claude_text = (repo / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "# My Claude" in claude_text
+    assert "Rule." in claude_text
+    assert "conductor:begin" not in claude_text
+
+
 def test_init_patch_agents_md_yes_without_claude_still_works(mocker, tmp_path):
     """Codex-only user (no Claude Code) must get AGENTS.md patched when
     explicitly asked, even with no Claude Code detected."""

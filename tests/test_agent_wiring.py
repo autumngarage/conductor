@@ -530,3 +530,170 @@ def test_unwire_with_explicit_cwd_only_touches_that_dir(tmp_path):
     assert not (tmp_path / "repo" / "AGENTS.md").exists()
     # The one in `other` is untouched because unwire() didn't look there.
     assert "conductor:begin" in (other / "AGENTS.md").read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------------------- #
+# Slice C — GEMINI.md / repo CLAUDE.md / Cursor rule.
+# --------------------------------------------------------------------------- #
+
+
+def test_wire_gemini_md_injects_block():
+    from pathlib import Path
+
+    report = aw.wire_gemini_md(version="0.4.2")
+    path = Path.cwd() / "GEMINI.md"
+    assert report.path == path
+    text = path.read_text(encoding="utf-8")
+    assert "conductor:begin v0.4.2" in text
+    assert "Conductor delegation" in text
+
+
+def test_wire_gemini_md_preserves_user_content():
+    from pathlib import Path
+
+    path = Path.cwd() / "GEMINI.md"
+    path.write_text("# My Gemini rules\n\nDo Z.\n", encoding="utf-8")
+    aw.wire_gemini_md(version="0.4.2")
+    text = path.read_text(encoding="utf-8")
+    assert "# My Gemini rules" in text
+    assert "Do Z." in text
+    assert "conductor:begin" in text
+
+
+def test_wire_claude_md_repo_injects_import_line():
+    """Repo-scope CLAUDE.md gets the @-import line (not inline block)."""
+    from pathlib import Path
+
+    report = aw.wire_claude_md_repo(version="0.4.2")
+    path = Path.cwd() / "CLAUDE.md"
+    assert report.path == path
+    text = path.read_text(encoding="utf-8")
+    assert "conductor:begin v0.4.2" in text
+    assert "@" in text and "delegation-guidance.md" in text
+
+
+def test_wire_claude_md_repo_vs_user_scope_independent(tmp_path):
+    """User-scope ~/.claude/CLAUDE.md and repo ./CLAUDE.md are different
+    files with independent sentinel blocks — neither wire clobbers the other."""
+    aw.wire_claude_code("0.4.2", patch_claude_md=True)  # user-scope
+    aw.wire_claude_md_repo(version="0.4.2")              # repo-scope
+
+    user_path = aw.claude_home() / "CLAUDE.md"
+    repo_path = tmp_path / "repo" / "CLAUDE.md"
+    assert user_path.exists() and "conductor:begin" in user_path.read_text(encoding="utf-8")
+    assert repo_path.exists() and "conductor:begin" in repo_path.read_text(encoding="utf-8")
+
+
+def test_wire_cursor_writes_managed_rule_file():
+    """Cursor rule is fully-managed — YAML frontmatter + body, deletable as one."""
+    from pathlib import Path
+
+    report = aw.wire_cursor(version="0.4.2")
+    path = Path.cwd() / ".cursor" / "rules" / "conductor-delegation.md"
+    assert report.path == path
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("---\n")
+    assert "description:" in text
+    assert "managed-by: conductor v0.4.2" in text
+    assert "Conductor delegation" in text
+    assert aw.is_managed_file(path)
+
+
+def test_wire_cursor_creates_nested_dirs():
+    """Even without .cursor/rules/ existing, wire_cursor creates the path."""
+    from pathlib import Path
+
+    aw.wire_cursor(version="0.4.2")
+    assert (Path.cwd() / ".cursor" / "rules").is_dir()
+    assert (Path.cwd() / ".cursor" / "rules" / "conductor-delegation.md").exists()
+
+
+def test_detect_picks_up_all_slice_c_artifacts():
+    aw.wire_gemini_md(version="0.4.2")
+    aw.wire_claude_md_repo(version="0.4.2")
+    aw.wire_cursor(version="0.4.2")
+
+    d = aw.detect()
+    kinds = {a.kind for a in d.managed}
+    assert "gemini-md-import" in kinds
+    assert "claude-md-repo-import" in kinds
+    assert "cursor-rule" in kinds
+
+
+def test_detect_reports_slice_c_existence_fields():
+    from pathlib import Path
+
+    d = aw.detect()
+    # Nothing present yet.
+    assert d.gemini_md == Path.cwd() / "GEMINI.md"
+    assert d.gemini_md_exists is False
+    assert d.claude_md_repo == Path.cwd() / "CLAUDE.md"
+    assert d.claude_md_repo_exists is False
+    assert d.cursor_rules_dir == Path.cwd() / ".cursor" / "rules"
+    assert d.cursor_rules_dir_exists is False
+
+    # After wiring, existence flips.
+    aw.wire_gemini_md(version="0.4.2")
+    aw.wire_claude_md_repo(version="0.4.2")
+    aw.wire_cursor(version="0.4.2")
+    d = aw.detect()
+    assert d.gemini_md_exists is True
+    assert d.claude_md_repo_exists is True
+    assert d.cursor_rules_dir_exists is True
+
+
+def test_unwire_removes_every_slice_c_artifact(tmp_path):
+    aw.wire_gemini_md(version="0.4.2")
+    aw.wire_claude_md_repo(version="0.4.2")
+    aw.wire_cursor(version="0.4.2")
+
+    aw.unwire()
+    # GEMINI.md and CLAUDE.md had only our blocks → deleted whole.
+    assert not (tmp_path / "repo" / "GEMINI.md").exists()
+    assert not (tmp_path / "repo" / "CLAUDE.md").exists()
+    # Cursor rule was fully-managed → deleted.
+    assert not (tmp_path / "repo" / ".cursor" / "rules" / "conductor-delegation.md").exists()
+
+
+def test_unwire_preserves_user_content_in_all_sentinel_files(tmp_path):
+    """For GEMINI.md and CLAUDE.md, user content outside the block must
+    survive unwire unchanged."""
+    for name in ("GEMINI.md", "CLAUDE.md"):
+        (tmp_path / "repo" / name).write_text(
+            f"# My {name}\n\nUser stuff.\n", encoding="utf-8"
+        )
+    aw.wire_gemini_md(version="0.4.2")
+    aw.wire_claude_md_repo(version="0.4.2")
+    aw.unwire()
+
+    for name in ("GEMINI.md", "CLAUDE.md"):
+        text = (tmp_path / "repo" / name).read_text(encoding="utf-8")
+        assert "User stuff." in text
+        assert "conductor:begin" not in text
+
+
+def test_cursor_rule_refuses_to_overwrite_user_owned_file(tmp_path):
+    """If the user already has a rule at the managed path, wire_cursor
+    must surface a UserOwnedFileError rather than overwriting."""
+    rule_path = tmp_path / "repo" / ".cursor" / "rules" / "conductor-delegation.md"
+    rule_path.parent.mkdir(parents=True)
+    rule_path.write_text("# my hand-written rule\n", encoding="utf-8")
+
+    with pytest.raises(aw.UserOwnedFileError):
+        aw.wire_cursor(version="0.4.2")
+    assert rule_path.read_text(encoding="utf-8") == "# my hand-written rule\n"
+
+
+def test_user_scope_claude_md_classified_correctly():
+    """~/.claude/CLAUDE.md detection kind is 'claude-md-import' (user-scope),
+    distinct from repo CLAUDE.md's 'claude-md-repo-import'."""
+    aw.wire_claude_code("0.4.2", patch_claude_md=True)   # user-scope
+    aw.wire_claude_md_repo(version="0.4.2")              # repo-scope
+
+    d = aw.detect()
+    kinds = [a.kind for a in d.managed]
+    assert "claude-md-import" in kinds          # user-scope
+    assert "claude-md-repo-import" in kinds     # repo-scope
+    # Two distinct entries; neither swallowed by the other.
+    assert kinds.count("claude-md-import") == 1
+    assert kinds.count("claude-md-repo-import") == 1

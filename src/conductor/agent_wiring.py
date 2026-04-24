@@ -104,6 +104,12 @@ class Detection:
     conductor_home: Path
     agents_md: Path                  # ./AGENTS.md in cwd — may or may not exist
     agents_md_exists: bool
+    gemini_md: Path                  # ./GEMINI.md in cwd
+    gemini_md_exists: bool
+    claude_md_repo: Path              # ./CLAUDE.md in cwd (repo-scope)
+    claude_md_repo_exists: bool
+    cursor_rules_dir: Path            # ./.cursor/rules/ in cwd
+    cursor_rules_dir_exists: bool
     managed: tuple[AgentArtifact, ...] = field(default_factory=tuple)
 
     @property
@@ -116,9 +122,9 @@ def detect(*, cwd: Path | None = None) -> Detection:
     """Scan the current environment for Claude Code + any managed files.
 
     Args:
-        cwd: where to look for repo-scoped files like ``./AGENTS.md``.
-            Defaults to the process's current working directory; tests
-            pass an explicit ``tmp_path`` for isolation.
+        cwd: where to look for repo-scoped files (AGENTS.md, GEMINI.md,
+            CLAUDE.md, .cursor/rules/). Defaults to the process's cwd;
+            tests pass an explicit ``tmp_path`` for isolation.
     """
     ch = claude_home()
     ch_exists = ch.is_dir()
@@ -126,28 +132,23 @@ def detect(*, cwd: Path | None = None) -> Detection:
     user_md = ch / "CLAUDE.md"
     work_dir = cwd or Path.cwd()
     agents_md = work_dir / "AGENTS.md"
+    gemini_md = work_dir / "GEMINI.md"
+    claude_md_repo = work_dir / "CLAUDE.md"
+    cursor_rules_dir = work_dir / ".cursor" / "rules"
 
     managed: list[AgentArtifact] = []
-    for path, kind in _candidate_artifacts().items():
+
+    # Fully-managed files: read the managed-by marker; skip anything we
+    # didn't write.
+    for path, kind in _candidate_artifacts(cwd=work_dir).items():
         if not path.exists():
             continue
         version = read_managed_version(path)
-        if version is None and kind != "claude-md-import":
-            # A non-managed file at a managed path — leave alone, not ours.
-            continue
-        if kind == "claude-md-import":
-            # CLAUDE.md is user-owned; we own only the sentinel block.
-            has_block = _has_sentinel_block(path)
-            if not has_block:
-                continue
-            managed.append(
-                AgentArtifact(path=path, kind=kind, version=_block_version(path), owned=True)
-            )
+        if version is None:
             continue
         managed.append(AgentArtifact(path=path, kind=kind, version=version, owned=True))
 
-    # Sentinel-block paths in cwd (AGENTS.md). Same ownership model as
-    # claude-md-import: file is user-owned, only the block is conductor's.
+    # Sentinel-block files (user-owned; only our block is ours).
     for path, kind in _candidate_sentinel_paths(cwd=work_dir).items():
         if not path.exists() or not _has_sentinel_block(path):
             continue
@@ -164,16 +165,21 @@ def detect(*, cwd: Path | None = None) -> Detection:
         conductor_home=conductor_home(),
         agents_md=agents_md,
         agents_md_exists=agents_md.exists(),
+        gemini_md=gemini_md,
+        gemini_md_exists=gemini_md.exists(),
+        claude_md_repo=claude_md_repo,
+        claude_md_repo_exists=claude_md_repo.exists(),
+        cursor_rules_dir=cursor_rules_dir,
+        cursor_rules_dir_exists=cursor_rules_dir.is_dir(),
         managed=tuple(managed),
     )
 
 
-def _candidate_artifacts() -> dict[Path, str]:
-    """Fully-managed paths conductor may own (excludes user-owned files
-    that take only a sentinel-block injection — those go through
-    ``_candidate_sentinel_paths``)."""
+def _candidate_artifacts(*, cwd: Path | None = None) -> dict[Path, str]:
+    """Fully-managed paths conductor may own (written whole, deleted whole)."""
     ch = claude_home()
     conductor = conductor_home()
+    cwd = cwd or Path.cwd()
     return {
         conductor / "delegation-guidance.md": "guidance",
         ch / "commands" / "conductor.md": "slash-command",
@@ -182,20 +188,27 @@ def _candidate_artifacts() -> dict[Path, str]:
         ch / "agents" / "codex-coding-agent.md": "subagent",
         ch / "agents" / "ollama-offline.md": "subagent",
         ch / "agents" / "conductor-auto.md": "subagent",
-        ch / "CLAUDE.md": "claude-md-import",
+        cwd / ".cursor" / "rules" / "conductor-delegation.md": "cursor-rule",
     }
 
 
 def _candidate_sentinel_paths(*, cwd: Path | None = None) -> dict[Path, str]:
-    """User-owned files that conductor injects sentinel blocks into.
+    """User-owned files where conductor injects sentinel blocks only.
 
-    Currently:
-      - ``./AGENTS.md`` in the caller's cwd (Codex / Cursor / shared
-        convention). One file per repo; conductor doesn't walk the tree.
+    User-scope (cwd-independent):
+      - ``~/.claude/CLAUDE.md`` — Claude Code global config.
+
+    Repo-scope (under ``cwd``):
+      - ``./AGENTS.md``  — Codex / Cursor / Zed / shared convention.
+      - ``./GEMINI.md``  — Gemini CLI convention.
+      - ``./CLAUDE.md``  — Claude Code repo-scope config.
     """
     cwd = cwd or Path.cwd()
     return {
+        claude_home() / "CLAUDE.md": "claude-md-import",
         cwd / "AGENTS.md": "agents-md-import",
+        cwd / "GEMINI.md": "gemini-md-import",
+        cwd / "CLAUDE.md": "claude-md-repo-import",
     }
 
 
@@ -402,12 +415,10 @@ def unwire(*, cwd: Path | None = None) -> UnwireReport:
     """
     removed: list[Path] = []
     skipped: list[tuple[Path, str]] = []
-    for path, kind in _candidate_artifacts().items():
+
+    # Fully-managed files: delete whole, but only if marker still matches.
+    for path, _kind in _candidate_artifacts(cwd=cwd).items():
         if not path.exists():
-            continue
-        if kind == "claude-md-import":
-            if remove_sentinel_block(path):
-                removed.append(path)
             continue
         if not is_managed_file(path):
             skipped.append((path, "not conductor-managed (hand-edited?)"))
@@ -418,7 +429,7 @@ def unwire(*, cwd: Path | None = None) -> UnwireReport:
         except OSError as e:
             skipped.append((path, f"unlink failed: {e}"))
 
-    # Sentinel-block paths in cwd (AGENTS.md).
+    # Sentinel-block files (user-scope + repo-scope): strip the block only.
     for path, _kind in _candidate_sentinel_paths(cwd=cwd).items():
         if path.exists() and remove_sentinel_block(path):
             removed.append(path)
@@ -586,6 +597,64 @@ def wire_agents_md(cwd: Path | None = None, *, version: str) -> AgentsMdReport:
     cwd = cwd or Path.cwd()
     path = cwd / "AGENTS.md"
     inject_sentinel_block(path, templates.AGENTS_MD_BLOCK, version=version)
+    return AgentsMdReport(path=path, patched=True)
+
+
+def wire_gemini_md(cwd: Path | None = None, *, version: str) -> AgentsMdReport:
+    """Inject conductor's delegation block into ``./GEMINI.md`` in ``cwd``.
+
+    Gemini CLI reads GEMINI.md. Like AGENTS.md, no ``@`` import mechanism,
+    so the block is inlined with the sentinel pattern.
+    """
+    from conductor import _agent_templates as templates
+
+    cwd = cwd or Path.cwd()
+    path = cwd / "GEMINI.md"
+    inject_sentinel_block(path, templates.GEMINI_MD_BLOCK, version=version)
+    return AgentsMdReport(path=path, patched=True)
+
+
+def wire_claude_md_repo(cwd: Path | None = None, *, version: str) -> AgentsMdReport:
+    """Inject an ``@`` import line into repo-scope ``./CLAUDE.md``.
+
+    Parallel to the user-scope ``~/.claude/CLAUDE.md`` patch in
+    ``wire_claude_code(patch_claude_md=True)``. Same sentinel-block
+    mechanism; difference is only scope (per-repo vs global).
+    """
+    cwd = cwd or Path.cwd()
+    path = cwd / "CLAUDE.md"
+    import_line = f"@{conductor_home()}/delegation-guidance.md"
+    inject_sentinel_block(path, import_line, version=version)
+    return AgentsMdReport(path=path, patched=True)
+
+
+def wire_cursor(cwd: Path | None = None, *, version: str) -> AgentsMdReport:
+    """Write Cursor's conductor-delegation rule at
+    ``<cwd>/.cursor/rules/conductor-delegation.md``.
+
+    Unlike the markdown instruction files above, Cursor rules are
+    fully-managed — the file is conductor's whole (YAML frontmatter
+    with ``description`` / ``globs`` / ``alwaysApply`` keys plus a body
+    rendered from ``CURSOR_RULE_BODY``).
+    """
+    from conductor import _agent_templates as templates
+
+    cwd = cwd or Path.cwd()
+    path = cwd / ".cursor" / "rules" / "conductor-delegation.md"
+    write_managed_frontmatter(
+        path,
+        {
+            "description": (
+                "Use when delegating or routing tasks to a different LLM via "
+                "the conductor CLI — e.g., cheap second opinions, long-context "
+                "reads, web search, or offline runs."
+            ),
+            "globs": "",
+            "alwaysApply": "false",
+        },
+        templates.CURSOR_RULE_BODY,
+        version=version,
+    )
     return AgentsMdReport(path=path, patched=True)
 
 

@@ -60,6 +60,33 @@ Deferred (see `autumn-garage/.cortex/plans/conductor-bootstrap.md`):
 - 1Password (`op run`) storage backend for `conductor init`.
 - Brew tap for `brew install autumngarage/conductor/conductor`.
 
+## Agent integration (v0.4.x)
+
+`conductor init` detects which agent tools you have installed (Claude Code,
+Codex, Cursor, Gemini CLI, Zed — anything that reads `AGENTS.md` /
+`CLAUDE.md` / `GEMINI.md`, or looks at `.cursor/rules/`) and offers to wire
+conductor in so those agents can delegate to other LLMs without you
+hand-authoring any prompts:
+
+- Writes `~/.conductor/delegation-guidance.md` (canonical guidance) and
+  appropriate user-scope artifacts (slash command + subagents for Claude Code).
+- Injects a self-contained delegation block into any agent instruction
+  files present in your repo (`AGENTS.md`, `GEMINI.md`, `CLAUDE.md`).
+  Existing user content is preserved — the block is bounded by
+  `<!-- conductor:begin -->` markers.
+- Writes a Cursor rule at `.cursor/rules/conductor-delegation.md` if
+  the directory exists.
+
+On a TTY you get a prompt per detected file (default yes); in CI use
+`--wire-agents=yes`, `--patch-claude-md=yes`, `--patch-agents-md=yes`,
+`--patch-gemini-md=yes`, `--patch-claude-md-repo=yes`, and `--wire-cursor=yes`
+to accept specific pieces without interaction. Everything conductor writes
+is marked `managed-by: conductor vX.Y.Z`; `conductor init --unwire` removes
+exactly those files and strips the sentinel blocks, preserving user content.
+
+Diagnose wiring state anytime with `conductor doctor` (JSON shape:
+`--json`).
+
 ## How Sentinel and Touchstone use it
 
 Once Conductor v0.1 ships, both consumers migrate from per-tool provider implementations to `conductor call` shell-outs. That migration lands in separate plans (`autumn-garage/.cortex/plans/sentinel-conductor-migration.md` and `…/touchstone-conductor-migration.md`) and is not part of v0.1.

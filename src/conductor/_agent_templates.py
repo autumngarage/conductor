@@ -292,10 +292,14 @@ Ollama is unavailable. Say so plainly and let the user decide —
 
 
 # --------------------------------------------------------------------------- #
-# AGENTS.md sentinel-block content — injected into repo-root AGENTS.md.
-# Must be self-contained: AGENTS.md has no @import mechanism, so the block
-# inlines the key info directly. References ~/.conductor/delegation-guidance.md
-# for the full version.
+# Repo-scope instruction-file blocks (AGENTS.md, GEMINI.md).
+#
+# Both files are markdown instruction files consumed by their respective
+# agents. Neither has an ``@`` import mechanism, so we inline a self-contained
+# block via the sentinel-block pattern. Content is identical — the audience
+# is any AI agent reading a project's instruction file — so AGENTS_MD_BLOCK
+# and GEMINI_MD_BLOCK share text. Separate constants exist so future
+# divergence (e.g., Gemini-specific phrasing) is a one-line change.
 # --------------------------------------------------------------------------- #
 
 AGENTS_MD_BLOCK = """## Conductor delegation
@@ -324,6 +328,42 @@ Providers commonly worth delegating to:
 Full delegation guidance (when to delegate, when not to, error handling):
 
     ~/.conductor/delegation-guidance.md
+"""
+
+
+GEMINI_MD_BLOCK = AGENTS_MD_BLOCK  # Identical content today; split if divergent.
+
+
+# --------------------------------------------------------------------------- #
+# Cursor rule file — fully-managed at <repo>/.cursor/rules/conductor-delegation.md.
+#
+# Cursor reads rule files with YAML frontmatter (description, globs,
+# alwaysApply). Unlike AGENTS.md / GEMINI.md, this file is conductor's
+# whole — the managed-by key sits in the frontmatter.
+# --------------------------------------------------------------------------- #
+
+CURSOR_RULE_BODY = """# Conductor delegation
+
+This project has [conductor](https://github.com/autumngarage/conductor)
+available — a CLI that dispatches work to other LLMs (Kimi, Gemini,
+Claude, Codex, Ollama) under a uniform interface.
+
+Use it when:
+- You want a cheap second opinion (`conductor call --with kimi --task "…"`).
+- You need fresh web information (`conductor call --with gemini --task "…"`).
+- You want to stay local / offline (`conductor call --with ollama --task "…"`).
+- You're not sure which provider fits — let the router pick:
+  `conductor call --auto --tags <tag1>,<tag2> --task "…"`.
+
+For longer running tool-using sessions:
+
+    conductor exec --with <provider> --tools Read,Edit,Bash \\
+        --sandbox workspace-write --task "…"
+
+Discover configured providers: `conductor list`.
+
+Full delegation guidance (when to delegate, when not to, error handling):
+`~/.conductor/delegation-guidance.md`
 """
 
 
