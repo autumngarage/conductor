@@ -25,7 +25,7 @@ from dataclasses import asdict
 
 import click
 
-from conductor import __version__, credentials
+from conductor import __version__, credentials, offline_mode
 from conductor.providers import (
     QUALITY_TIERS,
     CallResponse,
@@ -136,6 +136,39 @@ def _validate_prefer(raw: str | None) -> str:
     return raw
 
 
+def _apply_offline_flag(
+    *, offline: bool | None, provider_id: str | None, auto: bool
+) -> tuple[str | None, bool]:
+    """Translate ``--offline/--no-offline`` into the routing knobs.
+
+    Returns ``(provider_id, auto)`` with offline semantics applied:
+
+    - ``--offline`` (True): sets the sticky offline flag, and — if the user
+      didn't otherwise ask for a specific provider — forces ``--with ollama``.
+      If ``--with`` was set to a non-ollama provider, that's a contradiction
+      and we raise UsageError. If ``--auto`` is set, we leave it alone: the
+      sticky flag makes ``_invoke_with_fallback`` reorder ollama to the front,
+      which is what the user wanted.
+    - ``--no-offline`` (False): clears the sticky flag, then behaves normally.
+    - ``None``: no-op.
+    """
+    if offline is None:
+        return provider_id, auto
+    if offline is False:
+        offline_mode.clear()
+        return provider_id, auto
+    # offline is True
+    if provider_id and provider_id != "ollama":
+        raise click.UsageError(
+            f"--offline forces the local provider; --with {provider_id} "
+            "contradicts it. Use one or the other."
+        )
+    offline_mode.set_active()
+    if not auto and not provider_id:
+        provider_id = "ollama"
+    return provider_id, auto
+
+
 def _closest(query: str, options: tuple[str, ...]) -> str:
     from difflib import get_close_matches
 
@@ -143,15 +176,29 @@ def _closest(query: str, options: tuple[str, ...]) -> str:
     return match[0] if match else options[0]
 
 
-_RETRYABLE_ERROR_SIGNALS = (
-    " 5",              # 5xx HTTP codes in error strings (e.g., "HTTP 503:")
-    "429",             # rate-limit
-    "overloaded",      # anthropic 529 wording
-    "timed out",       # subprocess + httpx
-    "timeout",
-    "rate limit",
-    "ratelimit",
-    "upstream",
+# Message fragments that indicate a connectivity-level failure (DNS
+# resolution, TCP reset, unreachable host, etc.). These are what httpx /
+# urllib / subprocess tooling surface when the network is gone — the
+# airplane-mode case. Matched case-insensitively. Kept conservative: a
+# false positive merely cascades a fallback that would have failed anyway,
+# but a false negative means we refuse to offer the local-model swap.
+_NETWORK_ERROR_SIGNALS = (
+    "connection refused",
+    "connection reset",
+    "connection aborted",
+    "connection error",       # httpx ConnectError str()
+    "connect call failed",    # asyncio
+    "could not resolve",      # curl / some python stacks
+    "name or service not known",
+    "nodename nor servname",  # macOS getaddrinfo wording
+    "temporary failure in name resolution",
+    "network is unreachable",
+    "network is down",        # macOS airplane mode, ENETDOWN
+    "no route to host",
+    "no address associated",
+    "no such host",
+    "host is down",
+    "getaddrinfo failed",
 )
 
 
@@ -159,11 +206,16 @@ def _is_retryable(err: Exception) -> tuple[bool, str]:
     """Classify an error as retryable-with-fallback or fatal.
 
     Returns (retryable, category) — category is "rate-limit" | "5xx" |
-    "timeout" | "other" for health-tracking purposes.
+    "timeout" | "network" | "other" for health-tracking and fallback-UX
+    routing purposes. "network" is separate from "timeout" so the offline-
+    mode prompt can fire on the real thing (DNS/TCP failure) rather than
+    on a slow-but-reachable upstream.
     """
     msg = str(err).lower()
     if "429" in msg or "rate limit" in msg or "ratelimit" in msg:
         return True, "rate-limit"
+    if any(sig in msg for sig in _NETWORK_ERROR_SIGNALS):
+        return True, "network"
     if "timed out" in msg or "timeout" in msg:
         return True, "timeout"
     # HTTP 5xx — check for " 5" preceded by "http" or a similar prefix so
@@ -172,6 +224,143 @@ def _is_retryable(err: Exception) -> tuple[bool, str]:
     if any(sig in msg for sig in signals):
         return True, "5xx"
     return False, "other"
+
+
+def _ollama_index(candidates: list) -> int | None:
+    """Return the index of ollama in ``candidates`` (or None if absent)."""
+    for i, c in enumerate(candidates):
+        if c.name == "ollama":
+            return i
+    return None
+
+
+def _reorder_ollama_first(candidates: list) -> bool:
+    """Move ollama to the head of ``candidates``; return True if mutated."""
+    idx = _ollama_index(candidates)
+    if idx is None or idx == 0:
+        return False
+    candidates.insert(0, candidates.pop(idx))
+    return True
+
+
+def _stderr_is_tty() -> bool:
+    """Best-effort check: are we talking to a human on stderr + stdin?
+
+    click.confirm() prompts on stderr when ``err=True``. We also need
+    stdin to be a TTY so the user can actually answer. Either one being
+    non-interactive (pipes, CI, test harness) should skip the prompt.
+    """
+    try:
+        return sys.stdin.isatty() and sys.stderr.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _echo_offline_hint(failed_name: str, *, silent: bool) -> None:
+    """Print a hint pointing at ollama when we couldn't prompt."""
+    if silent:
+        return
+    click.echo(
+        f"[conductor] {failed_name} is unreachable and no local fallback "
+        "is available for automatic switching. If you are offline, run "
+        "`conductor call --with ollama --task '...'` (or pass --offline).",
+        err=True,
+    )
+
+
+def _maybe_echo_explicit_network_hint(provider_id: str, err: Exception) -> None:
+    """On a network-category failure in explicit (--with) mode, nudge local.
+
+    The auto-mode path has its own prompt + sticky-flag dance. Explicit mode
+    can't reroute silently (the user asked for this provider specifically),
+    so the most helpful thing is a one-line suggestion. No-op when the user
+    already picked ollama, or when the failure isn't network-shaped.
+    """
+    if provider_id == "ollama":
+        return
+    _, category = _is_retryable(err)
+    if category != "network":
+        return
+    click.echo(
+        f"[conductor] {provider_id} looks unreachable (network error). "
+        "If you are offline: `conductor call --offline --task '...'` "
+        "or `conductor call --with ollama --task '...'`.",
+        err=True,
+    )
+
+
+def _maybe_switch_to_ollama(
+    *,
+    failed: str,
+    candidates: list,
+    cursor: int,
+    silent: bool,
+) -> bool | None:
+    """Ask the user whether to skip ahead to ollama, then rewrite candidates.
+
+    Returns:
+      True  — user confirmed; ``candidates`` now has ollama at ``cursor + 1``
+              and later remote candidates dropped. Sticky-flag setting is the
+              caller's responsibility.
+      False — user declined. ``candidates`` is unchanged; the normal cascade
+              continues through whatever remote candidates are left.
+      None  — we couldn't prompt (non-TTY, or ollama not in the remaining
+              candidates, or ollama isn't actually reachable locally). Caller
+              should treat this as "the offline fallback isn't wired up right
+              now" and print a hint + re-raise.
+    """
+    remaining_idx = _ollama_index(candidates[cursor + 1 :])
+    if remaining_idx is None:
+        # Ollama isn't even in the ranking — nothing to offer.
+        return None
+    absolute_idx = cursor + 1 + remaining_idx
+
+    ollama = get_provider("ollama")
+    ok, reason = ollama.configured()
+    if not ok:
+        if not silent:
+            click.echo(
+                f"[conductor] {failed} is unreachable and ollama is not "
+                f"running locally ({reason}). Start it with `ollama serve` "
+                "or re-run with a different provider.",
+                err=True,
+            )
+        return None
+
+    if not _stderr_is_tty():
+        return None
+
+    default_model = getattr(ollama, "default_model", "local")
+    click.echo("", err=True)
+    click.echo(
+        f"⚠ {failed} is unreachable — you appear to be offline.",
+        err=True,
+    )
+    try:
+        answer = click.confirm(
+            f"  Fall back to local model ({default_model} via ollama)?",
+            default=True,
+            err=True,
+        )
+    except click.Abort:
+        return False
+
+    if not answer:
+        # The user explicitly declined the local switch. Respect that —
+        # drop ollama from the remaining ranking so a silent cascade
+        # doesn't route through it anyway. The normal fallback chain
+        # keeps trying any other remote candidates below, and re-raises
+        # the original error if none are left.
+        del candidates[absolute_idx]
+        return False
+
+    # Truncate: drop any remote candidates between the current cursor and
+    # ollama, and drop anything after ollama too. The user opted for local,
+    # so we don't want to keep trying other remotes if ollama itself fails.
+    ollama_candidate = candidates[absolute_idx]
+    del candidates[cursor + 1 :]
+    candidates.append(ollama_candidate)
+    return True
 
 
 def _invoke_with_fallback(
@@ -188,17 +377,40 @@ def _invoke_with_fallback(
     silent: bool,
     resume_session_id: str | None = None,
 ) -> tuple[CallResponse, list[str]]:
-    """Try the decision's ranked providers in order; one-hop fallback on 5xx.
+    """Try the decision's ranked providers in order; fallback on retryable errors.
 
     Returns (response, fallbacks_used). fallbacks_used is the list of
     provider names attempted before the successful one (excluding the final).
 
     Raises the last ProviderError if every candidate fails.
+
+    Offline-mode integration:
+      - If ``offline_mode.is_active()`` and ollama is in the ranking, ollama
+        is moved to the head of the list so we try local first.
+      - On the first "network"-category failure we prompt (TTY only) to
+        switch to ollama, truncating the remaining remote candidates on
+        acceptance. Accepting also sets the sticky offline flag so subsequent
+        invocations skip straight to local for the TTL window.
     """
     last_exc: Exception | None = None
     fallbacks: list[str] = []
+    candidates = list(decision.ranked)
 
-    for idx, candidate in enumerate(decision.ranked):
+    # Short-circuit evaluation is load-bearing here: _reorder_ollama_first
+    # mutates `candidates` and must run when the flag is active, even under
+    # --silent-route. The `not silent` only gates the log line.
+    if offline_mode.is_active() and _reorder_ollama_first(candidates) and not silent:
+        remaining_m = max(1, (offline_mode.seconds_remaining() + 59) // 60)
+        click.echo(
+            f"[conductor] offline mode active (~{remaining_m}m left) · "
+            "routing → ollama. Pass --no-offline to clear.",
+            err=True,
+        )
+
+    prompted_offline = False
+    idx = 0
+    while idx < len(candidates):
+        candidate = candidates[idx]
         provider = get_provider(candidate.name)
         try:
             if mode == "exec":
@@ -228,6 +440,7 @@ def _invoke_with_fallback(
         except UnsupportedCapability:
             # Router filter should prevent this; if it leaks through, skip.
             fallbacks.append(candidate.name)
+            idx += 1
             continue
         except ProviderError as e:
             retryable, category = _is_retryable(e)
@@ -238,15 +451,38 @@ def _invoke_with_fallback(
             if not retryable:
                 raise
             fallbacks.append(candidate.name)
-            if idx + 1 < len(decision.ranked):
-                next_name = decision.ranked[idx + 1].name
+
+            # First real connectivity failure in this invocation: prompt
+            # (or use the sticky flag) to switch to ollama instead of
+            # spraying timeouts across every remote in the ranking.
+            if category == "network" and not prompted_offline:
+                prompted_offline = True
+                decision_flag = _maybe_switch_to_ollama(
+                    failed=candidate.name,
+                    candidates=candidates,
+                    cursor=idx,
+                    silent=silent,
+                )
+                if decision_flag is None:
+                    # No fallback is actionable (ollama absent / not running /
+                    # non-TTY). Don't silently cascade through more remotes
+                    # that will also fail — surface the hint and re-raise.
+                    _echo_offline_hint(candidate.name, silent=silent)
+                    raise
+                if decision_flag:
+                    offline_mode.set_active()
+                # If False (user declined), fall through to the normal
+                # cascade — maybe it was a blip and claude works.
+
+            if idx + 1 < len(candidates):
+                next_name = candidates[idx + 1].name
                 if not silent:
                     click.echo(
                         f"[conductor] {candidate.name} failed ({category}) · "
                         f"falling back → {next_name}",
                         err=True,
                     )
-            # Try next candidate.
+            idx += 1
             continue
 
     # Exhausted every candidate; re-raise the last error for user visibility.
@@ -422,6 +658,13 @@ def main() -> None:
     default=None,
     help="Resume a prior session by ID (claude/codex/gemini only). Requires --with.",
 )
+@click.option(
+    "--offline/--no-offline",
+    "offline",
+    default=None,
+    help="--offline: force local (ollama) routing and set the sticky offline "
+    "flag. --no-offline: clear the sticky flag before running.",
+)
 def call(
     provider_id: str | None,
     auto: bool,
@@ -435,8 +678,12 @@ def call(
     verbose_route: bool,
     silent_route: bool,
     resume_session_id: str | None,
+    offline: bool | None,
 ) -> None:
     """Send a task to a provider and print the response."""
+    provider_id, auto = _apply_offline_flag(
+        offline=offline, provider_id=provider_id, auto=auto
+    )
     if auto and provider_id:
         raise click.UsageError("--with and --auto are mutually exclusive.")
     if not auto and not provider_id:
@@ -510,6 +757,7 @@ def call(
             sys.exit(2)
         except ProviderError as e:
             click.echo(f"conductor: {e}", err=True)
+            _maybe_echo_explicit_network_hint(provider_id, e)
             sys.exit(1)
 
     if auto and not as_json:
@@ -590,6 +838,13 @@ def call(
     default=None,
     help="Resume a prior session by ID (claude/codex/gemini only). Requires --with.",
 )
+@click.option(
+    "--offline/--no-offline",
+    "offline",
+    default=None,
+    help="--offline: force local (ollama) routing and set the sticky offline "
+    "flag. --no-offline: clear the sticky flag before running.",
+)
 def exec_cmd(
     provider_id: str | None,
     auto: bool,
@@ -607,8 +862,12 @@ def exec_cmd(
     verbose_route: bool,
     silent_route: bool,
     resume_session_id: str | None,
+    offline: bool | None,
 ) -> None:
     """Run a task as an agent session with tool access (exec mode)."""
+    provider_id, auto = _apply_offline_flag(
+        offline=offline, provider_id=provider_id, auto=auto
+    )
     if auto and provider_id:
         raise click.UsageError("--with and --auto are mutually exclusive.")
     if not auto and not provider_id:
@@ -685,6 +944,7 @@ def exec_cmd(
             sys.exit(2)
         except ProviderError as e:
             click.echo(f"conductor: {e}", err=True)
+            _maybe_echo_explicit_network_hint(provider_id, e)
             sys.exit(1)
 
     if auto and not as_json:

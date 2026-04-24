@@ -74,6 +74,7 @@ Shipped:
 - `conductor doctor [--json]` — diagnostic report: which providers are configured, which env vars are set, what's in the macOS Keychain.
 - `conductor init [-y]` — interactive first-run wizard (TTY-detected, `--yes` for non-TTY). For providers needing credentials (today just `kimi`), prompts, offers macOS Keychain / direnv `.envrc` / print-only storage, runs the smoke test, prints the equivalent non-interactive setup.
 - Credentials resolver (`conductor.credentials`): env var first, then macOS Keychain under service `conductor`.
+- Offline-mode fallback: on a real connectivity failure (DNS, TCP reset, unreachable host) during `--auto` routing, Conductor prompts once to switch to the local `ollama` provider and remembers that choice for a short window. `conductor call --offline --task "..."` is the non-interactive form — useful on a plane, in CI, or any time you want to force local. Clear the sticky flag with `--no-offline`.
 
 Deferred (see `autumn-garage/.cortex/plans/conductor-bootstrap.md`):
 
