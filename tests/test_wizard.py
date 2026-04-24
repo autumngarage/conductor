@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from click.testing import CliRunner
 
 from conductor.cli import main
@@ -9,6 +10,16 @@ from conductor.providers.kimi import (
     CLOUDFLARE_ACCOUNT_ID_ENV,
     CLOUDFLARE_API_TOKEN_ENV,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_agent_homes(tmp_path, monkeypatch):
+    """Isolate ~/.claude and ~/.conductor for every wizard test — otherwise
+    a wizard run could write into the developer's real home dir."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path / ".conductor"))
+    monkeypatch.setenv("CLAUDE_HOME", str(tmp_path / ".claude"))
+    # Default: Claude CLI not on PATH. Tests that need it patch explicitly.
+    monkeypatch.setattr("shutil.which", lambda _cmd: None)
 
 
 def test_init_non_interactive_mode_reports_state(mocker, monkeypatch):
@@ -310,6 +321,213 @@ def test_init_back_rewinds_previous_provider(mocker):
     assert result.exit_code == 0
     # The claude section header should appear twice (original + rewalk).
     assert result.output.count("[1/5]  claude") == 2
+
+
+# ---------------------------------------------------------------------------
+# Agent-integration wiring (Slice A)
+# ---------------------------------------------------------------------------
+
+
+def _stub_all_providers_unconfigured(mocker):
+    from conductor.providers import (
+        ClaudeProvider,
+        CodexProvider,
+        GeminiProvider,
+        KimiProvider,
+        OllamaProvider,
+    )
+    for cls in (
+        ClaudeProvider, CodexProvider, GeminiProvider, KimiProvider, OllamaProvider
+    ):
+        mocker.patch.object(cls, "configured", lambda self: (False, "stubbed"))
+
+
+def test_init_yes_does_not_auto_wire_without_flag(mocker, tmp_path):
+    """Non-interactive run with default flags must NOT write agent files.
+
+    Doctrine 0002: non-TTY paths are flag-driven; silent side effects on
+    fresh installs are forbidden.
+    """
+    _stub_all_providers_unconfigured(mocker)
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()  # Claude detected but no --wire-agents flag
+
+    result = CliRunner().invoke(main, ["init", "--yes"])
+    assert result.exit_code == 0
+    assert not (claude_dir / "commands" / "conductor.md").exists()
+    assert not (claude_dir / "agents" / "kimi-long-context.md").exists()
+
+
+def test_init_yes_with_wire_agents_yes_writes_files(mocker, tmp_path):
+    _stub_all_providers_unconfigured(mocker)
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    conductor_dir = tmp_path / ".conductor"
+
+    result = CliRunner().invoke(
+        main,
+        ["init", "--yes", "--wire-agents", "yes", "--patch-claude-md", "yes"],
+    )
+    assert result.exit_code == 0, result.output
+    assert (conductor_dir / "delegation-guidance.md").exists()
+    assert (claude_dir / "commands" / "conductor.md").exists()
+    assert (claude_dir / "agents" / "kimi-long-context.md").exists()
+    assert (claude_dir / "agents" / "gemini-web-search.md").exists()
+    claude_md = (claude_dir / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "conductor:begin" in claude_md
+    assert "delegation-guidance.md" in claude_md
+
+
+def test_init_yes_with_wire_agents_no_writes_nothing(mocker, tmp_path):
+    _stub_all_providers_unconfigured(mocker)
+    (tmp_path / ".claude").mkdir()
+
+    result = CliRunner().invoke(
+        main,
+        ["init", "--yes", "--wire-agents", "no"],
+    )
+    assert result.exit_code == 0
+    assert not (tmp_path / ".conductor" / "delegation-guidance.md").exists()
+    assert not (tmp_path / ".claude" / "commands" / "conductor.md").exists()
+
+
+def test_init_wire_agents_yes_without_claude_is_graceful(mocker, tmp_path):
+    """With --wire-agents=yes but no Claude detected, we report and no-op."""
+    _stub_all_providers_unconfigured(mocker)
+    # No ~/.claude/ dir; no claude on PATH.
+    result = CliRunner().invoke(
+        main, ["init", "--yes", "--wire-agents", "yes"]
+    )
+    assert result.exit_code == 0
+    assert not (tmp_path / ".conductor" / "delegation-guidance.md").exists()
+
+
+def test_init_only_skips_agent_wiring_entirely(mocker, tmp_path):
+    """--only narrows scope to one provider; agent wiring must not run."""
+    from conductor.providers import KimiProvider
+    mocker.patch.object(KimiProvider, "configured", lambda self: (True, None))
+    (tmp_path / ".claude").mkdir()
+
+    result = CliRunner().invoke(
+        main,
+        ["init", "--only", "kimi", "--yes", "--wire-agents", "yes"],
+    )
+    assert result.exit_code == 0
+    # No wiring despite --wire-agents=yes because --only narrowed scope.
+    assert not (tmp_path / ".conductor" / "delegation-guidance.md").exists()
+
+
+def test_init_interactive_claude_detected_prompts(mocker, tmp_path):
+    """On TTY with Claude detected, the wizard prompts and honors [n]."""
+    _stub_all_providers_unconfigured(mocker)
+    mocker.patch("conductor.wizard._is_tty", return_value=True)
+    (tmp_path / ".claude").mkdir()
+
+    # For each provider's concierge flow: [s]kip. Then at the agent prompt: [n]o.
+    # 5 providers × "s" (skip) + agent-wiring "n" (decline).
+    result = CliRunner().invoke(
+        main, ["init"], input="s\ns\ns\ns\ns\nn\n"
+    )
+    assert result.exit_code == 0
+    assert "Agent integration — Claude Code" in result.output
+    # User declined — no files written.
+    assert not (tmp_path / ".conductor" / "delegation-guidance.md").exists()
+
+
+def test_init_unwire_removes_managed_files(mocker, tmp_path):
+    _stub_all_providers_unconfigured(mocker)
+    (tmp_path / ".claude").mkdir()
+
+    # First wire.
+    wire_result = CliRunner().invoke(
+        main,
+        ["init", "--yes", "--wire-agents", "yes", "--patch-claude-md", "yes"],
+    )
+    assert wire_result.exit_code == 0
+    assert (tmp_path / ".claude" / "commands" / "conductor.md").exists()
+
+    # Then unwire.
+    unwire_result = CliRunner().invoke(main, ["init", "--unwire"])
+    assert unwire_result.exit_code == 0, unwire_result.output
+    assert "Removed:" in unwire_result.output
+    assert not (tmp_path / ".conductor" / "delegation-guidance.md").exists()
+    assert not (tmp_path / ".claude" / "commands" / "conductor.md").exists()
+
+
+def test_init_unwire_with_only_is_rejected():
+    result = CliRunner().invoke(main, ["init", "--unwire", "--only", "kimi"])
+    assert result.exit_code == 2
+    assert "unwire" in result.output.lower()
+
+
+def test_init_unwire_on_clean_env_reports_nothing(tmp_path):
+    result = CliRunner().invoke(main, ["init", "--unwire"])
+    assert result.exit_code == 0
+    assert "No conductor-managed" in result.output
+
+
+def test_init_quit_during_provider_walk_skips_wiring(mocker, tmp_path):
+    """If the user [q]uits during the provider walk, the wiring phase MUST
+    NOT run — they explicitly stopped, so writing files after would
+    contradict that intent."""
+    _stub_all_providers_unconfigured(mocker)
+    mocker.patch("conductor.wizard._is_tty", return_value=True)
+    (tmp_path / ".claude").mkdir()
+
+    # First provider's menu: [q]uit immediately.
+    result = CliRunner().invoke(
+        main, ["init", "--wire-agents", "yes", "--patch-claude-md", "yes"],
+        input="q\n",
+    )
+    # Quit returns non-zero per existing wizard contract.
+    assert result.exit_code == 1
+    # Critically: no integration block was even shown.
+    assert "Agent integration" not in result.output
+    # And no files were written despite --wire-agents=yes.
+    assert not (tmp_path / ".conductor" / "delegation-guidance.md").exists()
+    assert not (tmp_path / ".claude" / "commands" / "conductor.md").exists()
+
+
+def test_init_wiring_failure_exits_non_zero(mocker, tmp_path):
+    """When wire_claude_code raises, init must exit non-zero so CI / scripts
+    notice. Silent success on a failed wire violates No Silent Failures."""
+    _stub_all_providers_unconfigured(mocker)
+    (tmp_path / ".claude").mkdir()
+    mocker.patch(
+        "conductor.agent_wiring.wire_claude_code",
+        side_effect=RuntimeError("disk on fire"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["init", "--yes", "--wire-agents", "yes", "--patch-claude-md", "yes"],
+    )
+    assert result.exit_code == 1, result.output
+    assert "wiring failed" in result.output.lower()
+    assert "disk on fire" in result.output
+
+
+def test_init_wiring_all_user_owned_exits_non_zero(mocker, tmp_path):
+    """If every target path is already a user-owned file, wire_claude_code
+    skips them all — that's a failed wire from the user's perspective and
+    must surface as a non-zero exit."""
+    _stub_all_providers_unconfigured(mocker)
+    claude_dir = tmp_path / ".claude"
+    (claude_dir / "agents").mkdir(parents=True)
+    (claude_dir / "commands").mkdir(parents=True)
+    # Drop user-owned files at every managed path.
+    (claude_dir / "agents" / "kimi-long-context.md").write_text("# mine", encoding="utf-8")
+    (claude_dir / "agents" / "gemini-web-search.md").write_text("# mine", encoding="utf-8")
+    (claude_dir / "commands" / "conductor.md").write_text("# mine", encoding="utf-8")
+    (tmp_path / ".conductor").mkdir()
+    (tmp_path / ".conductor" / "delegation-guidance.md").write_text("# mine", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        main,
+        ["init", "--yes", "--wire-agents", "yes", "--patch-claude-md", "no"],
+    )
+    assert result.exit_code == 1, result.output
+    assert "skipped" in result.output.lower()
 
 
 def test_init_summary_and_next_steps_printed(mocker):

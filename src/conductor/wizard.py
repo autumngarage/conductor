@@ -209,6 +209,8 @@ def run_init_wizard(
     accept_defaults: bool = False,
     only: str | None = None,
     remaining: bool = False,
+    wire_agents: str | None = None,
+    patch_claude_md: str | None = None,
 ) -> int:
     """Walk the user through configuring every provider that needs it.
 
@@ -216,6 +218,14 @@ def run_init_wizard(
         accept_defaults: non-interactive mode; report state without prompting.
         only: configure only this one provider; skip the rest.
         remaining: skip providers that are already configured (resume flow).
+        wire_agents: one of "yes" / "no" / "ask" / None. Controls whether
+            the wizard offers to wire conductor into detected agent tools
+            (Claude Code today; more in later slices). None means ask on
+            TTY, skip on non-TTY.
+        patch_claude_md: same tri-state, for the one-line ``@import`` edit
+            in ``~/.claude/CLAUDE.md``. Separate from ``wire_agents`` so
+            users can accept the artifacts while declining the import
+            edit (and vice versa).
 
     Returns a shell exit code: 0 on success, non-zero if the user
     explicitly aborted.
@@ -299,9 +309,23 @@ def run_init_wizard(
         click.echo("")
         idx += 1
 
+    # Agent wiring — only offered on an unscoped, non-aborted run. `--only`
+    # narrows scope deliberately; an aborted ([q]uit) walk means the user
+    # explicitly stopped, and silently writing artifacts after they quit
+    # would violate that intent.
+    wiring_ok = True
+    if not only and not aborted:
+        wiring_ok = _maybe_wire_agents(
+            interactive=interactive,
+            wire_agents=wire_agents,
+            patch_claude_md=patch_claude_md,
+        )
+
     _print_summary(outcomes)
     _print_next_steps(outcomes)
-    return 1 if aborted else 0
+    if aborted or not wiring_ok:
+        return 1
+    return 0
 
 
 class _AbortSetup(Exception):  # noqa: N818  — sentinel, never caught outside this module
@@ -625,6 +649,146 @@ def _print_summary(outcomes: list[WizardOutcome]) -> None:
     click.echo(f"  Skipped:    {', '.join(skipped_names) if skipped_names else '(none)'}")
     if failed_names:
         click.echo(f"  Failed:     {', '.join(failed_names)}")
+
+
+# --------------------------------------------------------------------------- #
+# Agent-integration flow — runs after the provider walk.
+# --------------------------------------------------------------------------- #
+
+
+def _maybe_wire_agents(
+    *,
+    interactive: bool,
+    wire_agents: str | None,
+    patch_claude_md: str | None,
+) -> bool:
+    """Offer to wire conductor into detected agent tools (Claude Code).
+
+    Returns True if no wiring was attempted (skipped, declined, or no
+    target detected) or if the wiring fully succeeded. Returns False if
+    wiring was attempted and failed — callers propagate this into the
+    process exit code so CI / scripted ``--wire-agents=yes`` runs surface
+    the failure instead of silently exiting 0.
+    """
+    from conductor import __version__
+    from conductor.agent_wiring import detect, wire_claude_code
+
+    detection = detect()
+
+    if not detection.claude_detected:
+        if interactive:
+            click.echo("")
+            click.echo("─" * 60)
+            click.echo("Agent integration")
+            click.echo("─" * 60)
+            click.echo(
+                "  Claude Code not detected in this environment; nothing to wire."
+            )
+            click.echo(
+                "  (re-run `conductor init` after installing Claude Code to enable "
+                "delegation)"
+            )
+            click.echo("")
+        return True
+
+    # Decide whether to offer the prompt at all.
+    decision = wire_agents if wire_agents is not None else ("ask" if interactive else "no")
+    if decision == "no":
+        return True
+
+    already_wired = len(detection.managed) > 0
+    click.echo("")
+    click.echo("─" * 60)
+    click.echo("Agent integration — Claude Code")
+    click.echo("─" * 60)
+    if already_wired:
+        click.echo(f"  Already wired ({len(detection.managed)} managed files found).")
+        click.echo("  Re-running will refresh each file to the current version.")
+    else:
+        click.echo("  Claude Code can delegate to other models (kimi, gemini, …)")
+        click.echo("  without leaving your editor. Conductor can wire this up by")
+        click.echo("  writing:")
+        click.echo("")
+        click.echo(f"    {detection.conductor_home}/delegation-guidance.md")
+        click.echo(f"    {detection.claude_home}/commands/conductor.md   (slash: /conductor)")
+        click.echo(f"    {detection.claude_home}/agents/kimi-long-context.md")
+        click.echo(f"    {detection.claude_home}/agents/gemini-web-search.md")
+        click.echo("")
+        click.echo("  Every file carries a 'managed-by: conductor' marker and is")
+        click.echo("  fully removable via `conductor init --unwire`.")
+    click.echo("")
+
+    if decision == "ask":
+        prompt = "Refresh conductor integration?" if already_wired else "Wire conductor in now?"
+        proceed = _prompt_menu(
+            options=[
+                ("y", f"yes — {prompt.lower().rstrip('?')}"),
+                ("n", "no — skip (you can re-run init later)"),
+            ],
+            default="y",
+        )
+        if proceed == "n":
+            click.echo("  (skipped — no files written)")
+            return True
+
+    # Decide about the CLAUDE.md @import edit.
+    pcm = (
+        patch_claude_md
+        if patch_claude_md is not None
+        else ("ask" if interactive else "no")
+    )
+    if pcm == "ask":
+        import_line = f"@{detection.conductor_home}/delegation-guidance.md"
+        click.echo("")
+        click.echo("  For Claude to actually read the guidance, one line needs to go")
+        click.echo(f"  into ~/.claude/CLAUDE.md:  {import_line}")
+        click.echo("")
+        click.echo("  Conductor can add it inside a <!-- conductor:begin --> block")
+        click.echo("  so `conductor init --unwire` can remove it cleanly later.")
+        click.echo("")
+        choice = _prompt_menu(
+            options=[
+                ("y", "yes — add the line for me"),
+                ("n", "no — I'll add it manually"),
+            ],
+            default="y",
+        )
+        do_patch = choice == "y"
+    else:
+        do_patch = pcm == "yes"
+
+    try:
+        report = wire_claude_code(__version__, patch_claude_md=do_patch)
+    except Exception as exc:  # noqa: BLE001 — surface any unexpected failure
+        click.echo(f"  ✗ wiring failed: {exc}")
+        return False
+
+    click.echo("")
+    if report.written:
+        click.echo("  ✓ wrote:")
+        for p in report.written:
+            click.echo(f"      {p}")
+    for path, reason in report.skipped:
+        click.echo(f"  ⚠ skipped {path}: {reason}")
+    if report.patched_claude_md:
+        click.echo(f"  ✓ patched {detection.claude_user_md} (sentinel block)")
+    elif not do_patch:
+        import_line = f"@{detection.conductor_home}/delegation-guidance.md"
+        click.echo("")
+        click.echo(
+            "  To activate the guidance, add this line to ~/.claude/CLAUDE.md:"
+        )
+        click.echo(f"      {import_line}")
+
+    click.echo("")
+    click.echo("  Try it:")
+    click.echo('    Ask Claude: "summarize this README with kimi"')
+    click.echo("    Or run:     /conductor kimi summarize README.md")
+    click.echo("")
+
+    # If every target file was skipped (all user-owned), treat that as a
+    # failed wire — the user asked for integration and got nothing.
+    return not (report.skipped and not report.written)
 
 
 def _print_next_steps(outcomes: list[WizardOutcome]) -> None:
