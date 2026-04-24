@@ -466,6 +466,70 @@ def test_init_unwire_on_clean_env_reports_nothing(tmp_path):
     assert "No conductor-managed" in result.output
 
 
+def test_init_quit_during_provider_walk_skips_wiring(mocker, tmp_path):
+    """If the user [q]uits during the provider walk, the wiring phase MUST
+    NOT run — they explicitly stopped, so writing files after would
+    contradict that intent."""
+    _stub_all_providers_unconfigured(mocker)
+    mocker.patch("conductor.wizard._is_tty", return_value=True)
+    (tmp_path / ".claude").mkdir()
+
+    # First provider's menu: [q]uit immediately.
+    result = CliRunner().invoke(
+        main, ["init", "--wire-agents", "yes", "--patch-claude-md", "yes"],
+        input="q\n",
+    )
+    # Quit returns non-zero per existing wizard contract.
+    assert result.exit_code == 1
+    # Critically: no integration block was even shown.
+    assert "Agent integration" not in result.output
+    # And no files were written despite --wire-agents=yes.
+    assert not (tmp_path / ".conductor" / "delegation-guidance.md").exists()
+    assert not (tmp_path / ".claude" / "commands" / "conductor.md").exists()
+
+
+def test_init_wiring_failure_exits_non_zero(mocker, tmp_path):
+    """When wire_claude_code raises, init must exit non-zero so CI / scripts
+    notice. Silent success on a failed wire violates No Silent Failures."""
+    _stub_all_providers_unconfigured(mocker)
+    (tmp_path / ".claude").mkdir()
+    mocker.patch(
+        "conductor.agent_wiring.wire_claude_code",
+        side_effect=RuntimeError("disk on fire"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["init", "--yes", "--wire-agents", "yes", "--patch-claude-md", "yes"],
+    )
+    assert result.exit_code == 1, result.output
+    assert "wiring failed" in result.output.lower()
+    assert "disk on fire" in result.output
+
+
+def test_init_wiring_all_user_owned_exits_non_zero(mocker, tmp_path):
+    """If every target path is already a user-owned file, wire_claude_code
+    skips them all — that's a failed wire from the user's perspective and
+    must surface as a non-zero exit."""
+    _stub_all_providers_unconfigured(mocker)
+    claude_dir = tmp_path / ".claude"
+    (claude_dir / "agents").mkdir(parents=True)
+    (claude_dir / "commands").mkdir(parents=True)
+    # Drop user-owned files at every managed path.
+    (claude_dir / "agents" / "kimi-long-context.md").write_text("# mine", encoding="utf-8")
+    (claude_dir / "agents" / "gemini-web-search.md").write_text("# mine", encoding="utf-8")
+    (claude_dir / "commands" / "conductor.md").write_text("# mine", encoding="utf-8")
+    (tmp_path / ".conductor").mkdir()
+    (tmp_path / ".conductor" / "delegation-guidance.md").write_text("# mine", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        main,
+        ["init", "--yes", "--wire-agents", "yes", "--patch-claude-md", "no"],
+    )
+    assert result.exit_code == 1, result.output
+    assert "skipped" in result.output.lower()
+
+
 def test_init_summary_and_next_steps_printed(mocker):
     from conductor.providers import (
         ClaudeProvider,

@@ -309,11 +309,13 @@ def run_init_wizard(
         click.echo("")
         idx += 1
 
-    # Agent wiring — only offered on an unscoped run. When the user invoked
-    # `--only <provider>` they've narrowed the scope deliberately; don't
-    # broaden it by running integration prompts after.
-    if not only:
-        _maybe_wire_agents(
+    # Agent wiring — only offered on an unscoped, non-aborted run. `--only`
+    # narrows scope deliberately; an aborted ([q]uit) walk means the user
+    # explicitly stopped, and silently writing artifacts after they quit
+    # would violate that intent.
+    wiring_ok = True
+    if not only and not aborted:
+        wiring_ok = _maybe_wire_agents(
             interactive=interactive,
             wire_agents=wire_agents,
             patch_claude_md=patch_claude_md,
@@ -321,7 +323,9 @@ def run_init_wizard(
 
     _print_summary(outcomes)
     _print_next_steps(outcomes)
-    return 1 if aborted else 0
+    if aborted or not wiring_ok:
+        return 1
+    return 0
 
 
 class _AbortSetup(Exception):  # noqa: N818  — sentinel, never caught outside this module
@@ -657,8 +661,15 @@ def _maybe_wire_agents(
     interactive: bool,
     wire_agents: str | None,
     patch_claude_md: str | None,
-) -> None:
-    """Offer to wire conductor into detected agent tools (Claude Code)."""
+) -> bool:
+    """Offer to wire conductor into detected agent tools (Claude Code).
+
+    Returns True if no wiring was attempted (skipped, declined, or no
+    target detected) or if the wiring fully succeeded. Returns False if
+    wiring was attempted and failed — callers propagate this into the
+    process exit code so CI / scripted ``--wire-agents=yes`` runs surface
+    the failure instead of silently exiting 0.
+    """
     from conductor import __version__
     from conductor.agent_wiring import detect, wire_claude_code
 
@@ -678,12 +689,12 @@ def _maybe_wire_agents(
                 "delegation)"
             )
             click.echo("")
-        return
+        return True
 
     # Decide whether to offer the prompt at all.
     decision = wire_agents if wire_agents is not None else ("ask" if interactive else "no")
     if decision == "no":
-        return
+        return True
 
     already_wired = len(detection.managed) > 0
     click.echo("")
@@ -718,7 +729,7 @@ def _maybe_wire_agents(
         )
         if proceed == "n":
             click.echo("  (skipped — no files written)")
-            return
+            return True
 
     # Decide about the CLAUDE.md @import edit.
     pcm = (
@@ -750,12 +761,13 @@ def _maybe_wire_agents(
         report = wire_claude_code(__version__, patch_claude_md=do_patch)
     except Exception as exc:  # noqa: BLE001 — surface any unexpected failure
         click.echo(f"  ✗ wiring failed: {exc}")
-        return
+        return False
 
     click.echo("")
-    click.echo("  ✓ wrote:")
-    for p in report.written:
-        click.echo(f"      {p}")
+    if report.written:
+        click.echo("  ✓ wrote:")
+        for p in report.written:
+            click.echo(f"      {p}")
     for path, reason in report.skipped:
         click.echo(f"  ⚠ skipped {path}: {reason}")
     if report.patched_claude_md:
@@ -773,6 +785,10 @@ def _maybe_wire_agents(
     click.echo('    Ask Claude: "summarize this README with kimi"')
     click.echo("    Or run:     /conductor kimi summarize README.md")
     click.echo("")
+
+    # If every target file was skipped (all user-owned), treat that as a
+    # failed wire — the user asked for integration and got nothing.
+    return not (report.skipped and not report.written)
 
 
 def _print_next_steps(outcomes: list[WizardOutcome]) -> None:
