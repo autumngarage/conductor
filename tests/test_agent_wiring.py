@@ -560,8 +560,13 @@ def test_wire_gemini_md_preserves_user_content():
     assert "conductor:begin" in text
 
 
-def test_wire_claude_md_repo_injects_import_line():
-    """Repo-scope CLAUDE.md gets the @-import line (not inline block)."""
+def test_wire_claude_md_repo_injects_inline_block():
+    """Repo-scope CLAUDE.md gets the INLINE block (not an @-import).
+
+    Repo CLAUDE.md is typically tracked in git; baking an
+    ``@/Users/<name>/.conductor/...`` absolute path into it would break on
+    every other contributor's checkout. So it must be self-contained.
+    """
     from pathlib import Path
 
     report = aw.wire_claude_md_repo(version="0.4.2")
@@ -569,7 +574,11 @@ def test_wire_claude_md_repo_injects_import_line():
     assert report.path == path
     text = path.read_text(encoding="utf-8")
     assert "conductor:begin v0.4.2" in text
-    assert "@" in text and "delegation-guidance.md" in text
+    assert "Conductor delegation" in text
+    # Must NOT contain an absolute-path @-import — that would be
+    # machine-local and break for other contributors on git pull.
+    home_prefix = str(aw.conductor_home())
+    assert f"@{home_prefix}" not in text
 
 
 def test_wire_claude_md_repo_vs_user_scope_independent(tmp_path):
