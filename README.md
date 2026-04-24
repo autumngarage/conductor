@@ -2,21 +2,43 @@
 
 Pick an LLM, give it a job. Manual or auto routing across providers.
 
-**Status:** v0.1 in flight. Kimi adapter shipped as the integration test case for the Conductor architecture. Other providers (claude, codex, gemini, ollama) and auto-mode routing land in subsequent phases.
+**Status:** shipping. Current tap release is v0.3.3 — five provider adapters (kimi, claude, codex, gemini, ollama), manual + auto routing, single-turn `call` + multi-turn `exec` with tools and sandboxes, and the first slice of agent-wiring (`conductor init --wire-agents` for Claude Code — delegation guidance, slash command, `kimi-long-context` / `gemini-web-search` subagents, `--unwire`). Further slices on main not yet tagged: repo-scoped `AGENTS.md` with three more subagents (codex / ollama / conductor-auto), plus `GEMINI.md`, repo `CLAUDE.md`, and Cursor-rule patching — use the dev-install path below until the next tap bump.
 
 Conductor is the fourth peer in the [Autumn Garage](https://github.com/autumngarage/autumn-garage) tool family alongside [Touchstone](https://github.com/autumngarage/touchstone), [Cortex](https://github.com/autumngarage/cortex), and [Sentinel](https://github.com/autumngarage/sentinel). It owns the LLM provider adapters and the user-facing "pick an LLM, give it a job" surface so that Sentinel and Touchstone don't each have to.
 
 ## Install
 
 ```sh
-# Clone + dev install
+brew install autumngarage/conductor/conductor
+```
+
+Same pattern as the other Autumn Garage peers:
+
+```sh
+brew install autumngarage/touchstone/touchstone   # pre-push code review
+brew install autumngarage/cortex/cortex           # project memory
+brew install autumngarage/sentinel/sentinel       # autonomous agent cycles
+```
+
+Then walk the setup wizard:
+
+```sh
+conductor init       # credentials + optional agent-tool wiring
+```
+
+### Alternatives
+
+```sh
+# Dev install from a clone
 git clone https://github.com/autumngarage/conductor
 cd conductor
 bash setup.sh
 uv sync
-```
 
-Brew tap (`autumngarage/conductor/conductor`) ships with v0.1.0.
+# Or via pip directly from the repo (the bare name `conductor` on PyPI
+# is an unrelated project — use the git URL explicitly):
+pip install git+https://github.com/autumngarage/conductor
+```
 
 ## Quick start
 
@@ -55,12 +77,23 @@ Shipped:
 
 Deferred (see `autumn-garage/.cortex/plans/conductor-bootstrap.md`):
 
-- Streaming, tool use, cost aggregation — all post-v0.1.
+- Streaming, cost aggregation — post-v0.1. (Tool use shipped in v0.3.x.)
 - LLM-based meta-routing for `--auto` (today: rule-based tag scoring).
 - 1Password (`op run`) storage backend for `conductor init`.
-- Brew tap for `brew install autumngarage/conductor/conductor`.
 
-## Agent integration (v0.4.x)
+## Agent integration
+
+> **What's in v0.3.3 (tap):** user-scope Claude Code wiring only —
+> `--wire-agents`, `--patch-claude-md`, `--unwire`.
+> **On main, untagged (next tap bump):** repo-scope `AGENTS.md` /
+> `GEMINI.md` / `CLAUDE.md` patching plus Cursor rule — adds
+> `--patch-agents-md`, `--patch-gemini-md`, `--patch-claude-md-repo`,
+> `--wire-cursor`. Users on the tap version will hit "unknown option"
+> errors if they try the untagged flags — install from the dev path
+> above, or:
+> ```sh
+> pip install git+https://github.com/autumngarage/conductor
+> ```
 
 `conductor init` detects which agent tools you have installed (Claude Code,
 Codex, Cursor, Gemini CLI, Zed — anything that reads `AGENTS.md` /
@@ -89,7 +122,7 @@ Diagnose wiring state anytime with `conductor doctor` (JSON shape:
 
 ## How Sentinel and Touchstone use it
 
-Once Conductor v0.1 ships, both consumers migrate from per-tool provider implementations to `conductor call` shell-outs. That migration lands in separate plans (`autumn-garage/.cortex/plans/sentinel-conductor-migration.md` and `…/touchstone-conductor-migration.md`) and is not part of v0.1.
+Both consumers are expected to migrate from per-tool provider implementations to `conductor call` shell-outs. The migrations are tracked in separate plans (`autumn-garage/.cortex/plans/sentinel-conductor-migration.md` and `…/touchstone-conductor-migration.md`).
 
 ## Architecture
 
