@@ -62,7 +62,9 @@ Fix failing tests before pushing. Live-API tests are gated on `RUN_LIVE_SMOKE=1`
 
 ## Release & Distribution
 
-Homebrew formula via `autumngarage/homebrew-conductor` tap (planned for v0.1.0; not yet wired). Version derived from git tag via `hatch-vcs`. Release process: tag on main (`git tag v0.X.Y`), push tag, `gh release create`, update Homebrew formula SHA. Pip install also supported (`pip install conductor`).
+Primary channel is the Homebrew tap `autumngarage/homebrew-conductor` (install: `brew install autumngarage/conductor/conductor`) — same pattern Touchstone, Sentinel, and Cortex use. The tap repo holds the Formula; the conductor repo holds the code. Version derived from git tag via `hatch-vcs`. Release process: tag on main (`git tag v0.X.Y`), push tag, `gh release create`, update the Formula's `url` + `sha256` in the tap repo. Pip install is also supported (`pip install conductor`).
+
+> **Source of truth:** the authoritative "is the tap wired / is a given version available" answer lives in the `autumngarage/homebrew-conductor` repo's Formula and git log — not in this file. This note describes the mechanism; the tap repo describes the state.
 
 ## Architecture
 

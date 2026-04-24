@@ -2,21 +2,42 @@
 
 Pick an LLM, give it a job. Manual or auto routing across providers.
 
-**Status:** v0.1 in flight. Kimi adapter shipped as the integration test case for the Conductor architecture. Other providers (claude, codex, gemini, ollama) and auto-mode routing land in subsequent phases.
+**Status:** shipping. Five provider adapters (kimi, claude, codex, gemini, ollama), manual + auto routing, single-turn `call` + multi-turn `exec` with tools and sandboxes, agent-wiring for Claude Code / Codex / Cursor / Gemini CLI. See the Homebrew tap for the latest released version.
 
 Conductor is the fourth peer in the [Autumn Garage](https://github.com/autumngarage/autumn-garage) tool family alongside [Touchstone](https://github.com/autumngarage/touchstone), [Cortex](https://github.com/autumngarage/cortex), and [Sentinel](https://github.com/autumngarage/sentinel). It owns the LLM provider adapters and the user-facing "pick an LLM, give it a job" surface so that Sentinel and Touchstone don't each have to.
 
 ## Install
 
 ```sh
-# Clone + dev install
+brew install autumngarage/conductor/conductor
+```
+
+Same pattern as the other Autumn Garage peers:
+
+```sh
+brew install autumngarage/touchstone/touchstone   # pre-push code review
+brew install autumngarage/cortex/cortex           # project memory
+brew install autumngarage/sentinel/sentinel       # autonomous agent cycles
+```
+
+Then walk the setup wizard:
+
+```sh
+conductor init       # credentials + optional agent-tool wiring
+```
+
+### Alternatives
+
+```sh
+# Dev install from a clone
 git clone https://github.com/autumngarage/conductor
 cd conductor
 bash setup.sh
 uv sync
-```
 
-Brew tap (`autumngarage/conductor/conductor`) ships with v0.1.0.
+# Or via pip
+pip install conductor
+```
 
 ## Quick start
 
@@ -55,10 +76,9 @@ Shipped:
 
 Deferred (see `autumn-garage/.cortex/plans/conductor-bootstrap.md`):
 
-- Streaming, tool use, cost aggregation — all post-v0.1.
+- Streaming, cost aggregation — post-v0.1. (Tool use shipped in v0.3.x.)
 - LLM-based meta-routing for `--auto` (today: rule-based tag scoring).
 - 1Password (`op run`) storage backend for `conductor init`.
-- Brew tap for `brew install autumngarage/conductor/conductor`.
 
 ## Agent integration (v0.4.x)
 
