@@ -380,6 +380,73 @@ def test_offline_flag_accepts_with_ollama(mocker):
     assert "both redundant" in result.output
 
 
+def test_offline_flag_forces_ollama_even_with_auto(mocker, _kimi_configured):
+    """`--offline --auto` must route to ollama, not silently fall through.
+
+    This is the codex-review regression: previously ``--offline --auto`` let
+    the auto router pick a remote provider (kimi wins on tag overlap), then
+    relied on ``_invoke_with_fallback`` to reorder ollama in front. If ollama
+    wasn't in the ranking at all (e.g. not configured), the CLI would quietly
+    route to the remote despite the explicit force-local request. Fix: when
+    ``--offline`` is passed, rewrite the invocation to ``--with ollama``
+    unconditionally.
+    """
+    _stub_other_providers_unconfigured(mocker)
+
+    with respx.mock() as router:
+        # `--offline` becomes `--with ollama` (no router, no --auto), so
+        # only /api/chat is hit.
+        router.post(_OLLAMA_CHAT_URL).mock(
+            return_value=httpx.Response(
+                200, json=_ollama_ok_response("via local despite auto")
+            )
+        )
+        result = CliRunner().invoke(
+            main,
+            [
+                "call",
+                "--offline",
+                "--auto",
+                "--tags",
+                "long-context",
+                "--task",
+                "hi",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "via local despite auto" in result.output
+    assert offline_mode.is_active() is True
+
+
+def test_sticky_flag_raises_when_ollama_missing_from_ranking(
+    mocker, _kimi_configured
+):
+    """Sticky flag promise: local routing. Without ollama, fail loudly.
+
+    Codex-review regression: if the sticky flag was active but ollama
+    wasn't in ``decision.ranked`` (e.g. because ollama is excluded or
+    unconfigured), ``_invoke_with_fallback`` would skip the reorder
+    and silently try remote providers — which, offline, all fail with
+    network errors, producing a misleading "kimi is unreachable" when
+    the real issue is "local fallback isn't available."
+    """
+    offline_mode.set_active(ttl_sec=600)
+    # Stub ollama off so it drops out of decision.ranked.
+    _stub_other_providers_unconfigured(mocker, include_ollama=True)
+
+    result = CliRunner().invoke(
+        main, ["call", "--auto", "--task", "hi"]
+    )
+
+    assert result.exit_code != 0
+    output = result.output.lower()
+    assert "offline mode" in output
+    assert "ollama" in output
+    # The error should name actionable fixes — not silently cascade.
+    assert "--no-offline" in result.output or "ollama serve" in result.output
+
+
 def test_no_offline_flag_clears_sticky_flag(mocker, _kimi_configured):
     offline_mode.set_active(ttl_sec=600)
     assert offline_mode.is_active() is True

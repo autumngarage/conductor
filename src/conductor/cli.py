@@ -143,12 +143,15 @@ def _apply_offline_flag(
 
     Returns ``(provider_id, auto)`` with offline semantics applied:
 
-    - ``--offline`` (True): sets the sticky offline flag, and — if the user
-      didn't otherwise ask for a specific provider — forces ``--with ollama``.
-      If ``--with`` was set to a non-ollama provider, that's a contradiction
-      and we raise UsageError. If ``--auto`` is set, we leave it alone: the
-      sticky flag makes ``_invoke_with_fallback`` reorder ollama to the front,
-      which is what the user wanted.
+    - ``--offline`` (True): sets the sticky offline flag and forces
+      ``--with ollama`` regardless of ``--auto`` / ``--tags`` / etc.
+      Auto-routing doesn't compose with a force-local directive — if the
+      router filters out ollama for any reason (exclude list, unmet tool
+      capability, health cooldown), silently falling through to a remote
+      provider would violate the documented "force local" contract. So
+      ``--offline`` unconditionally rewrites the invocation to explicit
+      ollama; ``--auto`` becomes a no-op in that case. Passing
+      ``--with <non-ollama>`` alongside ``--offline`` is an error.
     - ``--no-offline`` (False): clears the sticky flag, then behaves normally.
     - ``None``: no-op.
     """
@@ -164,9 +167,7 @@ def _apply_offline_flag(
             "contradicts it. Use one or the other."
         )
     offline_mode.set_active()
-    if not auto and not provider_id:
-        provider_id = "ollama"
-    return provider_id, auto
+    return "ollama", False
 
 
 def _closest(query: str, options: tuple[str, ...]) -> str:
@@ -396,16 +397,28 @@ def _invoke_with_fallback(
     fallbacks: list[str] = []
     candidates = list(decision.ranked)
 
-    # Short-circuit evaluation is load-bearing here: _reorder_ollama_first
-    # mutates `candidates` and must run when the flag is active, even under
-    # --silent-route. The `not silent` only gates the log line.
-    if offline_mode.is_active() and _reorder_ollama_first(candidates) and not silent:
-        remaining_m = max(1, (offline_mode.seconds_remaining() + 59) // 60)
-        click.echo(
-            f"[conductor] offline mode active (~{remaining_m}m left) · "
-            "routing → ollama. Pass --no-offline to clear.",
-            err=True,
-        )
+    if offline_mode.is_active():
+        if _ollama_index(candidates) is None:
+            # Offline mode promises local routing. If ollama is absent from
+            # the ranking (excluded, unconfigured, or filtered out by
+            # tools/sandbox), silently cascading to a remote provider would
+            # violate that promise — and the remote will almost certainly
+            # fail with a network error anyway. Surface the contradiction
+            # up front instead.
+            raise ProviderConfigError(
+                "offline mode is active but ollama is not in the routing "
+                "candidates (excluded, not configured, or filtered out by "
+                "--tools/--sandbox). Start ollama (`ollama serve`), relax "
+                "the filters, or clear the flag with --no-offline."
+            )
+        _reorder_ollama_first(candidates)
+        if not silent:
+            remaining_m = max(1, (offline_mode.seconds_remaining() + 59) // 60)
+            click.echo(
+                f"[conductor] offline mode active (~{remaining_m}m left) · "
+                "routing → ollama. Pass --no-offline to clear.",
+                err=True,
+            )
 
     prompted_offline = False
     idx = 0
