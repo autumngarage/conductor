@@ -14,6 +14,7 @@ from conductor.providers.interface import (
 from conductor.providers.ollama import (
     OLLAMA_BASE_URL_ENV,
     OLLAMA_DEFAULT_BASE_URL,
+    OLLAMA_DEFAULT_MODEL,
     OllamaProvider,
 )
 
@@ -48,7 +49,12 @@ def test_default_model_available_true_when_pulled():
         router.get(TAGS_URL).mock(
             return_value=httpx.Response(
                 200,
-                json={"models": [{"name": "qwen2.5-coder:14b"}, {"name": "other:1b"}]},
+                json={
+                    "models": [
+                        {"name": OLLAMA_DEFAULT_MODEL},
+                        {"name": "other:1b"},
+                    ]
+                },
             )
         )
         ok, reason = OllamaProvider().default_model_available()
@@ -64,7 +70,7 @@ def test_default_model_available_false_lists_alternatives():
         )
         ok, reason = OllamaProvider().default_model_available()
     assert ok is False
-    assert "qwen2.5-coder:14b" in reason
+    assert OLLAMA_DEFAULT_MODEL in reason
     assert "ollama pull" in reason
     assert "qwen2.5-coder:7b" in reason  # shows locally installed alternatives
 
@@ -76,7 +82,7 @@ def test_default_model_available_false_when_no_models_pulled():
         )
         ok, reason = OllamaProvider().default_model_available()
     assert ok is False
-    assert "ollama pull qwen2.5-coder:14b" in reason
+    assert f"ollama pull {OLLAMA_DEFAULT_MODEL}" in reason
 
 
 def test_configured_honors_env_override(monkeypatch):
@@ -91,7 +97,7 @@ def test_configured_honors_env_override(monkeypatch):
 
 def test_call_returns_normalized_response():
     body = {
-        "model": "qwen2.5-coder:14b",
+        "model": OLLAMA_DEFAULT_MODEL,
         "message": {"role": "assistant", "content": "hello from ollama"},
         "prompt_eval_count": 8,
         "eval_count": 3,
@@ -103,7 +109,7 @@ def test_call_returns_normalized_response():
 
     assert response.text == "hello from ollama"
     assert response.provider == "ollama"
-    assert response.model == "qwen2.5-coder:14b"
+    assert response.model == OLLAMA_DEFAULT_MODEL
     assert response.usage["input_tokens"] == 8
     assert response.usage["output_tokens"] == 3
     assert response.usage["cached_tokens"] is None
@@ -155,7 +161,7 @@ def test_call_session_id_is_none_for_ollama():
                 200,
                 json={
                     "message": {"content": "ok"},
-                    "model": "qwen2.5-coder:14b",
+                    "model": OLLAMA_DEFAULT_MODEL,
                     "prompt_eval_count": 1,
                     "eval_count": 1,
                 },
@@ -175,7 +181,7 @@ import json as _json  # noqa: E402 — grouped near the exec tests
 
 def _ollama_terminal(content: str) -> dict:
     return {
-        "model": "qwen2.5-coder:14b",
+        "model": OLLAMA_DEFAULT_MODEL,
         "message": {"role": "assistant", "content": content},
         "prompt_eval_count": 5,
         "eval_count": 2,
@@ -191,7 +197,7 @@ def _ollama_tool_turn(name: str, arguments: dict, call_id: str | None = None) ->
     if call_id is not None:
         call["id"] = call_id
     return {
-        "model": "qwen2.5-coder:14b",
+        "model": OLLAMA_DEFAULT_MODEL,
         "message": {
             "role": "assistant",
             "content": "",
@@ -433,3 +439,135 @@ def test_exec_accepts_strict_sandbox(tmp_path):
             cwd=str(tmp_path),
         )
     assert resp.text == "direct answer"
+
+
+# --------------------------------------------------------------------------- #
+# v0.3.3 — local LLM ergonomics (timeout env override, stealth tool-call guard)
+# --------------------------------------------------------------------------- #
+
+
+def test_default_model_points_at_tool_use_capable_qwen():
+    # Guardrail: the default must be a model that actually emits structured
+    # tool_calls in ollama. Bumped from qwen2.5-coder:14b (silent-fail) on
+    # 2026-04-24 after dogfood. If someone rolls this back, fail loud.
+    assert "qwen" in OLLAMA_DEFAULT_MODEL
+    assert "qwen2.5-coder" not in OLLAMA_DEFAULT_MODEL
+
+
+def test_timeout_defaults_to_baked_in_when_env_unset(monkeypatch):
+    from conductor.providers.ollama import OLLAMA_REQUEST_TIMEOUT_SEC
+
+    monkeypatch.delenv("CONDUCTOR_OLLAMA_TIMEOUT_SEC", raising=False)
+    provider = OllamaProvider()
+    assert provider._timeout_sec == OLLAMA_REQUEST_TIMEOUT_SEC
+
+
+def test_timeout_env_override_wins(monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_OLLAMA_TIMEOUT_SEC", "45")
+    provider = OllamaProvider()
+    assert provider._timeout_sec == 45.0
+
+
+def test_timeout_explicit_kwarg_beats_env(monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_OLLAMA_TIMEOUT_SEC", "45")
+    provider = OllamaProvider(timeout_sec=12.0)
+    assert provider._timeout_sec == 12.0
+
+
+def test_timeout_env_invalid_falls_back_to_default(monkeypatch):
+    from conductor.providers.ollama import OLLAMA_REQUEST_TIMEOUT_SEC
+
+    monkeypatch.setenv("CONDUCTOR_OLLAMA_TIMEOUT_SEC", "abc")
+    assert OllamaProvider()._timeout_sec == OLLAMA_REQUEST_TIMEOUT_SEC
+
+
+def test_timeout_env_non_positive_falls_back_to_default(monkeypatch):
+    from conductor.providers.ollama import OLLAMA_REQUEST_TIMEOUT_SEC
+
+    monkeypatch.setenv("CONDUCTOR_OLLAMA_TIMEOUT_SEC", "-5")
+    assert OllamaProvider()._timeout_sec == OLLAMA_REQUEST_TIMEOUT_SEC
+
+
+def test_stealth_tool_call_fenced_markdown_detected():
+    from conductor.providers.ollama import _find_stealth_tool_call
+
+    content = '```json\n{"name": "Read", "arguments": {"path": "a.txt"}}\n```'
+    assert _find_stealth_tool_call(content, frozenset({"Read"})) == "Read"
+
+
+def test_stealth_tool_call_plain_json_detected():
+    from conductor.providers.ollama import _find_stealth_tool_call
+
+    content = 'Here you go: {"name": "Grep", "arguments": {"pattern": "x"}}'
+    assert _find_stealth_tool_call(content, frozenset({"Grep"})) == "Grep"
+
+
+def test_stealth_tool_call_ignored_when_name_not_in_tool_set():
+    from conductor.providers.ollama import _find_stealth_tool_call
+
+    content = '```json\n{"name": "Telepathy", "arguments": {}}\n```'
+    assert _find_stealth_tool_call(content, frozenset({"Read"})) is None
+
+
+def test_stealth_tool_call_ignored_when_no_tools_param():
+    from conductor.providers.ollama import _find_stealth_tool_call
+
+    content = '{"name": "Read"}'
+    assert _find_stealth_tool_call(content, frozenset()) is None
+
+
+def test_stealth_tool_call_ignored_on_plain_prose():
+    from conductor.providers.ollama import _find_stealth_tool_call
+
+    content = "The function _resolve_in_cwd defends against path traversal."
+    assert _find_stealth_tool_call(content, frozenset({"Read"})) is None
+
+
+def test_exec_warns_on_stealth_tool_call(tmp_path):
+    # Simulate qwen2.5-coder-style silent fail: content contains the
+    # tool call as markdown JSON, but tool_calls field is empty. The
+    # loop should inject a visible diagnostic ahead of the prose.
+    stealth_body = {
+        "model": OLLAMA_DEFAULT_MODEL,
+        "message": {
+            "role": "assistant",
+            "content": (
+                '```json\n{"name": "Read", "arguments": '
+                '{"path": "src/conductor/tools/registry.py"}}\n```\n\n'
+                "_resolve_in_cwd blocks path traversal."
+            ),
+            # No tool_calls field — the silent fail pattern.
+        },
+        "prompt_eval_count": 10,
+        "eval_count": 20,
+        "done": True,
+    }
+    with respx.mock() as router:
+        router.post(CHAT_URL).mock(return_value=httpx.Response(200, json=stealth_body))
+        resp = OllamaProvider().exec(
+            "summarize _resolve_in_cwd",
+            tools=frozenset({"Read"}),
+            sandbox="read-only",
+            cwd=str(tmp_path),
+        )
+    assert "[conductor:" in resp.text
+    assert "tool-call-shaped" in resp.text
+    assert "Read" in resp.text
+    # Original model prose still present after the diagnostic.
+    assert "_resolve_in_cwd" in resp.text
+
+
+def test_exec_does_not_warn_on_clean_no_tool_response(tmp_path):
+    # When the model legitimately answers without tool-use, don't spam
+    # the user with a false-positive diagnostic.
+    clean = _ollama_terminal("direct answer without tools")
+    with respx.mock() as router:
+        router.post(CHAT_URL).mock(return_value=httpx.Response(200, json=clean))
+        resp = OllamaProvider().exec(
+            "what is 2+2",
+            tools=frozenset({"Read"}),
+            sandbox="read-only",
+            cwd=str(tmp_path),
+        )
+    assert "[conductor:" not in resp.text
+    assert resp.text == "direct answer without tools"
