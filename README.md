@@ -2,7 +2,7 @@
 
 Pick an LLM, give it a job. Manual or auto routing across providers.
 
-**Status:** shipping. Current tap release is v0.3.3 — five provider adapters (kimi, claude, codex, gemini, ollama), manual + auto routing, single-turn `call` + multi-turn `exec` with tools and sandboxes. Agent-wiring (Claude Code / Codex / Cursor / Gemini CLI) landed on main in the v0.4.x series and ships with the next tap bump; until then, use the dev-install or `pip install` paths below to try it.
+**Status:** shipping. Current tap release is v0.3.3 — five provider adapters (kimi, claude, codex, gemini, ollama), manual + auto routing, single-turn `call` + multi-turn `exec` with tools and sandboxes, and the first slice of agent-wiring (`conductor init --wire-agents` for Claude Code — delegation guidance, slash command, `kimi-long-context` / `gemini-web-search` subagents, `--unwire`). Further slices on main not yet tagged: repo-scoped `AGENTS.md` with three more subagents (codex / ollama / conductor-auto), plus `GEMINI.md`, repo `CLAUDE.md`, and Cursor-rule patching — use the dev-install or `pip install` paths below until the next tap bump.
 
 Conductor is the fourth peer in the [Autumn Garage](https://github.com/autumngarage/autumn-garage) tool family alongside [Touchstone](https://github.com/autumngarage/touchstone), [Cortex](https://github.com/autumngarage/cortex), and [Sentinel](https://github.com/autumngarage/sentinel). It owns the LLM provider adapters and the user-facing "pick an LLM, give it a job" surface so that Sentinel and Touchstone don't each have to.
 
