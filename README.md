@@ -89,8 +89,11 @@ Deferred (see `autumn-garage/.cortex/plans/conductor-bootstrap.md`):
 > `GEMINI.md` / `CLAUDE.md` patching plus Cursor rule — adds
 > `--patch-agents-md`, `--patch-gemini-md`, `--patch-claude-md-repo`,
 > `--wire-cursor`. Users on the tap version will hit "unknown option"
-> errors if they try the untagged flags — install from source or
-> `pip install git+...` for those.
+> errors if they try the untagged flags — install from the dev path
+> above, or:
+> ```sh
+> pip install git+https://github.com/autumngarage/conductor
+> ```
 
 `conductor init` detects which agent tools you have installed (Claude Code,
 Codex, Cursor, Gemini CLI, Zed — anything that reads `AGENTS.md` /
