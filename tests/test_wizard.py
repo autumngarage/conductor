@@ -14,10 +14,14 @@ from conductor.providers.kimi import (
 
 @pytest.fixture(autouse=True)
 def _isolated_agent_homes(tmp_path, monkeypatch):
-    """Isolate ~/.claude and ~/.conductor for every wizard test — otherwise
-    a wizard run could write into the developer's real home dir."""
+    """Isolate ~/.claude, ~/.conductor, and cwd for every wizard test —
+    otherwise a wizard run could write into the developer's real home
+    dir, and AGENTS.md detection would see the real repo's file."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
     monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path / ".conductor"))
     monkeypatch.setenv("CLAUDE_HOME", str(tmp_path / ".claude"))
+    monkeypatch.chdir(repo_dir)
     # Default: Claude CLI not on PATH. Tests that need it patch explicitly.
     monkeypatch.setattr("shutil.which", lambda _cmd: None)
 
@@ -507,6 +511,127 @@ def test_init_wiring_failure_exits_non_zero(mocker, tmp_path):
     assert "disk on fire" in result.output
 
 
+def test_init_patch_agents_md_yes_creates_block(mocker, tmp_path):
+    """--patch-agents-md=yes creates AGENTS.md with a conductor block, even
+    when no Claude Code is detected — the two wirings are independent."""
+    _stub_all_providers_unconfigured(mocker)
+    # Claude Code NOT detected; AGENTS.md doesn't exist yet.
+    result = CliRunner().invoke(
+        main,
+        [
+            "init",
+            "--yes",
+            "--wire-agents", "yes",
+            "--patch-agents-md", "yes",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    agents_md = tmp_path / "repo" / "AGENTS.md"
+    assert agents_md.exists()
+    text = agents_md.read_text(encoding="utf-8")
+    assert "conductor:begin" in text
+    assert "Conductor delegation" in text
+
+
+def test_init_patch_agents_md_preserves_user_content(mocker, tmp_path):
+    _stub_all_providers_unconfigured(mocker)
+    agents_md = tmp_path / "repo" / "AGENTS.md"
+    agents_md.write_text("# My own AGENTS.md\n\nDo Y.\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "init",
+            "--yes",
+            "--wire-agents", "yes",
+            "--patch-agents-md", "yes",
+            "--patch-claude-md", "no",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    text = agents_md.read_text(encoding="utf-8")
+    assert "# My own AGENTS.md" in text
+    assert "Do Y." in text
+    assert "conductor:begin" in text
+
+
+def test_init_patch_agents_md_no_leaves_file_alone(mocker, tmp_path):
+    _stub_all_providers_unconfigured(mocker)
+    agents_md = tmp_path / "repo" / "AGENTS.md"
+    original = "# My own AGENTS.md\n\nDo Y.\n"
+    agents_md.write_text(original, encoding="utf-8")
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "init",
+            "--yes",
+            "--wire-agents", "yes",
+            "--patch-agents-md", "no",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert agents_md.read_text(encoding="utf-8") == original
+
+
+def test_init_unwire_removes_agents_md_block(mocker, tmp_path):
+    """unwire in cwd with a wired AGENTS.md must strip the block; user
+    content above/below the block must be preserved."""
+    _stub_all_providers_unconfigured(mocker)
+    agents_md = tmp_path / "repo" / "AGENTS.md"
+    agents_md.write_text("# Reviewer guide\n", encoding="utf-8")
+
+    # Wire first.
+    wire = CliRunner().invoke(
+        main,
+        [
+            "init",
+            "--yes",
+            "--wire-agents", "yes",
+            "--patch-agents-md", "yes",
+            "--patch-claude-md", "no",
+        ],
+    )
+    assert wire.exit_code == 0, wire.output
+    assert "conductor:begin" in agents_md.read_text(encoding="utf-8")
+
+    # Unwire.
+    unwire = CliRunner().invoke(main, ["init", "--unwire"])
+    assert unwire.exit_code == 0, unwire.output
+    text = agents_md.read_text(encoding="utf-8")
+    assert "# Reviewer guide" in text
+    assert "conductor:begin" not in text
+
+
+def test_init_unwire_rejects_new_patch_agents_md_flag():
+    """--unwire must refuse combination with Slice B's --patch-agents-md."""
+    result = CliRunner().invoke(
+        main, ["init", "--unwire", "--patch-agents-md", "yes"]
+    )
+    assert result.exit_code == 2
+    assert "unwire" in result.output.lower()
+
+
+def test_init_patch_agents_md_yes_without_claude_still_works(mocker, tmp_path):
+    """Codex-only user (no Claude Code) must get AGENTS.md patched when
+    explicitly asked, even with no Claude Code detected."""
+    _stub_all_providers_unconfigured(mocker)
+    # Nothing at ~/.claude/; AGENTS.md also doesn't exist yet.
+    result = CliRunner().invoke(
+        main,
+        [
+            "init",
+            "--yes",
+            "--wire-agents", "yes",
+            "--patch-agents-md", "yes",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "repo" / "AGENTS.md").exists()
+    # Still shouldn't create ~/.claude artifacts.
+    assert not (tmp_path / ".claude" / "commands" / "conductor.md").exists()
+
+
 def test_init_wiring_all_user_owned_exits_non_zero(mocker, tmp_path):
     """If every target path is already a user-owned file, wire_claude_code
     skips them all — that's a failed wire from the user's perspective and
@@ -515,12 +640,19 @@ def test_init_wiring_all_user_owned_exits_non_zero(mocker, tmp_path):
     claude_dir = tmp_path / ".claude"
     (claude_dir / "agents").mkdir(parents=True)
     (claude_dir / "commands").mkdir(parents=True)
-    # Drop user-owned files at every managed path.
-    (claude_dir / "agents" / "kimi-long-context.md").write_text("# mine", encoding="utf-8")
-    (claude_dir / "agents" / "gemini-web-search.md").write_text("# mine", encoding="utf-8")
-    (claude_dir / "commands" / "conductor.md").write_text("# mine", encoding="utf-8")
+    # Drop user-owned files at EVERY managed path (Slice A + B).
+    user_owned = "# mine"
+    for relpath in (
+        "agents/kimi-long-context.md",
+        "agents/gemini-web-search.md",
+        "agents/codex-coding-agent.md",
+        "agents/ollama-offline.md",
+        "agents/conductor-auto.md",
+        "commands/conductor.md",
+    ):
+        (claude_dir / relpath).write_text(user_owned, encoding="utf-8")
     (tmp_path / ".conductor").mkdir()
-    (tmp_path / ".conductor" / "delegation-guidance.md").write_text("# mine", encoding="utf-8")
+    (tmp_path / ".conductor" / "delegation-guidance.md").write_text(user_owned, encoding="utf-8")
 
     result = CliRunner().invoke(
         main,

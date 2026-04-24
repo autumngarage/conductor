@@ -102,6 +102,8 @@ class Detection:
     claude_user_md: Path             # ~/.claude/CLAUDE.md — may or may not exist
     claude_user_md_exists: bool
     conductor_home: Path
+    agents_md: Path                  # ./AGENTS.md in cwd — may or may not exist
+    agents_md_exists: bool
     managed: tuple[AgentArtifact, ...] = field(default_factory=tuple)
 
     @property
@@ -110,12 +112,20 @@ class Detection:
         return self.claude_cli_on_path or self.claude_home_exists
 
 
-def detect() -> Detection:
-    """Scan the current environment for Claude Code + any managed files."""
+def detect(*, cwd: Path | None = None) -> Detection:
+    """Scan the current environment for Claude Code + any managed files.
+
+    Args:
+        cwd: where to look for repo-scoped files like ``./AGENTS.md``.
+            Defaults to the process's current working directory; tests
+            pass an explicit ``tmp_path`` for isolation.
+    """
     ch = claude_home()
     ch_exists = ch.is_dir()
     cli_on_path = shutil.which("claude") is not None
     user_md = ch / "CLAUDE.md"
+    work_dir = cwd or Path.cwd()
+    agents_md = work_dir / "AGENTS.md"
 
     managed: list[AgentArtifact] = []
     for path, kind in _candidate_artifacts().items():
@@ -136,6 +146,15 @@ def detect() -> Detection:
             continue
         managed.append(AgentArtifact(path=path, kind=kind, version=version, owned=True))
 
+    # Sentinel-block paths in cwd (AGENTS.md). Same ownership model as
+    # claude-md-import: file is user-owned, only the block is conductor's.
+    for path, kind in _candidate_sentinel_paths(cwd=work_dir).items():
+        if not path.exists() or not _has_sentinel_block(path):
+            continue
+        managed.append(
+            AgentArtifact(path=path, kind=kind, version=_block_version(path), owned=True)
+        )
+
     return Detection(
         claude_cli_on_path=cli_on_path,
         claude_home=ch,
@@ -143,12 +162,16 @@ def detect() -> Detection:
         claude_user_md=user_md,
         claude_user_md_exists=user_md.exists(),
         conductor_home=conductor_home(),
+        agents_md=agents_md,
+        agents_md_exists=agents_md.exists(),
         managed=tuple(managed),
     )
 
 
 def _candidate_artifacts() -> dict[Path, str]:
-    """The set of paths conductor may own. Used by detect() and unwire()."""
+    """Fully-managed paths conductor may own (excludes user-owned files
+    that take only a sentinel-block injection — those go through
+    ``_candidate_sentinel_paths``)."""
     ch = claude_home()
     conductor = conductor_home()
     return {
@@ -156,7 +179,23 @@ def _candidate_artifacts() -> dict[Path, str]:
         ch / "commands" / "conductor.md": "slash-command",
         ch / "agents" / "kimi-long-context.md": "subagent",
         ch / "agents" / "gemini-web-search.md": "subagent",
+        ch / "agents" / "codex-coding-agent.md": "subagent",
+        ch / "agents" / "ollama-offline.md": "subagent",
+        ch / "agents" / "conductor-auto.md": "subagent",
         ch / "CLAUDE.md": "claude-md-import",
+    }
+
+
+def _candidate_sentinel_paths(*, cwd: Path | None = None) -> dict[Path, str]:
+    """User-owned files that conductor injects sentinel blocks into.
+
+    Currently:
+      - ``./AGENTS.md`` in the caller's cwd (Codex / Cursor / shared
+        convention). One file per repo; conductor doesn't walk the tree.
+    """
+    cwd = cwd or Path.cwd()
+    return {
+        cwd / "AGENTS.md": "agents-md-import",
     }
 
 
@@ -349,13 +388,17 @@ class UnwireReport:
     skipped: tuple[tuple[Path, str], ...]  # (path, reason)
 
 
-def unwire() -> UnwireReport:
+def unwire(*, cwd: Path | None = None) -> UnwireReport:
     """Remove every managed file / sentinel block conductor has written.
 
     Fully-managed files (guidance, slash command, subagents) are deleted
     only if their header still marks them as conductor-managed. User-owned
-    files (CLAUDE.md) have their sentinel block removed; the rest of the
-    file is left alone.
+    files (CLAUDE.md, AGENTS.md) have their sentinel block removed; the
+    rest of the file is left alone.
+
+    ``cwd`` controls where ``AGENTS.md`` is looked for. Defaults to the
+    process's current working directory; callers running unwire across
+    multiple repos must invoke from each repo (we never walk the tree).
     """
     removed: list[Path] = []
     skipped: list[tuple[Path, str]] = []
@@ -374,6 +417,12 @@ def unwire() -> UnwireReport:
             removed.append(path)
         except OSError as e:
             skipped.append((path, f"unlink failed: {e}"))
+
+    # Sentinel-block paths in cwd (AGENTS.md).
+    for path, _kind in _candidate_sentinel_paths(cwd=cwd).items():
+        if path.exists() and remove_sentinel_block(path):
+            removed.append(path)
+
     return UnwireReport(removed=tuple(removed), skipped=tuple(skipped))
 
 
@@ -462,6 +511,45 @@ def wire_claude_code(
         },
         templates.SUBAGENT_GEMINI_WEB_SEARCH,
     )
+    _write_fm(
+        ch / "agents" / "codex-coding-agent.md",
+        {
+            "name": "codex-coding-agent",
+            "description": (
+                "Use for heavy multi-file coding tasks where a tool-using agent "
+                "loop is expected. Delegates to OpenAI Codex via `conductor exec "
+                "--with codex` in a workspace-write sandbox."
+            ),
+            "tools": "Bash",
+        },
+        templates.SUBAGENT_CODEX_CODING_AGENT,
+    )
+    _write_fm(
+        ch / "agents" / "ollama-offline.md",
+        {
+            "name": "ollama-offline",
+            "description": (
+                "Use for privacy-sensitive or offline-only tasks. Delegates to a "
+                "local Ollama model via `conductor call --with ollama` — nothing "
+                "leaves the machine."
+            ),
+            "tools": "Bash",
+        },
+        templates.SUBAGENT_OLLAMA_OFFLINE,
+    )
+    _write_fm(
+        ch / "agents" / "conductor-auto.md",
+        {
+            "name": "conductor-auto",
+            "description": (
+                "Use when delegating but unsure which provider fits. Lets "
+                "conductor's auto-router pick by task tags via `conductor call "
+                "--auto --tags <…>`."
+            ),
+            "tools": "Bash",
+        },
+        templates.SUBAGENT_CONDUCTOR_AUTO,
+    )
 
     patched = False
     if patch_claude_md:
@@ -474,6 +562,31 @@ def wire_claude_code(
         skipped=tuple(skipped),
         patched_claude_md=patched,
     )
+
+
+@dataclass(frozen=True)
+class AgentsMdReport:
+    path: Path
+    patched: bool
+
+
+def wire_agents_md(cwd: Path | None = None, *, version: str) -> AgentsMdReport:
+    """Inject conductor's delegation block into ``./AGENTS.md`` in ``cwd``.
+
+    AGENTS.md is the cross-tool convention (Codex, Cursor, Zed, …). It has
+    no ``@`` import mechanism, so we inline the block via the sentinel
+    pattern — user content outside the markers is preserved.
+
+    The block content is self-contained (a quick reference plus a
+    pointer to ``~/.conductor/delegation-guidance.md`` for the full
+    text), so an agent that reads only AGENTS.md still gets enough.
+    """
+    from conductor import _agent_templates as templates
+
+    cwd = cwd or Path.cwd()
+    path = cwd / "AGENTS.md"
+    inject_sentinel_block(path, templates.AGENTS_MD_BLOCK, version=version)
+    return AgentsMdReport(path=path, patched=True)
 
 
 # --------------------------------------------------------------------------- #

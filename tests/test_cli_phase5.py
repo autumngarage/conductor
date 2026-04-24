@@ -13,9 +13,13 @@ from conductor.cli import main
 @pytest.fixture(autouse=True)
 def _isolated_agent_homes(tmp_path, monkeypatch):
     """doctor now reports agent-integration state; isolate so tests don't
-    depend on the developer's real ~/.claude/ or ~/.conductor/ contents."""
+    depend on the developer's real ~/.claude/, ~/.conductor/, or current
+    working directory's AGENTS.md."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
     monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path / ".conductor"))
     monkeypatch.setenv("CLAUDE_HOME", str(tmp_path / ".claude"))
+    monkeypatch.chdir(repo_dir)
     monkeypatch.setattr("shutil.which", lambda _cmd: None)
 
 
@@ -226,6 +230,33 @@ def test_doctor_reports_agent_integration_wired(mocker, monkeypatch, tmp_path):
     assert "guidance" in result.output.lower()
     assert "slash-command" in result.output.lower()
     assert "subagent" in result.output.lower()
+
+
+def test_doctor_reports_agents_md_when_present(mocker, monkeypatch, tmp_path):
+    _stub_all_unconfigured(mocker)
+    agents_md = tmp_path / "repo" / "AGENTS.md"
+    agents_md.write_text("# mine\n", encoding="utf-8")
+    for var in ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "OLLAMA_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+
+    result = CliRunner().invoke(main, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "AGENTS.md" in result.output
+    assert "present but not wired" in result.output.lower()
+
+
+def test_doctor_reports_agents_md_wired(mocker, monkeypatch, tmp_path):
+    _stub_all_unconfigured(mocker)
+    for var in ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "OLLAMA_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+
+    from conductor import agent_wiring
+    agent_wiring.wire_agents_md(version="0.4.1")
+
+    result = CliRunner().invoke(main, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "AGENTS.md" in result.output
+    assert "wired" in result.output.lower()
 
 
 def test_doctor_json_includes_agent_integration(mocker, monkeypatch, tmp_path):

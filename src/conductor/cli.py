@@ -1031,6 +1031,11 @@ def _agent_integration_payload() -> dict:
         "claude_home": str(detection.claude_home),
         "claude_home_exists": detection.claude_home_exists,
         "conductor_home": str(detection.conductor_home),
+        "agents_md_path": str(detection.agents_md),
+        "agents_md_exists": detection.agents_md_exists,
+        "agents_md_wired": any(
+            a.kind == "agents-md-import" for a in detection.managed
+        ),
         "managed_files": [
             {"path": str(a.path), "kind": a.kind, "version": a.version}
             for a in detection.managed
@@ -1085,17 +1090,33 @@ def doctor(as_json: bool) -> None:
     click.echo("")
     click.echo("Agent integration:")
     ai = payload["agent_integration"]
+
+    claude_managed = [f for f in ai["managed_files"] if f["kind"] != "agents-md-import"]
     if not ai["claude_detected"]:
         click.echo("  Claude Code: not detected")
-    elif not ai["managed_files"]:
+    elif not claude_managed:
         click.echo("  Claude Code: detected, not wired (run `conductor init`)")
     else:
-        click.echo(
-            f"  Claude Code: wired — {len(ai['managed_files'])} managed files"
-        )
-        for f in ai["managed_files"]:
+        click.echo(f"  Claude Code: wired — {len(claude_managed)} managed files")
+        for f in claude_managed:
             version_note = f" v{f['version']}" if f["version"] else ""
-            click.echo(f"    {f['kind']:<15}  {f['path']}{version_note}")
+            click.echo(f"    {f['kind']:<18}  {f['path']}{version_note}")
+
+    if not ai["agents_md_exists"] and not ai["agents_md_wired"]:
+        click.echo("  AGENTS.md:   no AGENTS.md in current directory")
+    elif ai["agents_md_wired"]:
+        block = next(
+            (f for f in ai["managed_files"] if f["kind"] == "agents-md-import"),
+            None,
+        )
+        version_note = f" v{block['version']}" if block and block["version"] else ""
+        click.echo(
+            f"  AGENTS.md:   wired — {ai['agents_md_path']}{version_note}"
+        )
+    else:
+        click.echo(
+            f"  AGENTS.md:   present but not wired — {ai['agents_md_path']}"
+        )
 
     click.echo("")
     click.echo("Next steps:")
@@ -1147,10 +1168,18 @@ def doctor(as_json: bool) -> None:
     "Default: ask on TTY, skip on non-TTY.",
 )
 @click.option(
+    "--patch-agents-md",
+    type=click.Choice(["yes", "no", "ask"]),
+    default=None,
+    help="Inject a conductor delegation block into ./AGENTS.md (repo-scoped). "
+    "Default: ask on TTY when the file exists, skip otherwise.",
+)
+@click.option(
     "--unwire",
     is_flag=True,
     default=False,
-    help="Remove every conductor-managed agent integration artifact and exit.",
+    help="Remove every conductor-managed agent integration artifact "
+    "(user-scope + repo-scope AGENTS.md block) and exit.",
 )
 def init(
     accept_defaults: bool,
@@ -1158,11 +1187,12 @@ def init(
     remaining: bool,
     wire_agents: str | None,
     patch_claude_md: str | None,
+    patch_agents_md: str | None,
     unwire: bool,
 ) -> None:
     """Interactively configure Conductor for first use."""
     if unwire:
-        if only or remaining or wire_agents or patch_claude_md:
+        if only or remaining or wire_agents or patch_claude_md or patch_agents_md:
             raise click.UsageError(
                 "--unwire can't be combined with provider or wiring flags."
             )
@@ -1180,6 +1210,7 @@ def init(
         remaining=remaining,
         wire_agents=wire_agents,
         patch_claude_md=patch_claude_md,
+        patch_agents_md=patch_agents_md,
     )
     sys.exit(exit_code)
 
