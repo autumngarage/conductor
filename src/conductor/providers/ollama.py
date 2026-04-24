@@ -32,10 +32,92 @@ from conductor.tools import (
 
 OLLAMA_BASE_URL_ENV = "OLLAMA_BASE_URL"
 OLLAMA_DEFAULT_BASE_URL = "http://localhost:11434"
-OLLAMA_DEFAULT_MODEL = "qwen2.5-coder:14b"
-OLLAMA_REQUEST_TIMEOUT_SEC = 180.0
+# Default bumped 2026-04-24 from qwen2.5-coder:14b to qwen3.6:35b-a3b after
+# dogfood: qwen2.5-coder emits tool calls as markdown-JSON inside content
+# rather than as structured tool_calls (silent-fail for exec() with tools),
+# and qwen3.6:35b-a3b is a MoE that runs ~7x faster than the 27b dense on
+# low-memory-headroom Macs despite the larger total parameter count.
+OLLAMA_DEFAULT_MODEL = "qwen3.6:35b-a3b"
+# Bumped 2026-04-24 from 180s → 600s. Agent-loop dogfood on an M4 Max 36GB
+# showed multi-turn tool-use loops with growing context routinely take
+# 5-15 minutes end-to-end — even for fast MoE models — and each iteration
+# can approach 180s when the prompt grows. Override per-request via the
+# CONDUCTOR_OLLAMA_TIMEOUT_SEC env var.
+OLLAMA_TIMEOUT_ENV = "CONDUCTOR_OLLAMA_TIMEOUT_SEC"
+OLLAMA_REQUEST_TIMEOUT_SEC = 600.0
 OLLAMA_MAX_TOOL_ITERATIONS = 10
 OLLAMA_CONTEXT_SAFETY_MARGIN = 0.1
+
+
+def _find_stealth_tool_call(content: str, tool_names: frozenset[str]) -> str | None:
+    """Return the tool name if ``content`` contains a tool-call-shaped JSON
+    block for one of ``tool_names``, otherwise None.
+
+    The heuristic looks for a JSON object with a ``name`` field whose
+    value is in ``tool_names`` — the shape every qwen-family model emits
+    when its chat template fails to convert the call into a structured
+    ``tool_calls`` field. Covers fenced (```json```) and bare JSON blocks.
+    Deliberately cheap — one regex, one json.loads attempt per candidate;
+    false positives here are not harmful because the diagnostic simply
+    warns that the loop returned without executing tools.
+    """
+    if not content or not tool_names:
+        return None
+    import re
+
+    # Look for JSON-like blocks: fenced markdown first, then any balanced
+    # {...} span that happens to hold a "name" key. Nested braces (e.g.
+    # {"arguments": {"path": "x"}}) defeat a simple [^{}]* match, so we
+    # scan for candidate starts and walk a depth counter to find each
+    # span's end. Keeps us regex-free for the nested case.
+    candidates: list[str] = []
+    for match in re.finditer(
+        r"```(?:json)?\s*(\{.*?\})\s*```", content, flags=re.DOTALL
+    ):
+        candidates.append(match.group(1))
+    if not candidates:
+        for start in range(len(content)):
+            if content[start] != "{":
+                continue
+            depth = 0
+            for end in range(start, len(content)):
+                ch = content[end]
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        span = content[start : end + 1]
+                        if '"name"' in span:
+                            candidates.append(span)
+                        break
+    for raw in candidates:
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and obj.get("name") in tool_names:
+            return obj["name"]
+    return None
+
+
+def _resolve_default_timeout() -> float:
+    """Pick the per-request HTTP timeout at instance-init time.
+
+    Env-override flow: ``CONDUCTOR_OLLAMA_TIMEOUT_SEC`` wins if set and
+    parseable as a positive float; otherwise fall back to the baked-in
+    default. Invalid values fall through rather than raising so a typo
+    doesn't brick the provider.
+    """
+    raw = os.environ.get(OLLAMA_TIMEOUT_ENV)
+    if raw:
+        try:
+            override = float(raw)
+            if override > 0:
+                return override
+        except ValueError:
+            pass
+    return OLLAMA_REQUEST_TIMEOUT_SEC
 
 
 class OllamaProvider:
@@ -68,10 +150,14 @@ class OllamaProvider:
         self,
         *,
         base_url: str | None = None,
-        timeout_sec: float = OLLAMA_REQUEST_TIMEOUT_SEC,
+        timeout_sec: float | None = None,
     ) -> None:
         self._base_url_override = base_url
-        self._timeout_sec = timeout_sec
+        # Resolve the timeout once per instance: explicit kwarg wins,
+        # then the CONDUCTOR_OLLAMA_TIMEOUT_SEC env var, then the default.
+        self._timeout_sec = (
+            timeout_sec if timeout_sec is not None else _resolve_default_timeout()
+        )
 
     def _base_url(self) -> str:
         return (
@@ -311,6 +397,26 @@ class OllamaProvider:
             final_text = message.get("content") or ""
 
             if not tool_calls:
+                # Silent-fail guard: some model+template combinations
+                # (notably qwen2.5-coder:* in ollama) emit the tool call
+                # as a markdown-JSON block inside `content` instead of
+                # populating the `tool_calls` field. Without this check
+                # the loop would silently return the model's prose as if
+                # it were the answer — and that prose is usually a
+                # hallucination since no tool actually ran.
+                stealth = _find_stealth_tool_call(final_text, tools)
+                if stealth:
+                    final_text = (
+                        "[conductor: the model "
+                        f"({model}) returned a tool-call-shaped JSON block "
+                        f"for `{stealth}` inside message.content instead of "
+                        "the structured tool_calls field. No tool was "
+                        "actually executed; the response below is the "
+                        "model's unaided prose. Try a model with proper "
+                        "tool-use support (e.g. qwen3.5+ or qwen3.6+, "
+                        "llama3.1+) — qwen2.5-coder is known to have this "
+                        "issue in ollama.]\n\n"
+                    ) + final_text
                 break
 
             if prompt_tokens >= context_ceiling:
