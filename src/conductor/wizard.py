@@ -211,6 +211,7 @@ def run_init_wizard(
     remaining: bool = False,
     wire_agents: str | None = None,
     patch_claude_md: str | None = None,
+    patch_agents_md: str | None = None,
 ) -> int:
     """Walk the user through configuring every provider that needs it.
 
@@ -220,12 +221,17 @@ def run_init_wizard(
         remaining: skip providers that are already configured (resume flow).
         wire_agents: one of "yes" / "no" / "ask" / None. Controls whether
             the wizard offers to wire conductor into detected agent tools
-            (Claude Code today; more in later slices). None means ask on
-            TTY, skip on non-TTY.
+            (Claude Code user-scope artifacts). None means ask on TTY,
+            skip on non-TTY.
         patch_claude_md: same tri-state, for the one-line ``@import`` edit
             in ``~/.claude/CLAUDE.md``. Separate from ``wire_agents`` so
             users can accept the artifacts while declining the import
             edit (and vice versa).
+        patch_agents_md: same tri-state, for inlining a delegation block
+            into the cwd's ``./AGENTS.md`` (the cross-tool convention used
+            by Codex / Cursor / Zed). Separate from ``patch_claude_md``
+            because user-scope and repo-scope patching are independent
+            consents.
 
     Returns a shell exit code: 0 on success, non-zero if the user
     explicitly aborted.
@@ -319,6 +325,7 @@ def run_init_wizard(
             interactive=interactive,
             wire_agents=wire_agents,
             patch_claude_md=patch_claude_md,
+            patch_agents_md=patch_agents_md,
         )
 
     _print_summary(outcomes)
@@ -661,8 +668,10 @@ def _maybe_wire_agents(
     interactive: bool,
     wire_agents: str | None,
     patch_claude_md: str | None,
+    patch_agents_md: str | None = None,
 ) -> bool:
-    """Offer to wire conductor into detected agent tools (Claude Code).
+    """Offer to wire conductor into detected agent tools (Claude Code
+    user-scope + repo-scope ``AGENTS.md``).
 
     Returns True if no wiring was attempted (skipped, declined, or no
     target detected) or if the wiring fully succeeded. Returns False if
@@ -671,30 +680,75 @@ def _maybe_wire_agents(
     the failure instead of silently exiting 0.
     """
     from conductor import __version__
-    from conductor.agent_wiring import detect, wire_claude_code
+    from conductor.agent_wiring import detect
 
     detection = detect()
 
-    if not detection.claude_detected:
+    claude_detected = detection.claude_detected
+    agents_md_detected = detection.agents_md_exists
+
+    # Decide the top-level wire-agents decision.
+    decision = wire_agents if wire_agents is not None else ("ask" if interactive else "no")
+    if decision == "no":
+        return True
+
+    # If nothing's detected AND the user didn't explicitly force a patch,
+    # short-circuit with an informational message. A user who explicitly
+    # passed --patch-agents-md=yes wants the file created even on a bare
+    # machine; don't silently swallow that intent.
+    user_forced_agents_md = patch_agents_md == "yes"
+    if not claude_detected and not agents_md_detected and not user_forced_agents_md:
         if interactive:
             click.echo("")
             click.echo("─" * 60)
             click.echo("Agent integration")
             click.echo("─" * 60)
             click.echo(
-                "  Claude Code not detected in this environment; nothing to wire."
+                "  No agent tools detected in this environment "
+                "(no ~/.claude/, no ./AGENTS.md)."
             )
             click.echo(
-                "  (re-run `conductor init` after installing Claude Code to enable "
-                "delegation)"
+                "  (re-run `conductor init` in a repo with AGENTS.md, or after "
+                "installing Claude Code)"
             )
             click.echo("")
         return True
 
-    # Decide whether to offer the prompt at all.
-    decision = wire_agents if wire_agents is not None else ("ask" if interactive else "no")
-    if decision == "no":
-        return True
+    claude_ok = True
+    if claude_detected:
+        claude_ok = _wire_claude_code_section(
+            detection=detection,
+            version=__version__,
+            interactive=interactive,
+            decision=decision,
+            patch_claude_md=patch_claude_md,
+        )
+
+    agents_ok = True
+    # AGENTS.md section runs if the file exists (natural fit) or the user
+    # explicitly forced creation via --patch-agents-md=yes.
+    if agents_md_detected or user_forced_agents_md:
+        agents_ok = _wire_agents_md_section(
+            detection=detection,
+            version=__version__,
+            interactive=interactive,
+            decision=decision,
+            patch_agents_md=patch_agents_md,
+        )
+
+    return claude_ok and agents_ok
+
+
+def _wire_claude_code_section(
+    *,
+    detection,
+    version: str,
+    interactive: bool,
+    decision: str,
+    patch_claude_md: str | None,
+) -> bool:
+    """Claude Code user-scope wiring (Slice A behavior, extracted)."""
+    from conductor.agent_wiring import wire_claude_code
 
     already_wired = len(detection.managed) > 0
     click.echo("")
@@ -758,7 +812,7 @@ def _maybe_wire_agents(
         do_patch = pcm == "yes"
 
     try:
-        report = wire_claude_code(__version__, patch_claude_md=do_patch)
+        report = wire_claude_code(version, patch_claude_md=do_patch)
     except Exception as exc:  # noqa: BLE001 — surface any unexpected failure
         click.echo(f"  ✗ wiring failed: {exc}")
         return False
@@ -789,6 +843,84 @@ def _maybe_wire_agents(
     # If every target file was skipped (all user-owned), treat that as a
     # failed wire — the user asked for integration and got nothing.
     return not (report.skipped and not report.written)
+
+
+def _wire_agents_md_section(
+    *,
+    detection,
+    version: str,
+    interactive: bool,
+    decision: str,
+    patch_agents_md: str | None,
+) -> bool:
+    """Repo-scope AGENTS.md sentinel-block injection.
+
+    Works regardless of Claude Code detection — Codex / Cursor / Zed users
+    who don't have Claude Code installed get the AGENTS.md patch on its
+    own. Idempotent: the inject helper replaces an existing conductor
+    block in place, so re-running bumps the version and never duplicates.
+    """
+    from conductor.agent_wiring import wire_agents_md
+
+    already_blocked = any(a.kind == "agents-md-import" for a in detection.managed)
+
+    click.echo("")
+    click.echo("─" * 60)
+    click.echo("Agent integration — AGENTS.md (repo-scoped)")
+    click.echo("─" * 60)
+    if detection.agents_md_exists:
+        if already_blocked:
+            click.echo(f"  {detection.agents_md} already has a conductor block.")
+            click.echo("  Re-running will refresh it to the current version.")
+        else:
+            click.echo(f"  {detection.agents_md} found — conductor can inject a")
+            click.echo("  delegation-guidance block (sentinel-bounded, fully removable).")
+    else:
+        click.echo(
+            f"  No AGENTS.md in {detection.agents_md.parent}. Conductor will create"
+        )
+        click.echo("  one containing only the delegation block — not recommended")
+        click.echo("  unless this repo is intended to use AGENTS.md going forward.")
+    click.echo("")
+
+    # `decision` is the top-level wire-agents decision. It gated us into
+    # this function (yes/ask). For the per-file patch, we honor
+    # `patch_agents_md` with the same tri-state semantics as patch_claude_md.
+    pam = (
+        patch_agents_md
+        if patch_agents_md is not None
+        else ("ask" if interactive else "no")
+    )
+    if pam == "ask":
+        verb = "refresh" if already_blocked else (
+            "patch" if detection.agents_md_exists else "create"
+        )
+        noun = "AGENTS.md"
+        choice = _prompt_menu(
+            options=[
+                ("y", f"yes — {verb} {noun}"),
+                ("n", "no — skip AGENTS.md"),
+            ],
+            default="y" if detection.agents_md_exists else "n",
+        )
+        if choice == "n":
+            return True
+        do_patch = True
+    else:
+        do_patch = pam == "yes"
+
+    if not do_patch:
+        return True
+
+    try:
+        report = wire_agents_md(version=version)
+    except Exception as exc:  # noqa: BLE001 — surface any unexpected failure
+        click.echo(f"  ✗ AGENTS.md patch failed: {exc}")
+        return False
+
+    click.echo(f"  ✓ patched {report.path} (sentinel block)")
+    click.echo("")
+    return True
 
 
 def _print_next_steps(outcomes: list[WizardOutcome]) -> None:

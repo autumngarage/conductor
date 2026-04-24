@@ -14,11 +14,15 @@ from conductor import agent_wiring as aw
 
 @pytest.fixture(autouse=True)
 def _isolated_homes(tmp_path, monkeypatch):
-    """Point every path helper at tmp_path; remove any inherited which()."""
+    """Point every path helper at tmp_path; chdir so repo-scoped checks
+    (``./AGENTS.md``) look inside the tmp dir; remove inherited which()."""
     conductor_dir = tmp_path / ".conductor"
     claude_dir = tmp_path / ".claude"
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
     monkeypatch.setenv("CONDUCTOR_HOME", str(conductor_dir))
     monkeypatch.setenv("CLAUDE_HOME", str(claude_dir))
+    monkeypatch.chdir(repo_dir)
     # Default: claude CLI not on PATH unless a test explicitly patches it.
     monkeypatch.setattr("shutil.which", lambda _cmd: None)
     yield
@@ -237,6 +241,9 @@ def test_wire_claude_code_writes_all_artifacts():
         aw.claude_home() / "commands" / "conductor.md",
         aw.claude_home() / "agents" / "kimi-long-context.md",
         aw.claude_home() / "agents" / "gemini-web-search.md",
+        aw.claude_home() / "agents" / "codex-coding-agent.md",
+        aw.claude_home() / "agents" / "ollama-offline.md",
+        aw.claude_home() / "agents" / "conductor-auto.md",
     }
     assert set(report.written) == expected_paths
     for p in expected_paths:
@@ -369,3 +376,157 @@ def test_managed_path_stays_out_of_arbitrary_dirs(tmp_path):
     # The conductor_home dir now exists, but nothing else was created.
     assert aw.conductor_home().is_dir()
     assert not (tmp_path / "other").exists()
+
+
+# --------------------------------------------------------------------------- #
+# Slice B — AGENTS.md (repo-scoped) wire/unwire round-trip.
+# --------------------------------------------------------------------------- #
+
+
+def test_wire_agents_md_creates_new_file_with_block():
+    """No existing AGENTS.md → create one containing only the block."""
+    from pathlib import Path
+
+    report = aw.wire_agents_md(version="0.4.1")
+    assert report.patched is True
+    assert report.path == Path.cwd() / "AGENTS.md"
+    text = report.path.read_text(encoding="utf-8")
+    assert "conductor:begin v0.4.1" in text
+    assert "conductor:end" in text
+    assert "Conductor delegation" in text
+    # Fully removable via the sentinel markers.
+    assert aw._has_sentinel_block(report.path)
+
+
+def test_wire_agents_md_preserves_existing_user_content(tmp_path):
+    """Existing AGENTS.md → append block; don't touch user content."""
+    from pathlib import Path
+
+    path = Path.cwd() / "AGENTS.md"
+    path.write_text("# My project's reviewer guide\n\nDo X.\n", encoding="utf-8")
+    aw.wire_agents_md(version="0.4.1")
+    text = path.read_text(encoding="utf-8")
+    assert "# My project's reviewer guide" in text
+    assert "Do X." in text
+    assert "conductor:begin" in text
+    # User content comes BEFORE the block.
+    assert text.index("Do X.") < text.index("conductor:begin")
+
+
+def test_wire_agents_md_idempotent_on_rerun():
+    """Second wire replaces the existing block; only one block in the file."""
+    from pathlib import Path
+
+    path = Path.cwd() / "AGENTS.md"
+    path.write_text("# header\n", encoding="utf-8")
+    aw.wire_agents_md(version="0.4.1")
+    aw.wire_agents_md(version="0.4.2")
+    text = path.read_text(encoding="utf-8")
+    assert text.count("conductor:begin") == 1
+    assert "v0.4.2" in text
+    assert "v0.4.1" not in text
+    assert "# header" in text
+
+
+def test_detect_reports_agents_md_exists_and_wired(tmp_path):
+    """detect() in a repo whose AGENTS.md has our block → agents_md_exists
+    True, managed list includes an agents-md-import artifact."""
+    from pathlib import Path
+
+    aw.wire_agents_md(version="0.4.1")
+    d = aw.detect()
+    assert d.agents_md_exists is True
+    assert d.agents_md == Path.cwd() / "AGENTS.md"
+    assert any(a.kind == "agents-md-import" for a in d.managed)
+
+
+def test_detect_ignores_agents_md_without_conductor_block():
+    """AGENTS.md exists but has no conductor block → not claimed."""
+    from pathlib import Path
+
+    (Path.cwd() / "AGENTS.md").write_text("# My file\n", encoding="utf-8")
+    d = aw.detect()
+    assert d.agents_md_exists is True
+    assert not any(a.kind == "agents-md-import" for a in d.managed)
+
+
+def test_unwire_removes_agents_md_block_only():
+    """unwire() removes our block; user-written sections of AGENTS.md are
+    preserved, the file stays on disk if it still has user content."""
+    from pathlib import Path
+
+    path = Path.cwd() / "AGENTS.md"
+    path.write_text("# Reviewer guide\n\nRules.\n", encoding="utf-8")
+    aw.wire_agents_md(version="0.4.1")
+    assert "conductor:begin" in path.read_text(encoding="utf-8")
+
+    report = aw.unwire()
+    assert path in report.removed
+    text = path.read_text(encoding="utf-8")
+    assert "# Reviewer guide" in text
+    assert "Rules." in text
+    assert "conductor:begin" not in text
+
+
+def test_unwire_deletes_agents_md_when_block_was_only_content():
+    """AGENTS.md created solely to hold our block → deleted on unwire."""
+    from pathlib import Path
+
+    aw.wire_agents_md(version="0.4.1")
+    path = Path.cwd() / "AGENTS.md"
+    assert path.exists()
+
+    aw.unwire()
+    assert not path.exists()
+
+
+def test_wire_then_unwire_then_wire_agents_md_round_trip():
+    aw.wire_agents_md(version="0.4.1")
+    aw.unwire()
+    # Second wire succeeds from a clean state.
+    report = aw.wire_agents_md(version="0.4.2")
+    text = report.path.read_text(encoding="utf-8")
+    assert "conductor:begin v0.4.2" in text
+
+
+def test_wire_claude_code_writes_three_new_subagents():
+    """Slice B adds codex, ollama, and conductor-auto subagents."""
+    report = aw.wire_claude_code("0.4.1", patch_claude_md=False)
+    written_names = {p.name for p in report.written}
+    assert "codex-coding-agent.md" in written_names
+    assert "ollama-offline.md" in written_names
+    assert "conductor-auto.md" in written_names
+
+
+def test_new_subagents_have_managed_markers():
+    """Every subagent file written must carry a managed-by marker so
+    unwire can identify it; aliens at the path must not be overwritten."""
+    aw.wire_claude_code("0.4.1", patch_claude_md=False)
+    for name in ("codex-coding-agent", "ollama-offline", "conductor-auto"):
+        path = aw.claude_home() / "agents" / f"{name}.md"
+        assert aw.is_managed_file(path)
+        assert aw.read_managed_version(path) == "0.4.1"
+
+
+def test_wire_agents_md_honors_explicit_cwd_arg(tmp_path):
+    """wire_agents_md(cwd=X) writes into X, not Path.cwd()."""
+    target_dir = tmp_path / "other-repo"
+    target_dir.mkdir()
+    report = aw.wire_agents_md(target_dir, version="0.4.1")
+    assert report.path == target_dir / "AGENTS.md"
+    assert (target_dir / "AGENTS.md").exists()
+    # Default cwd path NOT touched.
+    assert not (tmp_path / "repo" / "AGENTS.md").exists()
+
+
+def test_unwire_with_explicit_cwd_only_touches_that_dir(tmp_path):
+    """unwire(cwd=X) removes X/AGENTS.md block but not Y/AGENTS.md in another dir."""
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    aw.wire_agents_md(other, version="0.4.1")
+    aw.wire_agents_md(version="0.4.1")  # also in default cwd
+
+    aw.unwire()  # cwd=None → defaults to Path.cwd() (the "repo" dir)
+    assert not (tmp_path / "repo" / "AGENTS.md").exists()
+    # The one in `other` is untouched because unwire() didn't look there.
+    assert "conductor:begin" in (other / "AGENTS.md").read_text(encoding="utf-8")
