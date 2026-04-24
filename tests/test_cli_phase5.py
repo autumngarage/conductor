@@ -226,7 +226,7 @@ def test_doctor_reports_agent_integration_wired(mocker, monkeypatch, tmp_path):
     result = CliRunner().invoke(main, ["doctor"])
     assert result.exit_code == 0, result.output
     assert "wired" in result.output.lower()
-    assert "managed files" in result.output.lower()
+    assert "user-scope files" in result.output.lower()
     assert "guidance" in result.output.lower()
     assert "slash-command" in result.output.lower()
     assert "subagent" in result.output.lower()
@@ -243,6 +243,69 @@ def test_doctor_reports_agents_md_when_present(mocker, monkeypatch, tmp_path):
     assert result.exit_code == 0, result.output
     assert "AGENTS.md" in result.output
     assert "present but not wired" in result.output.lower()
+
+
+def test_doctor_reports_gemini_md_states(mocker, monkeypatch, tmp_path):
+    _stub_all_unconfigured(mocker)
+    for var in ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "OLLAMA_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+
+    # Pre-wire: no GEMINI.md exists.
+    result = CliRunner().invoke(main, ["doctor"])
+    assert "GEMINI.md" in result.output
+    assert "no GEMINI.md" in result.output
+
+    # Present but not wired.
+    (tmp_path / "repo" / "GEMINI.md").write_text("# mine\n", encoding="utf-8")
+    result = CliRunner().invoke(main, ["doctor"])
+    assert "present but not wired" in result.output.lower()
+
+    # Wired.
+    from conductor import agent_wiring
+    agent_wiring.wire_gemini_md(version="0.4.2")
+    result = CliRunner().invoke(main, ["doctor"])
+    assert "GEMINI.md" in result.output
+    # "wired —" appears twice in a fully-wired output; locate it on the
+    # GEMINI.md line specifically.
+    gemini_lines = [
+        ln for ln in result.output.splitlines() if "GEMINI.md" in ln
+    ]
+    assert any("wired" in ln for ln in gemini_lines), gemini_lines
+
+
+def test_doctor_reports_cursor_states(mocker, monkeypatch, tmp_path):
+    _stub_all_unconfigured(mocker)
+    for var in ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "OLLAMA_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+
+    # No .cursor/rules/.
+    result = CliRunner().invoke(main, ["doctor"])
+    assert "Cursor:" in result.output
+    assert "no .cursor/rules/" in result.output.lower()
+
+    # Wired.
+    from conductor import agent_wiring
+    agent_wiring.wire_cursor(version="0.4.2")
+    result = CliRunner().invoke(main, ["doctor"])
+    assert "Cursor:" in result.output
+    assert "rule wired" in result.output.lower()
+
+
+def test_doctor_json_includes_slice_c_fields(mocker, monkeypatch, tmp_path):
+    _stub_all_unconfigured(mocker)
+    for var in ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "OLLAMA_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+    mocker.patch("conductor.cli.credentials.keychain_has", return_value=False)
+
+    result = CliRunner().invoke(main, ["doctor", "--json"])
+    payload = json.loads(result.output)
+    ai = payload["agent_integration"]
+    for key in (
+        "gemini_md_path", "gemini_md_exists", "gemini_md_wired",
+        "claude_md_repo_path", "claude_md_repo_exists", "claude_md_repo_wired",
+        "cursor_rules_dir", "cursor_rules_dir_exists", "cursor_rule_wired",
+    ):
+        assert key in ai, f"missing {key}"
 
 
 def test_doctor_reports_agents_md_wired(mocker, monkeypatch, tmp_path):

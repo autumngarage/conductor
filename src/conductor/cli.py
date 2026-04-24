@@ -1025,6 +1025,7 @@ def _agent_integration_payload() -> dict:
     from conductor.agent_wiring import detect
 
     detection = detect()
+    kinds = {a.kind for a in detection.managed}
     return {
         "claude_detected": detection.claude_detected,
         "claude_cli_on_path": detection.claude_cli_on_path,
@@ -1033,9 +1034,16 @@ def _agent_integration_payload() -> dict:
         "conductor_home": str(detection.conductor_home),
         "agents_md_path": str(detection.agents_md),
         "agents_md_exists": detection.agents_md_exists,
-        "agents_md_wired": any(
-            a.kind == "agents-md-import" for a in detection.managed
-        ),
+        "agents_md_wired": "agents-md-import" in kinds,
+        "gemini_md_path": str(detection.gemini_md),
+        "gemini_md_exists": detection.gemini_md_exists,
+        "gemini_md_wired": "gemini-md-import" in kinds,
+        "claude_md_repo_path": str(detection.claude_md_repo),
+        "claude_md_repo_exists": detection.claude_md_repo_exists,
+        "claude_md_repo_wired": "claude-md-repo-import" in kinds,
+        "cursor_rules_dir": str(detection.cursor_rules_dir),
+        "cursor_rules_dir_exists": detection.cursor_rules_dir_exists,
+        "cursor_rule_wired": "cursor-rule" in kinds,
         "managed_files": [
             {"path": str(a.path), "kind": a.kind, "version": a.version}
             for a in detection.managed
@@ -1091,32 +1099,61 @@ def doctor(as_json: bool) -> None:
     click.echo("Agent integration:")
     ai = payload["agent_integration"]
 
-    claude_managed = [f for f in ai["managed_files"] if f["kind"] != "agents-md-import"]
+    _repo_kinds = {
+        "agents-md-import", "gemini-md-import",
+        "claude-md-repo-import", "cursor-rule",
+    }
+    user_managed = [f for f in ai["managed_files"] if f["kind"] not in _repo_kinds]
     if not ai["claude_detected"]:
-        click.echo("  Claude Code: not detected")
-    elif not claude_managed:
-        click.echo("  Claude Code: detected, not wired (run `conductor init`)")
+        click.echo("  Claude Code:  not detected")
+    elif not user_managed:
+        click.echo("  Claude Code:  detected, not wired (run `conductor init`)")
     else:
-        click.echo(f"  Claude Code: wired — {len(claude_managed)} managed files")
-        for f in claude_managed:
+        click.echo(f"  Claude Code:  wired — {len(user_managed)} user-scope files")
+        for f in user_managed:
             version_note = f" v{f['version']}" if f["version"] else ""
             click.echo(f"    {f['kind']:<18}  {f['path']}{version_note}")
 
-    if not ai["agents_md_exists"] and not ai["agents_md_wired"]:
-        click.echo("  AGENTS.md:   no AGENTS.md in current directory")
-    elif ai["agents_md_wired"]:
-        block = next(
-            (f for f in ai["managed_files"] if f["kind"] == "agents-md-import"),
+    def _repo_line(
+        label: str,
+        file_kind: str,
+        exists_key: str,
+        wired_key: str,
+        path_key: str,
+    ) -> None:
+        if not ai[exists_key] and not ai[wired_key]:
+            click.echo(f"  {label}  no {label.split(':')[0].strip()} in current directory")
+            return
+        if ai[wired_key]:
+            entry = next(
+                (f for f in ai["managed_files"] if f["kind"] == file_kind),
+                None,
+            )
+            version_note = f" v{entry['version']}" if entry and entry["version"] else ""
+            click.echo(f"  {label}  wired — {ai[path_key]}{version_note}")
+        else:
+            click.echo(f"  {label}  present but not wired — {ai[path_key]}")
+
+    _repo_line("AGENTS.md:   ", "agents-md-import",
+               "agents_md_exists", "agents_md_wired", "agents_md_path")
+    _repo_line("GEMINI.md:   ", "gemini-md-import",
+               "gemini_md_exists", "gemini_md_wired", "gemini_md_path")
+    _repo_line("CLAUDE.md:   ", "claude-md-repo-import",
+               "claude_md_repo_exists", "claude_md_repo_wired", "claude_md_repo_path")
+
+    # Cursor is a fully-managed file inside a conventional directory, not a
+    # sentinel-block patch. Its detection story is "does .cursor/rules/ exist".
+    if not ai["cursor_rules_dir_exists"] and not ai["cursor_rule_wired"]:
+        click.echo("  Cursor:       no .cursor/rules/ in current directory")
+    elif ai["cursor_rule_wired"]:
+        entry = next(
+            (f for f in ai["managed_files"] if f["kind"] == "cursor-rule"),
             None,
         )
-        version_note = f" v{block['version']}" if block and block["version"] else ""
-        click.echo(
-            f"  AGENTS.md:   wired — {ai['agents_md_path']}{version_note}"
-        )
+        version_note = f" v{entry['version']}" if entry and entry["version"] else ""
+        click.echo(f"  Cursor:       rule wired{version_note}")
     else:
-        click.echo(
-            f"  AGENTS.md:   present but not wired — {ai['agents_md_path']}"
-        )
+        click.echo("  Cursor:       .cursor/rules/ present but not wired")
 
     click.echo("")
     click.echo("Next steps:")
@@ -1171,15 +1208,37 @@ def doctor(as_json: bool) -> None:
     "--patch-agents-md",
     type=click.Choice(["yes", "no", "ask"]),
     default=None,
-    help="Inject a conductor delegation block into ./AGENTS.md (repo-scoped). "
-    "Default: ask on TTY when the file exists, skip otherwise.",
+    help="Inject a conductor delegation block into ./AGENTS.md "
+    "(Codex / Cursor / Zed convention). Default: ask on TTY when present.",
+)
+@click.option(
+    "--patch-gemini-md",
+    type=click.Choice(["yes", "no", "ask"]),
+    default=None,
+    help="Inject a conductor delegation block into ./GEMINI.md "
+    "(Gemini CLI convention). Default: ask on TTY when present.",
+)
+@click.option(
+    "--patch-claude-md-repo",
+    type=click.Choice(["yes", "no", "ask"]),
+    default=None,
+    help="Inject @import into repo-scope ./CLAUDE.md (parallel to "
+    "--patch-claude-md for user-scope). Default: ask on TTY when present.",
+)
+@click.option(
+    "--wire-cursor",
+    "wire_cursor_flag",
+    type=click.Choice(["yes", "no", "ask"]),
+    default=None,
+    help="Write a managed Cursor rule at .cursor/rules/conductor-delegation.mdc. "
+    "Default: ask on TTY when .cursor/rules/ exists.",
 )
 @click.option(
     "--unwire",
     is_flag=True,
     default=False,
     help="Remove every conductor-managed agent integration artifact "
-    "(user-scope + repo-scope AGENTS.md block) and exit.",
+    "(user-scope + repo-scope sentinel blocks + Cursor rule) and exit.",
 )
 def init(
     accept_defaults: bool,
@@ -1188,11 +1247,18 @@ def init(
     wire_agents: str | None,
     patch_claude_md: str | None,
     patch_agents_md: str | None,
+    patch_gemini_md: str | None,
+    patch_claude_md_repo: str | None,
+    wire_cursor_flag: str | None,
     unwire: bool,
 ) -> None:
     """Interactively configure Conductor for first use."""
     if unwire:
-        if only or remaining or wire_agents or patch_claude_md or patch_agents_md:
+        wiring_flags = (
+            wire_agents, patch_claude_md, patch_agents_md,
+            patch_gemini_md, patch_claude_md_repo, wire_cursor_flag,
+        )
+        if only or remaining or any(f is not None for f in wiring_flags):
             raise click.UsageError(
                 "--unwire can't be combined with provider or wiring flags."
             )
@@ -1211,6 +1277,9 @@ def init(
         wire_agents=wire_agents,
         patch_claude_md=patch_claude_md,
         patch_agents_md=patch_agents_md,
+        patch_gemini_md=patch_gemini_md,
+        patch_claude_md_repo=patch_claude_md_repo,
+        wire_cursor_flag=wire_cursor_flag,
     )
     sys.exit(exit_code)
 
