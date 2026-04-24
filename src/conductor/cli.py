@@ -1230,7 +1230,7 @@ def doctor(as_json: bool) -> None:
     "wire_cursor_flag",
     type=click.Choice(["yes", "no", "ask"]),
     default=None,
-    help="Write a managed Cursor rule at .cursor/rules/conductor-delegation.md. "
+    help="Write a managed Cursor rule at .cursor/rules/conductor-delegation.mdc. "
     "Default: ask on TTY when .cursor/rules/ exists.",
 )
 @click.option(

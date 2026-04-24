@@ -657,7 +657,7 @@ def test_init_wire_cursor_yes_writes_rule(mocker, tmp_path):
         ["init", "--yes", "--wire-agents", "yes", "--wire-cursor", "yes"],
     )
     assert result.exit_code == 0, result.output
-    rule = tmp_path / "repo" / ".cursor" / "rules" / "conductor-delegation.md"
+    rule = tmp_path / "repo" / ".cursor" / "rules" / "conductor-delegation.mdc"
     assert rule.exists()
     text = rule.read_text(encoding="utf-8")
     assert "managed-by: conductor" in text
@@ -683,7 +683,7 @@ def test_init_all_slice_c_flags_yes_wires_everything(mocker, tmp_path):
     assert (repo / "AGENTS.md").exists()
     assert (repo / "GEMINI.md").exists()
     assert (repo / "CLAUDE.md").exists()
-    assert (repo / ".cursor" / "rules" / "conductor-delegation.md").exists()
+    assert (repo / ".cursor" / "rules" / "conductor-delegation.mdc").exists()
 
 
 def test_init_slice_c_unwire_removes_all(mocker, tmp_path):
@@ -707,7 +707,7 @@ def test_init_slice_c_unwire_removes_all(mocker, tmp_path):
     assert result.exit_code == 0, result.output
     assert not (repo / "GEMINI.md").exists()
     assert not (repo / "CLAUDE.md").exists()
-    assert not (repo / ".cursor" / "rules" / "conductor-delegation.md").exists()
+    assert not (repo / ".cursor" / "rules" / "conductor-delegation.mdc").exists()
 
 
 def test_init_unwire_rejects_slice_c_flags():

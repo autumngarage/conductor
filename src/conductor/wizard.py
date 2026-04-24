@@ -1042,7 +1042,7 @@ def _wire_cursor_section(
     decision: str,
     wire_cursor_flag: str | None,
 ) -> bool:
-    """Cursor rule at <repo>/.cursor/rules/conductor-delegation.md.
+    """Cursor rule at <repo>/.cursor/rules/conductor-delegation.mdc.
 
     Unlike the sentinel-block cases, this is a fully-managed file —
     conductor owns it whole. ``unwire`` deletes it.
@@ -1055,7 +1055,7 @@ def _wire_cursor_section(
     click.echo("─" * 60)
     click.echo("Agent integration — Cursor rule (repo-scoped)")
     click.echo("─" * 60)
-    rule_path = detection.cursor_rules_dir / "conductor-delegation.md"
+    rule_path = detection.cursor_rules_dir / "conductor-delegation.mdc"
     if detection.cursor_rules_dir_exists:
         if already_written:
             click.echo(f"  {rule_path} already exists (managed by conductor).")

@@ -335,7 +335,7 @@ GEMINI_MD_BLOCK = AGENTS_MD_BLOCK  # Identical content today; split if divergent
 
 
 # --------------------------------------------------------------------------- #
-# Cursor rule file — fully-managed at <repo>/.cursor/rules/conductor-delegation.md.
+# Cursor rule file — fully-managed at <repo>/.cursor/rules/conductor-delegation.mdc.
 #
 # Cursor reads rule files with YAML frontmatter (description, globs,
 # alwaysApply). Unlike AGENTS.md / GEMINI.md, this file is conductor's

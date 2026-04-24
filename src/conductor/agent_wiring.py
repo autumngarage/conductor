@@ -188,7 +188,7 @@ def _candidate_artifacts(*, cwd: Path | None = None) -> dict[Path, str]:
         ch / "agents" / "codex-coding-agent.md": "subagent",
         ch / "agents" / "ollama-offline.md": "subagent",
         ch / "agents" / "conductor-auto.md": "subagent",
-        cwd / ".cursor" / "rules" / "conductor-delegation.md": "cursor-rule",
+        cwd / ".cursor" / "rules" / "conductor-delegation.mdc": "cursor-rule",
     }
 
 
@@ -639,7 +639,7 @@ def wire_claude_md_repo(cwd: Path | None = None, *, version: str) -> AgentsMdRep
 
 def wire_cursor(cwd: Path | None = None, *, version: str) -> AgentsMdReport:
     """Write Cursor's conductor-delegation rule at
-    ``<cwd>/.cursor/rules/conductor-delegation.md``.
+    ``<cwd>/.cursor/rules/conductor-delegation.mdc``.
 
     Unlike the markdown instruction files above, Cursor rules are
     fully-managed — the file is conductor's whole (YAML frontmatter
@@ -649,7 +649,7 @@ def wire_cursor(cwd: Path | None = None, *, version: str) -> AgentsMdReport:
     from conductor import _agent_templates as templates
 
     cwd = cwd or Path.cwd()
-    path = cwd / ".cursor" / "rules" / "conductor-delegation.md"
+    path = cwd / ".cursor" / "rules" / "conductor-delegation.mdc"
     write_managed_frontmatter(
         path,
         {

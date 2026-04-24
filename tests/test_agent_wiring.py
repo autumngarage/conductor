@@ -598,7 +598,7 @@ def test_wire_cursor_writes_managed_rule_file():
     from pathlib import Path
 
     report = aw.wire_cursor(version="0.4.2")
-    path = Path.cwd() / ".cursor" / "rules" / "conductor-delegation.md"
+    path = Path.cwd() / ".cursor" / "rules" / "conductor-delegation.mdc"
     assert report.path == path
     text = path.read_text(encoding="utf-8")
     assert text.startswith("---\n")
@@ -614,7 +614,7 @@ def test_wire_cursor_creates_nested_dirs():
 
     aw.wire_cursor(version="0.4.2")
     assert (Path.cwd() / ".cursor" / "rules").is_dir()
-    assert (Path.cwd() / ".cursor" / "rules" / "conductor-delegation.md").exists()
+    assert (Path.cwd() / ".cursor" / "rules" / "conductor-delegation.mdc").exists()
 
 
 def test_detect_picks_up_all_slice_c_artifacts():
@@ -661,7 +661,7 @@ def test_unwire_removes_every_slice_c_artifact(tmp_path):
     assert not (tmp_path / "repo" / "GEMINI.md").exists()
     assert not (tmp_path / "repo" / "CLAUDE.md").exists()
     # Cursor rule was fully-managed → deleted.
-    assert not (tmp_path / "repo" / ".cursor" / "rules" / "conductor-delegation.md").exists()
+    assert not (tmp_path / "repo" / ".cursor" / "rules" / "conductor-delegation.mdc").exists()
 
 
 def test_unwire_preserves_user_content_in_all_sentinel_files(tmp_path):
@@ -684,7 +684,7 @@ def test_unwire_preserves_user_content_in_all_sentinel_files(tmp_path):
 def test_cursor_rule_refuses_to_overwrite_user_owned_file(tmp_path):
     """If the user already has a rule at the managed path, wire_cursor
     must surface a UserOwnedFileError rather than overwriting."""
-    rule_path = tmp_path / "repo" / ".cursor" / "rules" / "conductor-delegation.md"
+    rule_path = tmp_path / "repo" / ".cursor" / "rules" / "conductor-delegation.mdc"
     rule_path.parent.mkdir(parents=True)
     rule_path.write_text("# my hand-written rule\n", encoding="utf-8")
 

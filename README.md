@@ -74,7 +74,7 @@ hand-authoring any prompts:
   files present in your repo (`AGENTS.md`, `GEMINI.md`, `CLAUDE.md`).
   Existing user content is preserved — the block is bounded by
   `<!-- conductor:begin -->` markers.
-- Writes a Cursor rule at `.cursor/rules/conductor-delegation.md` if
+- Writes a Cursor rule at `.cursor/rules/conductor-delegation.mdc` if
   the directory exists.
 
 On a TTY you get a prompt per detected file (default yes); in CI use
