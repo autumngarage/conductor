@@ -39,6 +39,16 @@ dev = [
     "ruff>=0.9.0",
 ]
 
+[tool.uv]
+# Pin the dependency-resolution cutoff to a fixed date so `uv lock` /
+# `uv sync` produce a byte-identical uv.lock for everyone, every time.
+# Without this, uv records "now" in the lockfile metadata, which churns
+# a 4-line diff on every machine, every day, with no actual dependency
+# change. Bump this date deliberately when you want to refresh deps —
+# it then becomes a single intentional "refresh deps" PR instead of
+# accidental noise on every unrelated branch.
+exclude-newer = "2026-04-25T00:00:00Z"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
