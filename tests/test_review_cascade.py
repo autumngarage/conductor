@@ -47,8 +47,15 @@ def _make_repo(tmp_path: Path) -> Path:
 
 def _run_script(repo: Path, fakes_dir: Path, extra_env: dict | None = None,
                 timeout: int = 60) -> subprocess.CompletedProcess:
+    # Scrub pre-commit/pre-push hook signals that may leak in from the test
+    # runner's environment (e.g. when pytest itself runs under a pre-push
+    # hook). The script's `should_skip_pre_push_review` would otherwise
+    # think we're pushing a non-default branch and skip review entirely.
+    inherited = {k: v for k, v in os.environ.items()
+                 if not (k.startswith("PRE_COMMIT") or k.startswith("CODEX_REVIEW")
+                         or k == "TOUCHSTONE_REVIEWER")}
     env = {
-        **os.environ,
+        **inherited,
         "PATH": f"{fakes_dir}:{os.environ.get('PATH', '')}",
         "CODEX_REVIEW_BASE": "HEAD~1",  # avoid origin fetch
         "CODEX_REVIEW_MODE": "review-only",
