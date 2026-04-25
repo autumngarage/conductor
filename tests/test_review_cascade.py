@@ -13,12 +13,9 @@ surfaced in the cascade chain summary.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import textwrap
 from pathlib import Path
-
-import pytest
 
 SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "codex-review.sh"
 
@@ -100,14 +97,17 @@ def _write_config(repo: Path, reviewers: list[str], on_error: str = "fail-open")
 # fake reviewer factories
 # ---------------------------------------------------------------------------
 
-FAKE_CODEX_RATE_LIMIT = '''
+FAKE_CODEX_RATE_LIMIT = r'''
 #!/usr/bin/env bash
 case "$1" in
   login)
     if [ "$2" = "status" ]; then exit 0; fi
     ;;
   exec)
-    echo 'ERROR: {"type":"error","status":429,"error":{"type":"rate_limit_exceeded","message":"Too many requests"}}' >&2
+    msg='{"type":"error","status":429,'
+    msg="${msg}\"error\":{\"type\":\"rate_limit_exceeded\","
+    msg="${msg}\"message\":\"Too many requests\"}}"
+    echo "ERROR: $msg" >&2
     exit 1
     ;;
 esac
