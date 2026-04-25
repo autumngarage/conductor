@@ -236,6 +236,48 @@ esac
 exit 1
 '''
 
+# Codex creates a sideways branch with an unauthorized commit and
+# checks it out (HEAD moves to a different ref entirely). Worktree
+# stays "clean" relative to the new HEAD but the count-based check
+# would compare zero new commits ahead of the original HEAD.
+FAKE_CODEX_CHECKOUT_SIDEWAYS = '''
+#!/usr/bin/env bash
+case "$1" in
+  login)
+    if [ "$2" = "status" ]; then exit 0; fi
+    ;;
+  exec)
+    git -c user.name=t -c user.email=t@t checkout -q -b sideways
+    echo "edit from codex" >> README
+    git -c user.name=t -c user.email=t@t add README
+    git -c user.name=t -c user.email=t@t commit -q -m "sideways unauthorized"
+    echo "ERROR: rate_limit_exceeded" >&2
+    exit 1
+    ;;
+esac
+exit 1
+'''
+
+# Codex drops the existing stash and adds its own — same count,
+# different content. Catches the count-vs-sha distinction.
+FAKE_CODEX_SWAP_STASH = '''
+#!/usr/bin/env bash
+case "$1" in
+  login)
+    if [ "$2" = "status" ]; then exit 0; fi
+    ;;
+  exec)
+    # Drop whatever is on top, then push our own.
+    git stash drop -q stash@{0} 2>/dev/null || true
+    echo "edit from codex" >> README
+    git stash push -q -m "swapped by codex" -- README
+    echo "ERROR: rate_limit_exceeded" >&2
+    exit 1
+    ;;
+esac
+exit 1
+'''
+
 
 # ---------------------------------------------------------------------------
 # tests
@@ -364,7 +406,52 @@ def test_fix_mode_aborts_on_unauthorized_commits(tmp_path: Path) -> None:
     result = _run_script(repo, fakes, extra_env={"CODEX_REVIEW_MODE": "fix"})
 
     assert result.returncode == 1, f"stdout={result.stdout}\nstderr={result.stderr}"
-    assert "unauthorized commits" in result.stdout
+    assert "moved HEAD to an un-blessed sha" in result.stdout
+    assert "Refusing to fall through" in result.stdout
+
+
+def test_fix_mode_aborts_on_sideways_checkout(tmp_path: Path) -> None:
+    """A reviewer that creates a branch and commits to it leaves a clean
+    tree and a HEAD that's not the script's expected sha. Detection by
+    HEAD-sha (not commit count) catches this even though the diff vs the
+    *original* HEAD shows zero new ancestors."""
+    repo = _make_repo(tmp_path)
+    _write_config(repo, ["codex", "claude"], mode="fix")
+
+    fakes = tmp_path / "fakes"
+    fakes.mkdir()
+    _write_executable(fakes / "codex", FAKE_CODEX_CHECKOUT_SIDEWAYS)
+    _write_executable(fakes / "claude", FAKE_CLAUDE_CLEAN)
+
+    result = _run_script(repo, fakes, extra_env={"CODEX_REVIEW_MODE": "fix"})
+
+    assert result.returncode == 1, f"stdout={result.stdout}\nstderr={result.stderr}"
+    assert "moved HEAD to an un-blessed sha" in result.stdout
+    assert "Refusing to fall through" in result.stdout
+
+
+def test_fix_mode_aborts_on_swapped_stash(tmp_path: Path) -> None:
+    """A reviewer that drops one stash and pushes another keeps the count
+    constant but the content changes. SHA-list comparison catches it."""
+    repo = _make_repo(tmp_path)
+    _write_config(repo, ["codex", "claude"], mode="fix")
+
+    # Plant a pre-existing stash so the reviewer has something to drop.
+    env = {**os.environ, "GIT_AUTHOR_NAME": "u", "GIT_AUTHOR_EMAIL": "u@u",
+           "GIT_COMMITTER_NAME": "u", "GIT_COMMITTER_EMAIL": "u@u"}
+    (repo / "README").write_text("base\nfeature line\nuser stash content\n")
+    subprocess.run(["git", "stash", "push", "-q", "-m", "user stash", "--",
+                    "README"], cwd=repo, env=env, check=True)
+
+    fakes = tmp_path / "fakes"
+    fakes.mkdir()
+    _write_executable(fakes / "codex", FAKE_CODEX_SWAP_STASH)
+    _write_executable(fakes / "claude", FAKE_CLAUDE_CLEAN)
+
+    result = _run_script(repo, fakes, extra_env={"CODEX_REVIEW_MODE": "fix"})
+
+    assert result.returncode == 1, f"stdout={result.stdout}\nstderr={result.stderr}"
+    assert "mutated the stash list" in result.stdout
     assert "Refusing to fall through" in result.stdout
 
 
@@ -383,7 +470,7 @@ def test_fix_mode_aborts_on_reviewer_stash(tmp_path: Path) -> None:
     result = _run_script(repo, fakes, extra_env={"CODEX_REVIEW_MODE": "fix"})
 
     assert result.returncode == 1, f"stdout={result.stdout}\nstderr={result.stderr}"
-    assert "added stash entries" in result.stdout
+    assert "mutated the stash list" in result.stdout
     assert "Refusing to fall through" in result.stdout
 
 

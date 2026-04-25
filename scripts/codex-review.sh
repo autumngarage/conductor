@@ -1750,13 +1750,19 @@ for _outer_idx in "${!AVAILABLE_CASCADE[@]}"; do
 
   # Snapshot repo state at the start of this reviewer's slot so we can detect
   # unauthorized side effects on fall-through. A reviewer in fix mode is
-  # allowed to write to the worktree and emit FIXED, and the script then
-  # auto-commits — those commits are blessed and increment FIX_COMMITS. Any
-  # other state change (commits the script didn't author, stashes, etc.) is
-  # un-blessed and must not silently leak into the next reviewer.
-  PRE_REVIEWER_HEAD="$(git rev-parse HEAD)"
-  PRE_REVIEWER_FIX_COMMITS="$FIX_COMMITS"
-  PRE_REVIEWER_STASH_COUNT="$(git stash list | wc -l | tr -d ' ')"
+  # allowed to write to the worktree and emit FIXED; the script then auto-
+  # commits and bumps EXPECTED_HEAD. Any other state change (commits the
+  # script didn't author, stash add/drop/replace, branch checkout, amend,
+  # rewind) is un-blessed and must not silently leak into the next reviewer.
+  #
+  # EXPECTED_HEAD: the only sha HEAD is allowed to be at on fall-through.
+  # Compare-by-sha (not commit-count) so amends, rewinds, or sideways
+  # checkouts are detected even when they preserve the count.
+  EXPECTED_HEAD="$(git rev-parse HEAD)"
+  # PRE_REVIEWER_STASH_SHAS: the literal list of stash commit shas. A
+  # reviewer that drops one stash and adds another preserves the count;
+  # compare the actual sha list so swap/replace is caught.
+  PRE_REVIEWER_STASH_SHAS="$(git stash list --format='%H' 2>/dev/null | tr '\n' ',')"
 
 for iter in $(seq 1 "$MAX_ITERATIONS"); do
   phase "loading diff"
@@ -1920,6 +1926,7 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
       git commit -m "fix: address $REVIEWER_LABEL review findings (auto, $REVIEW_MODE, iter $iter)"
       WORKTREE_DIRTY_BEFORE_REVIEW=false
       FIX_COMMITS=$((FIX_COMMITS + 1))
+      EXPECTED_HEAD="$(git rev-parse HEAD)"
       echo "==> Created fix commit $(git rev-parse --short HEAD). Re-running review on new HEAD..."
       echo ""
       continue
@@ -1971,23 +1978,25 @@ done
     # we did NOT actually clean up, and falling through would still leak.
     if mode_allows_fix; then
       current_head="$(git rev-parse HEAD)"
-      authored_fix_commits=$((FIX_COMMITS - PRE_REVIEWER_FIX_COMMITS))
-      if [ "$current_head" != "$PRE_REVIEWER_HEAD" ]; then
-        actual_new_commits="$(git rev-list --count "${PRE_REVIEWER_HEAD}..HEAD" 2>/dev/null || echo "?")"
-        if [ "$actual_new_commits" != "$authored_fix_commits" ]; then
-          echo "==> ${REVIEWER_LABEL} created unauthorized commits before failing."
-          echo "    HEAD moved $PRE_REVIEWER_HEAD -> $current_head"
-          echo "    Expected $authored_fix_commits new commit(s) (script-authored auto-fix)"
-          echo "    Found $actual_new_commits new commit(s). Refusing to fall through."
-          REVIEW_EXIT_REASON="cascade-aborted-unauthorized-commits"
-          print_summary
-          exit 1
-        fi
+      if [ "$current_head" != "$EXPECTED_HEAD" ]; then
+        # HEAD is not where the script left it. This catches: reviewer-
+        # authored commits, amend of a script-authored fix-commit, rewind
+        # via reset, sideways checkout to another ref. None of these are
+        # safe to silently carry into the next reviewer.
+        echo "==> ${REVIEWER_LABEL} moved HEAD to an un-blessed sha before failing."
+        echo "    Expected HEAD: $EXPECTED_HEAD"
+        echo "    Actual HEAD:   $current_head"
+        echo "    Refusing to fall through. Inspect 'git log' / 'git reflog' manually."
+        REVIEW_EXIT_REASON="cascade-aborted-unauthorized-commits"
+        print_summary
+        exit 1
       fi
-      current_stash_count="$(git stash list | wc -l | tr -d ' ')"
-      if [ "$current_stash_count" != "$PRE_REVIEWER_STASH_COUNT" ]; then
-        echo "==> ${REVIEWER_LABEL} added stash entries before failing."
-        echo "    Stash count $PRE_REVIEWER_STASH_COUNT -> $current_stash_count"
+      current_stash_shas="$(git stash list --format='%H' 2>/dev/null | tr '\n' ',')"
+      if [ "$current_stash_shas" != "$PRE_REVIEWER_STASH_SHAS" ]; then
+        # Stash list changed. This catches add, drop, AND swap (drop one /
+        # add one — same count, different content). Anything that mutates
+        # hidden state under a clean-looking worktree.
+        echo "==> ${REVIEWER_LABEL} mutated the stash list before failing."
         echo "    Refusing to fall through with hidden state. Inspect 'git stash list' manually."
         REVIEW_EXIT_REASON="cascade-aborted-stash-leak"
         print_summary
