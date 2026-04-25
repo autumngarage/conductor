@@ -1285,11 +1285,27 @@ def _diagnostic_payload() -> dict:
         )
 
     env_info = []
+    key_commands = credentials.load_key_commands()
     for var in _DIAGNOSTIC_ENV_VARS:
         in_env = var in os.environ
         in_keychain = credentials.keychain_has(var)
+        has_key_command = var in key_commands
+        if in_env:
+            source = "env"
+        elif has_key_command:
+            source = "key_command"
+        elif in_keychain:
+            source = "keychain"
+        else:
+            source = None
         env_info.append(
-            {"name": var, "in_env": in_env, "in_keychain": in_keychain}
+            {
+                "name": var,
+                "in_env": in_env,
+                "in_keychain": in_keychain,
+                "has_key_command": has_key_command,
+                "source": source,
+            }
         )
 
     return {
@@ -1372,11 +1388,15 @@ def doctor(as_json: bool) -> None:
             click.echo(f"      ⚠ {w}")
 
     click.echo("")
-    click.echo("Credentials (env / keychain):")
+    click.echo("Credentials (active source per env-var):")
     for c in payload["credentials"]:
-        in_env = "env" if c["in_env"] else "—"
-        in_kc = "keychain" if c["in_keychain"] else "—"
-        click.echo(f"  {c['name']:<24}  {in_env:<4}  {in_kc}")
+        source_label = {
+            "env": "✓ env",
+            "key_command": "✓ key_command (secret manager)",
+            "keychain": "✓ keychain",
+            None: "—",
+        }.get(c["source"], "—")
+        click.echo(f"  {c['name']:<24}  {source_label}")
 
     click.echo("")
     click.echo("Agent integration:")

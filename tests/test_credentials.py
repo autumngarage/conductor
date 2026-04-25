@@ -99,3 +99,175 @@ def test_keychain_has_shortcut(mocker):
     assert credentials.keychain_has("K") is True
     mocker.patch.object(credentials, "_keychain_find", return_value=None)
     assert credentials.keychain_has("K") is False
+
+
+# --------------------------------------------------------------------------- #
+# key_command — credentials.toml load / save / resolve.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def credfile(tmp_path, monkeypatch):
+    """Isolate the credentials TOML to a per-test tmp path."""
+    path = tmp_path / "credentials.toml"
+    monkeypatch.setenv(credentials.CREDENTIALS_FILE_ENV, str(path))
+    credentials.clear_key_command_cache()
+    yield path
+    credentials.clear_key_command_cache()
+
+
+def test_load_key_commands_empty_when_file_missing(credfile):
+    assert credentials.load_key_commands() == {}
+
+
+def test_save_and_load_key_command_roundtrips(credfile):
+    credentials.save_key_command("FOO_KEY", "echo hello")
+    assert credentials.load_key_commands() == {"FOO_KEY": "echo hello"}
+
+
+def test_save_key_command_sets_file_mode_0600(credfile):
+    credentials.save_key_command("FOO_KEY", "echo hello")
+    import stat
+
+    mode = stat.S_IMODE(credfile.stat().st_mode)
+    assert mode == 0o600, f"expected 0600, got {oct(mode)}"
+
+
+def test_save_key_command_merges_multiple_entries(credfile):
+    credentials.save_key_command("A_KEY", "echo a")
+    credentials.save_key_command("B_KEY", "echo b")
+    loaded = credentials.load_key_commands()
+    assert loaded == {"A_KEY": "echo a", "B_KEY": "echo b"}
+
+
+def test_save_key_command_escapes_quotes_and_backslashes(credfile):
+    cmd = 'echo "hello\\world"'
+    credentials.save_key_command("K", cmd)
+    assert credentials.load_key_commands()["K"] == cmd
+
+
+def test_delete_key_command_removes_entry(credfile):
+    credentials.save_key_command("A_KEY", "echo a")
+    credentials.save_key_command("B_KEY", "echo b")
+    assert credentials.delete_key_command("A_KEY") is True
+    assert credentials.load_key_commands() == {"B_KEY": "echo b"}
+
+
+def test_delete_key_command_removes_file_when_last_entry_removed(credfile):
+    credentials.save_key_command("A_KEY", "echo a")
+    assert credentials.delete_key_command("A_KEY") is True
+    assert not credfile.exists()
+
+
+def test_delete_key_command_returns_false_when_missing(credfile):
+    assert credentials.delete_key_command("NOPE") is False
+
+
+def test_load_key_commands_warns_and_returns_empty_on_invalid_toml(
+    credfile, capsys
+):
+    credfile.write_text("this is = not [valid toml\n")
+    assert credentials.load_key_commands() == {}
+    err = capsys.readouterr().err
+    assert "not valid TOML" in err
+
+
+def test_load_key_commands_ignores_non_string_entries(credfile):
+    credfile.write_text(
+        '[key_commands]\nGOOD = "echo good"\nBAD = 42\nEMPTY = ""\n'
+    )
+    assert credentials.load_key_commands() == {"GOOD": "echo good"}
+
+
+def test_get_resolves_via_key_command(credfile, monkeypatch, mocker):
+    monkeypatch.delenv("MY_KEY", raising=False)
+    mocker.patch.object(credentials, "_keychain_find", return_value=None)
+    credentials.save_key_command("MY_KEY", "echo from-op")
+    assert credentials.get("MY_KEY") == "from-op"
+
+
+def test_resolve_with_source_reports_env_first(credfile, monkeypatch):
+    monkeypatch.setenv("MY_KEY", "from-env")
+    credentials.save_key_command("MY_KEY", "echo from-op")
+    value, source = credentials.resolve_with_source("MY_KEY")
+    assert value == "from-env"
+    assert source == "env"
+
+
+def test_resolve_with_source_reports_key_command_when_no_env(
+    credfile, monkeypatch, mocker
+):
+    monkeypatch.delenv("MY_KEY", raising=False)
+    mocker.patch.object(credentials, "_keychain_find", return_value="from-keychain")
+    credentials.save_key_command("MY_KEY", "echo from-op")
+    value, source = credentials.resolve_with_source("MY_KEY")
+    assert value == "from-op"
+    assert source == "key_command"
+
+
+def test_resolve_with_source_reports_keychain_when_no_env_or_command(
+    credfile, monkeypatch, mocker
+):
+    monkeypatch.delenv("MY_KEY", raising=False)
+    mocker.patch.object(credentials.sys, "platform", "darwin")
+    mocker.patch.object(credentials, "_keychain_find", return_value="from-keychain")
+    value, source = credentials.resolve_with_source("MY_KEY")
+    assert value == "from-keychain"
+    assert source == "keychain"
+
+
+def test_key_command_failure_does_not_fall_through_to_keychain(
+    credfile, monkeypatch, mocker, capsys
+):
+    """If the user explicitly configured key_command, a failed resolution
+    must not silently fall back to a possibly-stale keychain value — the
+    operator needs to see their configuration is broken."""
+    monkeypatch.delenv("MY_KEY", raising=False)
+    mocker.patch.object(credentials, "_keychain_find", return_value="STALE-KEY")
+    credentials.save_key_command("MY_KEY", "false")  # exits 1
+    value, source = credentials.resolve_with_source("MY_KEY")
+    assert value is None
+    assert source is None
+    err = capsys.readouterr().err
+    assert "MY_KEY" in err and "exited" in err
+
+
+def test_key_command_unknown_binary_warns(credfile, capsys):
+    credentials.save_key_command(
+        "MY_KEY", "this-command-definitely-does-not-exist-xyz123 read foo"
+    )
+    assert credentials.get("MY_KEY") is None
+    err = capsys.readouterr().err
+    assert "not found on PATH" in err
+
+
+def test_key_command_empty_output_returns_none(credfile, capsys):
+    credentials.save_key_command("MY_KEY", "true")  # exits 0, empty stdout
+    assert credentials.get("MY_KEY") is None
+    err = capsys.readouterr().err
+    assert "empty output" in err
+
+
+def test_key_command_result_is_cached_per_process(credfile, mocker):
+    credentials.save_key_command("MY_KEY", "echo cached-value")
+    spy = mocker.spy(credentials.subprocess, "run")
+    assert credentials.get("MY_KEY") == "cached-value"
+    assert credentials.get("MY_KEY") == "cached-value"
+    # Only one subprocess invocation despite two get() calls.
+    assert spy.call_count == 1
+
+
+def test_clear_key_command_cache_forces_re_resolve(credfile, mocker):
+    credentials.save_key_command("MY_KEY", "echo first")
+    assert credentials.get("MY_KEY") == "first"
+    credentials.clear_key_command_cache()
+    # Rewrite to a new value; without cache clear, we'd get the old one.
+    credentials.save_key_command("MY_KEY", "echo second")
+    assert credentials.get("MY_KEY") == "second"
+
+
+def test_save_key_command_rejects_empty_inputs(credfile):
+    with pytest.raises(ValueError):
+        credentials.save_key_command("", "echo x")
+    with pytest.raises(ValueError):
+        credentials.save_key_command("KEY", "   ")

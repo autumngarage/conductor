@@ -134,6 +134,178 @@ def test_init_kimi_interactive_print_only(mocker, monkeypatch):
     assert f"export {CLOUDFLARE_API_TOKEN_ENV}" in result.output
 
 
+def test_init_kimi_1password_indirection_writes_key_command(
+    mocker, monkeypatch, tmp_path
+):
+    """User picks 1password storage → conductor writes key_command entries
+    instead of storing the secret. Default deny: secrets never persist."""
+    mocker.patch("conductor.wizard._is_tty", return_value=True)
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda cmd: "/opt/homebrew/bin/op" if cmd == "op" else None,
+    )
+
+    from conductor.providers import KimiProvider
+
+    mocker.patch.object(KimiProvider, "configured", lambda self: (False, "missing"))
+    mocker.patch.object(KimiProvider, "smoke", return_value=(True, None))
+    monkeypatch.delenv(CLOUDFLARE_API_TOKEN_ENV, raising=False)
+    monkeypatch.delenv(CLOUDFLARE_ACCOUNT_ID_ENV, raising=False)
+
+    # Force credentials.toml to a tmp path so the test doesn't touch real config.
+    cred_file = tmp_path / "credentials.toml"
+    monkeypatch.setenv("CONDUCTOR_CREDENTIALS_FILE", str(cred_file))
+
+    # Stub `op read` to return a fake secret so test-resolve succeeds.
+    import subprocess
+
+    real_run = subprocess.run
+
+    def fake_run(argv, *args, **kwargs):
+        if isinstance(argv, list) and argv and argv[0] == "op":
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=0,
+                stdout=f"resolved-{argv[-1]}\n",
+                stderr="",
+            )
+        return real_run(argv, *args, **kwargs)
+
+    mocker.patch("conductor.credentials.subprocess.run", side_effect=fake_run)
+    # Pretend `op` is on PATH from credentials.py's perspective too.
+    mocker.patch(
+        "conductor.credentials.shutil.which",
+        lambda cmd: "/opt/homebrew/bin/op" if cmd == "op" else None,
+    )
+
+    # Inputs: source-choice "1password", then op:// reference per credential.
+    result = CliRunner().invoke(
+        main,
+        ["init", "--only", "kimi"],
+        input=(
+            "1password\n"
+            "op://Personal/Cloudflare/token\n"
+            "op://Personal/Cloudflare/account_id\n"
+        ),
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "smoke test passed" in result.output.lower()
+    # File written, both keys present, raw secrets NOT in the file.
+    assert cred_file.exists()
+    text = cred_file.read_text()
+    assert "CLOUDFLARE_API_TOKEN" in text
+    assert "CLOUDFLARE_ACCOUNT_ID" in text
+    assert "op://Personal/Cloudflare/token" in text
+    assert "resolved-" not in text  # the secret value never persists
+
+
+def test_init_1password_choice_only_appears_when_op_detected(
+    mocker, monkeypatch, tmp_path
+):
+    """Without op CLI, the source-choice menu MUST NOT appear — the existing
+    secret-prompt flow is still the only path."""
+    mocker.patch("conductor.wizard._is_tty", return_value=True)
+    # Default fixture already stubs shutil.which → None; just confirm.
+
+    from conductor.providers import KimiProvider
+
+    mocker.patch.object(KimiProvider, "configured", lambda self: (False, "missing"))
+    mocker.patch.object(KimiProvider, "smoke", return_value=(True, None))
+    mocker.patch("conductor.wizard.credentials.set_in_keychain")
+    monkeypatch.delenv(CLOUDFLARE_API_TOKEN_ENV, raising=False)
+    monkeypatch.delenv(CLOUDFLARE_ACCOUNT_ID_ENV, raising=False)
+
+    result = CliRunner().invoke(
+        main,
+        ["init", "--only", "kimi"],
+        input="tok\nacct\nkeychain\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "1password" not in result.output.lower()
+
+
+def test_init_1password_invalid_reference_aborts(mocker, monkeypatch, tmp_path):
+    """User pastes something that isn't an op:// reference → wizard refuses
+    rather than silently writing it. Prevents fat-fingering a raw secret
+    into the key_command field."""
+    mocker.patch("conductor.wizard._is_tty", return_value=True)
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda cmd: "/opt/homebrew/bin/op" if cmd == "op" else None,
+    )
+
+    from conductor.providers import KimiProvider
+
+    mocker.patch.object(KimiProvider, "configured", lambda self: (False, "missing"))
+    monkeypatch.delenv(CLOUDFLARE_API_TOKEN_ENV, raising=False)
+    monkeypatch.delenv(CLOUDFLARE_ACCOUNT_ID_ENV, raising=False)
+
+    cred_file = tmp_path / "credentials.toml"
+    monkeypatch.setenv("CONDUCTOR_CREDENTIALS_FILE", str(cred_file))
+
+    result = CliRunner().invoke(
+        main,
+        ["init", "--only", "kimi"],
+        input="1password\nthis-is-a-raw-secret-not-a-reference\n",
+    )
+
+    assert result.exit_code == 0  # wizard exits cleanly even on failure
+    assert "doesn't look like an op:// reference" in result.output
+    assert not cred_file.exists()  # nothing written
+
+
+def test_init_1password_resolution_failure_rolls_back(mocker, monkeypatch, tmp_path):
+    """If `op read` fails for the entered reference, the wizard must NOT
+    leave a half-written credentials file behind."""
+    mocker.patch("conductor.wizard._is_tty", return_value=True)
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda cmd: "/opt/homebrew/bin/op" if cmd == "op" else None,
+    )
+    mocker.patch(
+        "conductor.credentials.shutil.which",
+        lambda cmd: "/opt/homebrew/bin/op" if cmd == "op" else None,
+    )
+
+    from conductor.providers import DeepSeekChatProvider
+
+    mocker.patch.object(
+        DeepSeekChatProvider, "configured", lambda self: (False, "missing")
+    )
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    cred_file = tmp_path / "credentials.toml"
+    monkeypatch.setenv("CONDUCTOR_CREDENTIALS_FILE", str(cred_file))
+
+    import subprocess
+
+    # `op read` exits non-zero — "item not found" simulated.
+    mocker.patch(
+        "conductor.credentials.subprocess.run",
+        return_value=subprocess.CompletedProcess(
+            args=["op"], returncode=1, stdout="", stderr="not found"
+        ),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["init", "--only", "deepseek-chat"],
+        input="1password\nop://Personal/DeepSeek/credential\n",
+    )
+
+    assert result.exit_code == 0
+    assert "did not return a value" in result.output
+    # Critical: rollback — the file either doesn't exist or has no entry
+    # for this key. Either is acceptable; a half-written entry is not.
+    if cred_file.exists():
+        from conductor import credentials as creds_mod
+
+        creds_mod.clear_key_command_cache()
+        assert "DEEPSEEK_API_KEY" not in creds_mod.load_key_commands()
+
+
 def test_init_kimi_aborts_when_credential_left_empty(mocker, monkeypatch):
     mocker.patch("conductor.wizard._is_tty", return_value=True)
 
