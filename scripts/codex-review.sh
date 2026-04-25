@@ -45,7 +45,11 @@
 #   CODEX_REVIEW_MAX_ITERATIONS   — fix loop cap (default: from config, or 3)
 #   CODEX_REVIEW_MAX_DIFF_LINES   — skip review if diff > this many lines (default: 5000)
 #   CODEX_REVIEW_CACHE_CLEAN      — cache exact-input clean reviews (default: true)
-#   CODEX_REVIEW_TIMEOUT          — wall-clock timeout per invocation in seconds (default: 300, 0=none)
+#   CODEX_REVIEW_TIMEOUT          — wall-clock timeout per invocation in seconds (default: 1800, 0=none)
+#                                   Safety net for genuinely wedged reviewer processes, NOT a thinking-time
+#                                   budget. Real reviews on big diffs can take 8–10 minutes; the cascade now
+#                                   falls through to the next reviewer on timeout, so a hung reviewer no
+#                                   longer silently passes the push.
 #   CODEX_REVIEW_ASSIST           — enable peer reviewer help requests (default: false)
 #   CODEX_REVIEW_ASSIST_TIMEOUT   — timeout for peer reviewer helper calls (default: 60)
 #   CODEX_REVIEW_ASSIST_MAX_ROUNDS — max helper calls per review run (default: 1)
@@ -79,7 +83,7 @@ CACHE_CLEAN_REVIEWS="${CODEX_REVIEW_CACHE_CLEAN:-true}"
 NO_AUTOFIX="${CODEX_REVIEW_NO_AUTOFIX:-false}"
 CONFIG_MODE=""
 REVIEW_ENABLED="${CODEX_REVIEW_ENABLED:-true}"
-REVIEW_TIMEOUT="${CODEX_REVIEW_TIMEOUT:-300}"
+REVIEW_TIMEOUT="${CODEX_REVIEW_TIMEOUT:-1800}"
 ON_ERROR="${CODEX_REVIEW_ON_ERROR:-fail-open}"
 UNSAFE_PATHS=""
 REVIEWER_CASCADE=()
@@ -758,7 +762,7 @@ reviewer_codex_exec() {
       "$REVIEW_MODE" "$sandbox" >&2
   fi
   CODEX_REVIEW_IN_PROGRESS=1 codex exec \
-    --sandbox "$sandbox" --ephemeral "$1" 2>/dev/null
+    --sandbox "$sandbox" --ephemeral "$1"
 }
 
 reviewer_claude_available() { command -v claude >/dev/null 2>&1; }
@@ -775,7 +779,7 @@ reviewer_claude_exec() {
   CODEX_REVIEW_IN_PROGRESS=1 claude -p \
     --allowedTools "$tools" \
     --output-format text \
-    "$1" 2>/dev/null
+    "$1"
 }
 
 reviewer_gemini_available() { command -v gemini >/dev/null 2>&1; }
@@ -789,12 +793,12 @@ reviewer_gemini_exec() {
   # without --yolo. no-tests cannot be fully enforced (edits without commands)
   # since Gemini lacks granular tool control.
   if [ "$REVIEW_MODE" = "fix" ]; then
-    CODEX_REVIEW_IN_PROGRESS=1 gemini -p "$1" --yolo 2>/dev/null
+    CODEX_REVIEW_IN_PROGRESS=1 gemini -p "$1" --yolo
   else
     if [ "$REVIEW_MODE" = "no-tests" ]; then
       printf "  ${C_DIM}(gemini: 'no-tests' mode degrades to review-only; gemini lacks granular tool control)${C_RESET}\n" >&2
     fi
-    CODEX_REVIEW_IN_PROGRESS=1 gemini -p "$1" 2>/dev/null
+    CODEX_REVIEW_IN_PROGRESS=1 gemini -p "$1"
   fi
 }
 
@@ -852,11 +856,13 @@ reviewer_local_exec() {
 
 ACTIVE_REVIEWER=""
 REVIEWER_STATUS=""
+AVAILABLE_CASCADE=()
 
 resolve_reviewer() {
   local reviewer
   ACTIVE_REVIEWER=""
   REVIEWER_STATUS=""
+  AVAILABLE_CASCADE=()
 
   for reviewer in "${REVIEWER_CASCADE[@]}"; do
     if ! declare -F "reviewer_${reviewer}_available" >/dev/null; then
@@ -875,11 +881,15 @@ resolve_reviewer() {
       REVIEWER_STATUS="${REVIEWER_STATUS}    ${reviewer}: auth check failed\n"
       continue
     fi
-    ACTIVE_REVIEWER="$reviewer"
-    return 0
+    AVAILABLE_CASCADE+=("$reviewer")
+    REVIEWER_STATUS="${REVIEWER_STATUS}    ${reviewer}: ready\n"
   done
 
-  return 1
+  if [ "${#AVAILABLE_CASCADE[@]}" -eq 0 ]; then
+    return 1
+  fi
+  ACTIVE_REVIEWER="${AVAILABLE_CASCADE[0]}"
+  return 0
 }
 
 ASSIST_REVIEWER=""
@@ -968,8 +978,50 @@ reviewer_label() {
 # --------------------------------------------------------------------------
 
 REVIEW_OUTPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/touchstone-review-output.XXXXXX")"
+REVIEW_STDERR_FILE="$(mktemp "${TMPDIR:-/tmp}/touchstone-review-stderr.XXXXXX")"
 ASSIST_OUTPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/touchstone-review-assist-output.XXXXXX")"
-trap 'rm -f "$REVIEW_OUTPUT_FILE" "$ASSIST_OUTPUT_FILE"' EXIT
+ASSIST_STDERR_FILE="$(mktemp "${TMPDIR:-/tmp}/touchstone-review-assist-stderr.XXXXXX")"
+trap 'rm -f "$REVIEW_OUTPUT_FILE" "$REVIEW_STDERR_FILE" "$ASSIST_OUTPUT_FILE" "$ASSIST_STDERR_FILE"' EXIT
+
+# Print the last N lines of a captured stderr file, one indented line at a time.
+# If empty, prints "<no stderr captured>" so a silent failure still emits a hint.
+print_stderr_tail() {
+  local file="$1"
+  local label="${2:-stderr}"
+  local lines="${3:-5}"
+
+  if [ ! -s "$file" ]; then
+    printf "    %s: <no stderr captured>\n" "$label"
+    return 0
+  fi
+  printf "    %s (last %d lines, full: %s):\n" "$label" "$lines" "$file"
+  tail -n "$lines" "$file" | sed 's/^/      /'
+}
+
+# Classify reviewer stderr into a short tag for the cascade chain summary.
+# Returns one of: usage-limit | auth | network | error
+classify_reviewer_failure() {
+  local file="$1"
+
+  if [ ! -s "$file" ]; then
+    printf 'error'
+    return 0
+  fi
+  # grep -qiE returns 0 on match; -E for alternation.
+  if grep -qiE 'rate.?limit|usage.limit|quota.exhaust|too many requests|429|"status"[[:space:]]*:[[:space:]]*429|insufficient.quota|exceeded' "$file"; then
+    printf 'usage-limit'
+    return 0
+  fi
+  if grep -qiE 'unauthor|forbidden|invalid.api.?key|authentication|not.logged.in|please.log.in|401|403' "$file"; then
+    printf 'auth'
+    return 0
+  fi
+  if grep -qiE 'network|timed.out|connection.refused|dns|unreachable|tls' "$file"; then
+    printf 'network'
+    return 0
+  fi
+  printf 'error'
+}
 
 kill_process_tree() {
   local pid="$1"
@@ -984,23 +1036,29 @@ kill_process_tree() {
   kill "-$signal" "$pid" 2>/dev/null || true
 }
 
-# run_reviewer_with_timeout TIMEOUT_SECS
-#   Runs the reviewer, captures output to REVIEW_OUTPUT_FILE, returns exit code.
-#   Exit 124 = timeout. Works correctly with subshells (no $() capture needed).
+# run_reviewer_with_timeout TIMEOUT_SECS [PROMPT] [STDOUT_FILE] [STDERR_FILE]
+#   Runs the reviewer, captures stdout to STDOUT_FILE and stderr to STDERR_FILE,
+#   returns exit code. Exit 124 = timeout. Works correctly with subshells (no
+#   $() capture needed).
 run_reviewer_with_timeout() {
   local timeout_secs="$1"
   local prompt="${2:-$REVIEW_PROMPT}"
   local output_file="${3:-$REVIEW_OUTPUT_FILE}"
+  local stderr_file="${4:-$REVIEW_STDERR_FILE}"
+
+  # Truncate stderr file so each attempt starts fresh (prevents stale stderr
+  # from a prior reviewer in the cascade leaking into the new one's classification).
+  : > "$stderr_file"
 
   # No timeout: run directly
   if [ "$timeout_secs" -le 0 ] 2>/dev/null; then
-    run_reviewer "$prompt" > "$output_file" 2>/dev/null
+    run_reviewer "$prompt" > "$output_file" 2> "$stderr_file"
     return $?
   fi
 
   # Run reviewer in background, kill if it exceeds timeout.
   (
-    run_reviewer "$prompt" > "$output_file" 2>/dev/null &
+    run_reviewer "$prompt" > "$output_file" 2> "$stderr_file" &
     local reviewer_pid=$!
 
     terminate_reviewer() {
@@ -1125,7 +1183,19 @@ if ! resolve_reviewer; then
   exit 0
 fi
 REVIEWER_LABEL="$(reviewer_label)"
-echo "==> Using reviewer: $REVIEWER_LABEL"
+if [ "${#AVAILABLE_CASCADE[@]}" -gt 1 ]; then
+  cascade_labels=""
+  for _r in "${AVAILABLE_CASCADE[@]}"; do
+    if [ -z "$cascade_labels" ]; then
+      cascade_labels="$(reviewer_label_for "$_r")"
+    else
+      cascade_labels="${cascade_labels} → $(reviewer_label_for "$_r")"
+    fi
+  done
+  echo "==> Reviewer cascade: $cascade_labels"
+else
+  echo "==> Using reviewer: $REVIEWER_LABEL"
+fi
 if [ -n "$REVIEW_CONTEXT_FILE" ]; then
   echo "==> Review context: $(basename "$REVIEW_CONTEXT_FILE")"
 fi
@@ -1477,6 +1547,17 @@ REVIEW_START_TIME="$(date +%s)"
 REVIEW_FILES_INSPECTED="$(git diff --name-only "$MERGE_BASE"..HEAD | wc -l | tr -d ' ')"
 REVIEW_EXIT_REASON=""
 
+# REVIEWER_CHAIN records each reviewer's outcome as "name:status" entries
+# (e.g. "codex:usage-limit", "claude:clean"). Surfaced in the summary block
+# and the JSON output so a fallback path is legible after the fact.
+REVIEWER_CHAIN=()
+FALLTHROUGH_REASON=""
+
+format_reviewer_chain() {
+  local IFS=,
+  printf '%s' "${REVIEWER_CHAIN[*]}"
+}
+
 # --------------------------------------------------------------------------
 # Phase labels
 # --------------------------------------------------------------------------
@@ -1529,8 +1610,14 @@ print_summary() {
   secs=$((elapsed % 60))
   findings="${REVIEW_FINDINGS_COUNT:-0}"
 
+  local chain_str
+  chain_str="$(format_reviewer_chain)"
+
   printf "\n  ${C_DIM}─── review summary ────────────────────────${C_RESET}\n"
   printf "  ${C_DIM}reviewer:       %s${C_RESET}\n" "$REVIEWER_LABEL"
+  if [ -n "$chain_str" ]; then
+    printf "  ${C_DIM}cascade chain:  %s${C_RESET}\n" "$chain_str"
+  fi
   if [ "$ROUTING_DECISION" != "default" ]; then
     printf "  ${C_DIM}route:          %s${C_RESET}\n" "$ROUTING_DECISION"
   fi
@@ -1546,8 +1633,8 @@ print_summary() {
   printf "  ${C_DIM}──────────────────────────────────────────${C_RESET}\n"
 
   if [ -n "${CODEX_REVIEW_SUMMARY_FILE:-}" ]; then
-    printf '{"reviewer":"%s","route":"%s","mode":"%s","files":%d,"diff_lines":%d,"iterations":%d,"fix_commits":%d,"peer_assists":%d,"findings":%d,"exit_reason":"%s","elapsed_seconds":%d}\n' \
-      "$REVIEWER_LABEL" "$ROUTING_DECISION" "$REVIEW_MODE" "$REVIEW_FILES_INSPECTED" "$DIFF_LINE_COUNT" \
+    printf '{"reviewer":"%s","reviewer_chain":"%s","route":"%s","mode":"%s","files":%d,"diff_lines":%d,"iterations":%d,"fix_commits":%d,"peer_assists":%d,"findings":%d,"exit_reason":"%s","elapsed_seconds":%d}\n' \
+      "$REVIEWER_LABEL" "$chain_str" "$ROUTING_DECISION" "$REVIEW_MODE" "$REVIEW_FILES_INSPECTED" "$DIFF_LINE_COUNT" \
       "${iter:-0}" "$FIX_COMMITS" "$ASSIST_ROUNDS" "$findings" "$REVIEW_EXIT_REASON" "$elapsed" \
       > "$CODEX_REVIEW_SUMMARY_FILE" 2>/dev/null || true
   fi
@@ -1655,6 +1742,12 @@ print_banner() {
   BANNER_PRINTED=true
 }
 
+for _outer_idx in "${!AVAILABLE_CASCADE[@]}"; do
+  ACTIVE_REVIEWER="${AVAILABLE_CASCADE[$_outer_idx]}"
+  REVIEWER_LABEL="$(reviewer_label)"
+  BANNER_PRINTED=false
+  FALLTHROUGH_REASON=""
+
 for iter in $(seq 1 "$MAX_ITERATIONS"); do
   phase "loading diff"
   DIFF_LINE_COUNT="$(git diff "$MERGE_BASE"..HEAD | wc -l | tr -d ' ')"
@@ -1700,16 +1793,19 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
   if [ "$EXIT" -eq 124 ]; then
     phase "timed out"
     echo "==> $REVIEWER_LABEL timed out after ${REVIEW_TIMEOUT}s."
-    REVIEW_EXIT_REASON="timeout"
-    print_summary
-    handle_error "timeout after ${REVIEW_TIMEOUT}s"
+    print_stderr_tail "$REVIEW_STDERR_FILE" "$REVIEWER_LABEL stderr"
+    REVIEWER_CHAIN+=("${ACTIVE_REVIEWER}:timeout")
+    FALLTHROUGH_REASON="timeout after ${REVIEW_TIMEOUT}s"
+    break
   fi
 
   if [ $EXIT -ne 0 ]; then
-    echo "==> $REVIEWER_LABEL review failed with exit $EXIT."
-    REVIEW_EXIT_REASON="error"
-    print_summary
-    handle_error "reviewer exit $EXIT"
+    failure_tag="$(classify_reviewer_failure "$REVIEW_STDERR_FILE")"
+    echo "==> $REVIEWER_LABEL review failed with exit $EXIT (${failure_tag})."
+    print_stderr_tail "$REVIEW_STDERR_FILE" "$REVIEWER_LABEL stderr"
+    REVIEWER_CHAIN+=("${ACTIVE_REVIEWER}:${failure_tag}")
+    FALLTHROUGH_REASON="${failure_tag} (exit $EXIT)"
+    break
   fi
 
   HELP_REQUEST=""
@@ -1738,16 +1834,19 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
         if [ "$EXIT" -eq 124 ]; then
           phase "timed out"
           echo "==> $REVIEWER_LABEL timed out after ${REVIEW_TIMEOUT}s after peer assistance."
-          REVIEW_EXIT_REASON="timeout"
-          print_summary
-          handle_error "timeout after ${REVIEW_TIMEOUT}s after peer assistance"
+          print_stderr_tail "$REVIEW_STDERR_FILE" "$REVIEWER_LABEL stderr"
+          REVIEWER_CHAIN+=("${ACTIVE_REVIEWER}:timeout-after-assist")
+          FALLTHROUGH_REASON="timeout after ${REVIEW_TIMEOUT}s after peer assistance"
+          break
         fi
 
         if [ "$EXIT" -ne 0 ]; then
-          echo "==> $REVIEWER_LABEL review failed with exit $EXIT after peer assistance."
-          REVIEW_EXIT_REASON="error"
-          print_summary
-          handle_error "reviewer exit $EXIT after peer assistance"
+          failure_tag="$(classify_reviewer_failure "$REVIEW_STDERR_FILE")"
+          echo "==> $REVIEWER_LABEL review failed with exit $EXIT (${failure_tag}) after peer assistance."
+          print_stderr_tail "$REVIEW_STDERR_FILE" "$REVIEWER_LABEL stderr"
+          REVIEWER_CHAIN+=("${ACTIVE_REVIEWER}:${failure_tag}-after-assist")
+          FALLTHROUGH_REASON="${failure_tag} (exit $EXIT) after peer assistance"
+          break
         fi
       else
         echo "==> Continuing with the primary reviewer output."
@@ -1764,6 +1863,7 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
         clean_subtitle="${clean_subtitle} · ${FIX_COMMITS} auto-fix commit(s)"
       fi
       tk_verdict ok "ALL CLEAR" "$clean_subtitle"
+      REVIEWER_CHAIN+=("${ACTIVE_REVIEWER}:clean")
       REVIEW_EXIT_REASON="clean"
       print_summary
       write_clean_review_cache "$REVIEW_CACHE_KEY" "$DIFF_LINE_COUNT"
@@ -1827,6 +1927,7 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
         echo "    To undo them: git reset --hard HEAD~$FIX_COMMITS"
       fi
       echo "    Address findings and try again. Emergency override: git push --no-verify"
+      REVIEWER_CHAIN+=("${ACTIVE_REVIEWER}:blocked")
       REVIEW_EXIT_REASON="blocked"
       print_summary
       exit 1
@@ -1837,11 +1938,36 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
       echo "    Last line was: '$LAST_LINE'"
       echo "    Raw output (first 20 lines):"
       printf '%s\n' "$OUTPUT" | head -20 | sed 's/^/    /'
+      REVIEWER_CHAIN+=("${ACTIVE_REVIEWER}:malformed")
       REVIEW_EXIT_REASON="malformed-sentinel"
       print_summary
       handle_error "malformed sentinel"
       ;;
   esac
+done
+
+  # End of inner iter loop — decide whether to fall through to next reviewer.
+  if [ -n "$FALLTHROUGH_REASON" ]; then
+    next_idx=$((_outer_idx + 1))
+    if [ "$next_idx" -lt "${#AVAILABLE_CASCADE[@]}" ]; then
+      next_reviewer="${AVAILABLE_CASCADE[$next_idx]}"
+      next_label="$(reviewer_label_for "$next_reviewer")"
+      echo ""
+      echo "==> ${REVIEWER_LABEL}: ${FALLTHROUGH_REASON} — falling back to ${next_label}"
+      continue
+    fi
+    # Cascade exhausted — every reviewer that was available failed at runtime.
+    echo ""
+    echo "==> All reviewers in the cascade failed."
+    echo "    Chain: $(format_reviewer_chain)"
+    REVIEW_EXIT_REASON="cascade-exhausted"
+    print_summary
+    handle_error "cascade exhausted: $(format_reviewer_chain)"
+  fi
+  # Otherwise the inner loop fell off the end without converging — that's a
+  # genuine "diff is contentious" signal, not "reviewer broke." Don't try the
+  # next reviewer; preserve the original non-convergence behavior below.
+  break
 done
 
 echo ""
@@ -1853,6 +1979,7 @@ echo "      git diff HEAD~$FIX_COMMITS..HEAD"
 echo ""
 echo "    To undo all auto-fix commits: git reset --hard HEAD~$FIX_COMMITS"
 echo "    Emergency override: git push --no-verify"
+REVIEWER_CHAIN+=("${ACTIVE_REVIEWER}:max-iterations")
 REVIEW_EXIT_REASON="max-iterations"
 print_summary
 exit 1
