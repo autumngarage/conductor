@@ -35,8 +35,10 @@ safe_by_default = false
 mode = "review-only"
 
 # Wall-clock timeout per reviewer invocation, in seconds. 0 = no timeout.
-# If the reviewer doesn't finish in time, the hook exits per on_error policy.
-# timeout = 300
+# Safety net for wedged reviewer processes, NOT a thinking-time budget — real
+# reviews on big diffs can run 8–10 minutes. On timeout the cascade now falls
+# through to the next reviewer instead of silently passing the push.
+# timeout = 1800
 
 # What to do when the reviewer fails (crash, timeout, malformed output).
 # "fail-open"   = exit 0, allow push (default — infrastructure errors don't block)
