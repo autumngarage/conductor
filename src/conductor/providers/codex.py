@@ -65,6 +65,9 @@ class CodexProvider:
     # GPT-5-codex ships 400K context via the `codex` CLI.
     max_context_tokens = 400_000
 
+    # User-facing login command surfaced in error messages and the wizard.
+    auth_login_command = "codex login"
+
     def __init__(
         self,
         *,
@@ -74,13 +77,47 @@ class CodexProvider:
         self._cli = cli_command
         self._timeout_sec = timeout_sec
 
-    def configured(self) -> tuple[bool, str | None]:
+    def _check_cli_path(self) -> tuple[bool, str | None]:
+        """Cheap PATH-only check (no subprocess) for the call/exec hot path."""
         if not shutil.which(self._cli):
             return False, (
                 f"`{self._cli}` CLI not found on PATH. "
-                "Install with `npm install -g @openai/codex` and auth with `codex login`."
+                "Install with `npm install -g @openai/codex` "
+                f"and auth with `{self.auth_login_command}` "
+                "(or set `OPENAI_API_KEY` for non-interactive use)."
             )
         return True, None
+
+    def _auth_probe(self) -> tuple[bool, str | None]:
+        """Verify auth via `codex login status` (exit 0 = logged in)."""
+        try:
+            result = subprocess.run(
+                [self._cli, "login", "status"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            return False, (
+                f"could not verify `{self._cli}` auth status: {e}. "
+                "Update the CLI and retry, or set `OPENAI_API_KEY` "
+                "for non-interactive use."
+            )
+        if result.returncode == 0:
+            return True, None
+        return False, (
+            "not authenticated. "
+            f"Run `{self.auth_login_command}` to log in via browser, "
+            f"`{self._cli} login --device-auth` for headless flow, "
+            f"or `printenv OPENAI_API_KEY | {self._cli} login --with-api-key` "
+            "for non-interactive use."
+        )
+
+    def configured(self) -> tuple[bool, str | None]:
+        ok, reason = self._check_cli_path()
+        if not ok:
+            return False, reason
+        return self._auth_probe()
 
     def smoke(self) -> tuple[bool, str | None]:
         ok, reason = self.configured()
@@ -198,7 +235,10 @@ class CodexProvider:
         timeout_sec_override: float | None = None,
         resume_session_id: str | None = None,
     ) -> CallResponse:
-        ok, reason = self.configured()
+        # Cheap PATH check on the hot path; auth state surfaces as a CLI
+        # exit failure below if needed. configured() (with auth probe) is
+        # the entry point that doctor/list/wizard call.
+        ok, reason = self._check_cli_path()
         if not ok:
             raise ProviderConfigError(reason or "codex not configured")
 

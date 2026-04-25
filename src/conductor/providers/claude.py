@@ -53,6 +53,12 @@ class ClaudeProvider:
     # Claude Sonnet 4.6 ships 1M context via the CLI's long-context mode.
     max_context_tokens = 1_000_000
 
+    # User-facing login command surfaced in error messages and the init
+    # wizard. Note: top-level `claude --help` doesn't list `auth` as a
+    # subcommand, but `claude auth login` is the actual non-interactive
+    # entry point (the slash variant `/login` only works inside the REPL).
+    auth_login_command = "claude auth login"
+
     def __init__(
         self,
         *,
@@ -62,13 +68,69 @@ class ClaudeProvider:
         self._cli = cli_command
         self._timeout_sec = timeout_sec
 
-    def configured(self) -> tuple[bool, str | None]:
+    def _check_cli_path(self) -> tuple[bool, str | None]:
+        """Cheap PATH-only check (no subprocess). Used by call()/exec()
+        for the defensive guard so the hot path doesn't take an auth-probe
+        round-trip on every invocation."""
         if not shutil.which(self._cli):
             return False, (
                 f"`{self._cli}` CLI not found on PATH. "
-                "Install with `brew install claude` and auth with `claude login`."
+                "Install with `brew install claude` and auth with "
+                f"`{self.auth_login_command}` "
+                "(or set `ANTHROPIC_API_KEY` for non-interactive use)."
             )
         return True, None
+
+    def _auth_probe(self) -> tuple[bool, str | None]:
+        """Verify the user is authenticated.
+
+        Calls ``claude auth status --json``, which exits 0 in BOTH the
+        authed and unauthed cases — the JSON body's ``loggedIn`` field
+        is the canonical signal. Returns a structured failure reason for
+        every error mode (timeout, non-JSON, missing field, loggedIn=false)
+        so doctor/wizard can render a useful next step.
+        """
+        try:
+            result = subprocess.run(
+                [self._cli, "auth", "status", "--json"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            return False, (
+                f"could not verify `{self._cli}` auth status: {e}. "
+                "Update the CLI (`brew upgrade claude`) and re-run, "
+                "or set `ANTHROPIC_API_KEY` for non-interactive use."
+            )
+        if result.returncode != 0:
+            return False, (
+                f"`{self._cli} auth status` exited {result.returncode}: "
+                f"{(result.stderr or result.stdout).strip()[:200]}. "
+                "Older CLIs may lack the `auth` subcommand; "
+                "`brew upgrade claude` and retry."
+            )
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return False, (
+                f"`{self._cli} auth status --json` output was not JSON: "
+                f"{result.stdout[:200]!r}"
+            )
+        if data.get("loggedIn"):
+            return True, None
+        return False, (
+            "not authenticated. "
+            f"Run `{self.auth_login_command}` to log in via browser, "
+            "`claude setup-token` for a long-lived token (subscription req'd), "
+            "or set `ANTHROPIC_API_KEY` for non-interactive use."
+        )
+
+    def configured(self) -> tuple[bool, str | None]:
+        ok, reason = self._check_cli_path()
+        if not ok:
+            return False, reason
+        return self._auth_probe()
 
     def smoke(self) -> tuple[bool, str | None]:
         ok, reason = self.configured()
@@ -154,7 +216,11 @@ class ClaudeProvider:
         timeout_sec_override: float | None = None,
         resume_session_id: str | None = None,
     ) -> CallResponse:
-        ok, reason = self.configured()
+        # Cheap PATH check only on the hot path — auth state surfaces as a
+        # CLI exit failure below if the user installed but didn't log in.
+        # `configured()` (with the auth probe) is the entry point that
+        # `doctor`/`list`/wizard call.
+        ok, reason = self._check_cli_path()
         if not ok:
             raise ProviderConfigError(reason or "claude not configured")
 
