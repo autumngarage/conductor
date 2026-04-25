@@ -14,13 +14,23 @@ import pytest
 
 from conductor.providers.claude import ClaudeProvider
 from conductor.providers.codex import CodexProvider
-from conductor.providers.gemini import GeminiProvider
+from conductor.providers.gemini import GEMINI_AUTH_ENV_VARS, GeminiProvider
 from conductor.providers.interface import (
     CallResponse,
     ProviderConfigError,
     ProviderError,
     ProviderHTTPError,
 )
+
+
+def _strip_gemini_auth_env(monkeypatch) -> None:
+    """Clear any GEMINI/GOOGLE auth env vars inherited from the host shell.
+
+    Without this, tests that exercise the OAuth-file path silently
+    succeed via the env-var fast path on developer machines.
+    """
+    for var in GEMINI_AUTH_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
 
 
 def _fake_completed(stdout: str = "", stderr: str = "", returncode: int = 0):
@@ -42,8 +52,12 @@ CLAUDE_JSON = """{
 }"""
 
 
-def test_claude_configured_when_cli_present(mocker):
+def test_claude_configured_when_cli_present_and_authed(mocker):
     mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    mocker.patch(
+        "conductor.providers.claude.subprocess.run",
+        return_value=_fake_completed(stdout='{"loggedIn": true}'),
+    )
     ok, reason = ClaudeProvider().configured()
     assert ok is True and reason is None
 
@@ -51,7 +65,62 @@ def test_claude_configured_when_cli_present(mocker):
 def test_claude_configured_false_when_cli_missing(mocker):
     mocker.patch("conductor.providers.claude.shutil.which", return_value=None)
     ok, reason = ClaudeProvider().configured()
-    assert ok is False and "claude" in reason
+    assert ok is False
+    assert "not found on PATH" in reason
+    # Reason names the actionable login command + env-var fallback.
+    assert "claude auth login" in reason
+    assert "ANTHROPIC_API_KEY" in reason
+
+
+def test_claude_configured_false_when_not_authed(mocker):
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    mocker.patch(
+        "conductor.providers.claude.subprocess.run",
+        return_value=_fake_completed(stdout='{"loggedIn": false}'),
+    )
+    ok, reason = ClaudeProvider().configured()
+    assert ok is False
+    assert "not authenticated" in reason
+    assert "claude auth login" in reason
+    assert "ANTHROPIC_API_KEY" in reason
+
+
+def test_claude_configured_false_when_auth_probe_exits_nonzero(mocker):
+    """Older CLI versions without `auth status` exit non-zero — surface,
+    don't silently treat as authed."""
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    mocker.patch(
+        "conductor.providers.claude.subprocess.run",
+        return_value=_fake_completed(
+            stderr="error: unknown command 'auth'", returncode=2
+        ),
+    )
+    ok, reason = ClaudeProvider().configured()
+    assert ok is False
+    assert "exited 2" in reason
+    assert "upgrade" in reason.lower()
+
+
+def test_claude_configured_false_when_auth_probe_times_out(mocker):
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    mocker.patch(
+        "conductor.providers.claude.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd="claude", timeout=5),
+    )
+    ok, reason = ClaudeProvider().configured()
+    assert ok is False
+    assert "could not verify" in reason
+
+
+def test_claude_configured_false_when_auth_probe_returns_non_json(mocker):
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    mocker.patch(
+        "conductor.providers.claude.subprocess.run",
+        return_value=_fake_completed(stdout="hello not json"),
+    )
+    ok, reason = ClaudeProvider().configured()
+    assert ok is False
+    assert "not JSON" in reason
 
 
 def test_claude_call_returns_normalized_response(mocker):
@@ -163,10 +232,49 @@ CODEX_NDJSON = (
 )
 
 
-def test_codex_configured_when_cli_present(mocker):
+def test_codex_configured_when_cli_present_and_authed(mocker):
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
-    ok, _ = CodexProvider().configured()
-    assert ok is True
+    mocker.patch(
+        "conductor.providers.codex.subprocess.run",
+        return_value=_fake_completed(stdout="Logged in using ChatGPT"),
+    )
+    ok, reason = CodexProvider().configured()
+    assert ok is True and reason is None
+
+
+def test_codex_configured_false_when_cli_missing(mocker):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value=None)
+    ok, reason = CodexProvider().configured()
+    assert ok is False
+    assert "not found on PATH" in reason
+    assert "codex login" in reason
+    assert "OPENAI_API_KEY" in reason
+
+
+def test_codex_configured_false_when_not_authed(mocker):
+    """`codex login status` exits non-zero when the user isn't authed."""
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    mocker.patch(
+        "conductor.providers.codex.subprocess.run",
+        return_value=_fake_completed(stderr="not logged in", returncode=1),
+    )
+    ok, reason = CodexProvider().configured()
+    assert ok is False
+    assert "not authenticated" in reason
+    assert "codex login" in reason
+    assert "OPENAI_API_KEY" in reason
+    assert "--with-api-key" in reason
+
+
+def test_codex_configured_false_when_auth_probe_times_out(mocker):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    mocker.patch(
+        "conductor.providers.codex.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd="codex", timeout=5),
+    )
+    ok, reason = CodexProvider().configured()
+    assert ok is False
+    assert "could not verify" in reason
 
 
 def test_codex_call_parses_ndjson_and_usage(mocker):
@@ -240,10 +348,86 @@ GEMINI_JSON = """{
 }"""
 
 
-def test_gemini_configured_when_cli_present(mocker):
+def test_gemini_configured_when_cli_present_and_env_authed(mocker, monkeypatch):
     mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
-    ok, _ = GeminiProvider().configured()
-    assert ok is True
+    _strip_gemini_auth_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    ok, reason = GeminiProvider().configured()
+    assert ok is True and reason is None
+
+
+def test_gemini_configured_when_oauth_creds_have_tokens(
+    mocker, monkeypatch, tmp_path
+):
+    """Filesystem-only auth path — env vars unset, OAuth file present."""
+    mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
+    _strip_gemini_auth_env(monkeypatch)
+    creds = tmp_path / "oauth_creds.json"
+    creds.write_text(
+        '{"access_token": "ya29.fake", "refresh_token": "1//fake", '
+        '"expiry_date": 0}'
+    )
+    # Expiry deliberately stale — we trust the CLI to refresh, so an
+    # expired access_token alongside a refresh_token is still authed.
+    ok, reason = GeminiProvider(oauth_creds_path=creds).configured()
+    assert ok is True and reason is None
+
+
+def test_gemini_configured_false_when_cli_missing(mocker):
+    mocker.patch("conductor.providers.gemini.shutil.which", return_value=None)
+    ok, reason = GeminiProvider().configured()
+    assert ok is False
+    assert "not found on PATH" in reason
+    assert "GEMINI_API_KEY" in reason
+
+
+def test_gemini_configured_false_when_no_env_and_no_oauth_file(
+    mocker, monkeypatch, tmp_path
+):
+    mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
+    _strip_gemini_auth_env(monkeypatch)
+    missing = tmp_path / "does_not_exist.json"
+    ok, reason = GeminiProvider(oauth_creds_path=missing).configured()
+    assert ok is False
+    assert "not authenticated" in reason
+    assert "GEMINI_API_KEY" in reason
+    assert "GOOGLE_API_KEY" in reason
+
+
+def test_gemini_configured_false_when_oauth_file_corrupt(
+    mocker, monkeypatch, tmp_path
+):
+    mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
+    _strip_gemini_auth_env(monkeypatch)
+    creds = tmp_path / "oauth_creds.json"
+    creds.write_text("not valid json {{")
+    ok, reason = GeminiProvider(oauth_creds_path=creds).configured()
+    assert ok is False
+    assert "could not parse" in reason
+
+
+def test_gemini_configured_false_when_oauth_file_has_no_tokens(
+    mocker, monkeypatch, tmp_path
+):
+    mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
+    _strip_gemini_auth_env(monkeypatch)
+    creds = tmp_path / "oauth_creds.json"
+    creds.write_text('{"unrelated_field": "value"}')
+    ok, reason = GeminiProvider(oauth_creds_path=creds).configured()
+    assert ok is False
+    assert "no usable tokens" in reason
+
+
+def test_gemini_configured_when_only_google_application_credentials_set(
+    mocker, monkeypatch, tmp_path
+):
+    """Vertex AI ADC path — GOOGLE_APPLICATION_CREDENTIALS is sufficient."""
+    mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
+    _strip_gemini_auth_env(monkeypatch)
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/sa.json")
+    missing = tmp_path / "does_not_exist.json"  # unreachable; env wins
+    ok, reason = GeminiProvider(oauth_creds_path=missing).configured()
+    assert ok is True and reason is None
 
 
 def test_gemini_call_parses_json_and_usage(mocker):

@@ -70,11 +70,15 @@ _INFO: dict[str, _ProviderInfo] = {
             "npm install -g @anthropic-ai/claude-code    # any platform",
         ],
         auth_cmds=[
-            "claude /login    # opens a browser for subscription OAuth",
+            "claude auth login         # opens a browser for subscription OAuth",
+            "# OR for headless / non-interactive use:",
+            "claude setup-token        # long-lived token (subscription req'd)",
+            "export ANTHROPIC_API_KEY=sk-ant-...    # API-key billing",
         ],
         troubleshoot_tips=[
-            "`claude /login` opens a browser — won't work in a headless env.",
-            "Verify with `claude --version` (need >= 1.0); then `claude -p 'hi'`.",
+            "`claude auth login` opens a browser — won't work in a headless env; "
+            "use `claude setup-token` or set `ANTHROPIC_API_KEY` instead.",
+            "Verify with `claude auth status --json` — `loggedIn: true` means authed.",
             "Subscription status: https://claude.ai/plans — Pro or Team required.",
             "Behind a proxy? auth uses auth0; check $HTTP_PROXY / firewall rules.",
         ],

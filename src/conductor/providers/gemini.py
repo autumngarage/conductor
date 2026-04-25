@@ -13,9 +13,11 @@ multiple model hops.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import time
+from pathlib import Path
 
 from conductor.providers.interface import (
     CallResponse,
@@ -27,6 +29,17 @@ from conductor.providers.interface import (
 
 GEMINI_DEFAULT_MODEL = "gemini-2.5-pro"
 GEMINI_REQUEST_TIMEOUT_SEC = 180.0
+
+# Env vars Gemini CLI accepts as auth credentials. Any one of these being
+# set is sufficient — the CLI prefers them over the OAuth file.
+GEMINI_AUTH_ENV_VARS = (
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+)
+# Default OAuth credentials file written by the CLI's first-run browser
+# flow. Override per-instance via the constructor for tests.
+GEMINI_DEFAULT_OAUTH_CREDS_PATH = Path.home() / ".gemini" / "oauth_creds.json"
 
 
 class GeminiProvider:
@@ -53,23 +66,93 @@ class GeminiProvider:
     # Gemini 2.5 Pro ships a 2M context window.
     max_context_tokens = 2_000_000
 
+    # No `gemini login` subcommand exists as of 0.38.x — the first
+    # interactive run of `gemini` itself triggers browser OAuth. None
+    # signals to the wizard that there's no non-interactive login command;
+    # the recommended fallback is `GEMINI_API_KEY`.
+    auth_login_command: str | None = None
+
     def __init__(
         self,
         *,
         cli_command: str = "gemini",
         timeout_sec: float = GEMINI_REQUEST_TIMEOUT_SEC,
+        oauth_creds_path: Path | None = None,
     ) -> None:
         self._cli = cli_command
         self._timeout_sec = timeout_sec
+        self._oauth_creds_path = (
+            oauth_creds_path
+            if oauth_creds_path is not None
+            else GEMINI_DEFAULT_OAUTH_CREDS_PATH
+        )
 
-    def configured(self) -> tuple[bool, str | None]:
+    def _check_cli_path(self) -> tuple[bool, str | None]:
+        """Cheap PATH-only check (no subprocess) for the call/exec hot path."""
         if not shutil.which(self._cli):
             return False, (
                 f"`{self._cli}` CLI not found on PATH. "
                 "Install with `npm install -g @google/gemini-cli`; "
-                "first run will prompt a browser auth."
+                "first run will prompt a browser auth, "
+                "or set `GEMINI_API_KEY` for non-interactive use."
             )
         return True, None
+
+    def _auth_probe(self) -> tuple[bool, str | None]:
+        """Verify auth state via env vars or the OAuth credentials file.
+
+        Gemini CLI doesn't ship `auth status` or `login` subcommands as of
+        0.38.x — they're interpreted as prompts and silently start an
+        agent loop. The probe runs:
+
+          1. Any of GEMINI_API_KEY / GOOGLE_API_KEY /
+             GOOGLE_APPLICATION_CREDENTIALS set → authed (the CLI uses
+             these directly without OAuth).
+          2. ``~/.gemini/oauth_creds.json`` exists, JSON-parses, and
+             carries an access_token or refresh_token → authed. We
+             deliberately don't check ``expiry_date``: the CLI uses the
+             refresh_token to mint new access tokens silently, so an
+             expired access_token isn't a real failure.
+          3. Otherwise → not authed.
+
+        Revisit when Gemini ships a real auth subcommand.
+        """
+        if any(os.environ.get(v) for v in GEMINI_AUTH_ENV_VARS):
+            return True, None
+
+        creds = self._oauth_creds_path
+        if not creds.exists():
+            return False, (
+                "not authenticated. "
+                f"Run `{self._cli}` interactively to trigger browser OAuth, "
+                "or set `GEMINI_API_KEY` (or GOOGLE_API_KEY / "
+                "GOOGLE_APPLICATION_CREDENTIALS) for non-interactive use."
+            )
+
+        try:
+            data = json.loads(creds.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            return False, (
+                f"could not parse {creds}: {e}. "
+                f"Re-run `{self._cli}` to refresh the OAuth credentials, "
+                "or set `GEMINI_API_KEY` for non-interactive use."
+            )
+
+        if not isinstance(data, dict) or not (
+            data.get("access_token") or data.get("refresh_token")
+        ):
+            return False, (
+                f"{creds} exists but has no usable tokens. "
+                f"Re-run `{self._cli}` to refresh."
+            )
+
+        return True, None
+
+    def configured(self) -> tuple[bool, str | None]:
+        ok, reason = self._check_cli_path()
+        if not ok:
+            return False, reason
+        return self._auth_probe()
 
     def smoke(self) -> tuple[bool, str | None]:
         ok, reason = self.configured()
@@ -147,7 +230,10 @@ class GeminiProvider:
         timeout_sec_override: float | None = None,
         resume_session_id: str | None = None,
     ) -> CallResponse:
-        ok, reason = self.configured()
+        # Cheap PATH check on the hot path; auth state surfaces as a CLI
+        # exit failure below if needed. configured() (with auth probe) is
+        # the entry point that doctor/list/wizard call.
+        ok, reason = self._check_cli_path()
         if not ok:
             raise ProviderConfigError(reason or "gemini not configured")
 
@@ -173,11 +259,10 @@ class GeminiProvider:
             args.extend(["--resume", resume_session_id])
         # Gemini CLI thinking budget support is evolving; pass via env var as
         # a forward-compatible hook. Ignored by versions that don't read it.
-        import os as _os
         env_overrides: dict[str, str] = {}
         if thinking_budget:
             env_overrides["GEMINI_THINKING_BUDGET"] = str(thinking_budget)
-        proc_env = {**_os.environ, **env_overrides} if env_overrides else None
+        proc_env = {**os.environ, **env_overrides} if env_overrides else None
 
         timeout = timeout_sec_override if timeout_sec_override is not None else self._timeout_sec
         start = time.monotonic()
