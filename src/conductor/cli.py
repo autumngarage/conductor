@@ -26,6 +26,7 @@ from dataclasses import asdict
 import click
 
 from conductor import __version__, credentials, offline_mode
+from conductor.banner import print_caller_banner
 from conductor.providers import (
     QUALITY_TIERS,
     CallResponse,
@@ -663,7 +664,8 @@ def main() -> None:
     "--silent-route",
     is_flag=True,
     default=False,
-    help="Suppress the default route-log line (useful for clean stdout piping).",
+    help="Suppress the route-log line and caller-attribution banner "
+    "(useful for clean stdout piping).",
 )
 @click.option(
     "--resume",
@@ -727,6 +729,7 @@ def call(
         except (NoConfiguredProvider, InvalidRouterRequest) as e:
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
+        print_caller_banner(decision.provider, silent=silent_route or as_json)
         _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
 
         try:
@@ -755,6 +758,7 @@ def call(
             provider = get_provider(provider_id)
         except KeyError as e:
             raise click.UsageError(str(e)) from e
+        print_caller_banner(provider_id, silent=silent_route or as_json)
         try:
             response = provider.call(
                 body,
@@ -909,6 +913,7 @@ def exec_cmd(
         except (NoConfiguredProvider, InvalidRouterRequest) as e:
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
+        print_caller_banner(decision.provider, silent=silent_route or as_json)
         _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
 
         try:
@@ -938,6 +943,7 @@ def exec_cmd(
             provider = get_provider(provider_id)
         except KeyError as e:
             raise click.UsageError(str(e)) from e
+        print_caller_banner(provider_id, silent=silent_route or as_json)
         try:
             response = provider.exec(
                 body,

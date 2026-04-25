@@ -74,6 +74,8 @@ def test_call_kimi_missing_account_exits_2(monkeypatch):
 def test_call_json_output(monkeypatch):
     monkeypatch.setenv(CLOUDFLARE_API_TOKEN_ENV, "cf-test-token")
     monkeypatch.setenv(CLOUDFLARE_ACCOUNT_ID_ENV, _TEST_ACCOUNT_ID)
+    # The caller banner is silenced under --json (matches existing route-log
+    # silencing), so stdout stays clean for json.loads().
     with respx.mock() as router:
         router.post(_CF_CHAT_URL).mock(
             return_value=httpx.Response(
@@ -89,9 +91,63 @@ def test_call_json_output(monkeypatch):
             main, ["call", "--with", "kimi", "--task", "hi", "--json"]
         )
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 0, result.stderr
     import json
 
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert payload["text"] == "ok"
     assert payload["provider"] == "kimi"
+
+
+def test_call_emits_caller_banner_when_claude_detected(monkeypatch):
+    """When CLAUDECODE is set, `conductor call` announces itself on stderr."""
+    monkeypatch.setenv(CLOUDFLARE_API_TOKEN_ENV, "cf-test-token")
+    monkeypatch.setenv(CLOUDFLARE_ACCOUNT_ID_ENV, _TEST_ACCOUNT_ID)
+    monkeypatch.setenv("CLAUDECODE", "1")
+    monkeypatch.setenv("NO_COLOR", "1")  # plain ASCII for stable assertion
+
+    with respx.mock() as router:
+        router.post(_CF_CHAT_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "model": KIMI_DEFAULT_MODEL,
+                    "choices": [{"message": {"content": "hello"}}],
+                    "usage": {},
+                },
+            )
+        )
+        result = CliRunner().invoke(
+            main, ["call", "--with", "kimi", "--task", "hi"]
+        )
+
+    assert result.exit_code == 0, result.stderr
+    # Banner on stderr — keeps stdout clean for subprocess parsing.
+    assert "Claude Code is using Conductor → kimi" in result.stderr
+    # Response on stdout, untouched.
+    assert result.stdout.strip() == "hello"
+
+
+def test_call_silent_route_suppresses_caller_banner(monkeypatch):
+    """--silent-route silences the caller banner (and the route log)."""
+    monkeypatch.setenv(CLOUDFLARE_API_TOKEN_ENV, "cf-test-token")
+    monkeypatch.setenv(CLOUDFLARE_ACCOUNT_ID_ENV, _TEST_ACCOUNT_ID)
+    monkeypatch.setenv("CLAUDECODE", "1")
+
+    with respx.mock() as router:
+        router.post(_CF_CHAT_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "model": KIMI_DEFAULT_MODEL,
+                    "choices": [{"message": {"content": "hello"}}],
+                    "usage": {},
+                },
+            )
+        )
+        result = CliRunner().invoke(
+            main, ["call", "--with", "kimi", "--task", "hi", "--silent-route"]
+        )
+
+    assert result.exit_code == 0, result.stderr
+    assert "Conductor" not in result.stderr
