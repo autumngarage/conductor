@@ -306,6 +306,132 @@ def test_init_1password_resolution_failure_rolls_back(mocker, monkeypatch, tmp_p
         assert "DEEPSEEK_API_KEY" not in creds_mod.load_key_commands()
 
 
+def test_init_1password_env_var_does_not_mask_broken_reference(
+    mocker, monkeypatch, tmp_path
+):
+    """Regression: even with the target env var set, the wizard MUST test
+    the op:// reference itself before claiming success. Otherwise a stray
+    env var (e.g. from `op run` in the user's shell) would let us persist
+    a wrong/broken op reference that fails on every later call."""
+    mocker.patch("conductor.wizard._is_tty", return_value=True)
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda cmd: "/opt/homebrew/bin/op" if cmd == "op" else None,
+    )
+    mocker.patch(
+        "conductor.credentials.shutil.which",
+        lambda cmd: "/opt/homebrew/bin/op" if cmd == "op" else None,
+    )
+
+    from conductor.providers import DeepSeekChatProvider
+
+    mocker.patch.object(
+        DeepSeekChatProvider, "configured", lambda self: (False, "missing")
+    )
+    # The env var IS set — which would mask credentials.get() returning
+    # a value even if `op read` itself fails.
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "from-env-stray")
+
+    cred_file = tmp_path / "credentials.toml"
+    monkeypatch.setenv("CONDUCTOR_CREDENTIALS_FILE", str(cred_file))
+
+    import subprocess
+
+    # `op read` exits non-zero. If the wizard incorrectly used
+    # credentials.get(), it would see "from-env-stray" and report success.
+    mocker.patch(
+        "conductor.credentials.subprocess.run",
+        return_value=subprocess.CompletedProcess(
+            args=["op"], returncode=1, stdout="", stderr="not found"
+        ),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["init", "--only", "deepseek-chat"],
+        input="1password\nop://Personal/DeepSeek/credential\n",
+    )
+
+    assert result.exit_code == 0
+    assert "did not return a value" in result.output
+    # Critical: no key_command persisted, despite the env var being set.
+    if cred_file.exists():
+        from conductor import credentials as creds_mod
+
+        creds_mod.clear_key_command_cache()
+        assert "DEEPSEEK_API_KEY" not in creds_mod.load_key_commands()
+
+
+def test_init_1password_partial_failure_does_not_persist_first_credential(
+    mocker, monkeypatch, tmp_path
+):
+    """Kimi has two credentials. If the first resolves but the second
+    fails, the wizard MUST NOT leave the first one persisted (and MUST
+    NOT have already deleted its keychain backup)."""
+    mocker.patch("conductor.wizard._is_tty", return_value=True)
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda cmd: "/opt/homebrew/bin/op" if cmd == "op" else None,
+    )
+    mocker.patch(
+        "conductor.credentials.shutil.which",
+        lambda cmd: "/opt/homebrew/bin/op" if cmd == "op" else None,
+    )
+
+    from conductor.providers import KimiProvider
+
+    mocker.patch.object(KimiProvider, "configured", lambda self: (False, "missing"))
+    monkeypatch.delenv(CLOUDFLARE_API_TOKEN_ENV, raising=False)
+    monkeypatch.delenv(CLOUDFLARE_ACCOUNT_ID_ENV, raising=False)
+
+    cred_file = tmp_path / "credentials.toml"
+    monkeypatch.setenv("CONDUCTOR_CREDENTIALS_FILE", str(cred_file))
+
+    # Track keychain deletes — must be zero on this failure path.
+    delete_keychain_mock = mocker.patch(
+        "conductor.credentials.delete_from_keychain"
+    )
+
+    import subprocess
+
+    # First op call succeeds; second fails. (CompletedProcess is consumed
+    # in order via side_effect.)
+    mocker.patch(
+        "conductor.credentials.subprocess.run",
+        side_effect=[
+            subprocess.CompletedProcess(
+                args=["op"], returncode=0, stdout="resolved-token\n", stderr=""
+            ),
+            subprocess.CompletedProcess(
+                args=["op"], returncode=1, stdout="", stderr="not found"
+            ),
+        ],
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["init", "--only", "kimi"],
+        input=(
+            "1password\n"
+            "op://Personal/Cloudflare/token\n"
+            "op://Personal/Cloudflare/account_id\n"
+        ),
+    )
+
+    assert result.exit_code == 0
+    assert "did not return a value" in result.output
+    # Neither key persisted — atomic save means both or neither.
+    if cred_file.exists():
+        from conductor import credentials as creds_mod
+
+        creds_mod.clear_key_command_cache()
+        loaded = creds_mod.load_key_commands()
+        assert CLOUDFLARE_API_TOKEN_ENV not in loaded
+        assert CLOUDFLARE_ACCOUNT_ID_ENV not in loaded
+    # No keychain deletes either — that step happens after persist.
+    delete_keychain_mock.assert_not_called()
+
+
 def test_init_kimi_aborts_when_credential_left_empty(mocker, monkeypatch):
     mocker.patch("conductor.wizard._is_tty", return_value=True)
 

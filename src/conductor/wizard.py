@@ -670,7 +670,10 @@ def _deepseek_flow(name: str) -> Callable[..., WizardOutcome]:
         click.echo(f"  Get a key: {info.credential_source_url}")
         click.echo("")
 
-        if _op_cli_available() and credentials.get(DEEPSEEK_API_KEY_ENV) is None:
+        # Source choice always offered when op is on PATH, even if a value
+        # is already in env/keychain — the user may want to migrate from
+        # local storage to indirection to remove the local copy.
+        if _op_cli_available():
             choice = _credential_source_choice(name)
             if choice == "skip":
                 return WizardOutcome(name, "skipped", "user skipped at source choice")
@@ -789,7 +792,12 @@ def _attempt_1password_indirection(
     click.echo("  Copy Secret Reference. Format: op://<vault>/<item>/<field>.")
     click.echo("")
 
-    saved: list[tuple[str, str]] = []
+    # Two phases: collect+test all references, then persist atomically.
+    # All-or-nothing prevents leaving a half-configured provider behind
+    # (e.g. kimi has two credentials — if only the first resolved, we'd
+    # have saved one key_command and deleted its keychain backup, leaving
+    # the user worse off than before they started).
+    pending: list[tuple[str, str, int]] = []  # (var, command, resolved_length)
     for var, label in creds:
         try:
             reference = click.prompt(
@@ -820,36 +828,42 @@ def _attempt_1password_indirection(
             if reference.startswith("op://")
             else reference
         )
-        # Test-resolve before persisting so we never write a broken entry.
+        # Test-resolve via run_key_command, NOT credentials.get — get()
+        # checks env first, and a stray env var would let us claim
+        # success without actually exercising the op:// reference.
         click.echo("  resolving via op …")
-        # Clear any cached value so the test-resolve actually runs.
         credentials.clear_key_command_cache()
-        # We can't call _run_key_command directly without injecting it via
-        # a temp save, so write first, then resolve, and roll back on error.
+        resolved = credentials.run_key_command(var, command)
+        if resolved is None:
+            click.echo(
+                f"  ✗ `op read {reference}` did not return a value. "
+                "Check that you're signed in (`op signin`) and the "
+                "reference is correct. Nothing has been written to disk."
+            )
+            return WizardOutcome(name, "failed", f"op resolution failed for {var}")
+        click.echo(f"  ✓ {var} resolves via op (length {len(resolved)})")
+        pending.append((var, command, len(resolved)))
+
+    # All references resolved. Persist + clean up old keychain entries.
+    for var, command, _ in pending:
         try:
             credentials.save_key_command(var, command)
         except (OSError, ValueError) as e:
             click.echo(f"  ✗ failed to write credentials file: {e}")
+            # Roll back any entries already written this round so we
+            # don't leave a partially-saved provider on disk.
+            for prior_var, _, _ in pending:
+                credentials.delete_key_command(prior_var)
             return WizardOutcome(name, "failed", f"credentials write failed: {e}")
-        resolved = credentials.get(var)
-        if resolved is None:
-            click.echo(
-                f"  ✗ `op read {reference}` did not return a value. "
-                "Check that you're signed in (`op signin`) and the reference is correct."
-            )
-            credentials.delete_key_command(var)
-            return WizardOutcome(name, "failed", f"op resolution failed for {var}")
-        click.echo(f"  ✓ {var} resolves via op (length {len(resolved)})")
-        saved.append((var, command))
-        # Defensive: if a prior keychain entry exists for this var, remove
-        # it so the indirection actually wins on the next call (env-only
-        # collisions remain — that's the user's CI override).
+        # Now that the indirection is persisted, drop any prior keychain
+        # entry so the next call resolves via op rather than a stale local
+        # cache. (Env-var overrides remain — that's the user's CI knob.)
         credentials.delete_from_keychain(var)
 
     click.echo("")
     click.echo(
-        f"  ✓ wrote {len(saved)} key_command entr"
-        f"{'y' if len(saved) == 1 else 'ies'} to "
+        f"  ✓ wrote {len(pending)} key_command entr"
+        f"{'y' if len(pending) == 1 else 'ies'} to "
         f"{credentials.credentials_file_path()}"
     )
 

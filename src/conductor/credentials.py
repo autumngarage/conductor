@@ -200,6 +200,19 @@ def clear_key_command_cache() -> None:
     _KEY_COMMAND_CACHE.clear()
 
 
+def run_key_command(key: str, command: str) -> str | None:
+    """Public alias for the key_command runner.
+
+    Used by ``conductor init`` to test-resolve a candidate command before
+    persisting it — bypassing the env/keychain layers so a stray env var
+    can't mask a broken ``op read`` and let the wizard report success on
+    a credential it never actually fetched. Populates the per-process
+    cache on success so an immediately-following smoke test reuses the
+    same value (one prompt, not two).
+    """
+    return _run_key_command(key, command)
+
+
 def _run_key_command(key: str, command: str) -> str | None:
     """Execute a key_command and return stdout (or None on failure).
 
