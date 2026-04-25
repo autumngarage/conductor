@@ -216,7 +216,69 @@ def test_doctor_json_shape(mocker, monkeypatch):
     assert len(payload["providers"]) == len(known_providers())
     cred_map = {c["name"]: c for c in payload["credentials"]}
     assert cred_map["CLOUDFLARE_API_TOKEN"]["in_env"] is True
+    assert cred_map["CLOUDFLARE_API_TOKEN"]["source"] == "env"
     assert cred_map["CLOUDFLARE_ACCOUNT_ID"]["in_env"] is False
+    assert cred_map["CLOUDFLARE_ACCOUNT_ID"]["source"] is None
+    # Every credential row carries the new fields.
+    for row in payload["credentials"]:
+        assert "has_key_command" in row
+        assert "source" in row
+
+
+def test_doctor_reports_key_command_source(mocker, monkeypatch, tmp_path):
+    """When a credential is set via key_command in credentials.toml, doctor
+    surfaces 'key_command' as the active source — not env or keychain."""
+    _stub_all_unconfigured(mocker)
+    for var in (
+        "CLOUDFLARE_API_TOKEN",
+        "CLOUDFLARE_ACCOUNT_ID",
+        "DEEPSEEK_API_KEY",
+        "OLLAMA_BASE_URL",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    mocker.patch("conductor.cli.credentials.keychain_has", return_value=False)
+
+    cred_file = tmp_path / "credentials.toml"
+    monkeypatch.setenv("CONDUCTOR_CREDENTIALS_FILE", str(cred_file))
+    from conductor import credentials as creds_mod
+
+    creds_mod.clear_key_command_cache()
+    creds_mod.save_key_command(
+        "DEEPSEEK_API_KEY", "op read op://Personal/DeepSeek/credential"
+    )
+
+    result = CliRunner().invoke(main, ["doctor", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    cred_map = {c["name"]: c for c in payload["credentials"]}
+    assert cred_map["DEEPSEEK_API_KEY"]["source"] == "key_command"
+    assert cred_map["DEEPSEEK_API_KEY"]["has_key_command"] is True
+    assert cred_map["DEEPSEEK_API_KEY"]["in_env"] is False
+
+    # Text rendering surfaces the secret-manager label.
+    text_result = CliRunner().invoke(main, ["doctor"])
+    assert "key_command (secret manager)" in text_result.output
+
+
+def test_doctor_env_beats_key_command_in_source(mocker, monkeypatch, tmp_path):
+    """Env var wins over key_command — operator can override secret-manager
+    config from a single shell session for debugging/CI."""
+    _stub_all_unconfigured(mocker)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "from-env")
+    mocker.patch("conductor.cli.credentials.keychain_has", return_value=False)
+
+    cred_file = tmp_path / "credentials.toml"
+    monkeypatch.setenv("CONDUCTOR_CREDENTIALS_FILE", str(cred_file))
+    from conductor import credentials as creds_mod
+
+    creds_mod.clear_key_command_cache()
+    creds_mod.save_key_command("DEEPSEEK_API_KEY", "echo from-op")
+
+    result = CliRunner().invoke(main, ["doctor", "--json"])
+    payload = json.loads(result.output)
+    cred_map = {c["name"]: c for c in payload["credentials"]}
+    assert cred_map["DEEPSEEK_API_KEY"]["source"] == "env"
+    assert cred_map["DEEPSEEK_API_KEY"]["has_key_command"] is True
 
 
 def test_doctor_reports_agent_integration_not_detected(mocker, monkeypatch):

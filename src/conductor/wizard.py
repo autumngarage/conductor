@@ -23,6 +23,8 @@ Concierge flow (v0.2):
 from __future__ import annotations
 
 import os
+import shlex
+import shutil
 import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -554,6 +556,13 @@ def _kimi_flow(*, can_back: bool = False) -> WizardOutcome:
     click.echo("    2. CLOUDFLARE_ACCOUNT_ID — shown on the right sidebar of dash.cloudflare.com")
     click.echo("")
 
+    if _op_cli_available():
+        choice = _credential_source_choice("kimi")
+        if choice == "skip":
+            return WizardOutcome("kimi", "skipped", "user skipped at source choice")
+        if choice == "1password":
+            return _attempt_1password_indirection("kimi", list(_KIMI_CREDS))
+
     missing = [
         (var, label)
         for var, label in _KIMI_CREDS
@@ -661,6 +670,19 @@ def _deepseek_flow(name: str) -> Callable[..., WizardOutcome]:
         click.echo(f"  Get a key: {info.credential_source_url}")
         click.echo("")
 
+        # Source choice always offered when op is on PATH, even if a value
+        # is already in env/keychain — the user may want to migrate from
+        # local storage to indirection to remove the local copy.
+        if _op_cli_available():
+            choice = _credential_source_choice(name)
+            if choice == "skip":
+                return WizardOutcome(name, "skipped", "user skipped at source choice")
+            if choice == "1password":
+                return _attempt_1password_indirection(
+                    name,
+                    [(DEEPSEEK_API_KEY_ENV, "DeepSeek API key")],
+                )
+
         if credentials.get(DEEPSEEK_API_KEY_ENV) is not None:
             provider = get_provider(name)
             ok, reason = provider.smoke()
@@ -731,6 +753,149 @@ def _deepseek_flow(name: str) -> Callable[..., WizardOutcome]:
         )
 
     return flow
+
+
+# --------------------------------------------------------------------------- #
+# 1Password (and other secret-manager) indirection helpers.
+#
+# When a user picks "1password" as the storage choice for an API-key flow,
+# the wizard collects an ``op://`` reference per credential (instead of the
+# secret value) and writes a ``key_command`` to the credentials TOML. The
+# secret never lands on this machine — conductor shells out to ``op read``
+# on every call. The same plumbing supports any tool that prints the
+# credential to stdout (Doppler, Bitwarden CLI, Vault, custom scripts) for
+# users who hand-edit the credentials file.
+# --------------------------------------------------------------------------- #
+
+
+def _op_cli_available() -> bool:
+    return shutil.which("op") is not None
+
+
+def _attempt_1password_indirection(
+    name: str,
+    creds: list[tuple[str, str]],
+) -> WizardOutcome:
+    """Collect op:// references for each credential, test-resolve, and save.
+
+    Returns a WizardOutcome regardless of outcome — the caller does not
+    fall back to manual entry from here. (Falling back would silently
+    leak the user's preference; if their op:// reference is wrong, we
+    want them to see and fix it, not paste a raw secret instead.)
+    """
+    click.echo("")
+    click.echo("  1Password indirection: conductor will fetch each credential")
+    click.echo("  via `op read <reference>` on every call. The secret is NOT")
+    click.echo("  stored on this machine.")
+    click.echo("")
+    click.echo("  Tip: copy a reference from 1Password's UI via right-click →")
+    click.echo("  Copy Secret Reference. Format: op://<vault>/<item>/<field>.")
+    click.echo("")
+
+    # Two phases: collect+test all references, then persist atomically.
+    # All-or-nothing prevents leaving a half-configured provider behind
+    # (e.g. kimi has two credentials — if only the first resolved, we'd
+    # have saved one key_command and deleted its keychain backup, leaving
+    # the user worse off than before they started).
+    pending: list[tuple[str, str, int]] = []  # (var, command, resolved_length)
+    for var, label in creds:
+        try:
+            reference = click.prompt(
+                f"  op:// reference for {label} ({var})",
+                default="",
+                show_default=False,
+            )
+        except click.Abort:
+            reference = ""
+        reference = reference.strip()
+        if not reference:
+            click.echo(f"  no reference provided — skipping {name}.")
+            return WizardOutcome(name, "skipped", f"no op:// reference for {var}")
+        if not (reference.startswith("op://") or reference.startswith("op ")):
+            click.echo(
+                f"  ✗ {reference!r} doesn't look like an op:// reference. "
+                "Aborting; rerun and paste a reference from 1Password."
+            )
+            return WizardOutcome(
+                name, "failed", f"invalid op:// reference for {var}"
+            )
+        # Build the shell command. If the user pasted a bare op:// reference,
+        # wrap with `op read`. If they pasted a full command (`op read ...`
+        # or `op item get ...`), trust it verbatim — power users may want
+        # `--no-newline` or non-default vault flags.
+        command = (
+            f"op read {shlex.quote(reference)}"
+            if reference.startswith("op://")
+            else reference
+        )
+        # Test-resolve via run_key_command, NOT credentials.get — get()
+        # checks env first, and a stray env var would let us claim
+        # success without actually exercising the op:// reference. The
+        # cache key is (var, command), so a previously-cached value for
+        # this var with a DIFFERENT command can't mask the new one
+        # either — same-var-different-command is a cache miss.
+        click.echo("  resolving via op …")
+        resolved = credentials.run_key_command(var, command)
+        if resolved is None:
+            click.echo(
+                f"  ✗ `op read {reference}` did not return a value. "
+                "Check that you're signed in (`op signin`) and the "
+                "reference is correct. Nothing has been written to disk."
+            )
+            return WizardOutcome(name, "failed", f"op resolution failed for {var}")
+        click.echo(f"  ✓ {var} resolves via op (length {len(resolved)})")
+        pending.append((var, command, len(resolved)))
+
+    # All references resolved. Single atomic file write — either every
+    # new entry lands or none does, and existing entries for OTHER vars
+    # in the file are preserved. No per-credential rollback needed.
+    updates = {var: command for var, command, _ in pending}
+    try:
+        credentials.set_key_commands(updates)
+    except (OSError, ValueError) as e:
+        click.echo(f"  ✗ failed to write credentials file: {e}")
+        click.echo("  no changes were persisted (atomic write).")
+        return WizardOutcome(name, "failed", f"credentials write failed: {e}")
+
+    # Best-effort keychain cleanup AFTER the file is committed. A failure
+    # here leaves both sources populated — harmless because env > key_command
+    # > keychain in resolution order, so the indirection still wins. We
+    # never delete keychain entries before the new source is durable.
+    for var, _, _ in pending:
+        credentials.delete_from_keychain(var)
+
+    click.echo("")
+    click.echo(
+        f"  ✓ wrote {len(pending)} key_command entr"
+        f"{'y' if len(pending) == 1 else 'ies'} to "
+        f"{credentials.credentials_file_path()}"
+    )
+
+    provider = get_provider(name)
+    ok, reason = provider.smoke()
+    if ok:
+        click.echo("  ✓ smoke test passed")
+        return WizardOutcome(name, "ok", "stored via 1password, smoke passed")
+    click.echo(f"  ✗ smoke test failed: {reason}")
+    return WizardOutcome(name, "failed", f"stored via 1password, smoke failed: {reason}")
+
+
+def _credential_source_choice(name: str) -> str:
+    """Ask whether to source the credential from 1Password or enter manually.
+
+    Returns ``"1password"`` or ``"manual"``. Only shown when ``op`` is on
+    PATH; otherwise callers go straight to manual entry. ``"skip"`` returns
+    early and propagates as a skip outcome.
+    """
+    options = [
+        ("manual", "manual — I'll enter the secret now and store it locally"),
+        (
+            "1password",
+            "1password — fetch via `op read` on every call (no local copy)",
+        ),
+        ("skip", f"skip — skip {name} entirely"),
+    ]
+    return _prompt_menu(options=options, default="manual")
 
 
 _FLOWS: dict[str, Callable[..., WizardOutcome]] = {
