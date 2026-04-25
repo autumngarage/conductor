@@ -1,0 +1,125 @@
+# Required repository secrets for this subprocess-adapter smoke:
+# - ${{ secrets.ANTHROPIC_API_KEY }} for the `claude` CLI.
+# - ${{ secrets.OPENAI_API_KEY }} for the `codex` CLI.
+# - ${{ secrets.GEMINI_API_KEY }} for the `gemini` CLI.
+# Cloudflare secrets are intentionally not referenced here: this workflow does
+# not exercise the Kimi/Cloudflare adapter, which is covered by validate.yml.
+name: nightly-smoke
+
+on:
+  schedule:
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  subprocess-adapter-live-smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install provider CLIs
+        run: npm install -g @anthropic-ai/claude-code @openai/codex @google/gemini-cli
+
+      - name: Verify provider CLIs are installed
+        shell: bash
+        run: |
+          missing=0
+          for cli in claude codex gemini; do
+            if ! command -v "$cli" >/dev/null 2>&1; then
+              echo "::error::$cli CLI is missing after install"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Run live subprocess smoke
+        id: live_smoke
+        shell: bash
+        env:
+          RUN_LIVE_SMOKE: "1"
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          set +e
+          {
+            missing=0
+            for name in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY; do
+              if [ -z "${!name}" ]; then
+                echo "::error::$name secret is required for live subprocess smoke"
+                missing=1
+              fi
+            done
+            if [ "$missing" -ne 0 ]; then
+              exit 1
+            fi
+
+            uv run pytest -k live tests/test_adapters_subprocess.py
+          } 2>&1 | tee live-smoke-output.txt
+          status=${PIPESTATUS[0]}
+
+          cp live-smoke-output.txt live-smoke-output-redacted.txt
+          for name in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY; do
+            value="${!name:-}"
+            if [ -n "$value" ]; then
+              SECRET_VALUE="$value" perl -0pi -e \
+                's/\Q$ENV{SECRET_VALUE}\E/[redacted secret]/g' \
+                live-smoke-output-redacted.txt
+            fi
+          done
+          exit "$status"
+
+      - name: Open failure issue
+        if: failure() && steps.live_smoke.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            echo "Nightly subprocess-adapter live smoke failed."
+            echo
+            echo "Run: $RUN_URL"
+            echo
+            echo '```'
+            tail -c 60000 live-smoke-output-redacted.txt
+            echo '```'
+          } > live-smoke-issue.md
+
+          if ! gh label list --search live-smoke-failure --json name --jq '.[].name' \
+            | grep -qx live-smoke-failure; then
+            gh label create live-smoke-failure \
+              --description "Nightly conductor live smoke failure" \
+              --color B60205
+          fi
+          gh issue create \
+            --title "Live subprocess smoke failed: $(date -u +%Y-%m-%d)" \
+            --label live-smoke-failure \
+            --body-file live-smoke-issue.md
+
+      - name: Log heartbeat
+        if: success()
+        run: |
+          echo "Live subprocess smoke passed at $(date -u --iso-8601=seconds)." >> "$GITHUB_STEP_SUMMARY"
