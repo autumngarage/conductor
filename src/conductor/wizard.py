@@ -830,9 +830,11 @@ def _attempt_1password_indirection(
         )
         # Test-resolve via run_key_command, NOT credentials.get — get()
         # checks env first, and a stray env var would let us claim
-        # success without actually exercising the op:// reference.
+        # success without actually exercising the op:// reference. The
+        # cache key is (var, command), so a previously-cached value for
+        # this var with a DIFFERENT command can't mask the new one
+        # either — same-var-different-command is a cache miss.
         click.echo("  resolving via op …")
-        credentials.clear_key_command_cache()
         resolved = credentials.run_key_command(var, command)
         if resolved is None:
             click.echo(

@@ -49,7 +49,13 @@ CredentialSource = Literal["env", "key_command", "keychain"]
 # Touch ID on every adapter call within a single CLI invocation. Cleared
 # between processes (which is the point — secret-manager indirection
 # explicitly does not persist to disk across sessions).
-_KEY_COMMAND_CACHE: dict[str, str] = {}
+#
+# Keyed by (env_var, command) so changing the command for the same var
+# is a cache miss by construction. This matters during `conductor init`:
+# an earlier provider.configured() call may have populated the cache
+# with the OLD command's resolved value; the wizard's test-resolve of a
+# new candidate command must NOT reuse that stale entry.
+_KEY_COMMAND_CACHE: dict[tuple[str, str], str] = {}
 
 
 def credentials_file_path() -> Path:
@@ -184,8 +190,12 @@ def set_key_commands(updates: dict[str, str]) -> Path:
             f.write(f'{k} = "{escaped}"\n')
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
+    # Drop cache entries for updated keys regardless of which command
+    # produced them — once the file changes, any cached value tied to
+    # a now-replaced command is stale.
     for key in updates:
-        _KEY_COMMAND_CACHE.pop(key, None)
+        for cache_key in [ck for ck in _KEY_COMMAND_CACHE if ck[0] == key]:
+            _KEY_COMMAND_CACHE.pop(cache_key, None)
     return path
 
 
@@ -198,9 +208,11 @@ def delete_key_command(key: str) -> bool:
     if key not in existing:
         return False
     existing.pop(key)
+    cache_keys = [ck for ck in _KEY_COMMAND_CACHE if ck[0] == key]
     if not existing:
         path.unlink()
-        _KEY_COMMAND_CACHE.pop(key, None)
+        for ck in cache_keys:
+            _KEY_COMMAND_CACHE.pop(ck, None)
         return True
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w", encoding="utf-8") as f:
@@ -211,7 +223,8 @@ def delete_key_command(key: str) -> bool:
             f.write(f'{k} = "{escaped}"\n')
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
-    _KEY_COMMAND_CACHE.pop(key, None)
+    for ck in cache_keys:
+        _KEY_COMMAND_CACHE.pop(ck, None)
     return True
 
 
@@ -240,8 +253,9 @@ def _run_key_command(key: str, command: str) -> str | None:
     no shell interpolation, no injection surface even if the credentials
     file is somehow corrupted. Failures print to stderr (never silent).
     """
-    if key in _KEY_COMMAND_CACHE:
-        return _KEY_COMMAND_CACHE[key]
+    cache_key = (key, command)
+    if cache_key in _KEY_COMMAND_CACHE:
+        return _KEY_COMMAND_CACHE[cache_key]
     try:
         argv = shlex.split(command)
     except ValueError as e:
@@ -290,7 +304,7 @@ def _run_key_command(key: str, command: str) -> str | None:
             file=sys.stderr,
         )
         return None
-    _KEY_COMMAND_CACHE[key] = value
+    _KEY_COMMAND_CACHE[cache_key] = value
     return value
 
 

@@ -257,6 +257,22 @@ def test_key_command_result_is_cached_per_process(credfile, mocker):
     assert spy.call_count == 1
 
 
+def test_key_command_cache_keys_on_command_not_just_var(credfile, mocker):
+    """Regression: cache key must include the command string. Otherwise
+    a wizard test-resolve of a NEW command would silently return the
+    cached value from an earlier resolution of the OLD command, masking
+    a broken op:// reference."""
+    credentials.save_key_command("MY_KEY", "echo from-old-cmd")
+    # Prime the cache via the old command.
+    assert credentials.get("MY_KEY") == "from-old-cmd"
+    # Now ask for a different command for the same key — must NOT return
+    # the cached value from the prior resolution.
+    spy = mocker.spy(credentials.subprocess, "run")
+    result = credentials.run_key_command("MY_KEY", "echo from-new-cmd")
+    assert result == "from-new-cmd"
+    assert spy.call_count == 1  # actually ran the new command
+
+
 def test_clear_key_command_cache_forces_re_resolve(credfile, mocker):
     credentials.save_key_command("MY_KEY", "echo first")
     assert credentials.get("MY_KEY") == "first"
