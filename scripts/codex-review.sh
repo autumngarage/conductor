@@ -1748,6 +1748,16 @@ for _outer_idx in "${!AVAILABLE_CASCADE[@]}"; do
   BANNER_PRINTED=false
   FALLTHROUGH_REASON=""
 
+  # Snapshot repo state at the start of this reviewer's slot so we can detect
+  # unauthorized side effects on fall-through. A reviewer in fix mode is
+  # allowed to write to the worktree and emit FIXED, and the script then
+  # auto-commits — those commits are blessed and increment FIX_COMMITS. Any
+  # other state change (commits the script didn't author, stashes, etc.) is
+  # un-blessed and must not silently leak into the next reviewer.
+  PRE_REVIEWER_HEAD="$(git rev-parse HEAD)"
+  PRE_REVIEWER_FIX_COMMITS="$FIX_COMMITS"
+  PRE_REVIEWER_STASH_COUNT="$(git stash list | wc -l | tr -d ' ')"
+
 for iter in $(seq 1 "$MAX_ITERATIONS"); do
   phase "loading diff"
   DIFF_LINE_COUNT="$(git diff "$MERGE_BASE"..HEAD | wc -l | tr -d ' ')"
@@ -1947,27 +1957,65 @@ done
 
   # End of inner iter loop — decide whether to fall through to next reviewer.
   if [ -n "$FALLTHROUGH_REASON" ]; then
-    # In fix / no-tests modes the reviewer is allowed to mutate the worktree,
-    # so a failed reviewer (timeout, non-zero exit, malformed sentinel) may
-    # have left partial edits behind that it never blessed with FIXED.
-    # Passing that state forward to the next reviewer would let them either
-    # approve the un-blessed edits (CLEAN) or auto-commit them as their own
-    # FIXED — either silently ratifies work the failing reviewer never
-    # committed to. Restore a clean slate before falling through, or abort
-    # if pre-review state was already dirty (we can't safely distinguish
-    # user changes from reviewer changes in that case).
-    if mode_allows_fix && [ -n "$(git status --porcelain)" ]; then
-      if [ "$WORKTREE_DIRTY_BEFORE_REVIEW" = true ]; then
-        echo "==> ${REVIEWER_LABEL}: ${FALLTHROUGH_REASON}"
-        echo "    Worktree had pre-review uncommitted changes — refusing to fall through"
-        echo "    with mixed user/reviewer state. Inspect the working tree manually."
-        REVIEW_EXIT_REASON="cascade-aborted-mixed-worktree"
+    # In fix / no-tests modes the reviewer is allowed to mutate the worktree
+    # and the script auto-commits FIXED iterations. A reviewer that fails
+    # (timeout, non-zero, malformed) may have:
+    #   (a) left partial uncommitted edits the contract never blessed,
+    #   (b) made commits we did not author (a porcelain-clean tree at a
+    #       different HEAD looks identical to a clean run),
+    #   (c) stashed work to hide it.
+    # Any of those leaking forward would let the next reviewer approve or
+    # auto-commit un-blessed state. Verify the snapshot we took at the top
+    # of this reviewer's slot; restore a clean worktree where safe, abort
+    # otherwise. Cleanup failures are NOT softened — a failed reset means
+    # we did NOT actually clean up, and falling through would still leak.
+    if mode_allows_fix; then
+      current_head="$(git rev-parse HEAD)"
+      authored_fix_commits=$((FIX_COMMITS - PRE_REVIEWER_FIX_COMMITS))
+      if [ "$current_head" != "$PRE_REVIEWER_HEAD" ]; then
+        actual_new_commits="$(git rev-list --count "${PRE_REVIEWER_HEAD}..HEAD" 2>/dev/null || echo "?")"
+        if [ "$actual_new_commits" != "$authored_fix_commits" ]; then
+          echo "==> ${REVIEWER_LABEL} created unauthorized commits before failing."
+          echo "    HEAD moved $PRE_REVIEWER_HEAD -> $current_head"
+          echo "    Expected $authored_fix_commits new commit(s) (script-authored auto-fix)"
+          echo "    Found $actual_new_commits new commit(s). Refusing to fall through."
+          REVIEW_EXIT_REASON="cascade-aborted-unauthorized-commits"
+          print_summary
+          exit 1
+        fi
+      fi
+      current_stash_count="$(git stash list | wc -l | tr -d ' ')"
+      if [ "$current_stash_count" != "$PRE_REVIEWER_STASH_COUNT" ]; then
+        echo "==> ${REVIEWER_LABEL} added stash entries before failing."
+        echo "    Stash count $PRE_REVIEWER_STASH_COUNT -> $current_stash_count"
+        echo "    Refusing to fall through with hidden state. Inspect 'git stash list' manually."
+        REVIEW_EXIT_REASON="cascade-aborted-stash-leak"
         print_summary
         exit 1
       fi
-      echo "==> Discarding partial edits left by ${REVIEWER_LABEL} before falling through."
-      git reset --hard HEAD >/dev/null 2>&1 || true
-      git clean -fd >/dev/null 2>&1 || true
+      if [ -n "$(git status --porcelain)" ]; then
+        if [ "$WORKTREE_DIRTY_BEFORE_REVIEW" = true ]; then
+          echo "==> ${REVIEWER_LABEL}: ${FALLTHROUGH_REASON}"
+          echo "    Worktree had pre-review uncommitted changes — refusing to fall through"
+          echo "    with mixed user/reviewer state. Inspect the working tree manually."
+          REVIEW_EXIT_REASON="cascade-aborted-mixed-worktree"
+          print_summary
+          exit 1
+        fi
+        echo "==> Discarding partial edits left by ${REVIEWER_LABEL} before falling through."
+        if ! git reset --hard HEAD >/dev/null 2>&1; then
+          echo "==> ERROR: git reset failed; partial edits NOT discarded. Aborting cascade." >&2
+          REVIEW_EXIT_REASON="cascade-aborted-cleanup-failed"
+          print_summary
+          exit 1
+        fi
+        if ! git clean -fd >/dev/null 2>&1; then
+          echo "==> ERROR: git clean failed; untracked reviewer files NOT removed. Aborting cascade." >&2
+          REVIEW_EXIT_REASON="cascade-aborted-cleanup-failed"
+          print_summary
+          exit 1
+        fi
+      fi
     fi
     next_idx=$((_outer_idx + 1))
     if [ "$next_idx" -lt "${#AVAILABLE_CASCADE[@]}" ]; then

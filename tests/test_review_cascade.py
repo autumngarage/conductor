@@ -198,6 +198,44 @@ esac
 exit 1
 '''
 
+# Codex commits its work then fails — the worktree is clean but HEAD
+# moved without the script's auto-fix path blessing it. The cascade must
+# detect this and abort.
+FAKE_CODEX_COMMITS_THEN_FAILS = '''
+#!/usr/bin/env bash
+case "$1" in
+  login)
+    if [ "$2" = "status" ]; then exit 0; fi
+    ;;
+  exec)
+    echo "edit from codex" >> README
+    git -c user.name=t -c user.email=t@t add README
+    git -c user.name=t -c user.email=t@t commit -q -m "unauthorized commit by codex"
+    echo "ERROR: rate_limit_exceeded" >&2
+    exit 1
+    ;;
+esac
+exit 1
+'''
+
+# Codex stashes its work then fails — clean tree, unchanged HEAD, but a
+# new stash entry hides reviewer-authored state.
+FAKE_CODEX_STASHES_THEN_FAILS = '''
+#!/usr/bin/env bash
+case "$1" in
+  login)
+    if [ "$2" = "status" ]; then exit 0; fi
+    ;;
+  exec)
+    echo "edit from codex" >> README
+    git stash push -q -m "hidden by codex" -- README
+    echo "ERROR: rate_limit_exceeded" >&2
+    exit 1
+    ;;
+esac
+exit 1
+'''
+
 
 # ---------------------------------------------------------------------------
 # tests
@@ -309,6 +347,44 @@ def test_fix_mode_discards_partial_edits_before_fallthrough(tmp_path: Path) -> N
         f"Worktree should be clean post-cascade; saw: {status.stdout!r}\n"
         f"This means a failed reviewer's partial edits leaked through to the next reviewer."
     )
+
+
+def test_fix_mode_aborts_on_unauthorized_commits(tmp_path: Path) -> None:
+    """A reviewer that commits its own work leaves a clean worktree at a
+    HEAD the script never blessed. Cascade must detect HEAD movement that
+    doesn't match the auto-fix counter and abort."""
+    repo = _make_repo(tmp_path)
+    _write_config(repo, ["codex", "claude"], mode="fix")
+
+    fakes = tmp_path / "fakes"
+    fakes.mkdir()
+    _write_executable(fakes / "codex", FAKE_CODEX_COMMITS_THEN_FAILS)
+    _write_executable(fakes / "claude", FAKE_CLAUDE_CLEAN)
+
+    result = _run_script(repo, fakes, extra_env={"CODEX_REVIEW_MODE": "fix"})
+
+    assert result.returncode == 1, f"stdout={result.stdout}\nstderr={result.stderr}"
+    assert "unauthorized commits" in result.stdout
+    assert "Refusing to fall through" in result.stdout
+
+
+def test_fix_mode_aborts_on_reviewer_stash(tmp_path: Path) -> None:
+    """A reviewer that stashes its work leaves a clean worktree and
+    unchanged HEAD, but the stash hides reviewer-authored state. Cascade
+    must detect stash list growth and abort."""
+    repo = _make_repo(tmp_path)
+    _write_config(repo, ["codex", "claude"], mode="fix")
+
+    fakes = tmp_path / "fakes"
+    fakes.mkdir()
+    _write_executable(fakes / "codex", FAKE_CODEX_STASHES_THEN_FAILS)
+    _write_executable(fakes / "claude", FAKE_CLAUDE_CLEAN)
+
+    result = _run_script(repo, fakes, extra_env={"CODEX_REVIEW_MODE": "fix"})
+
+    assert result.returncode == 1, f"stdout={result.stdout}\nstderr={result.stderr}"
+    assert "added stash entries" in result.stdout
+    assert "Refusing to fall through" in result.stdout
 
 
 def test_fix_mode_aborts_when_pre_review_worktree_dirty(tmp_path: Path) -> None:
