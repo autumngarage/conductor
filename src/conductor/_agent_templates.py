@@ -156,6 +156,10 @@ When invoked:
 
        cat <file> | conductor call --with kimi --task "Summarize." --json
 
+   For long-context work that also needs deeper reasoning, add
+   `--effort high` or `--effort max`. For pure summarization or
+   extraction, omit `--effort` and use the default.
+
 4. Parse the JSON, extract the `text` field, and return it verbatim
    prefixed with "From Kimi:". Include the `model` and `duration_ms` from
    the JSON as a one-line footer for transparency.
@@ -236,7 +240,7 @@ When invoked:
 
 3. Parse the JSON, extract `text`, and return it verbatim prefixed with
    "From Codex:". Note `session_id` in the JSON if present — callers can
-   resume by passing it back as `--resume-session-id`.
+   resume by passing it back as `--resume`.
 
 If the task is a quick one-shot question (no file tools needed), route
 it to a single-turn provider instead — `exec` mode carries more setup
@@ -272,7 +276,13 @@ When invoked:
    than a hosted flagship. If the user's task clearly needs frontier
    reasoning and is NOT privacy-sensitive, say so and ask the parent
    to route elsewhere.
-2. Run:
+2. Run with conductor's explicit offline flag:
+
+       conductor call --offline --task "<prompt>" --json
+
+   This forces the local Ollama provider and records conductor's
+   short-lived offline preference. If the parent explicitly does not want
+   that sticky offline preference, use the explicit provider path instead:
 
        conductor call --with ollama --task "<prompt>" --json
 
@@ -383,15 +393,35 @@ When invoked:
    - `cheap` — user explicitly asked for a cheap run
    - `offline` — user explicitly asked for local-only
    Pick 1–3 tags; do NOT invent new ones.
-2. Run:
+2. For normal single-turn routing, run:
 
-       conductor call --auto --tags <tag1>,<tag2> --task "<prompt>" --json
+       conductor call --auto --tags <tag1>,<tag2> --prefer <mode> \\
+           --task "<prompt>" --json
 
    For the prefer axis:
    - Default: `--prefer balanced` (what conductor does by default).
    - User asked for the cheapest option: `--prefer cheapest`.
    - User asked for the best answer: `--prefer best`.
    - Response-time matters: `--prefer fastest`.
+
+   For the effort axis, omit `--effort` unless the user asks for a
+   different thinking budget. Valid levels are `minimal`, `low`, `medium`,
+   `high`, and `max` (or an integer budget).
+
+   If the task needs file/code tools, use exec mode instead:
+
+       conductor exec --auto --tags tool-use,<tag> \\
+           --tools Read,Grep,Glob,Edit,Write,Bash \\
+           --sandbox <mode> --task "<prompt>" --json
+
+   Sandbox modes are: `read-only` for inspection, `workspace-write` for
+   edits in the workspace, `strict` for the strongest isolation supported
+   by local/HTTP tool loops, and `none` only for text-only work with no
+   tools.
+
+   If the user explicitly requires local/offline execution, prefer the
+   `ollama-offline` subagent. If you must run directly, use `--offline`
+   rather than relying only on the soft `offline` tag.
 3. Parse the JSON, extract `text`, and return it prefixed with
    "From <provider> (auto-routed by conductor):". The chosen provider
    is in the JSON under `provider`.
