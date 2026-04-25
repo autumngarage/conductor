@@ -129,6 +129,7 @@ case "$1" in
     ;;
   exec)
     echo "I reviewed your code and it looks fine but I will not emit the sentinel."
+    echo "warning: tool restriction prevented me from running tests" >&2
     exit 0
     ;;
 esac
@@ -339,6 +340,10 @@ def test_malformed_sentinel_falls_through(tmp_path: Path) -> None:
     assert "falling back to Claude" in result.stdout
     assert "codex:malformed" in result.stdout
     assert "claude:clean" in result.stdout
+    # A malformed-sentinel reviewer can still write useful diagnostics
+    # to stderr (e.g. tool-restriction warnings); those must surface
+    # so the user knows *why* the contract was violated.
+    assert "tool restriction prevented me from running tests" in result.stdout
 
 
 def test_cascade_exhausted_records_chain(tmp_path: Path) -> None:

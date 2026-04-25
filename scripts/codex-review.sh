@@ -1961,6 +1961,11 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
       echo "    Last line was: '$LAST_LINE'"
       echo "    Raw output (first 20 lines):"
       printf '%s\n' "$OUTPUT" | head -20 | sed 's/^/    /'
+      # A reviewer can exit 0 yet print useful diagnostics on stderr
+      # (e.g. tool-restriction warnings). Surface them just like the
+      # timeout / non-zero-exit paths do, so the user sees *why* the
+      # contract was violated, not just that it was.
+      print_stderr_tail "$REVIEW_STDERR_FILE" "$REVIEWER_LABEL stderr"
       REVIEWER_CHAIN+=("${ACTIVE_REVIEWER}:malformed")
       FALLTHROUGH_REASON="malformed sentinel"
       break
