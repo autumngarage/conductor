@@ -6,6 +6,8 @@ All three call external CLIs. We stub ``subprocess.run`` and
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 
 import pytest
@@ -14,6 +16,7 @@ from conductor.providers.claude import ClaudeProvider
 from conductor.providers.codex import CodexProvider
 from conductor.providers.gemini import GeminiProvider
 from conductor.providers.interface import (
+    CallResponse,
     ProviderConfigError,
     ProviderError,
     ProviderHTTPError,
@@ -303,3 +306,43 @@ def test_gemini_call_raises_on_empty_stdout(mocker):
     )
     with pytest.raises(ProviderHTTPError):
         GeminiProvider().call("hi")
+
+
+# ---------------------------------------------------------------------------
+# Live subprocess smoke
+# ---------------------------------------------------------------------------
+
+LIVE_SMOKE_DISABLED = not os.environ.get("RUN_LIVE_SMOKE")
+LIVE_SMOKE_REASON = "set RUN_LIVE_SMOKE=1 to run live subprocess smoke tests"
+LIVE_ONE_TOKEN_PROMPT = "Reply with exactly: OK"
+
+
+def _assert_live_response_shape(response: CallResponse, *, provider: str) -> None:
+    assert isinstance(response, CallResponse)
+    assert response.provider == provider
+    assert response.model
+    assert response.text.strip()
+    assert isinstance(response.duration_ms, int)
+    assert response.duration_ms >= 0
+    assert isinstance(response.usage, dict)
+
+
+@pytest.mark.skipif(LIVE_SMOKE_DISABLED, reason=LIVE_SMOKE_REASON)
+@pytest.mark.skipif(shutil.which("claude") is None, reason="claude CLI not installed")
+def test_live_claude_call_returns_call_response_shape():
+    response = ClaudeProvider().call(LIVE_ONE_TOKEN_PROMPT, effort="minimal")
+    _assert_live_response_shape(response, provider="claude")
+
+
+@pytest.mark.skipif(LIVE_SMOKE_DISABLED, reason=LIVE_SMOKE_REASON)
+@pytest.mark.skipif(shutil.which("codex") is None, reason="codex CLI not installed")
+def test_live_codex_call_returns_call_response_shape():
+    response = CodexProvider().call(LIVE_ONE_TOKEN_PROMPT, effort="minimal")
+    _assert_live_response_shape(response, provider="codex")
+
+
+@pytest.mark.skipif(LIVE_SMOKE_DISABLED, reason=LIVE_SMOKE_REASON)
+@pytest.mark.skipif(shutil.which("gemini") is None, reason="gemini CLI not installed")
+def test_live_gemini_call_returns_call_response_shape():
+    response = GeminiProvider().call(LIVE_ONE_TOKEN_PROMPT, effort="minimal")
+    _assert_live_response_shape(response, provider="gemini")
