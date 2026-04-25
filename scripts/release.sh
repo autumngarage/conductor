@@ -44,11 +44,14 @@ new_tag="v${major}.${minor}.${patch}"
 echo "==> Current: $current_tag"
 echo "==> New:     $new_tag"
 
-# Atomic: gh release create with --target builds the tag server-side as
-# part of the release, so a failed release leaves no orphan tag for the
-# next run to skip past.
-gh release create "$new_tag" --target main --generate-notes
-git fetch --tags origin >/dev/null
+# Pin the release target to the verified-in-sync HEAD SHA, not the branch
+# name — otherwise a commit that lands on origin/main between the sync
+# check above and the gh call below would be released instead. The tag
+# is created server-side as part of the release, so a failed release
+# leaves no orphan tag for the next run to skip past.
+target_sha="$(git rev-parse HEAD)"
+gh release create "$new_tag" --target "$target_sha" --generate-notes
+git fetch --tags origin >/dev/null || true
 
 echo
 echo "  ✓ Released $new_tag"
