@@ -22,6 +22,9 @@ case "$bump" in
   *) echo "ERROR: unknown bump arg: $bump (use --major, --minor, --patch)" >&2; exit 1 ;;
 esac
 
+command -v gh >/dev/null 2>&1 || { echo "ERROR: gh CLI not installed (need it for gh release create)" >&2; exit 1; }
+gh auth status >/dev/null 2>&1 || { echo "ERROR: gh not authenticated (run: gh auth login)" >&2; exit 1; }
+
 branch="$(git rev-parse --abbrev-ref HEAD)"
 [ "$branch" = "main" ] || { echo "ERROR: must be on main (currently $branch)" >&2; exit 1; }
 [ -z "$(git status --porcelain)" ] || { echo "ERROR: working tree dirty" >&2; exit 1; }
@@ -41,9 +44,14 @@ new_tag="v${major}.${minor}.${patch}"
 echo "==> Current: $current_tag"
 echo "==> New:     $new_tag"
 
-git tag "$new_tag"
-git push origin "$new_tag"
-gh release create "$new_tag" --generate-notes
+# Pin the release target to the verified-in-sync HEAD SHA, not the branch
+# name — otherwise a commit that lands on origin/main between the sync
+# check above and the gh call below would be released instead. The tag
+# is created server-side as part of the release, so a failed release
+# leaves no orphan tag for the next run to skip past.
+target_sha="$(git rev-parse HEAD)"
+gh release create "$new_tag" --target "$target_sha" --generate-notes
+git fetch --tags origin >/dev/null || true
 
 echo
 echo "  ✓ Released $new_tag"
