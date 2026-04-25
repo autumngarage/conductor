@@ -1,5 +1,6 @@
 from conductor.providers.claude import ClaudeProvider
 from conductor.providers.codex import CodexProvider
+from conductor.providers.deepseek import DeepSeekChatProvider, DeepSeekReasonerProvider
 from conductor.providers.gemini import GeminiProvider
 from conductor.providers.interface import (
     EFFORT_LEVELS,
@@ -28,6 +29,8 @@ __all__ = [
     "CallResponse",
     "ClaudeProvider",
     "CodexProvider",
+    "DeepSeekChatProvider",
+    "DeepSeekReasonerProvider",
     "GeminiProvider",
     "KimiProvider",
     "OllamaProvider",
@@ -47,6 +50,8 @@ _BUILTIN_REGISTRY: dict[str, type[Provider]] = {
     "kimi": KimiProvider,
     "claude": ClaudeProvider,
     "codex": CodexProvider,
+    "deepseek-chat": DeepSeekChatProvider,
+    "deepseek-reasoner": DeepSeekReasonerProvider,
     "gemini": GeminiProvider,
     "ollama": OllamaProvider,
 }

@@ -217,4 +217,14 @@ def _escape(s: str) -> str:
 # Built-in names that custom entries MUST NOT shadow. Kept here (and not
 # derived from providers/__init__._REGISTRY) to avoid a circular import —
 # the values change only when a new first-party provider ships.
-_BUILTIN_NAMES = frozenset({"kimi", "claude", "codex", "gemini", "ollama"})
+_BUILTIN_NAMES = frozenset(
+    {
+        "kimi",
+        "claude",
+        "codex",
+        "deepseek-chat",
+        "deepseek-reasoner",
+        "gemini",
+        "ollama",
+    }
+)

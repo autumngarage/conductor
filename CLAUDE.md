@@ -79,7 +79,7 @@ Both modes return the same `CallResponse` shape on stdout (text or JSON via `--j
 
 ### Two physical adapter shapes
 
-- **HTTP adapters** (e.g. `kimi`, `ollama`) talk to an OpenAI-compatible endpoint via `httpx`. These are the only adapters that touch API keys directly.
+- **HTTP adapters** (e.g. `kimi`, `deepseek-chat`, `deepseek-reasoner`, `ollama`) talk to an OpenAI-compatible endpoint via `httpx`. These are the only adapters that touch API keys directly. DeepSeek is registered as two providers backed by one HTTP base class — `deepseek-chat` (V3.x: cheap, code-review, tool-use) and `deepseek-reasoner` (R1: strong-reasoning, thinking) — so the auto-mode router can pick the right model per task tag while sharing one `DEEPSEEK_API_KEY`.
 - **Subprocess adapters** (e.g. `claude`, `codex`, `gemini`) shell out to a CLI that owns its own auth. These never touch API keys.
 
 Both shapes implement the same `Provider` Protocol (`configured()`, `smoke()`, `call()`) so the rest of Conductor doesn't care which physical shape it's calling.

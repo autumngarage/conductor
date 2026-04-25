@@ -27,6 +27,8 @@ def _stub_all_unconfigured(mocker):
     from conductor.providers import (
         ClaudeProvider,
         CodexProvider,
+        DeepSeekChatProvider,
+        DeepSeekReasonerProvider,
         GeminiProvider,
         KimiProvider,
         OllamaProvider,
@@ -35,6 +37,8 @@ def _stub_all_unconfigured(mocker):
     for cls in (
         ClaudeProvider,
         CodexProvider,
+        DeepSeekChatProvider,
+        DeepSeekReasonerProvider,
         GeminiProvider,
         KimiProvider,
         OllamaProvider,
@@ -52,11 +56,19 @@ def _stub_all_unconfigured(mocker):
 # ---------------------------------------------------------------------------
 
 
-def test_list_text_output_shows_all_five_providers(mocker):
+def test_list_text_output_shows_all_builtin_providers(mocker):
     _stub_all_unconfigured(mocker)
     result = CliRunner().invoke(main, ["list"])
     assert result.exit_code == 0, result.output
-    for name in ("kimi", "claude", "codex", "gemini", "ollama"):
+    for name in (
+        "kimi",
+        "claude",
+        "codex",
+        "deepseek-chat",
+        "deepseek-reasoner",
+        "gemini",
+        "ollama",
+    ):
         assert name in result.output
 
 
@@ -65,14 +77,17 @@ def test_list_json_output_returns_structured_rows(mocker):
     result = CliRunner().invoke(main, ["list", "--json"])
     assert result.exit_code == 0
     rows = json.loads(result.output)
-    assert len(rows) == 5
-    assert {r["provider"] for r in rows} == {
+    expected = {
         "kimi",
         "claude",
         "codex",
+        "deepseek-chat",
+        "deepseek-reasoner",
         "gemini",
         "ollama",
     }
+    assert len(rows) == len(expected)
+    assert {r["provider"] for r in rows} == expected
     assert all(r["configured"] is False for r in rows)
     assert all(r["default_model"] for r in rows)
 
@@ -158,21 +173,37 @@ def test_smoke_json_output_shape(mocker):
 
 def test_doctor_text_output_covers_every_provider(mocker, monkeypatch):
     _stub_all_unconfigured(mocker)
-    for var in ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "OLLAMA_BASE_URL"):
+    for var in (
+        "CLOUDFLARE_API_TOKEN",
+        "CLOUDFLARE_ACCOUNT_ID",
+        "DEEPSEEK_API_KEY",
+        "OLLAMA_BASE_URL",
+    ):
         monkeypatch.delenv(var, raising=False)
 
     result = CliRunner().invoke(main, ["doctor"])
     assert result.exit_code == 0, result.output
-    for name in ("kimi", "claude", "codex", "gemini", "ollama"):
+    for name in (
+        "kimi",
+        "claude",
+        "codex",
+        "deepseek-chat",
+        "deepseek-reasoner",
+        "gemini",
+        "ollama",
+    ):
         assert name in result.output
     assert "Credentials" in result.output or "credentials" in result.output.lower()
     assert "conductor init" in result.output
 
 
 def test_doctor_json_shape(mocker, monkeypatch):
+    from conductor.providers import known_providers
+
     _stub_all_unconfigured(mocker)
     monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "x")
     monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
     mocker.patch("conductor.cli.credentials.keychain_has", return_value=False)
 
@@ -182,7 +213,7 @@ def test_doctor_json_shape(mocker, monkeypatch):
     assert set(payload.keys()) >= {
         "version", "platform", "python", "providers", "credentials", "warnings"
     }
-    assert len(payload["providers"]) == 5
+    assert len(payload["providers"]) == len(known_providers())
     cred_map = {c["name"]: c for c in payload["credentials"]}
     assert cred_map["CLOUDFLARE_API_TOKEN"]["in_env"] is True
     assert cred_map["CLOUDFLARE_ACCOUNT_ID"]["in_env"] is False

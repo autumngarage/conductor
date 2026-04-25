@@ -7,6 +7,8 @@ import pytest
 from conductor.providers import (
     ClaudeProvider,
     CodexProvider,
+    DeepSeekChatProvider,
+    DeepSeekReasonerProvider,
     GeminiProvider,
     KimiProvider,
     OllamaProvider,
@@ -15,14 +17,24 @@ from conductor.providers import (
 )
 
 
-def test_known_providers_returns_all_five():
-    assert known_providers() == ["claude", "codex", "gemini", "kimi", "ollama"]
+def test_known_providers_returns_all_builtins():
+    assert known_providers() == [
+        "claude",
+        "codex",
+        "deepseek-chat",
+        "deepseek-reasoner",
+        "gemini",
+        "kimi",
+        "ollama",
+    ]
 
 
 def test_get_provider_returns_correct_class():
     assert isinstance(get_provider("kimi"), KimiProvider)
     assert isinstance(get_provider("claude"), ClaudeProvider)
     assert isinstance(get_provider("codex"), CodexProvider)
+    assert isinstance(get_provider("deepseek-chat"), DeepSeekChatProvider)
+    assert isinstance(get_provider("deepseek-reasoner"), DeepSeekReasonerProvider)
     assert isinstance(get_provider("gemini"), GeminiProvider)
     assert isinstance(get_provider("ollama"), OllamaProvider)
 

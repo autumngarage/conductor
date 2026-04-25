@@ -607,8 +607,11 @@ def main() -> None:
     "--with",
     "provider_id",
     default=None,
-    help="Provider identifier (kimi, claude, codex, gemini, ollama). "
-    "Mutually exclusive with --auto.",
+    help=(
+        "Provider identifier "
+        "(kimi, claude, codex, deepseek-chat, deepseek-reasoner, gemini, ollama). "
+        "Mutually exclusive with --auto."
+    ),
 )
 @click.option(
     "--auto",
@@ -1244,6 +1247,7 @@ def smoke(provider_id: str | None, run_all: bool, as_json: bool) -> None:
 _DIAGNOSTIC_ENV_VARS = (
     "CLOUDFLARE_API_TOKEN",
     "CLOUDFLARE_ACCOUNT_ID",
+    "DEEPSEEK_API_KEY",
     "OLLAMA_BASE_URL",
 )
 
@@ -1687,7 +1691,15 @@ def providers_add(
     # Guard against shadowing built-ins — the loader does the same check
     # when reading the file, but catching it here gives a friendlier error
     # before the file is touched.
-    if name in {"kimi", "claude", "codex", "gemini", "ollama"}:
+    if name in {
+        "kimi",
+        "claude",
+        "codex",
+        "deepseek-chat",
+        "deepseek-reasoner",
+        "gemini",
+        "ollama",
+    }:
         raise click.UsageError(
             f"`{name}` is a built-in provider identifier. Pick a different name."
         )
