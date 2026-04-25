@@ -1947,6 +1947,28 @@ done
 
   # End of inner iter loop — decide whether to fall through to next reviewer.
   if [ -n "$FALLTHROUGH_REASON" ]; then
+    # In fix / no-tests modes the reviewer is allowed to mutate the worktree,
+    # so a failed reviewer (timeout, non-zero exit, malformed sentinel) may
+    # have left partial edits behind that it never blessed with FIXED.
+    # Passing that state forward to the next reviewer would let them either
+    # approve the un-blessed edits (CLEAN) or auto-commit them as their own
+    # FIXED — either silently ratifies work the failing reviewer never
+    # committed to. Restore a clean slate before falling through, or abort
+    # if pre-review state was already dirty (we can't safely distinguish
+    # user changes from reviewer changes in that case).
+    if mode_allows_fix && [ -n "$(git status --porcelain)" ]; then
+      if [ "$WORKTREE_DIRTY_BEFORE_REVIEW" = true ]; then
+        echo "==> ${REVIEWER_LABEL}: ${FALLTHROUGH_REASON}"
+        echo "    Worktree had pre-review uncommitted changes — refusing to fall through"
+        echo "    with mixed user/reviewer state. Inspect the working tree manually."
+        REVIEW_EXIT_REASON="cascade-aborted-mixed-worktree"
+        print_summary
+        exit 1
+      fi
+      echo "==> Discarding partial edits left by ${REVIEWER_LABEL} before falling through."
+      git reset --hard HEAD >/dev/null 2>&1 || true
+      git clean -fd >/dev/null 2>&1 || true
+    fi
     next_idx=$((_outer_idx + 1))
     if [ "$next_idx" -lt "${#AVAILABLE_CASCADE[@]}" ]; then
       next_reviewer="${AVAILABLE_CASCADE[$next_idx]}"

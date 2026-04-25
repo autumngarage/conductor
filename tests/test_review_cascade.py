@@ -75,14 +75,15 @@ def _run_script(repo: Path, fakes_dir: Path, extra_env: dict | None = None,
     )
 
 
-def _write_config(repo: Path, reviewers: list[str], on_error: str = "fail-open") -> None:
+def _write_config(repo: Path, reviewers: list[str], on_error: str = "fail-open",
+                  mode: str = "review-only") -> None:
     body = textwrap.dedent(f"""
         [codex_review]
         max_iterations = 1
         max_diff_lines = 5000
         cache_clean_reviews = false
-        safe_by_default = false
-        mode = "review-only"
+        safe_by_default = true
+        mode = "{mode}"
         on_error = "{on_error}"
         unsafe_paths = []
 
@@ -91,6 +92,12 @@ def _write_config(repo: Path, reviewers: list[str], on_error: str = "fail-open")
         reviewers = {reviewers!r}
     """).lstrip("\n")
     (repo / ".codex-review.toml").write_text(body)
+    # Commit so the worktree is clean before review runs — otherwise the
+    # config file shows up as untracked and trips WORKTREE_DIRTY_BEFORE_REVIEW.
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "add", ".codex-review.toml"], cwd=repo, env=env, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "config"], cwd=repo, env=env, check=True)
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +172,26 @@ case "$1" in
     ;;
   -p)
     echo "ERROR: 401 unauthorized" >&2
+    exit 1
+    ;;
+esac
+exit 1
+'''
+
+# Codex writes a file (simulating a partial edit) then exits non-zero
+# without ever emitting CODEX_REVIEW_FIXED. In fix mode the cascade must
+# discard this partial edit before falling through, otherwise claude would
+# review-or-bless un-blessed work.
+FAKE_CODEX_PARTIAL_EDIT = '''
+#!/usr/bin/env bash
+case "$1" in
+  login)
+    if [ "$2" = "status" ]; then exit 0; fi
+    ;;
+  exec)
+    # Simulate codex starting an edit then crashing mid-flight.
+    echo "partial edit from codex that will never be blessed" >> README
+    echo "ERROR: rate_limit_exceeded" >&2
     exit 1
     ;;
 esac
@@ -253,6 +280,56 @@ def test_cascade_exhausted_blocks_when_fail_closed(tmp_path: Path) -> None:
     assert result.returncode == 1, f"stdout={result.stdout}\nstderr={result.stderr}"
     assert "All reviewers in the cascade failed" in result.stdout
     assert "blocking push" in result.stderr or "blocking push" in result.stdout
+
+
+def test_fix_mode_discards_partial_edits_before_fallthrough(tmp_path: Path) -> None:
+    """In fix mode, a failed reviewer may have written partial edits before
+    crashing. The cascade must NOT pass that dirty worktree to the next
+    reviewer — otherwise claude could bless or auto-commit work codex
+    never blessed with FIXED."""
+    repo = _make_repo(tmp_path)
+    _write_config(repo, ["codex", "claude"], mode="fix")
+
+    fakes = tmp_path / "fakes"
+    fakes.mkdir()
+    _write_executable(fakes / "codex", FAKE_CODEX_PARTIAL_EDIT)
+    _write_executable(fakes / "claude", FAKE_CLAUDE_CLEAN)
+
+    result = _run_script(repo, fakes, extra_env={"CODEX_REVIEW_MODE": "fix"})
+
+    assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+    assert "Discarding partial edits" in result.stdout
+    assert "falling back to Claude" in result.stdout
+    # Worktree must be clean after the cascade — codex's un-blessed edit
+    # should have been reverted before claude saw it.
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True,
+    )
+    assert status.stdout == "", (
+        f"Worktree should be clean post-cascade; saw: {status.stdout!r}\n"
+        f"This means a failed reviewer's partial edits leaked through to the next reviewer."
+    )
+
+
+def test_fix_mode_aborts_when_pre_review_worktree_dirty(tmp_path: Path) -> None:
+    """If the user already had uncommitted changes before review started,
+    we cannot safely distinguish their work from reviewer edits on failure.
+    Refuse to fall through and block the push, so the user can sort it out."""
+    repo = _make_repo(tmp_path)
+    _write_config(repo, ["codex", "claude"], mode="fix")
+    # Plant a pre-review uncommitted change.
+    (repo / "README").write_text("base\nfeature line\nuser edit\n")
+
+    fakes = tmp_path / "fakes"
+    fakes.mkdir()
+    _write_executable(fakes / "codex", FAKE_CODEX_PARTIAL_EDIT)
+    _write_executable(fakes / "claude", FAKE_CLAUDE_CLEAN)
+
+    result = _run_script(repo, fakes, extra_env={"CODEX_REVIEW_MODE": "fix"})
+
+    assert result.returncode == 1, f"stdout={result.stdout}\nstderr={result.stderr}"
+    assert "refusing to fall through" in result.stdout
+    assert "mixed user/reviewer state" in result.stdout
 
 
 def test_stderr_tail_surfaced_on_failure(tmp_path: Path) -> None:
