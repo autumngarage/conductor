@@ -1939,9 +1939,8 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
       echo "    Raw output (first 20 lines):"
       printf '%s\n' "$OUTPUT" | head -20 | sed 's/^/    /'
       REVIEWER_CHAIN+=("${ACTIVE_REVIEWER}:malformed")
-      REVIEW_EXIT_REASON="malformed-sentinel"
-      print_summary
-      handle_error "malformed sentinel"
+      FALLTHROUGH_REASON="malformed sentinel"
+      break
       ;;
   esac
 done
