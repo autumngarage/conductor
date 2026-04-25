@@ -110,3 +110,90 @@ def conductor_version() -> str | None:
 
 SUBTITLE_INIT = "pick an LLM, give it a job"
 SUBTITLE_DOCTOR = "provider health check"
+
+
+# --------------------------------------------------------------------------- #
+# Caller-attribution banner — a one-liner emitted at the top of
+# `conductor call` / `conductor exec` to announce that Conductor is doing
+# the work, and (when detectable) name the LLM tool that invoked us.
+#
+# Goal: when Claude Code, Sentinel, etc. shell out to conductor, the user
+# watching that tool's transcript sees "▸ Claude Code is using Conductor
+# → kimi" — branding without breaking subprocess parsing (we write to
+# stderr; consumers parse stdout).
+# --------------------------------------------------------------------------- #
+
+# (env-var, display-name). Order is the precedence when multiple markers
+# are set (rare; first match wins). Status of each entry:
+#   verified   — confirmed against the actual tool's environment.
+#   convention — autumn-garage peer; we control both sides of the contract.
+#
+# Add new callers only after confirming their env footprint, so the
+# registry never claims coverage we haven't tested.
+_CALLER_REGISTRY: tuple[tuple[str, str], ...] = (
+    ("CLAUDECODE", "Claude Code"),     # verified
+    ("SENTINEL", "Sentinel"),          # convention (autumn-garage peer)
+    ("TOUCHSTONE", "Touchstone"),      # convention (autumn-garage peer)
+    # ("CURSOR_AGENT", "Cursor"),      # TODO: verify env footprint
+    # ("AIDER_AGENT", "Aider"),        # TODO: verify env footprint
+    # ("CODEX_CLI", "Codex CLI"),      # TODO: verify env footprint
+    # ("GEMINI_CLI", "Gemini CLI"),    # TODO: verify env footprint
+)
+
+
+def detect_caller() -> str | None:
+    """Return the display name of the calling LLM tool, or None.
+
+    Probes env vars set by known callers (Claude Code, trio peers) in
+    registry order; first match wins. Returns None when no marker is set
+    — caller is unknown or conductor was invoked by a plain shell.
+    """
+    for env_var, name in _CALLER_REGISTRY:
+        if os.environ.get(env_var):
+            return name
+    return None
+
+
+def print_caller_banner(
+    provider: str,
+    *,
+    stream=None,
+    silent: bool = False,
+) -> None:
+    """Emit a one-line caller-attribution banner to stderr.
+
+    Format:
+      `▸ <Caller> is using Conductor → <provider>` when a caller is detected.
+      `▸ Conductor → <provider>` when stderr is a TTY but no caller is
+      detected (a human is watching but we don't know their tool).
+
+    Stays silent when ``silent=True``, when no caller is detected AND
+    stderr is not a TTY (the line would be neither attributable nor
+    visible), or when writing fails (closed stream, broken pipe).
+    Branding must never fail a real call — every error path is swallowed.
+    """
+    if silent:
+        return
+    target = stream if stream is not None else sys.stderr
+    caller = detect_caller()
+
+    try:
+        is_tty = bool(target.isatty())
+    except (AttributeError, ValueError):
+        is_tty = False
+
+    if caller is None and not is_tty:
+        return
+
+    use_color = _color_enabled(target)
+    name = f"{_ANSI_PURPLE}Conductor{_ANSI_RESET}" if use_color else "Conductor"
+    line = (
+        f"▸ {caller} is using {name} → {provider}"
+        if caller
+        else f"▸ {name} → {provider}"
+    )
+
+    try:
+        print(line, file=target)
+    except (OSError, ValueError):
+        return
