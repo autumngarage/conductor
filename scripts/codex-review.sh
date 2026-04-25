@@ -1759,6 +1759,12 @@ for _outer_idx in "${!AVAILABLE_CASCADE[@]}"; do
   # Compare-by-sha (not commit-count) so amends, rewinds, or sideways
   # checkouts are detected even when they preserve the count.
   EXPECTED_HEAD="$(git rev-parse HEAD)"
+  # PRE_REVIEWER_BRANCH: the symbolic ref / branch name. A reviewer can
+  # check out a different branch that happens to point at the same sha;
+  # HEAD-sha comparison alone wouldn't catch it but the next reviewer
+  # would auto-commit on the wrong branch. `--abbrev-ref` returns "HEAD"
+  # in detached state, which is still a stable sentinel for comparison.
+  PRE_REVIEWER_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'detached')"
   # PRE_REVIEWER_STASH_SHAS: the literal list of stash commit shas. A
   # reviewer that drops one stash and adds another preserves the count;
   # compare the actual sha list so swap/replace is caught.
@@ -1991,6 +1997,18 @@ done
         print_summary
         exit 1
       fi
+      current_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'detached')"
+      if [ "$current_branch" != "$PRE_REVIEWER_BRANCH" ]; then
+        # Same sha, different branch. The next reviewer's auto-commit
+        # would land on the wrong branch.
+        echo "==> ${REVIEWER_LABEL} switched branches before failing."
+        echo "    Expected branch: $PRE_REVIEWER_BRANCH"
+        echo "    Actual branch:   $current_branch"
+        echo "    Refusing to fall through. Run 'git checkout $PRE_REVIEWER_BRANCH' to recover."
+        REVIEW_EXIT_REASON="cascade-aborted-branch-switched"
+        print_summary
+        exit 1
+      fi
       current_stash_shas="$(git stash list --format='%H' 2>/dev/null | tr '\n' ',')"
       if [ "$current_stash_shas" != "$PRE_REVIEWER_STASH_SHAS" ]; then
         # Stash list changed. This catches add, drop, AND swap (drop one /
@@ -2018,9 +2036,22 @@ done
           print_summary
           exit 1
         fi
-        if ! git clean -fd >/dev/null 2>&1; then
+        # `-ffd` (double-f) recurses into nested git repos, which a single
+        # `-fd` would leave behind. Without this a reviewer that planted a
+        # nested .git dir would still leak into the next reviewer's view.
+        if ! git clean -ffd >/dev/null 2>&1; then
           echo "==> ERROR: git clean failed; untracked reviewer files NOT removed. Aborting cascade." >&2
           REVIEW_EXIT_REASON="cascade-aborted-cleanup-failed"
+          print_summary
+          exit 1
+        fi
+        # Re-verify: cleanup commands can succeed-with-residue in edge cases
+        # (special-mode files, permission quirks, etc.). If anything is
+        # still dirty, do not proceed.
+        if [ -n "$(git status --porcelain)" ]; then
+          echo "==> ERROR: worktree still dirty after cleanup. Aborting cascade." >&2
+          git status --porcelain | sed 's/^/      /' >&2
+          REVIEW_EXIT_REASON="cascade-aborted-cleanup-residue"
           print_summary
           exit 1
         fi

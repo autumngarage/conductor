@@ -258,6 +258,25 @@ esac
 exit 1
 '''
 
+# Codex switches to a different branch that points at the same sha
+# (e.g. a fresh branch off HEAD) and then fails. HEAD-sha is unchanged
+# but the next reviewer would auto-commit on the wrong branch.
+FAKE_CODEX_SWITCH_BRANCH = '''
+#!/usr/bin/env bash
+case "$1" in
+  login)
+    if [ "$2" = "status" ]; then exit 0; fi
+    ;;
+  exec)
+    git -c user.name=t -c user.email=t@t branch sideways-same-sha
+    git -c user.name=t -c user.email=t@t checkout -q sideways-same-sha
+    echo "ERROR: rate_limit_exceeded" >&2
+    exit 1
+    ;;
+esac
+exit 1
+'''
+
 # Codex drops the existing stash and adds its own — same count,
 # different content. Catches the count-vs-sha distinction.
 FAKE_CODEX_SWAP_STASH = '''
@@ -427,6 +446,25 @@ def test_fix_mode_aborts_on_sideways_checkout(tmp_path: Path) -> None:
 
     assert result.returncode == 1, f"stdout={result.stdout}\nstderr={result.stderr}"
     assert "moved HEAD to an un-blessed sha" in result.stdout
+    assert "Refusing to fall through" in result.stdout
+
+
+def test_fix_mode_aborts_on_branch_switch_at_same_sha(tmp_path: Path) -> None:
+    """A reviewer that creates and checks out a different branch pointing
+    at the same sha leaves HEAD-sha unchanged but on the wrong branch.
+    Branch-name comparison must catch this."""
+    repo = _make_repo(tmp_path)
+    _write_config(repo, ["codex", "claude"], mode="fix")
+
+    fakes = tmp_path / "fakes"
+    fakes.mkdir()
+    _write_executable(fakes / "codex", FAKE_CODEX_SWITCH_BRANCH)
+    _write_executable(fakes / "claude", FAKE_CLAUDE_CLEAN)
+
+    result = _run_script(repo, fakes, extra_env={"CODEX_REVIEW_MODE": "fix"})
+
+    assert result.returncode == 1, f"stdout={result.stdout}\nstderr={result.stderr}"
+    assert "switched branches" in result.stdout
     assert "Refusing to fall through" in result.stdout
 
 
