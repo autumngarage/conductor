@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+#
+# scripts/release.sh — cut a conductor release.
+#
+# Usage:
+#   scripts/release.sh --patch   # default
+#   scripts/release.sh --minor
+#   scripts/release.sh --major
+#
+# Conductor uses hatch-vcs, so the version is derived from the git tag —
+# no source files to bump, no commit to make. The helper just tags, pushes
+# the tag, and creates the GitHub release. The release-published event
+# fires .github/workflows/release.yml, which auto-bumps the homebrew tap.
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+bump="${1:---patch}"
+case "$bump" in
+  --major|--minor|--patch) ;;
+  *) echo "ERROR: unknown bump arg: $bump (use --major, --minor, --patch)" >&2; exit 1 ;;
+esac
+
+branch="$(git rev-parse --abbrev-ref HEAD)"
+[ "$branch" = "main" ] || { echo "ERROR: must be on main (currently $branch)" >&2; exit 1; }
+[ -z "$(git status --porcelain)" ] || { echo "ERROR: working tree dirty" >&2; exit 1; }
+git fetch --tags origin >/dev/null
+[ "$(git rev-list --left-right --count origin/main...main)" = "0	0" ] || { echo "ERROR: local main out of sync with origin" >&2; exit 1; }
+
+current_tag="$(git tag -l --sort=-v:refname 'v*' | head -1)"
+current_version="${current_tag#v}"
+IFS='.' read -r major minor patch <<< "$current_version"
+case "$bump" in
+  --major) major=$((major + 1)); minor=0; patch=0 ;;
+  --minor) minor=$((minor + 1)); patch=0 ;;
+  --patch) patch=$((patch + 1)) ;;
+esac
+new_tag="v${major}.${minor}.${patch}"
+
+echo "==> Current: $current_tag"
+echo "==> New:     $new_tag"
+
+git tag "$new_tag"
+git push origin "$new_tag"
+gh release create "$new_tag" --generate-notes
+
+echo
+echo "  ✓ Released $new_tag"
+echo "  Tap bump is in flight via .github/workflows/release.yml"
+echo "  Watch: gh run list --workflow=release.yml --repo autumngarage/conductor --limit 1"
+echo "  Upgrade: brew update && brew upgrade conductor"
