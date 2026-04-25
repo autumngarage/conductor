@@ -139,16 +139,35 @@ def load_key_commands() -> dict[str, str]:
 
 
 def save_key_command(key: str, command: str) -> Path:
-    """Write a key_command entry, creating / merging the credentials file.
+    """Write a single key_command entry, creating / merging the file.
 
-    Atomic write via temp+rename. Sets file mode to 0600 so other users
-    on the host can't read the (still-secret-bearing) command line.
+    Convenience wrapper for the single-credential case. Most callers
+    should use ``set_key_commands`` instead — when multiple credentials
+    need to be written together, looping ``save_key_command`` produces
+    intermediate file states that can't be cleanly rolled back if a later
+    write fails.
     """
-    if not key or not command.strip():
-        raise ValueError("key and command must be non-empty")
+    return set_key_commands({key: command})
+
+
+def set_key_commands(updates: dict[str, str]) -> Path:
+    """Merge ``updates`` into the credentials file in one atomic write.
+
+    Either every entry lands or none does — the temp+rename is one
+    syscall, so the file's prior contents survive a mid-write crash.
+    Existing entries not in ``updates`` are preserved. Sets file mode
+    to 0600 so other users on the host can't read the (still
+    secret-bearing) command lines.
+    """
+    if not updates:
+        raise ValueError("updates must be non-empty")
+    for k, v in updates.items():
+        if not k or not isinstance(k, str):
+            raise ValueError(f"key must be a non-empty string (got {k!r})")
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError(f"command for {k!r} must be a non-empty string")
     path = credentials_file_path()
-    existing = load_key_commands()
-    existing[key] = command
+    merged = {**load_key_commands(), **updates}
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w", encoding="utf-8") as f:
@@ -159,13 +178,14 @@ def save_key_command(key: str, command: str) -> Path:
             "# command is executed just-in-time per call.\n\n"
         )
         f.write("[key_commands]\n")
-        for k, v in sorted(existing.items()):
+        for k, v in sorted(merged.items()):
             # TOML basic-string escape: backslashes and double-quotes only.
             escaped = v.replace("\\", "\\\\").replace('"', '\\"')
             f.write(f'{k} = "{escaped}"\n')
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
-    _KEY_COMMAND_CACHE.pop(key, None)
+    for key in updates:
+        _KEY_COMMAND_CACHE.pop(key, None)
     return path
 
 

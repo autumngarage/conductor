@@ -432,6 +432,146 @@ def test_init_1password_partial_failure_does_not_persist_first_credential(
     delete_keychain_mock.assert_not_called()
 
 
+def test_init_1password_preserves_unrelated_entries_on_write_failure(
+    mocker, monkeypatch, tmp_path
+):
+    """Regression: if the credentials-file write itself fails (e.g. disk
+    full), pre-existing key_command entries for OTHER providers MUST
+    survive. Atomic temp+rename guarantees this; this test pins the
+    behavior so a future refactor can't regress it."""
+    mocker.patch("conductor.wizard._is_tty", return_value=True)
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda cmd: "/opt/homebrew/bin/op" if cmd == "op" else None,
+    )
+    mocker.patch(
+        "conductor.credentials.shutil.which",
+        lambda cmd: "/opt/homebrew/bin/op" if cmd == "op" else None,
+    )
+
+    from conductor import credentials as creds_mod
+
+    cred_file = tmp_path / "credentials.toml"
+    monkeypatch.setenv("CONDUCTOR_CREDENTIALS_FILE", str(cred_file))
+
+    # Pre-existing entry for an unrelated provider — must NOT be touched.
+    creds_mod.save_key_command(
+        "UNRELATED_KEY", "op read op://Personal/Unrelated/credential"
+    )
+    creds_mod.clear_key_command_cache()
+
+    from conductor.providers import DeepSeekChatProvider
+
+    mocker.patch.object(
+        DeepSeekChatProvider, "configured", lambda self: (False, "missing")
+    )
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    import subprocess
+
+    # Test-resolve passes, but the actual file write fails (simulated
+    # by patching set_key_commands to raise).
+    mocker.patch(
+        "conductor.credentials.subprocess.run",
+        return_value=subprocess.CompletedProcess(
+            args=["op"], returncode=0, stdout="resolved-value\n", stderr=""
+        ),
+    )
+    mocker.patch(
+        "conductor.credentials.set_key_commands",
+        side_effect=OSError("disk full"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["init", "--only", "deepseek-chat"],
+        input="1password\nop://Personal/DeepSeek/credential\n",
+    )
+
+    assert result.exit_code == 0
+    assert "failed to write credentials file" in result.output
+    assert "atomic write" in result.output
+    # The pre-existing entry survives untouched.
+    creds_mod.clear_key_command_cache()
+    surviving = creds_mod.load_key_commands()
+    assert surviving == {
+        "UNRELATED_KEY": "op read op://Personal/Unrelated/credential"
+    }
+
+
+def test_init_1password_preserves_keychain_until_file_write_commits(
+    mocker, monkeypatch, tmp_path
+):
+    """Regression: keychain delete MUST happen after the file write
+    commits, never interleaved with it. Otherwise a mid-loop write
+    failure could leave the user with neither the file entry nor the
+    keychain backup."""
+    mocker.patch("conductor.wizard._is_tty", return_value=True)
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda cmd: "/opt/homebrew/bin/op" if cmd == "op" else None,
+    )
+    mocker.patch(
+        "conductor.credentials.shutil.which",
+        lambda cmd: "/opt/homebrew/bin/op" if cmd == "op" else None,
+    )
+
+    from conductor.providers import DeepSeekChatProvider
+
+    mocker.patch.object(
+        DeepSeekChatProvider, "configured", lambda self: (False, "missing")
+    )
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    cred_file = tmp_path / "credentials.toml"
+    monkeypatch.setenv("CONDUCTOR_CREDENTIALS_FILE", str(cred_file))
+
+    import subprocess
+
+    # Track the order of mutations: file write must happen BEFORE
+    # any delete_from_keychain call.
+    call_order: list[str] = []
+
+    def fake_set_key_commands(updates):
+        call_order.append("set_key_commands")
+        cred_file.write_text("[key_commands]\nDEEPSEEK_API_KEY = \"echo x\"\n")
+        return cred_file
+
+    def fake_delete_from_keychain(key):
+        call_order.append(f"delete_from_keychain:{key}")
+
+    mocker.patch(
+        "conductor.credentials.subprocess.run",
+        return_value=subprocess.CompletedProcess(
+            args=["op"], returncode=0, stdout="resolved-value\n", stderr=""
+        ),
+    )
+    mocker.patch(
+        "conductor.credentials.set_key_commands",
+        side_effect=fake_set_key_commands,
+    )
+    mocker.patch(
+        "conductor.credentials.delete_from_keychain",
+        side_effect=fake_delete_from_keychain,
+    )
+    mocker.patch.object(DeepSeekChatProvider, "smoke", return_value=(True, None))
+
+    result = CliRunner().invoke(
+        main,
+        ["init", "--only", "deepseek-chat"],
+        input="1password\nop://Personal/DeepSeek/credential\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    # File write commits first, THEN keychain cleanup. Critical ordering:
+    # delete_from_keychain must never appear before set_key_commands.
+    assert call_order[0] == "set_key_commands"
+    assert "delete_from_keychain:DEEPSEEK_API_KEY" in call_order
+    assert call_order.index("set_key_commands") < call_order.index(
+        "delete_from_keychain:DEEPSEEK_API_KEY"
+    )
+
+
 def test_init_kimi_aborts_when_credential_left_empty(mocker, monkeypatch):
     mocker.patch("conductor.wizard._is_tty", return_value=True)
 

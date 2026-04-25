@@ -271,3 +271,72 @@ def test_save_key_command_rejects_empty_inputs(credfile):
         credentials.save_key_command("", "echo x")
     with pytest.raises(ValueError):
         credentials.save_key_command("KEY", "   ")
+
+
+# --------------------------------------------------------------------------- #
+# set_key_commands — atomic multi-credential update (regression coverage).
+# --------------------------------------------------------------------------- #
+
+
+def test_set_key_commands_atomic_write_preserves_unrelated_entries(credfile):
+    """Updating credential A must not touch the user's existing credential B."""
+    credentials.save_key_command("PRE_EXISTING", "echo old-value")
+    credentials.set_key_commands({"NEW_KEY": "echo new-value"})
+    loaded = credentials.load_key_commands()
+    assert loaded == {
+        "PRE_EXISTING": "echo old-value",
+        "NEW_KEY": "echo new-value",
+    }
+
+
+def test_set_key_commands_overwrites_same_key(credfile):
+    """A second wizard run for the same provider should update, not append."""
+    credentials.save_key_command("MY_KEY", "echo first-version")
+    credentials.set_key_commands({"MY_KEY": "echo second-version"})
+    assert credentials.load_key_commands() == {"MY_KEY": "echo second-version"}
+
+
+def test_set_key_commands_writes_multiple_in_one_pass(credfile):
+    """Two credentials supplied together should land together (kimi case)."""
+    credentials.set_key_commands(
+        {
+            "CLOUDFLARE_API_TOKEN": "op read op://Personal/CF/token",
+            "CLOUDFLARE_ACCOUNT_ID": "op read op://Personal/CF/account",
+        }
+    )
+    loaded = credentials.load_key_commands()
+    assert loaded == {
+        "CLOUDFLARE_API_TOKEN": "op read op://Personal/CF/token",
+        "CLOUDFLARE_ACCOUNT_ID": "op read op://Personal/CF/account",
+    }
+
+
+def test_set_key_commands_rejects_empty_dict(credfile):
+    with pytest.raises(ValueError):
+        credentials.set_key_commands({})
+
+
+def test_set_key_commands_rejects_invalid_value(credfile):
+    with pytest.raises(ValueError):
+        credentials.set_key_commands({"K": ""})
+    with pytest.raises(ValueError):
+        credentials.set_key_commands({"K": "   "})
+
+
+def test_set_key_commands_clears_cache_for_updated_keys_only(credfile, mocker):
+    """Cache invalidation is per-key — updating A shouldn't drop the cache
+    entry for B (an unrelated credential's resolved value)."""
+    credentials.save_key_command("KEY_A", "echo from-a")
+    credentials.save_key_command("KEY_B", "echo from-b")
+    # Prime cache for both.
+    assert credentials.get("KEY_A") == "from-a"
+    assert credentials.get("KEY_B") == "from-b"
+    # Update only KEY_A.
+    credentials.set_key_commands({"KEY_A": "echo from-a-v2"})
+    spy = mocker.spy(credentials.subprocess, "run")
+    # KEY_B still served from cache (no new subprocess).
+    assert credentials.get("KEY_B") == "from-b"
+    assert spy.call_count == 0
+    # KEY_A re-resolves.
+    assert credentials.get("KEY_A") == "from-a-v2"
+    assert spy.call_count == 1

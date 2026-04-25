@@ -844,20 +844,22 @@ def _attempt_1password_indirection(
         click.echo(f"  ✓ {var} resolves via op (length {len(resolved)})")
         pending.append((var, command, len(resolved)))
 
-    # All references resolved. Persist + clean up old keychain entries.
-    for var, command, _ in pending:
-        try:
-            credentials.save_key_command(var, command)
-        except (OSError, ValueError) as e:
-            click.echo(f"  ✗ failed to write credentials file: {e}")
-            # Roll back any entries already written this round so we
-            # don't leave a partially-saved provider on disk.
-            for prior_var, _, _ in pending:
-                credentials.delete_key_command(prior_var)
-            return WizardOutcome(name, "failed", f"credentials write failed: {e}")
-        # Now that the indirection is persisted, drop any prior keychain
-        # entry so the next call resolves via op rather than a stale local
-        # cache. (Env-var overrides remain — that's the user's CI knob.)
+    # All references resolved. Single atomic file write — either every
+    # new entry lands or none does, and existing entries for OTHER vars
+    # in the file are preserved. No per-credential rollback needed.
+    updates = {var: command for var, command, _ in pending}
+    try:
+        credentials.set_key_commands(updates)
+    except (OSError, ValueError) as e:
+        click.echo(f"  ✗ failed to write credentials file: {e}")
+        click.echo("  no changes were persisted (atomic write).")
+        return WizardOutcome(name, "failed", f"credentials write failed: {e}")
+
+    # Best-effort keychain cleanup AFTER the file is committed. A failure
+    # here leaves both sources populated — harmless because env > key_command
+    # > keychain in resolution order, so the indirection still wins. We
+    # never delete keychain entries before the new source is durable.
+    for var, _, _ in pending:
         credentials.delete_from_keychain(var)
 
     click.echo("")
