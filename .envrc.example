@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+# Per-project env overrides, loaded by direnv on `cd` into this repo.
+# Run `direnv allow` once to opt in.
+#
+# /etc/zshenv sets `UV_EXCLUDE_NEWER="7 days"` as a system-wide supply-chain
+# mitigation (refuses packages younger than 7 days so scanners have time to
+# flag compromised ones — see scripts/enforce-pkg-security.sh in your dotfiles).
+# That is a *rolling span*: uv resolves it to a different "now - 7 days"
+# timestamp on every invocation, baking churn into uv.lock's metadata even
+# when no real dependency changed. Unsetting it here lets the project's
+# `[tool.uv] exclude-newer = "..."` pin (in pyproject.toml) take effect, so
+# uv.lock is byte-stable for everyone, every time. The security policy still
+# applies to every *other* project on this machine.
+unset UV_EXCLUDE_NEWER

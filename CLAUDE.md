@@ -60,6 +60,18 @@ uv run ruff check --fix src/ tests/   # auto-fix
 
 Fix failing tests before pushing. Live-API tests are gated on `RUN_LIVE_SMOKE=1` and the relevant `*_API_KEY` being set; CI runs only the mocked tests by default.
 
+### Reproducible uv.lock
+
+`pyproject.toml` pins `[tool.uv].exclude-newer` to a fixed date so resolves are byte-stable. If your machine sets `UV_EXCLUDE_NEWER` in the environment (e.g. a system-wide pkg-security policy in `/etc/zshenv`), it will override the project pin and re-introduce metadata churn in `uv.lock`. The repo ships a `.envrc.example` that unsets that variable for this directory only — copy it to `.envrc` and run `direnv allow` to opt in:
+
+```bash
+cp .envrc.example .envrc && direnv allow
+```
+
+`.envrc` itself is gitignored because `conductor init` may append API keys to it; tracking it would create a secret-leak path. CI runners don't set `UV_EXCLUDE_NEWER`, so they pick up the project pin automatically.
+
+To refresh dependencies later, bump the date in `[tool.uv].exclude-newer` and run `uv lock` — that becomes a single deliberate "refresh deps" PR instead of accidental noise on every unrelated branch.
+
 ## Release & Distribution
 
 Primary channel is the Homebrew tap `autumngarage/homebrew-conductor` (install: `brew install autumngarage/conductor/conductor`) — same pattern Touchstone, Sentinel, and Cortex use. The tap repo holds the Formula; the conductor repo holds the code. Version derived from git tag via `hatch-vcs`. Release process is two steps: `git tag v0.X.Y` on main, push the tag, then `gh release create v0.X.Y --generate-notes`. The release-published event triggers `.github/workflows/release.yml`, which calls the shared `homebrew-bump.yml` reusable workflow in `autumngarage/autumn-garage` (pinned `@v1`) to rewrite the tap Formula's `url` + `sha256` and commit directly to the tap's `main` — no hand-editing. Manual escape hatch: `gh workflow run release.yml -f tag_name=v0.X.Y` re-bumps for an existing tag. Required repo secret: `HOMEBREW_TAP_PAT` (classic PAT with `repo` scope on the tap, or fine-grained with `contents:write` on `autumngarage/homebrew-conductor`). A pip install from the git URL also works (`pip install git+https://github.com/autumngarage/conductor`); note that the bare `pip install conductor` name on PyPI is an unrelated 1.0.0 project, do not advertise it.
