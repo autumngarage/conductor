@@ -1,6 +1,6 @@
 """Tests for the auto-mode router.
 
-All five providers expose their own ``configured()`` (env-var or CLI check);
+All built-in providers expose their own ``configured()`` (env-var or CLI check);
 we stub those directly so tests run without real CLIs/env vars.
 """
 
@@ -36,6 +36,8 @@ def _stub_configured(mocker, results: dict[str, bool]):
     from conductor.providers import (
         ClaudeProvider,
         CodexProvider,
+        DeepSeekChatProvider,
+        DeepSeekReasonerProvider,
         GeminiProvider,
         KimiProvider,
         OllamaProvider,
@@ -45,6 +47,8 @@ def _stub_configured(mocker, results: dict[str, bool]):
         "kimi": KimiProvider,
         "claude": ClaudeProvider,
         "codex": CodexProvider,
+        "deepseek-chat": DeepSeekChatProvider,
+        "deepseek-reasoner": DeepSeekReasonerProvider,
         "gemini": GeminiProvider,
         "ollama": OllamaProvider,
     }
@@ -118,7 +122,14 @@ def test_route_decision_surfaces_skipped_with_reasons(mocker):
     _stub_configured(mocker, {"kimi": True})
     _, decision = pick(["cheap"])
     skipped_names = {name for name, _ in decision.candidates_skipped}
-    assert skipped_names == {"claude", "codex", "gemini", "ollama"}
+    assert skipped_names == {
+        "claude",
+        "codex",
+        "deepseek-chat",
+        "deepseek-reasoner",
+        "gemini",
+        "ollama",
+    }
 
 
 def test_priority_order_is_stable():

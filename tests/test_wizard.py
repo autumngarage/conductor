@@ -278,53 +278,36 @@ def test_init_help_not_shown_before_any_failure(mocker):
 
 def test_init_first_provider_has_no_back_option(mocker):
     """[b]ack doesn't appear on the first provider's menu (nothing to go back to)."""
-    from conductor.providers import (
-        ClaudeProvider,
-        CodexProvider,
-        GeminiProvider,
-        KimiProvider,
-        OllamaProvider,
-    )
+    from conductor.providers import known_providers
 
     mocker.patch("conductor.wizard._is_tty", return_value=True)
-    for cls in (
-        ClaudeProvider, CodexProvider, GeminiProvider, KimiProvider, OllamaProvider
-    ):
-        mocker.patch.object(cls, "configured", lambda self: (False, "nope"))
+    _stub_all_providers_unconfigured(mocker)
 
-    # Skip claude immediately → wizard continues to codex where [b] should appear.
+    # Skip claude immediately → wizard continues to the second provider where
+    # [b] should appear.
     result = CliRunner().invoke(main, ["init"], input="s\nq\n")
-    # The claude section should not have offered [b]ack.
-    claude_section, _, rest = result.output.partition("[2/5]")
+    second_header = f"[2/{len(known_providers())}]"
+    claude_section, _, rest = result.output.partition(second_header)
     assert "[b]" not in claude_section
-    # The codex section (rest) should offer [b]ack.
     assert "[b]" in rest
 
 
 def test_init_back_rewinds_previous_provider(mocker):
     """Pressing [b]ack from provider 2 rewalks provider 1 and drops its outcome."""
-    from conductor.providers import (
-        ClaudeProvider,
-        CodexProvider,
-        GeminiProvider,
-        KimiProvider,
-        OllamaProvider,
-    )
+    from conductor.providers import known_providers
 
     mocker.patch("conductor.wizard._is_tty", return_value=True)
-    for cls in (
-        ClaudeProvider, CodexProvider, GeminiProvider, KimiProvider, OllamaProvider
-    ):
-        mocker.patch.object(cls, "configured", lambda self: (False, "nope"))
+    _stub_all_providers_unconfigured(mocker)
 
-    # Input: claude→skip, codex→back, claude(rewalk)→skip, codex→skip,
-    # gemini→skip, kimi prompt→empty (skip), ollama→skip.
-    result = CliRunner().invoke(
-        main, ["init"], input="s\nb\ns\ns\ns\n\ns\n"
-    )
+    total = len(known_providers())
+    # Input: claude→skip, codex→back, claude(rewalk)→skip, then skip the
+    # remaining providers (codex through ollama). Empty line covers the
+    # one API-key flow that prompts for credentials before the menu.
+    inputs = ["s", "b", "s"] + ["s"] * (total - 1) + [""] + ["s"] * 2
+    result = CliRunner().invoke(main, ["init"], input="\n".join(inputs) + "\n")
     assert result.exit_code == 0
     # The claude section header should appear twice (original + rewalk).
-    assert result.output.count("[1/5]  claude") == 2
+    assert result.output.count(f"[1/{total}]  claude") == 2
 
 
 # ---------------------------------------------------------------------------
@@ -332,17 +315,22 @@ def test_init_back_rewinds_previous_provider(mocker):
 # ---------------------------------------------------------------------------
 
 
+_ALL_PROVIDER_CLASSES = (
+    "ClaudeProvider",
+    "CodexProvider",
+    "DeepSeekChatProvider",
+    "DeepSeekReasonerProvider",
+    "GeminiProvider",
+    "KimiProvider",
+    "OllamaProvider",
+)
+
+
 def _stub_all_providers_unconfigured(mocker):
-    from conductor.providers import (
-        ClaudeProvider,
-        CodexProvider,
-        GeminiProvider,
-        KimiProvider,
-        OllamaProvider,
-    )
-    for cls in (
-        ClaudeProvider, CodexProvider, GeminiProvider, KimiProvider, OllamaProvider
-    ):
+    import conductor.providers as providers_pkg
+
+    for class_name in _ALL_PROVIDER_CLASSES:
+        cls = getattr(providers_pkg, class_name)
         mocker.patch.object(cls, "configured", lambda self: (False, "stubbed"))
 
 
@@ -428,10 +416,11 @@ def test_init_interactive_claude_detected_prompts(mocker, tmp_path):
     (tmp_path / ".claude").mkdir()
 
     # For each provider's concierge flow: [s]kip. Then at the agent prompt: [n]o.
-    # 5 providers × "s" (skip) + agent-wiring "n" (decline).
-    result = CliRunner().invoke(
-        main, ["init"], input="s\ns\ns\ns\ns\nn\n"
-    )
+    # One "s" per built-in provider + agent-wiring "n" (decline).
+    from conductor.providers import known_providers
+
+    skips = "s\n" * len(known_providers())
+    result = CliRunner().invoke(main, ["init"], input=f"{skips}n\n")
     assert result.exit_code == 0
     assert "Agent integration — Claude Code" in result.output
     # User declined — no files written.

@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 
 from conductor import credentials
 from conductor.providers import get_provider, known_providers
+from conductor.providers.deepseek import DEEPSEEK_API_KEY_ENV
 from conductor.providers.kimi import (
     CLOUDFLARE_ACCOUNT_ID_ENV,
     CLOUDFLARE_API_TOKEN_ENV,
@@ -154,6 +155,56 @@ _INFO: dict[str, _ProviderInfo] = {
             "Quick check: curl -H 'Authorization: Bearer $TOKEN' "
             "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT/ai/models/search",
             "Free tier = 10k tokens/day; 429 errors mean you've hit the cap.",
+        ],
+    ),
+    "deepseek-chat": _ProviderInfo(
+        tagline="DeepSeek V3.x chat — cheap, fast general-purpose model.",
+        description=(
+            "Cheap and fast; strong tier; good default for code-review "
+            "and general chat when latency and cost matter more than "
+            "deep reasoning. Requires a DeepSeek API key."
+        ),
+        install_cmds=[
+            "# No install step — Conductor talks directly to DeepSeek's",
+            "# OpenAI-compatible HTTP endpoint via httpx.",
+        ],
+        auth_cmds=[
+            "# Wizard will prompt for DEEPSEEK_API_KEY and store it",
+            "# in Keychain / direnv. The same key serves deepseek-reasoner.",
+        ],
+        credential_source_url="https://platform.deepseek.com/api_keys",
+        troubleshoot_tips=[
+            "DEEPSEEK_API_KEY must be in the current shell — restart your "
+            "terminal after adding it to ~/.zshrc.",
+            "Validate the key: https://platform.deepseek.com/api_keys "
+            "(regenerate if unsure).",
+            "401 means the key is wrong; 402 means the account is out of credit.",
+        ],
+    ),
+    "deepseek-reasoner": _ProviderInfo(
+        tagline="DeepSeek R1 reasoning — strong reasoning with built-in CoT.",
+        description=(
+            "Picks up tasks tagged 'strong-reasoning' or 'thinking'. "
+            "Slower (12s p50) and more expensive than deepseek-chat, but "
+            "emits a chain-of-thought before the answer. Reuses the same "
+            "DEEPSEEK_API_KEY as deepseek-chat — set up once."
+        ),
+        install_cmds=[
+            "# No install step — Conductor talks directly to DeepSeek's",
+            "# OpenAI-compatible HTTP endpoint via httpx.",
+        ],
+        auth_cmds=[
+            "# Wizard will prompt for DEEPSEEK_API_KEY and store it",
+            "# in Keychain / direnv. Same key as deepseek-chat.",
+        ],
+        credential_source_url="https://platform.deepseek.com/api_keys",
+        troubleshoot_tips=[
+            "Same DEEPSEEK_API_KEY as deepseek-chat — if chat works and "
+            "reasoner doesn't, the key is fine; check the model id.",
+            "Reasoner is slow (12s p50 typical); long timeouts are normal, "
+            "not a hang.",
+            "402 means the account is out of credit; reasoner uses ~2× the "
+            "tokens-per-call as chat because of the reasoning trace.",
         ],
     ),
     "ollama": _ProviderInfo(
@@ -582,8 +633,110 @@ def _kimi_flow(*, can_back: bool = False) -> WizardOutcome:
     return WizardOutcome("kimi", "failed", f"stored via {storage}, smoke failed: {reason}")
 
 
+def _deepseek_flow(name: str) -> Callable[..., WizardOutcome]:
+    """API-key flow for either deepseek-chat or deepseek-reasoner.
+
+    Both providers share one credential (``DEEPSEEK_API_KEY``); once one
+    flow stores it, the other detects it as already-configured and skips
+    the prompt.
+    """
+
+    def flow(*, can_back: bool = False) -> WizardOutcome:
+        info = _INFO[name]
+        if can_back:
+            options = [
+                ("c", "continue — enter credentials now"),
+                ("s", "skip this provider"),
+                ("b", "back — redo the previous provider"),
+                ("q", "quit setup"),
+            ]
+            entry = _prompt_menu(options=options, default="c")
+            if entry == "s":
+                return WizardOutcome(name, "skipped", "user skipped")
+            if entry == "q":
+                raise _AbortSetup()
+            if entry == "b":
+                raise _GoBack()
+            click.echo("")
+        click.echo(f"  Get a key: {info.credential_source_url}")
+        click.echo("")
+
+        if credentials.get(DEEPSEEK_API_KEY_ENV) is not None:
+            provider = get_provider(name)
+            ok, reason = provider.smoke()
+            if ok:
+                return WizardOutcome(
+                    name, "ok", "credentials already present, smoke passed"
+                )
+            return WizardOutcome(
+                name, "failed", f"credentials present but smoke failed: {reason}"
+            )
+
+        try:
+            value = click.prompt(
+                f"  DeepSeek API key ({DEEPSEEK_API_KEY_ENV})",
+                hide_input=True,
+                default="",
+                show_default=False,
+            )
+        except click.Abort:
+            value = ""
+        if not value:
+            click.echo(f"  {DEEPSEEK_API_KEY_ENV} not provided — skipping {name}.")
+            return WizardOutcome(name, "skipped", f"{DEEPSEEK_API_KEY_ENV} not provided")
+
+        storage = _prompt_menu(
+            options=[
+                ("keychain", "keychain — macOS Keychain (recommended, no shell-env leakage)"),
+                ("envrc", "envrc — write export to .envrc via direnv"),
+                ("print", "print — show export statement, I'll store it myself"),
+                ("skip", f"skip — skip {name} entirely"),
+            ],
+        )
+        if storage == "skip":
+            return WizardOutcome(name, "skipped", "user skipped during storage choice")
+
+        values = {DEEPSEEK_API_KEY_ENV: value}
+
+        if storage == "keychain":
+            try:
+                credentials.set_in_keychain(DEEPSEEK_API_KEY_ENV, value)
+                click.echo("  ✓ stored in macOS Keychain (service: conductor).")
+            except RuntimeError as e:
+                click.echo(f"  ✗ keychain storage failed: {e}")
+                click.echo("  falling back to print-only.")
+                storage = "print"
+
+        if storage == "envrc":
+            envrc_path = os.path.join(os.getcwd(), ".envrc")
+            _append_envrc(envrc_path, values)
+            click.echo(f"  ✓ wrote export line to {envrc_path}")
+            click.echo("    run `direnv allow` in that directory to activate.")
+
+        if storage == "print":
+            click.echo("  add this to your shell rc or .envrc:")
+            click.echo(f"    export {DEEPSEEK_API_KEY_ENV}={value!r}")
+
+        os.environ[DEEPSEEK_API_KEY_ENV] = value
+
+        provider = get_provider(name)
+        ok, reason = provider.smoke()
+        if ok:
+            click.echo("  ✓ smoke test passed")
+            return WizardOutcome(name, "ok", f"stored via {storage}, smoke passed")
+        click.echo(f"  ✗ smoke test failed: {reason}")
+        click.echo("  credential stored but the endpoint is not responding as expected.")
+        return WizardOutcome(
+            name, "failed", f"stored via {storage}, smoke failed: {reason}"
+        )
+
+    return flow
+
+
 _FLOWS: dict[str, Callable[..., WizardOutcome]] = {
     "kimi": _kimi_flow,
+    "deepseek-chat": _deepseek_flow("deepseek-chat"),
+    "deepseek-reasoner": _deepseek_flow("deepseek-reasoner"),
 }
 
 
