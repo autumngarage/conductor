@@ -44,9 +44,11 @@ new_tag="v${major}.${minor}.${patch}"
 echo "==> Current: $current_tag"
 echo "==> New:     $new_tag"
 
-git tag "$new_tag"
-git push origin "$new_tag"
-gh release create "$new_tag" --generate-notes
+# Atomic: gh release create with --target builds the tag server-side as
+# part of the release, so a failed release leaves no orphan tag for the
+# next run to skip past.
+gh release create "$new_tag" --target main --generate-notes
+git fetch --tags origin >/dev/null
 
 echo
 echo "  ✓ Released $new_tag"
