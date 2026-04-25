@@ -62,7 +62,13 @@ Fix failing tests before pushing. Live-API tests are gated on `RUN_LIVE_SMOKE=1`
 
 ### Reproducible uv.lock
 
-`pyproject.toml` pins `[tool.uv].exclude-newer` to a fixed date so resolves are byte-stable. If your machine sets `UV_EXCLUDE_NEWER` in the environment (e.g. a system-wide pkg-security policy in `/etc/zshenv`), it will override the project pin and re-introduce metadata churn in `uv.lock`. The repo ships a `.envrc` that unsets that variable for this directory only — run `direnv allow` once to opt in. CI runners don't set the variable, so they pick up the project pin automatically.
+`pyproject.toml` pins `[tool.uv].exclude-newer` to a fixed date so resolves are byte-stable. If your machine sets `UV_EXCLUDE_NEWER` in the environment (e.g. a system-wide pkg-security policy in `/etc/zshenv`), it will override the project pin and re-introduce metadata churn in `uv.lock`. The repo ships a `.envrc.example` that unsets that variable for this directory only — copy it to `.envrc` and run `direnv allow` to opt in:
+
+```bash
+cp .envrc.example .envrc && direnv allow
+```
+
+`.envrc` itself is gitignored because `conductor init` may append API keys to it; tracking it would create a secret-leak path. CI runners don't set `UV_EXCLUDE_NEWER`, so they pick up the project pin automatically.
 
 To refresh dependencies later, bump the date in `[tool.uv].exclude-newer` and run `uv lock` — that becomes a single deliberate "refresh deps" PR instead of accidental noise on every unrelated branch.
 

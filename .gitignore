@@ -2,6 +2,11 @@
 .env
 .env.*
 !.env.example
+# .envrc untracked because `conductor init` may append API keys to it.
+# Track .envrc.example as the source-of-truth template; copy to .envrc and
+# `direnv allow` to opt in.
+.envrc
+!.envrc.example
 config.json
 credentials.json
 *.pem
