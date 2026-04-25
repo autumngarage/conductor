@@ -2,7 +2,7 @@
 Status: active
 Written: 2026-04-24
 Author: claude-opus-4-7
-Goal-hash: pending
+Goal-hash: b400fba9
 Updated-by:
   - 2026-04-24T16:35 claude-opus-4-7 (created; first-pass plan after blindspot audit)
   - 2026-04-24T20:55 claude-opus-4-7 (revised after Codex review: replaced Slice B "cost observability" with "subagent prompt-drift testing"; added Phase 0 to Slice A and Slice C; deferred cost observability)
@@ -125,16 +125,18 @@ Rough size: large and uncertain. Phase 0 is small (~1 day to write the contract)
 
 ## Follow-ups (deferred)
 
-The audit and Codex review surfaced these additional items. Each is acknowledged here and lands its own plan or journal entry if/when prioritized:
+The audit and Codex review surfaced eight additional items beyond the top-3 cut. All eight are recorded with disposition in the single journal entry [`journal/2026-04-24-blindspot-followups-noted`](../journal/2026-04-24-blindspot-followups-noted.md). When any individual item is prioritized, a focused Plan can be written and that journal entry updated with a forward-link.
 
-- **Cost observability (`conductor usage`)** — was the original Slice B; deferred because the persisted-state shape needs explicit provenance and a visible-failure path for unwritable cache (per `Derive, don't persist` and `No silent failures`) that the first-pass draft missed. Resolved-to: future plan `plans/conductor-cost-observability.md` (high-priority follow-up).
-- **`offline_mode.py` silent-no-op fix** — the unwritable-cache silent-no-op pattern in the recently-shipped offline-mode code has the same `No silent failures` violation Codex flagged on Slice B. Resolved-to: future plan or a small drive-by PR.
-- **Reachability blindness in `pick()`** — router picks providers without active health probing; `configured()` is env-var-deep, not network-deep. Resolved-to: future plan `plans/conductor-router-reachability.md`.
-- **No durable session / conversation state** — every `call`/`exec` is single-shot; multi-turn requires caller-side context concatenation. Resolved-to: future plan `plans/conductor-sessions.md` (or accepted as a permanent boundary; see Known limitations).
-- **Capability-tag empirical calibration** — `kimi.tags = ["long-context", "cheap", "vision", "code-review"]` are hand-assigned and unvalidated. Resolved-to: future plan `plans/conductor-tag-calibration.md` (low priority; speculative until a consumer reports bad routing).
-- **Credential rotation/expiry handling** — no warning when a stored token nears expiry or has been unused for N months. Resolved-to: journal entry `journal/2026-04-24-credential-lifecycle-noted.md`.
-- **No structured logs for CI ingestion** — everything is stderr text. Resolved-to: journal entry `journal/2026-04-24-observability-gap-noted.md`.
-- **Dependency version pinning is soft (`>=`)** — every install can pick up different httpx / click. Resolved-to: journal entry `journal/2026-04-24-dependency-pinning-noted.md`.
+Summary (full reasoning + priority in the journal entry):
+
+- Cost observability (`conductor usage`) — original Slice B; deferred for principle fixes.
+- `offline_mode.py` silent-no-op fix — same `No silent failures` violation as Slice B.
+- Reachability blindness in `pick()` — router is env-var-deep, not network-deep.
+- No durable session / conversation state — possibly a permanent boundary.
+- Capability-tag empirical calibration — speculative until a consumer reports bad routing.
+- Credential rotation/expiry handling — low-frequency, low-priority.
+- No structured logs for CI ingestion — consumer-driven.
+- Dependency version pinning is soft (`>=`) — no incident yet.
 
 ## Known limitations at exit
 
@@ -149,7 +151,7 @@ After all three slices ship, conductor will still have these accepted limitation
 <!--
 Authoring checklist:
 
-- [x] Frontmatter populated (Goal-hash: pending — recompute via `cortex doctor` once available).
+- [x] Frontmatter populated (Goal-hash: b400fba9, computed per cortex doctor on 2026-04-24).
 - [x] Why grounded in doctrine/0002 + 0004 + Codex-review journal.
 - [x] Success criteria measurable (file paths, test counts, automated workflow signals).
 - [x] Every deferred item resolves to a future plan or journal entry.
