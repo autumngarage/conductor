@@ -335,7 +335,8 @@ def test_doctor_reports_agents_md_when_present(mocker, monkeypatch, tmp_path):
     result = CliRunner().invoke(main, ["doctor"])
     assert result.exit_code == 0, result.output
     assert "AGENTS.md" in result.output
-    assert "present but not wired" in result.output.lower()
+    assert "no Conductor delegation block" in result.output
+    assert "file still loads normally" in result.output
 
 
 def test_doctor_reports_gemini_md_states(mocker, monkeypatch, tmp_path):
@@ -348,10 +349,10 @@ def test_doctor_reports_gemini_md_states(mocker, monkeypatch, tmp_path):
     assert "GEMINI.md" in result.output
     assert "no GEMINI.md" in result.output
 
-    # Present but not wired.
+    # Present but no Conductor delegation block.
     (tmp_path / "repo" / "GEMINI.md").write_text("# mine\n", encoding="utf-8")
     result = CliRunner().invoke(main, ["doctor"])
-    assert "present but not wired" in result.output.lower()
+    assert "no Conductor delegation block" in result.output
 
     # Wired.
     from conductor import agent_wiring
