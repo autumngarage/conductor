@@ -30,6 +30,10 @@ from conductor.providers.interface import (
 GEMINI_DEFAULT_MODEL = "gemini-2.5-pro"
 GEMINI_REQUEST_TIMEOUT_SEC = 180.0
 
+# Sentinel: "caller didn't specify a timeout" vs "caller explicitly passed
+# None". The constructor default applies only in the first case.
+_USE_DEFAULT: object = object()
+
 # Env vars Gemini CLI accepts as auth credentials. Any one of these being
 # set is sufficient — the CLI prefers them over the OAuth file.
 GEMINI_AUTH_ENV_VARS = (
@@ -199,7 +203,7 @@ class GeminiProvider:
         tools: frozenset[str] = frozenset(),
         sandbox: str = "none",
         cwd: str | None = None,
-        timeout_sec: int = 300,
+        timeout_sec: int | None = None,
         resume_session_id: str | None = None,
     ) -> CallResponse:
         # Gemini's --approval-mode: "plan" (read-only) vs "yolo" (all writes
@@ -227,7 +231,7 @@ class GeminiProvider:
         effort: str | int,
         approval_mode: str,
         cwd: str | None = None,
-        timeout_sec_override: float | None = None,
+        timeout_sec_override: float | None | object = _USE_DEFAULT,
         resume_session_id: str | None = None,
     ) -> CallResponse:
         # Cheap PATH check on the hot path; auth state surfaces as a CLI
@@ -264,7 +268,10 @@ class GeminiProvider:
             env_overrides["GEMINI_THINKING_BUDGET"] = str(thinking_budget)
         proc_env = {**os.environ, **env_overrides} if env_overrides else None
 
-        timeout = timeout_sec_override if timeout_sec_override is not None else self._timeout_sec
+        if timeout_sec_override is _USE_DEFAULT:
+            timeout = self._timeout_sec
+        else:
+            timeout = timeout_sec_override  # type: ignore[assignment]
         start = time.monotonic()
         try:
             result = subprocess.run(
@@ -276,8 +283,9 @@ class GeminiProvider:
                 env=proc_env,
             )
         except subprocess.TimeoutExpired as e:
+            elapsed = time.monotonic() - start
             raise ProviderError(
-                f"gemini CLI timed out after {timeout:.0f}s"
+                f"gemini CLI timed out after {elapsed:.0f}s"
             ) from e
         duration_ms = int((time.monotonic() - start) * 1000)
 

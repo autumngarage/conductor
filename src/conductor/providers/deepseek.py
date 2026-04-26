@@ -211,7 +211,7 @@ class _DeepSeekBase:
         tools: frozenset[str] = frozenset(),
         sandbox: str = "none",
         cwd: str | None = None,
-        timeout_sec: int = 300,
+        timeout_sec: int | None = None,
         resume_session_id: str | None = None,
     ) -> CallResponse:
         if resume_session_id:

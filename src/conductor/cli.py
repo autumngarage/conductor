@@ -375,7 +375,7 @@ def _invoke_with_fallback(
     tools: frozenset[str],
     sandbox: str,
     cwd: str | None,
-    timeout_sec: int,
+    timeout_sec: int | None,
     silent: bool,
     resume_session_id: str | None = None,
 ) -> tuple[CallResponse, list[str]]:
@@ -745,7 +745,7 @@ def call(
                 tools=frozenset(),
                 sandbox="none",
                 cwd=None,
-                timeout_sec=300,
+                timeout_sec=None,
                 silent=silent_route or as_json,
             )
         except ProviderConfigError as e:
@@ -837,9 +837,13 @@ def call(
 @click.option(
     "--timeout",
     "timeout_sec",
-    default=300,
+    default=None,
     type=int,
-    help="Wall-clock timeout in seconds (default: 300).",
+    help=(
+        "Wall-clock timeout in seconds. Default: no timeout — agent sessions "
+        "can run as long as they need. Set explicitly (e.g. --timeout 600) "
+        "for CI or unattended runs that must bound runtime."
+    ),
 )
 @click.option("--task", default=None, help="The task / prompt. Reads stdin if omitted.")
 @click.option("--model", default=None, help="Override the provider's default model.")
@@ -875,7 +879,7 @@ def exec_cmd(
     sandbox: str | None,
     exclude: str | None,
     cwd: str | None,
-    timeout_sec: int,
+    timeout_sec: int | None,
     task: str | None,
     model: str | None,
     as_json: bool,

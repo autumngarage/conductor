@@ -279,6 +279,46 @@ def test_exec_unknown_sandbox_errors_with_hint():
     assert "read-only" in result.output
 
 
+def test_exec_cli_default_passes_no_timeout_to_provider(mocker):
+    """`conductor exec --with codex --task ...` (no --timeout) must hand
+    the provider `timeout_sec=None` so subprocess.run runs unbounded.
+    Regression for the 22-minute lost-work bug where the CLI silently
+    capped exec at 300s and the partial session_id was never recoverable."""
+    _stub_all_configured(mocker, {"codex"})
+    exec_mock = mocker.patch.object(
+        CodexProvider, "exec", return_value=_fake_response("codex")
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--with", "codex", "--task", "do the thing"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert exec_mock.called
+    assert exec_mock.call_args.kwargs["timeout_sec"] is None, (
+        "exec without --timeout must pass None (unbounded). "
+        f"Got timeout_sec={exec_mock.call_args.kwargs['timeout_sec']!r}"
+    )
+
+
+def test_exec_cli_explicit_timeout_passes_through(mocker):
+    """`--timeout 600` must be honored — the no-default change must not
+    block users who deliberately want to bound a CI run."""
+    _stub_all_configured(mocker, {"codex"})
+    exec_mock = mocker.patch.object(
+        CodexProvider, "exec", return_value=_fake_response("codex")
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--with", "codex", "--timeout", "600", "--task", "do it"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert exec_mock.call_args.kwargs["timeout_sec"] == 600
+
+
 def test_exec_with_kimi_tools_raises_unsupported(mocker, monkeypatch):
     # Pin kimi to its pre-v0.3.0 capability set so --tools Edit is
     # guaranteed to land in the UnsupportedCapability branch. Post-v0.3.1

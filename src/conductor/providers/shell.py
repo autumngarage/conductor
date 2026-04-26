@@ -49,6 +49,10 @@ from conductor.providers.interface import (
 
 SHELL_PROVIDER_TIMEOUT_SEC = 180.0
 
+# Sentinel: distinguishes "caller didn't specify a timeout" from "caller
+# explicitly passed None" (no timeout, run unbounded).
+_USE_DEFAULT: object = object()
+
 AcceptsMode = Literal["stdin", "argv"]
 
 
@@ -183,7 +187,7 @@ class ShellProvider:
         tools: frozenset[str] = frozenset(),
         sandbox: str = "none",
         cwd: str | None = None,
-        timeout_sec: int = 300,
+        timeout_sec: int | None = None,
         resume_session_id: str | None = None,
     ) -> CallResponse:
         if tools:
@@ -212,7 +216,7 @@ class ShellProvider:
         task: str,
         *,
         effort: str | int,
-        timeout_override: float | None = None,
+        timeout_override: float | None | object = _USE_DEFAULT,
         cwd: str | None = None,
     ) -> CallResponse:
         argv = shlex.split(self._spec.shell)
@@ -222,7 +226,11 @@ class ShellProvider:
         else:  # argv
             argv = [*argv, task]
 
-        timeout = timeout_override if timeout_override is not None else self._timeout_sec
+        timeout = (
+            self._timeout_sec
+            if timeout_override is _USE_DEFAULT
+            else timeout_override  # type: ignore[assignment]
+        )
         start = time.monotonic()
         try:
             result = subprocess.run(
@@ -233,8 +241,9 @@ class ShellProvider:
                 cwd=cwd,
             )
         except subprocess.TimeoutExpired as e:
+            elapsed = time.monotonic() - start
             raise ProviderError(
-                f"custom provider `{self._spec.name}` timed out after {timeout:.0f}s"
+                f"custom provider `{self._spec.name}` timed out after {elapsed:.0f}s"
             ) from e
         except FileNotFoundError as e:
             raise ProviderConfigError(

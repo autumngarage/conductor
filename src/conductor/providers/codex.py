@@ -30,6 +30,11 @@ from conductor.providers.interface import (
 CODEX_DEFAULT_MODEL = "gpt-5.4"
 CODEX_REQUEST_TIMEOUT_SEC = 180.0
 
+# Sentinel distinguishing "caller didn't specify a timeout" from "caller
+# explicitly asked for no timeout (None)". The constructor default applies
+# only in the first case; explicit None means run unbounded.
+_USE_DEFAULT: object = object()
+
 # Map symbolic effort → codex's reasoning-effort value.
 # Codex natively exposes minimal|low|medium|high. The CLI plumbs this via
 # `-c model_reasoning_effort=<value>` as of codex-cli 0.125.0 (the older
@@ -204,19 +209,14 @@ class CodexProvider:
         tools: frozenset[str] = frozenset(),
         sandbox: str = "none",
         cwd: str | None = None,
-        timeout_sec: int = 300,
+        timeout_sec: int | None = None,
         resume_session_id: str | None = None,
     ) -> CallResponse:
-        # Codex has two sandboxes: read-only (no fs writes), workspace-write
-        # (edits allowed). "none" is ambiguous in codex; we treat it as
-        # read-only since there's no meaningful "no sandbox" in codex exec.
         codex_sandbox = {
             "read-only": "read-only",
             "workspace-write": "workspace-write",
             "none": "read-only",
         }.get(sandbox, "read-only")
-        # Tool filtering in codex is sandbox-based, not fine-grained.
-        # `tools` is advisory for logging; sandbox does the enforcing.
         return self._run(
             task,
             model=model,
@@ -235,7 +235,7 @@ class CodexProvider:
         effort: str | int,
         sandbox: str,
         cwd: str | None = None,
-        timeout_sec_override: float | None = None,
+        timeout_sec_override: float | None | object = _USE_DEFAULT,
         resume_session_id: str | None = None,
     ) -> CallResponse:
         # Cheap PATH check on the hot path; auth state surfaces as a CLI
@@ -277,7 +277,11 @@ class CodexProvider:
         if codex_effort_flag:
             args.extend(["-c", f"model_reasoning_effort={codex_effort_flag}"])
 
-        timeout = timeout_sec_override if timeout_sec_override is not None else self._timeout_sec
+        if timeout_sec_override is _USE_DEFAULT:
+            timeout = self._timeout_sec
+        else:
+            # `None` means "run unbounded" (subprocess.run accepts timeout=None).
+            timeout = timeout_sec_override  # type: ignore[assignment]
         start = time.monotonic()
         try:
             result = subprocess.run(
@@ -288,9 +292,22 @@ class CodexProvider:
                 cwd=cwd,
             )
         except subprocess.TimeoutExpired as e:
-            raise ProviderError(
-                f"codex CLI timed out after {timeout:.0f}s"
-            ) from e
+            # Recover the session_id (if any) from whatever NDJSON the codex
+            # CLI managed to emit before we killed it. Without this the user
+            # has nothing to `--resume` from after a timeout.
+            partial_stdout = e.stdout or ""
+            if isinstance(partial_stdout, bytes):
+                partial_stdout = partial_stdout.decode("utf-8", errors="replace")
+            _, _, _, partial_session_id = self._parse_ndjson(partial_stdout)
+            elapsed = time.monotonic() - start
+            msg = f"codex CLI timed out after {elapsed:.0f}s"
+            if partial_session_id:
+                msg += (
+                    f" (partial session_id={partial_session_id} — "
+                    f"resume with `conductor exec --with codex "
+                    f"--resume {partial_session_id} ...`)"
+                )
+            raise ProviderError(msg) from e
         duration_ms = int((time.monotonic() - start) * 1000)
 
         if result.returncode != 0:
