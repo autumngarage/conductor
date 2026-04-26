@@ -30,8 +30,11 @@ from conductor.providers.interface import (
 CODEX_DEFAULT_MODEL = "gpt-5.4"
 CODEX_REQUEST_TIMEOUT_SEC = 180.0
 
-# Map symbolic effort → codex --effort flag value.
-# Codex natively exposes minimal|low|medium|high.
+# Map symbolic effort → codex's reasoning-effort value.
+# Codex natively exposes minimal|low|medium|high. The CLI plumbs this via
+# `-c model_reasoning_effort=<value>` as of codex-cli 0.125.0 (the older
+# `--effort` flag was removed in that release). We always emit the new
+# form; users on pre-0.125.0 codex will need to upgrade.
 _EFFORT_TO_CODEX_FLAG = {
     "minimal": "minimal",
     "low": "low",
@@ -272,7 +275,7 @@ class CodexProvider:
                 sandbox,
             ]
         if codex_effort_flag:
-            args.extend(["--effort", codex_effort_flag])
+            args.extend(["-c", f"model_reasoning_effort={codex_effort_flag}"])
 
         timeout = timeout_sec_override if timeout_sec_override is not None else self._timeout_sec
         start = time.monotonic()

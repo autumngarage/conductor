@@ -293,6 +293,31 @@ def test_codex_call_parses_ndjson_and_usage(mocker):
     assert response.session_id == "sess-codex-1"
 
 
+def test_codex_call_translates_effort_to_reasoning_effort_config(mocker):
+    """Codex CLI 0.125.0 dropped --effort in favor of `-c model_reasoning_effort=`.
+    Conductor must emit the new form. Regression test for the silent breakage
+    where conductor's call passed `--effort minimal` to a 0.125.0 codex CLI,
+    which exited 2 with `error: unexpected argument '--effort' found`."""
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    captured = mocker.patch(
+        "conductor.providers.codex.subprocess.run",
+        return_value=_fake_completed(stdout=CODEX_NDJSON),
+    )
+    CodexProvider().call("hi", effort="minimal")
+    args = captured.call_args.args[0]
+    # Old (broken) form must not appear.
+    assert "--effort" not in args, (
+        "codex CLI >= 0.125.0 removed --effort; conductor must use -c instead. "
+        f"args={args!r}"
+    )
+    # New form: -c model_reasoning_effort=minimal must be present together.
+    assert "-c" in args, f"missing -c flag, args={args!r}"
+    c_idx = args.index("-c")
+    assert args[c_idx + 1] == "model_reasoning_effort=minimal", (
+        f"expected `model_reasoning_effort=minimal`, got {args[c_idx + 1]!r}"
+    )
+
+
 def test_codex_call_with_resume_uses_resume_subcommand(mocker):
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
     captured = mocker.patch(
