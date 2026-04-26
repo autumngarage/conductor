@@ -1373,19 +1373,34 @@ def doctor(as_json: bool) -> None:
         f"{payload['platform']}  ·  python {payload['python']}"
     )
     click.echo("")
-    click.echo("Providers:")
-    for p in payload["providers"]:
+    configured = [p for p in payload["providers"] if p["configured"]]
+    unconfigured = [p for p in payload["providers"] if not p["configured"]]
+    total = len(payload["providers"])
+
+    def _provider_line(p: dict) -> None:
         symbol = "✓" if p["configured"] else "✗"
         effort_note = "" if p["supports_effort"] else " (no thinking mode)"
         click.echo(
-            f"  {symbol} {p['provider']:<8}  "
+            f"    {symbol} {p['provider']:<8}  "
             f"tier={p['quality_tier']:<8}  "
             f"default={p['default_model']}{effort_note}"
         )
         if not p["configured"]:
-            click.echo(f"      └─ {p['reason']}")
+            click.echo(f"        └─ {p['reason']}")
         for w in p.get("warnings") or []:
-            click.echo(f"      ⚠ {w}")
+            click.echo(f"        ⚠ {w}")
+
+    click.echo(f"Providers ({len(configured)}/{total} configured):")
+    if configured:
+        click.echo("  Configured:")
+        for p in configured:
+            _provider_line(p)
+    if unconfigured:
+        if configured:
+            click.echo("")
+        click.echo("  Available (not configured):")
+        for p in unconfigured:
+            _provider_line(p)
 
     click.echo("")
     click.echo("Credentials (active source per env-var):")
@@ -1435,7 +1450,19 @@ def doctor(as_json: bool) -> None:
             version_note = f" v{entry['version']}" if entry and entry["version"] else ""
             click.echo(f"  {label}  wired — {ai[path_key]}{version_note}")
         else:
-            click.echo(f"  {label}  present but not wired — {ai[path_key]}")
+            # The file itself is loaded normally by its host agent; only
+            # Conductor's per-repo delegation block is missing. Spell that out
+            # so "present but not wired" doesn't read as "the file is broken".
+            click.echo(
+                f"  {label}  no Conductor delegation block — {ai[path_key]}"
+            )
+            click.echo(
+                "                (file still loads normally for its agent; "
+                "Conductor would add per-repo"
+            )
+            click.echo(
+                "                routing hints via `conductor init`.)"
+            )
 
     _repo_line("AGENTS.md:   ", "agents-md-import",
                "agents_md_exists", "agents_md_wired", "agents_md_path")
@@ -1456,7 +1483,10 @@ def doctor(as_json: bool) -> None:
         version_note = f" v{entry['version']}" if entry and entry["version"] else ""
         click.echo(f"  Cursor:       rule wired{version_note}")
     else:
-        click.echo("  Cursor:       .cursor/rules/ present but not wired")
+        click.echo(
+            "  Cursor:       no Conductor rule in .cursor/rules/ "
+            "(run `conductor init` to add one)"
+        )
 
     click.echo("")
     click.echo("Next steps:")
