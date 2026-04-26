@@ -377,6 +377,12 @@ def test_doctor_reports_cursor_states(mocker, monkeypatch, tmp_path):
     assert "Cursor:" in result.output
     assert "no .cursor/rules/" in result.output.lower()
 
+    # Directory present but Conductor rule missing.
+    (tmp_path / "repo" / ".cursor" / "rules").mkdir(parents=True)
+    result = CliRunner().invoke(main, ["doctor"])
+    assert "Cursor:" in result.output
+    assert "no Conductor rule" in result.output
+
     # Wired.
     from conductor import agent_wiring
     agent_wiring.wire_cursor(version="0.4.2")
