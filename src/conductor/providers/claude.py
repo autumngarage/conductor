@@ -27,6 +27,10 @@ from conductor.providers.interface import (
 CLAUDE_DEFAULT_MODEL = "sonnet"
 CLAUDE_REQUEST_TIMEOUT_SEC = 180.0
 
+# Sentinel: "caller didn't specify a timeout" vs "caller explicitly passed
+# None". The constructor default applies only in the first case.
+_USE_DEFAULT: object = object()
+
 
 class ClaudeProvider:
     name = "claude"
@@ -178,7 +182,7 @@ class ClaudeProvider:
         tools: frozenset[str] = frozenset(),
         sandbox: str = "none",
         cwd: str | None = None,
-        timeout_sec: int = 300,
+        timeout_sec: int | None = None,
         resume_session_id: str | None = None,
     ) -> CallResponse:
         # Claude's `--allowedTools` is fine-grained; passing an empty set
@@ -213,7 +217,7 @@ class ClaudeProvider:
         allowed_tools: str | None,
         permission_mode: str | None,
         cwd: str | None = None,
-        timeout_sec_override: float | None = None,
+        timeout_sec_override: float | None | object = _USE_DEFAULT,
         resume_session_id: str | None = None,
     ) -> CallResponse:
         # Cheap PATH check only on the hot path — auth state surfaces as a
@@ -250,7 +254,10 @@ class ClaudeProvider:
         # by older CLI versions). Wire to a proper CLI flag when stable.
         env_overrides = {"MAX_THINKING_TOKENS": str(thinking_budget)} if thinking_budget else {}
 
-        timeout = timeout_sec_override if timeout_sec_override is not None else self._timeout_sec
+        if timeout_sec_override is _USE_DEFAULT:
+            timeout = self._timeout_sec
+        else:
+            timeout = timeout_sec_override  # type: ignore[assignment]
         start = time.monotonic()
         try:
             import os as _os
@@ -264,8 +271,9 @@ class ClaudeProvider:
                 env=proc_env,
             )
         except subprocess.TimeoutExpired as e:
+            elapsed = time.monotonic() - start
             raise ProviderError(
-                f"claude CLI timed out after {timeout:.0f}s"
+                f"claude CLI timed out after {elapsed:.0f}s"
             ) from e
         duration_ms = int((time.monotonic() - start) * 1000)
 
