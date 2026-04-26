@@ -1,5 +1,35 @@
 # AGENTS.md — AI Reviewer Guide for conductor
 
+<!-- touchstone:shared-principles:start -->
+## Shared Engineering Principles (apply these first)
+
+These principles are touchstone-owned and shared across every project. Apply them as the **primary review criteria** before any project-specific rule below — a reviewer that lets a band-aid or a silent failure through has missed the point of this gate.
+
+- **No band-aids** — fix the root cause; if patching a symptom, say so explicitly and name the root cause.
+- **Keep interfaces narrow** — expose the smallest stable contract; don't leak storage shape, vendor SDKs, or workflow sequencing.
+- **Derive limits from domain** — thresholds and sizes come from input/config/named constants; test at small, typical, and large scales.
+- **Derive, don't persist** — compute from the source of truth; persist derived state only with a documented invalidation + rebuild path.
+- **No silent failures** — every exception is re-raised or logged with debug context. No `except: pass`, no swallowed errors.
+- **Every fix gets a test** — bug fix includes a regression test that runs in CI and fails on the old code.
+- **Think in invariants** — name and assert at least one invariant for nontrivial logic.
+- **One code path** — share business logic across modes; confine mode-specific differences to adapters, config, or the I/O boundary.
+- **Version your data boundaries** — when a model/algorithm/source change affects decisions, version the boundary; don't aggregate across.
+- **Separate behavior changes from tidying** — never mix functional changes with broad renames, formatting sweeps, or unrelated refactors.
+- **Make irreversible actions recoverable** — destructive operations need a dry-run, backup, idempotency, rollback, or forward-fix plan before they run.
+- **Preserve compatibility at boundaries** — public API/config/schema/CLI/hook/template changes need a compatibility or migration plan.
+- **Audit weak-point classes** — when a structural bug is found, audit the class and add a guardrail; don't fix only the one instance.
+
+Full rationale, worked examples, and the *why* behind each rule:
+
+- `principles/engineering-principles.md`
+- `principles/pre-implementation-checklist.md`
+- `principles/documentation-ownership.md`
+- `principles/git-workflow.md`
+
+This block is managed by `touchstone` and refreshes on `touchstone update` / `touchstone init`. Edit content **outside** the markers to add project-specific reviewer guidance — touchstone will not touch it.
+<!-- touchstone:shared-principles:end -->
+
+
 You are reviewing pull requests for **conductor**. Optimize your review for catching the things that bite this repo, not generic style polish.
 
 This file is the source of truth for how AI reviewers (Codex, Claude, etc.) should think about a PR. The companion file `CLAUDE.md` is for the *author* writing the code; this file is for the *reviewer*.

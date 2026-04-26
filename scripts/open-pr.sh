@@ -7,10 +7,22 @@
 # Always uses the project's PR template if one exists.
 #
 # Usage:
-#   bash scripts/open-pr.sh                # title from last commit
+#   bash scripts/open-pr.sh                # title from last commit; base = default branch
 #   bash scripts/open-pr.sh --auto-merge   # open + Codex review + squash-merge
 #   bash scripts/open-pr.sh --draft        # same, opened as draft
+#   bash scripts/open-pr.sh --base feat/X  # stacked PR: base this PR on feat/X, not main
 #   bash scripts/open-pr.sh "Custom title" # explicit title
+#
+# ⚠ Stacked PRs — read this before using --base:
+#   Stacking a PR on another PR's branch is useful when work naturally
+#   splits into a chain (parent PR ships primitive, child PR ships the
+#   consumer that depends on it). GitHub does NOT auto-rebase the child
+#   onto main when the parent squash-merges; it closes the child's branch
+#   instead. So stacked PRs work well with a merge commit or rebase merge,
+#   but the `--auto-merge` default (squash) will orphan the child.
+#
+#   For simpler review, prefer bundling related work into one PR over
+#   stacks when you can. See principles/git-workflow.md.
 #
 set -euo pipefail
 
@@ -57,16 +69,42 @@ fi
 # Parse flags early (needed before the existing-PR check).
 DRAFT_FLAG=""
 AUTO_MERGE=false
+BASE_OVERRIDE=""
 POSITIONAL=()
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --draft) DRAFT_FLAG="--draft"; shift ;;
     --auto-merge) AUTO_MERGE=true; shift ;;
+    --base)
+      if [ "$#" -lt 2 ]; then
+        echo "ERROR: --base requires a branch name." >&2
+        exit 1
+      fi
+      BASE_OVERRIDE="$2"
+      shift 2
+      ;;
     *) POSITIONAL+=("$1"); shift ;;
   esac
 done
 set -- "${POSITIONAL[@]+"${POSITIONAL[@]}"}"
+
+# Resolve the actual base branch: --base overrides the repo default.
+BASE_BRANCH="${BASE_OVERRIDE:-$DEFAULT_BRANCH}"
+if [ "$BASE_BRANCH" = "$CURRENT_BRANCH" ]; then
+  echo "ERROR: --base $BASE_BRANCH cannot equal the current branch." >&2
+  exit 1
+fi
+
+# Warn when stacking + auto-merge combine — the user is likely about to
+# orphan their stack. --auto-merge squashes the parent, which closes (not
+# rebases) stacked children.
+if [ -n "$BASE_OVERRIDE" ] && [ "$AUTO_MERGE" = true ]; then
+  echo "WARNING: --base $BASE_OVERRIDE with --auto-merge stacks this PR on another branch" >&2
+  echo "         AND will squash-merge it, which orphans any later stacked children." >&2
+  echo "         Either drop --auto-merge (open stack, merge manually in order)" >&2
+  echo "         or drop --base (bundle into one PR on $DEFAULT_BRANCH)." >&2
+fi
 
 # Push (set upstream on first push, plain push afterwards).
 if git rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
@@ -114,11 +152,11 @@ trap 'rm -f "$BODY_FILE"' EXIT
   fi
 } > "$BODY_FILE"
 
-echo "==> Opening PR against $DEFAULT_BRANCH ..."
+echo "==> Opening PR against $BASE_BRANCH ..."
 if [ -n "$DRAFT_FLAG" ]; then
-  PR_URL="$(gh pr create --base "$DEFAULT_BRANCH" --title "$TITLE" --body-file "$BODY_FILE" --draft)"
+  PR_URL="$(gh pr create --base "$BASE_BRANCH" --title "$TITLE" --body-file "$BODY_FILE" --draft)"
 else
-  PR_URL="$(gh pr create --base "$DEFAULT_BRANCH" --title "$TITLE" --body-file "$BODY_FILE")"
+  PR_URL="$(gh pr create --base "$BASE_BRANCH" --title "$TITLE" --body-file "$BODY_FILE")"
 fi
 
 echo "$PR_URL"

@@ -1,0 +1,20 @@
+{
+  "_comment": "Touchstone-owned Claude Code settings. Bootstrap copies this to .claude/settings.json; `bin/touchstone update` overwrites it. User-specific overrides go in .claude/settings.local.json (gitignored), which Claude Code merges on top of this file. Edit this file directly only if you understand it will be clobbered on the next update.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash scripts/branch-guard.sh"
+          },
+          {
+            "type": "command",
+            "command": "bash scripts/emergency-disclosure.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
