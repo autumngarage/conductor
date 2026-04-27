@@ -129,7 +129,7 @@ From the OpenRouter `:auto` research dispatched 2026-04-27:
 7. **Presets are a server-side feature** (`model: "@preset/<name>"`). Powerful but couples to OR's dashboard config. Skip in v1, revisit if inline requests get bloated.
 8. **NotDiamond direct, Martian, RouteLLM** are credible alternatives if `:auto`'s quality-first bias becomes painful. Not v1 scope.
 
-## Migration plan: three sequential PRs
+## Migration plan: four sequential PRs
 
 Each PR is independently reversible.
 
