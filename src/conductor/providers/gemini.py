@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from conductor.providers.interface import (
     CallResponse,
@@ -26,6 +27,9 @@ from conductor.providers.interface import (
     ProviderHTTPError,
     resolve_effort_tokens,
 )
+
+if TYPE_CHECKING:
+    from conductor.session_log import SessionLog
 
 GEMINI_DEFAULT_MODEL = "gemini-2.5-pro"
 GEMINI_REQUEST_TIMEOUT_SEC = 180.0
@@ -213,6 +217,7 @@ class GeminiProvider:
         timeout_sec: int | None = None,
         max_stall_sec: int | None = None,
         resume_session_id: str | None = None,
+        session_log: SessionLog | None = None,
     ) -> CallResponse:
         # accepted for API parity; only codex implements stall-watchdog today
         # Gemini's --approval-mode: "plan" (read-only) vs "yolo" (all writes

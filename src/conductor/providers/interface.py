@@ -29,7 +29,10 @@ supported_sandboxes against the caller's request, then scores by `prefer`.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import ClassVar, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, ClassVar, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from conductor.session_log import SessionLog
 
 # --------------------------------------------------------------------------- #
 # Effort levels — symbolic dial for "how hard should this provider think".
@@ -184,6 +187,7 @@ class Provider(Protocol):
         timeout_sec: int | None = None,
         max_stall_sec: int | None = None,
         resume_session_id: str | None = None,
+        session_log: SessionLog | None = None,
     ) -> CallResponse:
         """Multi-turn agent session with tool access.
 

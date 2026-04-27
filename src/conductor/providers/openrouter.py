@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sys
 import time
+from typing import TYPE_CHECKING
 
 import httpx
 
@@ -22,6 +23,9 @@ from conductor.providers.interface import (
     UnsupportedCapability,
     resolve_effort_tokens,
 )
+
+if TYPE_CHECKING:
+    from conductor.session_log import SessionLog
 
 from . import openrouter_catalog
 
@@ -247,6 +251,7 @@ class OpenRouterProvider:
         timeout_sec: int | None = None,
         max_stall_sec: int | None = None,
         resume_session_id: str | None = None,
+        session_log: SessionLog | None = None,
     ) -> CallResponse:
         if resume_session_id:
             raise UnsupportedCapability(

@@ -23,6 +23,7 @@ import sys
 import threading
 import time
 from pathlib import Path  # noqa: TC003 — runtime import so tests can patch Path.write_text
+from typing import TYPE_CHECKING
 
 from conductor import __version__ as _conductor_version
 from conductor.offline_mode import _cache_dir
@@ -34,6 +35,9 @@ from conductor.providers.interface import (
     ProviderStalledError,
     resolve_effort_tokens,
 )
+
+if TYPE_CHECKING:
+    from conductor.session_log import SessionLog
 
 CODEX_DEFAULT_MODEL = "gpt-5.4"
 CODEX_REQUEST_TIMEOUT_SEC = 180.0
@@ -195,6 +199,55 @@ class CodexProvider:
                 output_tokens = (output_tokens or 0) + (usage.get("output_tokens") or 0)
         return content, input_tokens, output_tokens, session_id
 
+    def _emit_stream_event(
+        self,
+        raw_line: str,
+        *,
+        session_log: SessionLog | None,
+    ) -> None:
+        if session_log is None:
+            return
+        try:
+            event = json.loads(raw_line)
+        except json.JSONDecodeError:
+            return
+
+        kind = event.get("type")
+        if kind == "session.created":
+            session_log.set_session_id(event.get("session_id") or event.get("id"))
+            return
+
+        item = event.get("item") or {}
+        item_type = item.get("type")
+        if kind == "item.completed" and item_type == "agent_message":
+            token_count = (
+                item.get("token_count")
+                or event.get("token_count")
+                or event.get("output_tokens")
+            )
+            session_log.emit(
+                "subagent_message",
+                {
+                    "provider": self.name,
+                    "token_count": token_count,
+                    "text": item.get("text", ""),
+                },
+            )
+            return
+
+        if item_type and (
+            "tool" in str(item_type) or str(item_type) in {"function_call", "tool_use"}
+        ):
+            session_log.emit(
+                "tool_call",
+                {
+                    "provider": self.name,
+                    "item_type": item_type,
+                    "name": item.get("name") or item.get("tool_name"),
+                    "args": item.get("arguments") or item.get("args"),
+                },
+            )
+
     def call(
         self,
         task: str,
@@ -224,6 +277,7 @@ class CodexProvider:
         max_stall_sec: int | None = None,
         liveness_interval_sec: float = 30.0,
         resume_session_id: str | None = None,
+        session_log: SessionLog | None = None,
     ) -> CallResponse:
         codex_sandbox = {
             "read-only": "read-only",
@@ -241,6 +295,7 @@ class CodexProvider:
             liveness_interval_sec=liveness_interval_sec,
             stream=True,
             resume_session_id=resume_session_id,
+            session_log=session_log,
         )
 
     def _run(
@@ -256,6 +311,7 @@ class CodexProvider:
         liveness_interval_sec: float = 30.0,
         stream: bool = False,
         resume_session_id: str | None = None,
+        session_log: SessionLog | None = None,
     ) -> CallResponse:
         # Cheap PATH check on the hot path; auth state surfaces as a CLI
         # exit failure below if needed. configured() (with auth probe) is
@@ -312,6 +368,7 @@ class CodexProvider:
                 timeout=timeout,
                 max_stall_sec=max_stall_sec,
                 liveness_interval_sec=liveness_interval_sec,
+                session_log=session_log,
             )
 
         start = time.monotonic()
@@ -388,6 +445,7 @@ class CodexProvider:
         timeout: float | None,
         max_stall_sec: int | None,
         liveness_interval_sec: float,
+        session_log: SessionLog | None,
     ) -> CallResponse:
         start = time.monotonic()
         process = subprocess.Popen(
@@ -475,6 +533,14 @@ class CodexProvider:
                 and now - last_output >= liveness_interval_sec
                 and now - last_liveness >= liveness_interval_sec
             ):
+                if session_log is not None:
+                    session_log.emit(
+                        "provider_silent",
+                        {
+                            "provider": self.name,
+                            "silent_sec": round(now - last_output, 1),
+                        },
+                    )
                 sys.stderr.write(
                     f"[conductor] no output from codex for {now - last_output:.0f}s...\n"
                 )
@@ -497,10 +563,13 @@ class CodexProvider:
             stdout_parts.append(item)
             last_output = time.monotonic()
             last_liveness = last_output
+            self._emit_stream_event(item, session_log=session_log)
 
             if not session_id_emitted:
                 sid = self._extract_session_id_fast(item)
                 if sid is not None:
+                    if session_log is not None:
+                        session_log.set_session_id(sid)
                     sys.stderr.write(f"[conductor] codex session_id={sid}\n")
                     sys.stderr.flush()
                     session_id_emitted = True
@@ -519,6 +588,8 @@ class CodexProvider:
             )
 
         content, input_tokens, output_tokens, session_id = self._parse_ndjson(stdout)
+        if session_log is not None:
+            session_log.set_session_id(session_id)
         if not content:
             raise ProviderHTTPError(
                 f"codex NDJSON stream had no agent_message: {stdout[:500]!r}"
