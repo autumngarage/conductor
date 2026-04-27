@@ -33,8 +33,11 @@ def no_key(monkeypatch):
     # only the env var still resolves the key. Force the resolver to return
     # None for these unconfigured-path tests.
     from conductor import credentials as _credentials
+    _orig_get = _credentials.get
     monkeypatch.setattr(
-        _credentials, "get", lambda key: None if key == OPENROUTER_API_KEY_ENV else _credentials.get(key)
+        _credentials,
+        "get",
+        lambda key: None if key == OPENROUTER_API_KEY_ENV else _orig_get(key),
     )
 
 
