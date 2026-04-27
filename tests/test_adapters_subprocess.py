@@ -23,6 +23,7 @@ from conductor.providers.interface import (
     ProviderHTTPError,
     ProviderStalledError,
 )
+from conductor.session_log import SessionLog
 
 
 def _strip_gemini_auth_env(monkeypatch) -> None:
@@ -620,6 +621,112 @@ def test_codex_exec_emits_liveness_signal_to_stderr(mocker, capsys):
         CodexProvider().exec("hi", max_stall_sec=0.25, liveness_interval_sec=0.1)
 
     assert "[conductor] no output from codex for " in capsys.readouterr().err
+
+
+def test_codex_exec_heartbeat_reports_tool_calls_from_session_log(
+    mocker, capsys, tmp_path, monkeypatch
+):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    lines = [
+        '{"type":"session.created","session_id":"sess-heartbeat-tools"}\n',
+        (
+            '{"type":"item.completed","item":{"type":"function_call","name":"Read",'
+            '"arguments":{"path":"README.md"}}}\n'
+        ),
+    ]
+    fake = _FakePopen(
+        stdout_schedule=[(0, line) for line in lines],
+        hang_after_stdout=True,
+    )
+    _patch_codex_popen(mocker, fake)
+    session_log = SessionLog(path=tmp_path / "heartbeat-tools.ndjson")
+
+    with pytest.raises(ProviderStalledError):
+        CodexProvider().exec(
+            "hi",
+            max_stall_sec=0.25,
+            liveness_interval_sec=0.1,
+            session_log=session_log,
+        )
+
+    err = capsys.readouterr().err
+    assert "1 tool call" in err
+
+
+def test_codex_exec_heartbeat_reports_subagent_tokens_from_session_log(
+    mocker, capsys, tmp_path, monkeypatch
+):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    lines = [
+        '{"type":"session.created","session_id":"sess-heartbeat-tokens"}\n',
+        (
+            '{"type":"item.completed","item":{"type":"agent_message",'
+            '"text":"working","token_count":1200}}\n'
+        ),
+    ]
+    fake = _FakePopen(
+        stdout_schedule=[(0, line) for line in lines],
+        hang_after_stdout=True,
+    )
+    _patch_codex_popen(mocker, fake)
+    session_log = SessionLog(path=tmp_path / "heartbeat-tokens.ndjson")
+
+    with pytest.raises(ProviderStalledError):
+        CodexProvider().exec(
+            "hi",
+            max_stall_sec=0.25,
+            liveness_interval_sec=0.1,
+            session_log=session_log,
+        )
+
+    err = capsys.readouterr().err
+    assert "1.2k tokens received since last heartbeat" in err
+
+
+def test_codex_exec_heartbeat_marks_zero_progress_as_possibly_stalled(
+    mocker, capsys, tmp_path, monkeypatch
+):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    partial = '{"type":"session.created","session_id":"sess-heartbeat-stalled"}\n'
+    fake = _FakePopen(
+        stdout_schedule=[(0, partial)],
+        hang_after_stdout=True,
+    )
+    _patch_codex_popen(mocker, fake)
+    session_log = SessionLog(path=tmp_path / "heartbeat-stalled.ndjson")
+
+    with pytest.raises(ProviderStalledError):
+        CodexProvider().exec(
+            "hi",
+            max_stall_sec=0.25,
+            liveness_interval_sec=0.1,
+            session_log=session_log,
+        )
+
+    err = capsys.readouterr().err
+    assert "0 tool calls, 0 tokens — possibly stalled" in err
+
+
+def test_codex_exec_heartbeat_falls_back_when_session_log_missing(mocker, capsys):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    partial = '{"type":"session.created","session_id":"sess-heartbeat-fallback"}\n'
+    fake = _FakePopen(
+        stdout_schedule=[(0, partial)],
+        hang_after_stdout=True,
+    )
+    _patch_codex_popen(mocker, fake)
+
+    with pytest.raises(ProviderStalledError):
+        CodexProvider().exec("hi", max_stall_sec=0.25, liveness_interval_sec=0.1)
+
+    err = capsys.readouterr().err
+    assert "[conductor] no output from codex for " in err
+    assert "tool call" not in err
+    assert "tokens received" not in err
+    assert "possibly stalled" not in err
 
 
 def test_codex_call_unaffected_by_streaming_changes(mocker):

@@ -61,6 +61,15 @@ _EFFORT_TO_CODEX_FLAG = {
 }
 
 
+def _format_compact_count(value: int) -> str:
+    """Format integer counts for operator-facing heartbeat output."""
+    if value < 1_000:
+        return str(value)
+    if value < 10_000:
+        return f"{value / 1_000:.1f}k"
+    return f"{value // 1_000}k"
+
+
 class CodexProvider:
     name = "codex"
     tags = ["strong-reasoning", "code-review", "tool-use"]
@@ -247,6 +256,71 @@ class CodexProvider:
                     "args": item.get("arguments") or item.get("args"),
                 },
             )
+
+    def _read_session_log_progress(
+        self,
+        *,
+        session_log: SessionLog,
+        offset: int,
+    ) -> tuple[str | None, int]:
+        """Summarize tool/message progress from complete NDJSON lines.
+
+        Heartbeats report deltas since the previous heartbeat, not cumulative
+        totals since process start. We therefore advance the read offset only
+        after consuming complete newline-terminated records.
+        """
+        try:
+            with session_log.log_path.open("r", encoding="utf-8") as fh:
+                fh.seek(offset)
+                chunk = fh.read()
+                end_offset = fh.tell()
+        except OSError:
+            return None, offset
+
+        if not chunk:
+            return (
+                "[conductor] no output from codex for {silent_sec:.0f}s...",
+                offset,
+            )
+
+        lines = chunk.splitlines(keepends=True)
+        if lines and not lines[-1].endswith("\n"):
+            incomplete = lines.pop()
+            end_offset -= len(incomplete)
+
+        tool_calls = 0
+        tokens_received = 0
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            if event.get("event") == "tool_call":
+                tool_calls += 1
+                continue
+
+            if event.get("event") != "subagent_message":
+                continue
+
+            token_count = (event.get("data") or {}).get("token_count")
+            if isinstance(token_count, int):
+                tokens_received += token_count
+
+        if tool_calls == 0 and tokens_received == 0:
+            return (
+                "[conductor] no output from codex for {silent_sec:.0f}s"
+                " · 0 tool calls, 0 tokens — possibly stalled",
+                end_offset,
+            )
+
+        tool_label = "tool call" if tool_calls == 1 else "tool calls"
+        return (
+            "[conductor] no output from codex for {silent_sec:.0f}s"
+            f" · {tool_calls} {tool_label}"
+            f" · {_format_compact_count(tokens_received)} tokens received since last heartbeat",
+            end_offset,
+        )
 
     def call(
         self,
@@ -487,6 +561,7 @@ class CodexProvider:
         stdout_done = False
         last_output = start
         last_liveness = start
+        heartbeat_log_offset = 0
         session_id_emitted = False
         while True:
             now = time.monotonic()
@@ -541,8 +616,20 @@ class CodexProvider:
                             "silent_sec": round(now - last_output, 1),
                         },
                     )
+                heartbeat_template: str | None = None
+                if session_log is not None:
+                    heartbeat_template, heartbeat_log_offset = (
+                        self._read_session_log_progress(
+                            session_log=session_log,
+                            offset=heartbeat_log_offset,
+                        )
+                    )
+                if heartbeat_template is None:
+                    heartbeat_template = (
+                        "[conductor] no output from codex for {silent_sec:.0f}s..."
+                    )
                 sys.stderr.write(
-                    f"[conductor] no output from codex for {now - last_output:.0f}s...\n"
+                    heartbeat_template.format(silent_sec=now - last_output) + "\n"
                 )
                 sys.stderr.flush()
                 last_liveness = now
