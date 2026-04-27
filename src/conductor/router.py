@@ -35,6 +35,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Literal
 
+from conductor.muted_providers import load_muted_provider_ids
 from conductor.providers import (
     TIER_RANK,
     Provider,
@@ -295,7 +296,8 @@ def pick(
 
     task_tag_set = set(task_tags or [])
     tools_set = frozenset(tools or ())
-    exclude_set = frozenset(exclude or ())
+    persisted_muted = frozenset(load_muted_provider_ids(known=set(known_providers())))
+    exclude_set = frozenset(exclude or ()) | persisted_muted
 
     if tools_set - {"Read", "Grep", "Glob", "Edit", "Write", "Bash"}:
         unknown = sorted(tools_set - {"Read", "Grep", "Glob", "Edit", "Write", "Bash"})
@@ -316,7 +318,10 @@ def pick(
 
     for name in order:
         if name in exclude_set:
-            skipped.append((name, "excluded by caller"))
+            if name in persisted_muted:
+                skipped.append((name, "muted persistently"))
+            else:
+                skipped.append((name, "excluded by caller"))
             continue
 
         provider = get_provider(name)

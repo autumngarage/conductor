@@ -29,6 +29,13 @@ import click
 import conductor.providers.openrouter_catalog as openrouter_catalog
 from conductor import __version__, credentials, offline_mode
 from conductor.banner import print_caller_banner
+from conductor.muted_providers import (
+    MutedProvidersError,
+    load_muted_provider_ids,
+    mute_provider_ids,
+    muted_providers_file_path,
+    unmute_provider_ids,
+)
 from conductor.profiles import ProfileError, ProfileSpec, get_profile, load_profiles
 from conductor.providers import (
     QUALITY_TIERS,
@@ -913,7 +920,7 @@ def call(
                 exclude=frozenset(_parse_csv(exclude)),
                 shadow=True,
             )
-        except (NoConfiguredProvider, InvalidRouterRequest) as e:
+        except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
         print_caller_banner(decision.provider, silent=silent_route or as_json)
@@ -1173,7 +1180,7 @@ def exec_cmd(
                 exclude=frozenset(_parse_csv(exclude)),
                 shadow=True,
             )
-        except (NoConfiguredProvider, InvalidRouterRequest) as e:
+        except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
         print_caller_banner(decision.provider, silent=silent_route or as_json)
@@ -1306,7 +1313,7 @@ def route(
             exclude=frozenset(_parse_csv(exclude)),
             shadow=True,
         )
-    except (NoConfiguredProvider, InvalidRouterRequest) as e:
+    except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
         if as_json:
             click.echo(json.dumps({"error": str(e)}, indent=2))
         else:
@@ -1453,6 +1460,7 @@ def profiles_show(name: str) -> None:
 
 
 def _provider_rows() -> list[dict]:
+    muted = set(load_muted_provider_ids(known=set(known_providers())))
     rows = []
     for name in known_providers():
         provider = get_provider(name)
@@ -1472,6 +1480,7 @@ def _provider_rows() -> list[dict]:
                 "default_model": provider.default_model,
                 "tags": list(provider.tags),
                 "tier": provider.quality_tier,
+                "muted": name in muted,
             }
         )
     return rows
@@ -1487,7 +1496,10 @@ def _provider_rows() -> list[dict]:
 )
 def list_cmd(as_json: bool) -> None:
     """Show every known provider and whether it's configured."""
-    rows = _provider_rows()
+    try:
+        rows = _provider_rows()
+    except MutedProvidersError as e:
+        raise click.ClickException(str(e)) from e
     if as_json:
         click.echo(json.dumps(rows, indent=2))
         return
@@ -1667,6 +1679,8 @@ def _active_credential_row(provider: object, *, configured: bool) -> dict | None
 
 
 def _diagnostic_payload() -> dict:
+    muted_list = load_muted_provider_ids(known=set(known_providers()))
+    muted = set(muted_list)
     providers_info = []
     active_credentials = []
     warnings: list[dict] = []
@@ -1699,6 +1713,7 @@ def _diagnostic_payload() -> dict:
                 "quality_tier": provider.quality_tier,
                 "supports_effort": provider.supports_effort,
                 "warnings": provider_warnings,
+                "muted": name in muted,
             }
         )
         active = _active_credential_row(provider, configured=ok)
@@ -1750,6 +1765,7 @@ def _diagnostic_payload() -> dict:
         "platform": sys.platform,
         "python": sys.version.split()[0],
         "providers": providers_info,
+        "muted": muted_list,
         "credentials": env_info,
         "active_credentials": active_credentials,
         "agent_integration": _agent_integration_payload(),
@@ -1798,7 +1814,10 @@ def _agent_integration_payload() -> dict:
 )
 def doctor(as_json: bool) -> None:
     """Diagnose what's configured, what's missing, and where to look."""
-    payload = _diagnostic_payload()
+    try:
+        payload = _diagnostic_payload()
+    except MutedProvidersError as e:
+        raise click.ClickException(str(e)) from e
 
     if as_json:
         click.echo(json.dumps(payload, indent=2))
@@ -1812,8 +1831,11 @@ def doctor(as_json: bool) -> None:
     )
     click.echo("")
     configured = [p for p in payload["providers"] if p["configured"]]
-    unconfigured = [p for p in payload["providers"] if not p["configured"]]
-    total = len(payload["providers"])
+    unconfigured = [
+        p for p in payload["providers"] if not p["configured"] and not p["muted"]
+    ]
+    active = [p for p in payload["providers"] if not p["muted"]]
+    muted = payload["muted"]
 
     def _provider_line(p: dict) -> None:
         symbol = "✓" if p["configured"] else "✗"
@@ -1830,7 +1852,10 @@ def doctor(as_json: bool) -> None:
         for w in p.get("warnings") or []:
             click.echo(f"        ⚠ {w}")
 
-    click.echo(f"Providers ({len(configured)}/{total} configured):")
+    click.echo(
+        f"Providers ({len([p for p in configured if not p['muted']])}/{len(active)} active, "
+        f"{len(muted)} muted):"
+    )
     if configured:
         click.echo("  Configured:")
         for p in configured:
@@ -1841,6 +1866,9 @@ def doctor(as_json: bool) -> None:
         click.echo("  Available (not configured):")
         for p in unconfigured:
             _provider_line(p)
+    if muted:
+        click.echo("")
+        click.echo(f"  Muted: {', '.join(muted)}")
 
     click.echo("")
     click.echo("Credentials (active source per env-var):")
@@ -1941,9 +1969,17 @@ def doctor(as_json: bool) -> None:
 
     click.echo("")
     click.echo("Next steps:")
-    not_configured = [p for p in payload["providers"] if not p["configured"]]
+    not_configured = [
+        p for p in payload["providers"] if not p["configured"] and not p["muted"]
+    ]
     if not not_configured:
-        click.echo("  everything is configured. try `conductor smoke --all`.")
+        if payload["muted"]:
+            click.echo(
+                "  all remaining providers are either configured or muted. "
+                "try `conductor smoke --all`."
+            )
+        else:
+            click.echo("  everything is configured. try `conductor smoke --all`.")
     else:
         click.echo("  run `conductor init` to configure missing providers interactively,")
         click.echo("  or set the env vars listed above and re-run `conductor doctor`.")
@@ -2193,7 +2229,7 @@ def models_show(slug: str) -> None:
 
 @main.group()
 def providers() -> None:
-    """Manage user-local custom providers (shell-command integrations).
+    """Manage user-local provider state (custom integrations + muting).
 
     Custom providers let you register an arbitrary CLI — your own
     internal LLM wrapper, a different model's inference script, a local
@@ -2204,6 +2240,9 @@ def providers() -> None:
     Custom providers are single-turn (no tool-use) and stateless (no
     resume). For CLIs that run their own agent loop internally, that
     happens inside the shell command, not through Conductor's router.
+
+    Muting is persistent: muted providers are hidden from doctor's
+    "Available" section and excluded from auto-routing until unmuted.
     """
 
 
@@ -2332,6 +2371,38 @@ def providers_remove(name: str) -> None:
     click.echo(f"==> removed custom provider `{name}` from {path}")
 
 
+@providers.command("mute")
+@click.argument("names", nargs=-1, required=True)
+def providers_mute(names: tuple[str, ...]) -> None:
+    """Persistently mute one or more providers."""
+    try:
+        path, added = mute_provider_ids(list(names), known=set(known_providers()))
+    except MutedProvidersError as e:
+        raise click.UsageError(str(e)) from e
+
+    if added:
+        click.echo(f"==> muted: {', '.join(added)}")
+    else:
+        click.echo("==> no changes; all requested providers were already muted")
+    click.echo(f"    file: {path}")
+
+
+@providers.command("unmute")
+@click.argument("names", nargs=-1, required=True)
+def providers_unmute(names: tuple[str, ...]) -> None:
+    """Remove one or more providers from the persistent mute list."""
+    try:
+        path, removed = unmute_provider_ids(list(names), known=set(known_providers()))
+    except MutedProvidersError as e:
+        raise click.UsageError(str(e)) from e
+
+    if removed:
+        click.echo(f"==> unmuted: {', '.join(removed)}")
+    else:
+        click.echo("==> no changes; none of the requested providers were muted")
+    click.echo(f"    file: {path}")
+
+
 @providers.command("list")
 @click.option(
     "--json",
@@ -2341,8 +2412,13 @@ def providers_remove(name: str) -> None:
     help="Emit the custom-provider list as JSON.",
 )
 def providers_list(as_json: bool) -> None:
-    """Show only custom providers (built-ins are in `conductor list`)."""
+    """Show persistent muted state plus registered custom providers."""
     from conductor.custom_providers import load_specs, providers_file_path
+
+    try:
+        muted = load_muted_provider_ids(known=set(known_providers()))
+    except MutedProvidersError as e:
+        raise click.ClickException(str(e)) from e
 
     specs = load_specs()
     if as_json:
@@ -2356,6 +2432,7 @@ def providers_list(as_json: bool) -> None:
                 "cost_per_1k_in": s.cost_per_1k_in,
                 "cost_per_1k_out": s.cost_per_1k_out,
                 "typical_p50_ms": s.typical_p50_ms,
+                "muted": s.name in muted,
             }
             for s in specs
         ]
@@ -2363,6 +2440,14 @@ def providers_list(as_json: bool) -> None:
         return
 
     path = providers_file_path()
+    muted_path = muted_providers_file_path()
+    click.echo(
+        "Muted providers: "
+        + (", ".join(muted) if muted else "(none)")
+    )
+    click.echo(f"file: {muted_path} {'(not yet created)' if not muted_path.exists() else ''}")
+    click.echo("")
+
     if not specs:
         click.echo("(no custom providers; register via `conductor providers add`)")
         click.echo(f"file: {path} {'(not yet created)' if not path.exists() else ''}")
@@ -2371,7 +2456,8 @@ def providers_list(as_json: bool) -> None:
     click.echo(f"Custom providers ({path}):")
     click.echo("")
     for s in specs:
-        click.echo(f"  {s.name}")
+        muted_note = "  [muted]" if s.name in muted else ""
+        click.echo(f"  {s.name}{muted_note}")
         click.echo(f"    shell:    {s.shell}")
         click.echo(f"    accepts:  {s.accepts}")
         click.echo(f"    tier:     {s.quality_tier}")
