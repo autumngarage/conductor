@@ -22,6 +22,7 @@ import json
 import os
 import sys
 from dataclasses import asdict
+from pathlib import Path
 
 import click
 
@@ -57,15 +58,32 @@ VALID_EFFORT_LEVELS = ("minimal", "low", "medium", "high", "max")
 # --------------------------------------------------------------------------- #
 
 
-def _read_task(task: str | None) -> str:
+def _read_task(task: str | None, task_file: str | None) -> str:
+    if task is not None and task_file is not None:
+        raise click.UsageError(
+            "task source is ambiguous. Use exactly one of --task, --task-file, or stdin; "
+            "got --task, --task-file."
+        )
+
     if task is not None:
         body = task
+    elif task_file is not None:
+        if task_file == "-":
+            body = sys.stdin.read()
+        else:
+            try:
+                body = Path(task_file).read_text(encoding="utf-8")
+            except OSError as e:
+                raise click.UsageError(
+                    f"could not read --task-file {task_file!r}: {e.strerror or e}"
+                ) from e
     elif not sys.stdin.isatty():
         body = sys.stdin.read()
     else:
         raise click.UsageError(
-            "no task provided. Pass --task '...' or pipe content on stdin."
+            "no task provided. Pass --task '...', --task-file PATH, or pipe content on stdin."
         )
+
     body = body.strip()
     if not body:
         raise click.UsageError("task is empty after stripping whitespace.")
@@ -692,7 +710,14 @@ def main() -> None:
 @click.option(
     "--task",
     default=None,
-    help="The task / prompt. If omitted, read from stdin.",
+    help="The task / prompt. Reads stdin if omitted.\n"
+    "For long briefs, prefer --task-file or stdin to keep the prompt\n"
+    "out of `ps aux`.",
+)
+@click.option(
+    "--task-file",
+    default=None,
+    help="Read the task / prompt from a UTF-8 file. Use '-' to read stdin.",
 )
 @click.option(
     "--model",
@@ -740,6 +765,7 @@ def call(
     effort: str | None,
     exclude: str | None,
     task: str | None,
+    task_file: str | None,
     model: str | None,
     as_json: bool,
     verbose_route: bool,
@@ -766,7 +792,7 @@ def call(
             f"--with {provider_id} and --exclude {exclude} contradict each other."
         )
 
-    body = _read_task(task)
+    body = _read_task(task, task_file)
     effort_value = _parse_effort(effort)
 
     decision: RouteDecision | None = None
@@ -910,7 +936,18 @@ def call(
         "--max-stall-seconds 600 (10 minutes of silence = stalled)."
     ),
 )
-@click.option("--task", default=None, help="The task / prompt. Reads stdin if omitted.")
+@click.option(
+    "--task",
+    default=None,
+    help="The task / prompt. Reads stdin if omitted.\n"
+    "For long briefs, prefer --task-file or stdin to keep the prompt\n"
+    "out of `ps aux`.",
+)
+@click.option(
+    "--task-file",
+    default=None,
+    help="Read the task / prompt from a UTF-8 file. Use '-' to read stdin.",
+)
 @click.option("--model", default=None, help="Override the provider's default model.")
 @click.option(
     "--json",
@@ -947,6 +984,7 @@ def exec_cmd(
     timeout_sec: int | None,
     max_stall_sec: int | None,
     task: str | None,
+    task_file: str | None,
     model: str | None,
     as_json: bool,
     verbose_route: bool,
@@ -967,7 +1005,7 @@ def exec_cmd(
             "--resume requires --with <provider> (sessions are provider-specific)."
         )
 
-    body = _read_task(task)
+    body = _read_task(task, task_file)
     tools_set = _validate_tools(tools)
     sandbox_value = _validate_sandbox(sandbox)
     effort_value = _parse_effort(effort)

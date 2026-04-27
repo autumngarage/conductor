@@ -39,6 +39,32 @@ def test_call_missing_task_and_no_stdin_errors():
     assert "task" in result.output.lower() and "empty" in result.output.lower()
 
 
+def test_call_task_file_reads_file(monkeypatch, tmp_path):
+    monkeypatch.setenv(CLOUDFLARE_API_TOKEN_ENV, "cf-test-token")
+    monkeypatch.setenv(CLOUDFLARE_ACCOUNT_ID_ENV, _TEST_ACCOUNT_ID)
+    brief = tmp_path / "brief.md"
+    brief.write_text("brief from file\n", encoding="utf-8")
+
+    with respx.mock() as router:
+        route = router.post(_CF_CHAT_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "model": KIMI_DEFAULT_MODEL,
+                    "choices": [{"message": {"content": "hello back"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 2},
+                },
+            )
+        )
+        result = CliRunner().invoke(
+            main, ["call", "--with", "kimi", "--task-file", str(brief)]
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "hello back" in result.output
+    assert route.calls.last.request.content.decode("utf-8").count("brief from file") == 1
+
+
 def test_call_kimi_happy_path(monkeypatch):
     monkeypatch.setenv(CLOUDFLARE_API_TOKEN_ENV, "cf-test-token")
     monkeypatch.setenv(CLOUDFLARE_ACCOUNT_ID_ENV, _TEST_ACCOUNT_ID)
