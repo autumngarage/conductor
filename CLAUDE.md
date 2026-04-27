@@ -142,3 +142,16 @@ Deferred (see `~/Repos/autumn-garage/.cortex/plans/conductor-bootstrap.md` for t
 1. **Mock httpx with respx, not with `monkeypatch`-on-the-class.** The test suite uses `respx.mock(base_url=...)` so adapter code reaches the real `httpx.Client(...)` codepath; this catches signature drift between Conductor and httpx that monkey-patched mocks would silently swallow.
 2. **Click's `CliRunner` attaches an empty stdin (isatty=False).** Tests that exercise "no input provided" hit the empty-task branch, not the no-stdin branch. Both are correct user errors; tests assert on the user-visible substring, not the internal branch.
 3. **Provider quirks live in the adapter, never in shared code.** Kimi clamps temperature to `[0,1]`; Moonshot disallows `tool_choice="required"`. When those constraints become reachable (v0.2+ features), they belong in `kimi.py`, never in `interface.py` or the router. The Provider Protocol exists to keep the rest of Conductor ignorant of provider-specific gotchas.
+
+## Delegating to codex via `conductor exec`
+
+When a parent agent (like Claude Code) hands a feature build to codex via `conductor exec --with codex --sandbox workspace-write`, the codex sandbox blocks two things by default that matter for shipping a PR:
+
+- **`.git/` is not writable.** `git checkout -b`, `git commit`, `git push` all fail with `Operation not permitted`.
+- **No network.** Even with `.git/` open, `git push` would fail because the sandbox blocks outbound network access in `workspace-write` mode.
+
+This means **codex cannot run the full branch → commit → push → open-pr.sh workflow itself.** Don't put those steps in a brief sent to codex — it'll waste minutes hitting the boundary, then report failure.
+
+**The pattern that works:** scope the codex brief to *code* (write files, run tests, validate). The parent agent picks up afterward and does the git work on the host side: `git status` to see what changed, `git checkout -b`, stage explicit paths, commit, push, run `bash scripts/open-pr.sh --auto-merge`. PR #57 (OpenRouter adapter) shipped this way after the parent re-did the brief mid-flight to handle git on the outside.
+
+If you want codex to do everything end-to-end including git, you'd need to open both sandbox boundaries (`--add-dir <repo>/.git` plus a network whitelist), which is a real safety escalation worth a deliberate design decision rather than a default.

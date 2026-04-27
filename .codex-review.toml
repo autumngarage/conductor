@@ -34,11 +34,15 @@ safe_by_default = false
 # Override for a single run with: CODEX_REVIEW_MODE=review-only git push
 mode = "review-only"
 
-# Wall-clock timeout per reviewer invocation, in seconds. 0 = no timeout.
-# Safety net for wedged reviewer processes, NOT a thinking-time budget — real
-# reviews on big diffs can run 8–10 minutes. On timeout the cascade now falls
-# through to the next reviewer instead of silently passing the push.
-# timeout = 1800
+# Stall threshold per reviewer invocation, in seconds. 0 = no watchdog.
+# Event-based kill condition: the reviewer is killed only if it produces NO
+# output for this long — slow-but-progressing reviews are not punished. This
+# is strictly better than a wall-clock cap, which forced us to pick an
+# arbitrary "long enough" number that still bit on big diffs (PR #57's review
+# at effort=max hit a 300s wall-clock at 837 lines). 300s of pure silence is
+# a strong signal of a wedged reviewer process; bumping higher trades faster
+# wedge-detection for tolerance of longer thinking pauses.
+max_stall_sec = 300
 
 # What to do when the reviewer fails (crash, timeout, malformed output).
 # "fail-open"   = exit 0, allow push (default — infrastructure errors don't block)
