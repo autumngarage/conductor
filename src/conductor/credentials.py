@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Literal
 
 CONDUCTOR_KEYCHAIN_SERVICE = "conductor"
+CONDUCTOR_SECRET_SERVICE = "conductor"
 CREDENTIALS_FILE_ENV = "CONDUCTOR_CREDENTIALS_FILE"
 DEFAULT_CREDENTIALS_PATH = Path.home() / ".config" / "conductor" / "credentials.toml"
 KEY_COMMAND_TIMEOUT_SEC = 30.0
@@ -246,6 +247,19 @@ def run_key_command(key: str, command: str) -> str | None:
     return _run_key_command(key, command)
 
 
+def libsecret_available() -> bool:
+    """Return True when the Linux secret-tool CLI is available."""
+    return sys.platform.startswith("linux") and shutil.which("secret-tool") is not None
+
+
+def libsecret_lookup_command(key: str) -> str:
+    """Return the key_command string that reads ``key`` from libsecret."""
+    return (
+        f"secret-tool lookup service {shlex.quote(CONDUCTOR_SECRET_SERVICE)} "
+        f"account {shlex.quote(key)}"
+    )
+
+
 def _run_key_command(key: str, command: str) -> str | None:
     """Execute a key_command and return stdout (or None on failure).
 
@@ -348,6 +362,60 @@ def set_in_keychain(key: str, value: str) -> None:
         raise RuntimeError(
             f"Keychain write failed ({result.returncode}): {result.stderr.strip()}"
         )
+
+
+def probe_keychain_read(key: str) -> bool:
+    """Probe-read a Keychain item so macOS can attach the access decision."""
+    if sys.platform != "darwin":
+        return False
+    return _keychain_find(key) is not None
+
+
+def set_in_libsecret(key: str, value: str) -> None:
+    """Store a credential in libsecret via ``secret-tool store``."""
+    if not sys.platform.startswith("linux"):
+        raise RuntimeError("libsecret storage is only available on Linux.")
+    if not shutil.which("secret-tool"):
+        raise RuntimeError(
+            "`secret-tool` not found. Install libsecret-tools or use env / 1Password."
+        )
+    result = subprocess.run(
+        [
+            "secret-tool",
+            "store",
+            "--label",
+            f"Conductor {key}",
+            "service",
+            CONDUCTOR_SECRET_SERVICE,
+            "account",
+            key,
+        ],
+        input=value,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"libsecret write failed ({result.returncode}): {result.stderr.strip()}"
+        )
+
+
+def delete_from_libsecret(key: str) -> None:
+    """Remove a Conductor libsecret entry; silently OK if it doesn't exist."""
+    if not libsecret_available():
+        return
+    subprocess.run(
+        [
+            "secret-tool",
+            "clear",
+            "service",
+            CONDUCTOR_SECRET_SERVICE,
+            "account",
+            key,
+        ],
+        capture_output=True,
+        text=True,
+    )
 
 
 def delete_from_keychain(key: str) -> None:
