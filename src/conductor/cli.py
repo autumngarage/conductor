@@ -1596,9 +1596,80 @@ _DIAGNOSTIC_ENV_VARS = (
     "OPENROUTER_API_KEY",
 )
 
+_HTTP_PROVIDER_CREDENTIAL_ENV_VARS = {
+    "deepseek-chat": "DEEPSEEK_API_KEY",
+    "deepseek-reasoner": "DEEPSEEK_API_KEY",
+    "kimi": "CLOUDFLARE_API_TOKEN",
+    "openrouter": "OPENROUTER_API_KEY",
+}
+
+
+def _credential_fingerprint(value: str) -> str:
+    """Return a non-secret fingerprint for a resolved credential."""
+    if len(value) <= 4:
+        return value
+    return f"{value[:-4]}...{value[-4:]}"
+
+
+def _active_credential_row(provider: object, *, configured: bool) -> dict | None:
+    """Summarize the credential Conductor would use for one provider.
+
+    Only configured providers get a row. The doctor report remains derived
+    from the same configured() gate the router uses, while this helper adds
+    the provider-specific credential detail that was previously missing.
+    """
+    provider_name = getattr(provider, "name", None)
+    if not configured or not isinstance(provider_name, str):
+        return None
+
+    if provider_name == "ollama":
+        detail = "no credential (local)"
+        return {
+            "provider": provider_name,
+            "kind": "local",
+            "source": "local",
+            "env_var": None,
+            "fingerprint": None,
+            "detail": detail,
+        }
+
+    # CLI-backed providers own auth inside the external CLI session; Conductor
+    # does not resolve or persist a secret for them directly.
+    if hasattr(provider, "auth_login_command"):
+        cli_name = getattr(provider, "_cli", provider_name)
+        detail = f"OAuth via `{cli_name}` CLI session (no env var)"
+        return {
+            "provider": provider_name,
+            "kind": "cli_session",
+            "source": "cli_session",
+            "env_var": None,
+            "fingerprint": None,
+            "detail": detail,
+        }
+
+    env_var = _HTTP_PROVIDER_CREDENTIAL_ENV_VARS.get(provider_name)
+    if env_var is None:
+        return None
+
+    value, source = credentials.resolve_with_source(env_var)
+    if value is None or source is None:
+        return None
+
+    fingerprint = _credential_fingerprint(value)
+    detail = f"{env_var} ({source}, {fingerprint})"
+    return {
+        "provider": provider_name,
+        "kind": "env_var",
+        "source": source,
+        "env_var": env_var,
+        "fingerprint": fingerprint,
+        "detail": detail,
+    }
+
 
 def _diagnostic_payload() -> dict:
     providers_info = []
+    active_credentials = []
     warnings: list[dict] = []
     for name in known_providers():
         provider = get_provider(name)
@@ -1631,6 +1702,9 @@ def _diagnostic_payload() -> dict:
                 "warnings": provider_warnings,
             }
         )
+        active = _active_credential_row(provider, configured=ok)
+        if active is not None:
+            active_credentials.append(active)
 
     env_info = []
     key_commands = credentials.load_key_commands()
@@ -1662,6 +1736,7 @@ def _diagnostic_payload() -> dict:
         "python": sys.version.split()[0],
         "providers": providers_info,
         "credentials": env_info,
+        "active_credentials": active_credentials,
         "agent_integration": _agent_integration_payload(),
         "warnings": warnings,
     }
@@ -1762,6 +1837,11 @@ def doctor(as_json: bool) -> None:
             None: "—",
         }.get(c["source"], "—")
         click.echo(f"  {c['name']:<24}  {source_label}")
+
+    click.echo("")
+    click.echo("Active credentials (per provider):")
+    for row in payload["active_credentials"]:
+        click.echo(f"  {row['provider']:<14} {row['detail']}")
 
     click.echo("")
     click.echo("Agent integration:")
