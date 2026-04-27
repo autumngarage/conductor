@@ -1405,7 +1405,14 @@ def _wire_cursor_section(
 
 
 def _print_next_steps(outcomes: list[WizardOutcome]) -> None:
+    ok_names = [o.provider for o in outcomes if o.status == "ok"]
+
     click.echo("")
+    if ok_names:
+        click.echo("Setup complete. Verify with:")
+        click.echo("  conductor smoke <name>          (per provider)")
+        click.echo("  conductor smoke --all           (everything)")
+        click.echo("")
     click.echo("Next steps:")
     click.echo("  conductor list           # see providers + quality tiers")
     click.echo("  conductor smoke --all    # verify configured providers")
