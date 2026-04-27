@@ -29,7 +29,7 @@ supported_sandboxes against the caller's request, then scores by `prefer`.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import ClassVar, Protocol, runtime_checkable
 
 # --------------------------------------------------------------------------- #
 # Effort levels — symbolic dial for "how hard should this provider think".
@@ -115,22 +115,26 @@ class CallResponse:
 @runtime_checkable
 class Provider(Protocol):
     # --- identity ---------------------------------------------------------- #
-    name: str
-    default_model: str
+    # Class-level attributes on every implementation. Declared as ClassVar so
+    # mypy treats the implementations' class-level assignments as Protocol-
+    # conformant (the default Protocol attribute is treated as a settable
+    # instance variable, which read-only class attributes do not satisfy).
+    name: ClassVar[str]
+    default_model: ClassVar[str]
 
     # --- capability tags (soft matching for routing) ----------------------- #
-    tags: list[str]
+    tags: ClassVar[list[str]]
 
     # --- capability declarations (hard filters + scoring dimensions) ------- #
-    quality_tier: str
-    supported_tools: frozenset[str]
-    supported_sandboxes: frozenset[str]
-    supports_effort: bool
-    effort_to_thinking: dict[str, int]
-    cost_per_1k_in: float
-    cost_per_1k_out: float
-    cost_per_1k_thinking: float
-    typical_p50_ms: int
+    quality_tier: ClassVar[str]
+    supported_tools: ClassVar[frozenset[str]]
+    supported_sandboxes: ClassVar[frozenset[str]]
+    supports_effort: ClassVar[bool]
+    effort_to_thinking: ClassVar[dict[str, int]]
+    cost_per_1k_in: ClassVar[float]
+    cost_per_1k_out: ClassVar[float]
+    cost_per_1k_thinking: ClassVar[float]
+    typical_p50_ms: ClassVar[int]
 
     # --- core methods ------------------------------------------------------ #
     def configured(self) -> tuple[bool, str | None]:
@@ -144,7 +148,7 @@ class Provider(Protocol):
         task: str,
         model: str | None = None,
         *,
-        effort: str = "medium",
+        effort: str | int = "medium",
         resume_session_id: str | None = None,
     ) -> CallResponse:
         """Single-turn call. `effort` is a symbolic dial (see EFFORT_LEVELS)
@@ -164,11 +168,11 @@ class Provider(Protocol):
         task: str,
         model: str | None = None,
         *,
-        effort: str = "medium",
+        effort: str | int = "medium",
         tools: frozenset[str] = frozenset(),
         sandbox: str = "none",
         cwd: str | None = None,
-        timeout_sec: int = 300,
+        timeout_sec: int | None = None,
         max_stall_sec: int | None = None,
         resume_session_id: str | None = None,
     ) -> CallResponse:

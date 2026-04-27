@@ -75,7 +75,7 @@ def _stub_other_providers_unconfigured(mocker, *, include_ollama: bool = False):
     """
     from conductor.providers import ClaudeProvider, CodexProvider, GeminiProvider
 
-    classes = [ClaudeProvider, CodexProvider, GeminiProvider]
+    classes: list[type] = [ClaudeProvider, CodexProvider, GeminiProvider]
     if include_ollama:
         from conductor.providers import OllamaProvider
 

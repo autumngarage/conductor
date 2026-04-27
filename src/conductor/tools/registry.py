@@ -233,7 +233,7 @@ class GrepTool:
         for file in candidates:
             try:
                 # Realpath-check every candidate to catch symlink escape.
-                _ = _resolve_in_cwd(str(file.relative_to(cwd)), cwd)
+                _resolve_in_cwd(str(file.relative_to(cwd)), cwd)
             except (ToolExecutionError, ValueError):
                 continue
             except Exception:
@@ -314,7 +314,7 @@ class GlobTool:
         # Path.rglob accepts glob-style patterns with ** for recursion.
         for match in root.rglob(pattern):
             try:
-                _ = _resolve_in_cwd(str(match.relative_to(cwd)), cwd)
+                _resolve_in_cwd(str(match.relative_to(cwd)), cwd)
             except (ToolExecutionError, ValueError):
                 continue
             matches.append(str(match.relative_to(cwd)))
@@ -528,8 +528,23 @@ class BashTool:
                 preexec_fn=preexec,
             )
         except subprocess.TimeoutExpired as e:
-            stdout = (e.stdout or "")[: max_output // 2]
-            stderr = (e.stderr or "")[: max_output // 2]
+            # text=True on the run() call ensures e.stdout/e.stderr are str,
+            # but TimeoutExpired's annotations widen to bytes|None across
+            # all overloads. Decode defensively for the typed signature.
+            raw_out = e.stdout or ""
+            raw_err = e.stderr or ""
+            stdout_str = (
+                raw_out.decode("utf-8", errors="replace")
+                if isinstance(raw_out, bytes)
+                else raw_out
+            )
+            stderr_str = (
+                raw_err.decode("utf-8", errors="replace")
+                if isinstance(raw_err, bytes)
+                else raw_err
+            )
+            stdout = stdout_str[: max_output // 2]
+            stderr = stderr_str[: max_output // 2]
             tag = "STRICT TIMEOUT" if strict else "TIMEOUT"
             return (
                 f"{tag} after {timeout}s. "
