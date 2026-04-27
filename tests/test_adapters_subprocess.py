@@ -637,6 +637,147 @@ def test_codex_call_unaffected_by_streaming_changes(mocker):
     assert not popen_mock.called
 
 
+def test_codex_exec_emits_session_id_to_stderr_when_received(mocker, capsys):
+    """Once codex emits the `session.created` NDJSON event, conductor must
+    surface the session_id on stderr immediately so a wrapping agent can
+    correlate logs and (if needed) `--resume` mid-flight. Without this the
+    session_id only became visible at completion or on error."""
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    lines = [
+        '{"type":"session.created","session_id":"sess-early-1"}\n',
+        '{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\n',
+        '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n',
+    ]
+    fake = _FakePopen(stdout_schedule=[(0, line) for line in lines])
+    _patch_codex_popen(mocker, fake)
+
+    CodexProvider().exec("hi", liveness_interval_sec=0)
+
+    captured = capsys.readouterr()
+    assert "[conductor] codex session_id=sess-early-1" in captured.err, (
+        f"Expected session_id stderr line. Got: {captured.err!r}"
+    )
+
+
+def test_codex_exec_emits_session_id_only_once(mocker, capsys):
+    """If codex emits multiple session.created events (shouldn't happen,
+    but the parser must tolerate it), conductor surfaces the first one
+    and stays quiet on duplicates — operator stderr stays clean."""
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    lines = [
+        '{"type":"session.created","session_id":"sess-first"}\n',
+        '{"type":"session.created","session_id":"sess-second"}\n',
+        '{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\n',
+        '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n',
+    ]
+    fake = _FakePopen(stdout_schedule=[(0, line) for line in lines])
+    _patch_codex_popen(mocker, fake)
+
+    CodexProvider().exec("hi", liveness_interval_sec=0)
+
+    err = capsys.readouterr().err
+    assert err.count("[conductor] codex session_id=") == 1
+    assert "sess-first" in err
+    assert "sess-second" not in err
+
+
+def test_codex_exec_writes_forensic_log_on_stall(mocker, tmp_path, monkeypatch):
+    """When the stall watchdog fires with partial NDJSON in the buffer,
+    conductor saves the raw NDJSON to the cache dir and includes the path
+    in the error message. This is the forensic trail for hangs that
+    happen without a recoverable session_id (or in addition to one)."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    partial = '{"type":"session.created","session_id":"sess-forensic-1"}\n'
+    fake = _FakePopen(
+        stdout_schedule=[(0, partial)],
+        hang_after_stdout=True,
+    )
+    _patch_codex_popen(mocker, fake)
+
+    with pytest.raises(ProviderStalledError) as exc:
+        CodexProvider().exec("hi", max_stall_sec=0.05, liveness_interval_sec=0)
+
+    msg = str(exc.value)
+    assert "raw NDJSON saved to" in msg
+    log_dir = tmp_path / "conductor"
+    log_files = list(log_dir.glob("codex-*.ndjson"))
+    assert len(log_files) == 1, f"expected one log file, got {log_files}"
+    assert log_files[0].read_text() == partial
+    assert str(log_files[0]) in msg
+
+
+def test_codex_exec_writes_forensic_log_on_streaming_timeout(mocker, tmp_path, monkeypatch):
+    """Same forensic-log behavior on the wall-clock timeout path."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    partial = (
+        '{"type":"session.created","session_id":"sess-forensic-2"}\n'
+        '{"type":"item.started","item":{"type":"agent_message"}}\n'
+    )
+    fake = _FakePopen(
+        stdout_schedule=[(0, line) for line in partial.splitlines(keepends=True)],
+        hang_after_stdout=True,
+    )
+    _patch_codex_popen(mocker, fake)
+
+    with pytest.raises(ProviderError) as exc:
+        CodexProvider().exec("hi", timeout_sec=0.1, liveness_interval_sec=0)
+
+    msg = str(exc.value)
+    assert "raw NDJSON saved to" in msg
+    log_files = list((tmp_path / "conductor").glob("codex-*.ndjson"))
+    assert len(log_files) == 1
+    assert log_files[0].read_text() == partial
+
+
+def test_codex_exec_no_forensic_log_when_no_partial_output(mocker, tmp_path, monkeypatch):
+    """If the stall fires before any output arrived, there's nothing to
+    save — don't litter the cache dir with empty files, and don't mention
+    a path that doesn't exist in the error message."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    fake = _FakePopen(stdout_schedule=[], hang_after_stdout=True)
+    _patch_codex_popen(mocker, fake)
+
+    with pytest.raises(ProviderStalledError) as exc:
+        CodexProvider().exec("hi", max_stall_sec=0.05, liveness_interval_sec=0)
+
+    msg = str(exc.value)
+    assert "raw NDJSON saved to" not in msg
+    log_dir = tmp_path / "conductor"
+    if log_dir.exists():
+        assert list(log_dir.glob("codex-*.ndjson")) == []
+
+
+def test_codex_exec_forensic_log_disk_failure_does_not_mask_real_error(
+    mocker, tmp_path, monkeypatch
+):
+    """If the cache write itself fails (read-only fs, ENOSPC, etc.), the
+    original ProviderStalledError must still propagate cleanly — losing
+    the forensic log is acceptable, masking the original error is not."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    partial = '{"type":"session.created","session_id":"sess-disk-fail"}\n'
+    fake = _FakePopen(stdout_schedule=[(0, partial)], hang_after_stdout=True)
+    _patch_codex_popen(mocker, fake)
+
+    # Force write_text to raise — simulates a read-only fs / quota failure.
+    mocker.patch(
+        "conductor.providers.codex.Path.write_text",
+        side_effect=OSError("disk full"),
+    )
+
+    with pytest.raises(ProviderStalledError) as exc:
+        CodexProvider().exec("hi", max_stall_sec=0.05, liveness_interval_sec=0)
+    msg = str(exc.value)
+    # Original error info still present:
+    assert "stalled" in msg
+    assert "sess-disk-fail" in msg
+    # No fabricated log path mentioned:
+    assert "raw NDJSON saved to" not in msg
+
+
 # ---------------------------------------------------------------------------
 # Gemini
 # ---------------------------------------------------------------------------
