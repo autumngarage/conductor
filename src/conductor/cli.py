@@ -26,13 +26,16 @@ from pathlib import Path
 
 import click
 
+import conductor.providers.openrouter_catalog as openrouter_catalog
 from conductor import __version__, credentials, offline_mode
 from conductor.banner import print_caller_banner
 from conductor.providers import (
     QUALITY_TIERS,
     CallResponse,
+    OpenRouterProvider,
     ProviderConfigError,
     ProviderError,
+    ProviderHTTPError,
     UnsupportedCapability,
     get_provider,
     known_providers,
@@ -447,24 +450,51 @@ def _invoke_with_fallback(
         provider = get_provider(candidate.name)
         try:
             if mode == "exec":
-                response = provider.exec(
-                    task,
-                    model=model,
-                    effort=effort,
-                    tools=tools,
-                    sandbox=sandbox,
-                    cwd=cwd,
-                    timeout_sec=timeout_sec,
-                    max_stall_sec=max_stall_sec,
-                    resume_session_id=resume_session_id,
-                )
+                if isinstance(provider, OpenRouterProvider):
+                    response = provider.exec(
+                        task,
+                        model=model,
+                        effort=effort,
+                        task_tags=list(decision.task_tags),
+                        prefer=decision.prefer,
+                        log_selection=not silent,
+                        tools=tools,
+                        sandbox=sandbox,
+                        cwd=cwd,
+                        timeout_sec=timeout_sec,
+                        max_stall_sec=max_stall_sec,
+                        resume_session_id=resume_session_id,
+                    )
+                else:
+                    response = provider.exec(
+                        task,
+                        model=model,
+                        effort=effort,
+                        tools=tools,
+                        sandbox=sandbox,
+                        cwd=cwd,
+                        timeout_sec=timeout_sec,
+                        max_stall_sec=max_stall_sec,
+                        resume_session_id=resume_session_id,
+                    )
             else:
-                response = provider.call(
-                    task,
-                    model=model,
-                    effort=effort,
-                    resume_session_id=resume_session_id,
-                )
+                if isinstance(provider, OpenRouterProvider):
+                    response = provider.call(
+                        task,
+                        model=model,
+                        effort=effort,
+                        task_tags=list(decision.task_tags),
+                        prefer=decision.prefer,
+                        log_selection=not silent,
+                        resume_session_id=resume_session_id,
+                    )
+                else:
+                    response = provider.call(
+                        task,
+                        model=model,
+                        effort=effort,
+                        resume_session_id=resume_session_id,
+                    )
             mark_outcome(candidate.name, "success")
             return response, fallbacks
         except ProviderConfigError:
@@ -658,6 +688,29 @@ def _emit_usage_log(response: CallResponse, *, silent: bool) -> None:
     click.echo(_format_usage_line(response), err=True)
 
 
+def _openrouter_catalog_or_exit() -> openrouter_catalog.CatalogSnapshot:
+    try:
+        snapshot = openrouter_catalog.read_cached_catalog()
+    except ProviderHTTPError as e:
+        raise click.ClickException(str(e)) from e
+    if snapshot is None:
+        raise click.ClickException(
+            "OpenRouter catalog cache not found. Run `conductor models refresh` first."
+        )
+    return snapshot
+
+
+def _model_capabilities(model: openrouter_catalog.ModelEntry) -> str:
+    caps = []
+    if model.supports_thinking:
+        caps.append("thinking")
+    if model.supports_tools:
+        caps.append("tools")
+    if model.supports_vision:
+        caps.append("vision")
+    return ",".join(caps) or "-"
+
+
 @click.group()
 @click.version_option(__version__, prog_name="conductor")
 def main() -> None:
@@ -676,7 +729,7 @@ def main() -> None:
     default=None,
     help=(
         "Provider identifier "
-        "(kimi, claude, codex, deepseek-chat, deepseek-reasoner, gemini, ollama). "
+        "(kimi, claude, codex, deepseek-chat, deepseek-reasoner, gemini, ollama, openrouter). "
         "Mutually exclusive with --auto."
     ),
 )
@@ -832,7 +885,7 @@ def call(
             click.echo(f"conductor: {e}", err=True)
             sys.exit(1)
     else:
-        if prefer is not None:
+        if prefer is not None and provider_id != "openrouter":
             raise click.UsageError("--prefer is only meaningful with --auto.")
         # Earlier guard `if not auto and not provider_id: raise` makes this
         # narrowing safe; the assert documents it for mypy and future readers.
@@ -843,12 +896,23 @@ def call(
             raise click.UsageError(str(e)) from e
         print_caller_banner(provider_id, silent=silent_route or as_json)
         try:
-            response = provider.call(
-                body,
-                model=model,
-                effort=effort_value,
-                resume_session_id=resume_session_id,
-            )
+            if isinstance(provider, OpenRouterProvider):
+                response = provider.call(
+                    body,
+                    model=model,
+                    effort=effort_value,
+                    task_tags=_parse_csv(tags),
+                    prefer=_validate_prefer(prefer),
+                    log_selection=not (silent_route or as_json),
+                    resume_session_id=resume_session_id,
+                )
+            else:
+                response = provider.call(
+                    body,
+                    model=model,
+                    effort=effort_value,
+                    resume_session_id=resume_session_id,
+                )
         except ProviderConfigError as e:
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
@@ -1052,6 +1116,8 @@ def exec_cmd(
             click.echo(f"conductor: {e}", err=True)
             sys.exit(1)
     else:
+        if prefer is not None and provider_id != "openrouter":
+            raise click.UsageError("--prefer is only meaningful with --auto.")
         # Same narrowing as in `call()` — the early guard rejects the case
         # where neither --auto nor --with was passed.
         assert provider_id is not None
@@ -1061,17 +1127,33 @@ def exec_cmd(
             raise click.UsageError(str(e)) from e
         print_caller_banner(provider_id, silent=silent_route or as_json)
         try:
-            response = provider.exec(
-                body,
-                model=model,
-                effort=effort_value,
-                tools=tools_set,
-                sandbox=sandbox_value,
-                cwd=cwd,
-                timeout_sec=timeout_sec,
-                max_stall_sec=max_stall_sec,
-                resume_session_id=resume_session_id,
-            )
+            if isinstance(provider, OpenRouterProvider):
+                response = provider.exec(
+                    body,
+                    model=model,
+                    effort=effort_value,
+                    task_tags=_parse_csv(tags),
+                    prefer=_validate_prefer(prefer),
+                    log_selection=not (silent_route or as_json),
+                    tools=tools_set,
+                    sandbox=sandbox_value,
+                    cwd=cwd,
+                    timeout_sec=timeout_sec,
+                    max_stall_sec=max_stall_sec,
+                    resume_session_id=resume_session_id,
+                )
+            else:
+                response = provider.exec(
+                    body,
+                    model=model,
+                    effort=effort_value,
+                    tools=tools_set,
+                    sandbox=sandbox_value,
+                    cwd=cwd,
+                    timeout_sec=timeout_sec,
+                    max_stall_sec=max_stall_sec,
+                    resume_session_id=resume_session_id,
+                )
         except UnsupportedCapability as e:
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
@@ -1767,6 +1849,100 @@ def _run_unwire() -> int:
         for path, reason in report.skipped:
             click.echo(f"  {path}  — {reason}")
     return 0
+
+
+# --------------------------------------------------------------------------- #
+# models — inspect and refresh the OpenRouter catalog cache
+# --------------------------------------------------------------------------- #
+
+
+@main.group()
+def models() -> None:
+    """Inspect and refresh the cached OpenRouter model catalog."""
+
+
+@models.command("refresh")
+def models_refresh() -> None:
+    """Fetch the live OpenRouter catalog and rewrite the local cache."""
+    try:
+        snapshot = openrouter_catalog.load_catalog_snapshot(force_refresh=True)
+    except ProviderHTTPError as e:
+        raise click.ClickException(str(e)) from e
+
+    click.echo(
+        f"Refreshed OpenRouter catalog at "
+        f"{openrouter_catalog.format_timestamp(snapshot.fetched_at)}"
+    )
+    click.echo(
+        f"  {len(snapshot.models)} models · cache TTL "
+        f"{openrouter_catalog.cache_ttl_hours()}h · written to "
+        f"{openrouter_catalog.display_cache_path()}"
+    )
+
+
+@models.command("list")
+def models_list() -> None:
+    """Print the cached OpenRouter catalog summary."""
+    snapshot = _openrouter_catalog_or_exit()
+    click.echo(
+        f"{len(snapshot.models)} models indexed, last refresh: "
+        f"{openrouter_catalog.format_timestamp(snapshot.fetched_at)}"
+    )
+    click.echo(
+        f"  cache TTL {openrouter_catalog.cache_ttl_hours()}h · "
+        f"cache file {openrouter_catalog.display_cache_path()}"
+    )
+    click.echo("")
+
+    sorted_models = sorted(snapshot.models, key=lambda model: model.id)
+    id_w = max(len("MODEL"), max(len(model.id) for model in sorted_models))
+    ctx_w = max(len("CTX"), max(len(f"{model.context_length:,}") for model in sorted_models))
+    header = (
+        f"{'MODEL':<{id_w}}  {'CTX':>{ctx_w}}  {'IN/1K':>10}  "
+        f"{'OUT/1K':>10}  CAPS"
+    )
+    click.echo(header)
+    click.echo("-" * len(header))
+    for model in sorted_models:
+        click.echo(
+            f"{model.id:<{id_w}}  "
+            f"{model.context_length:>{ctx_w},}  "
+            f"{model.pricing_prompt:>10.6f}  "
+            f"{model.pricing_completion:>10.6f}  "
+            f"{_model_capabilities(model)}"
+        )
+
+
+@models.command("show")
+@click.argument("slug")
+def models_show(slug: str) -> None:
+    """Print one cached OpenRouter model's parsed details."""
+    snapshot = _openrouter_catalog_or_exit()
+    model = next((entry for entry in snapshot.models if entry.id == slug), None)
+    if model is None:
+        raise click.ClickException(
+            f"OpenRouter model {slug!r} was not found in the local cache. "
+            "Run `conductor models refresh`."
+        )
+
+    thinking_price = (
+        "n/a"
+        if model.pricing_thinking is None
+        else f"{model.pricing_thinking:.6f} USD / 1k"
+    )
+    click.echo(model.id)
+    click.echo(f"  name: {model.name}")
+    click.echo(f"  created: {openrouter_catalog.format_timestamp(model.created)}")
+    click.echo(f"  context length: {model.context_length:,}")
+    click.echo(f"  prompt price: {model.pricing_prompt:.6f} USD / 1k")
+    click.echo(f"  completion price: {model.pricing_completion:.6f} USD / 1k")
+    click.echo(f"  thinking price: {thinking_price}")
+    click.echo(
+        "  capabilities: "
+        f"thinking={'yes' if model.supports_thinking else 'no'} · "
+        f"tools={'yes' if model.supports_tools else 'no'} · "
+        f"vision={'yes' if model.supports_vision else 'no'}"
+    )
 
 
 # --------------------------------------------------------------------------- #

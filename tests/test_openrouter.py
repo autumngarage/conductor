@@ -74,7 +74,10 @@ def test_call_returns_normalized_response(configured):
         router.post("/chat/completions").mock(
             return_value=httpx.Response(200, json=body)
         )
-        response = OpenRouterProvider().call("What is 2+2?")
+        response = OpenRouterProvider().call(
+            "What is 2+2?",
+            model="anthropic/claude-sonnet-4",
+        )
 
     assert isinstance(response, CallResponse)
     assert response.text == "4"
@@ -129,16 +132,71 @@ def test_call_sends_reasoning_effort_and_openrouter_headers(configured):
 
     with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
         router.post("/chat/completions").mock(side_effect=_record)
-        OpenRouterProvider().call("hi", effort="max")
+        OpenRouterProvider().call("hi", model="anthropic/claude-sonnet-4", effort="max")
 
     assert captured["authorization"] == "Bearer or-test-key"
     assert captured["http_referer"] == "https://github.com/autumngarage/conductor"
     assert captured["x_title"] == "conductor"
     assert captured["payload"] == {
-        "model": OPENROUTER_DEFAULT_MODEL,
+        "model": "anthropic/claude-sonnet-4",
         "messages": [{"role": "user", "content": "hi"}],
         "reasoning": {"effort": "xhigh"},
     }
+
+
+def test_call_without_model_invokes_selector_and_builds_payload(configured, mocker):
+    selector = mocker.patch(
+        "conductor.providers.openrouter.select_model_for_task",
+        return_value={
+            "model": OPENROUTER_DEFAULT_MODEL,
+            "plugins": [
+                {
+                    "id": "auto-router",
+                    "allowed_models": ["google/gemini-flash-1.5", "openai/gpt-5.2"],
+                }
+            ],
+            "reasoning": {"effort": "medium"},
+        },
+    )
+    captured: dict[str, object] = {}
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "model": "google/gemini-flash-1.5",
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {},
+            },
+        )
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        response = OpenRouterProvider().call(
+            "hi",
+            task_tags=["cheap"],
+            prefer="balanced",
+        )
+
+    selector.assert_called_once_with(
+        task_tags=["cheap"],
+        prefer="balanced",
+        effort="medium",
+        exclude=None,
+    )
+    assert captured["payload"] == {
+        "model": OPENROUTER_DEFAULT_MODEL,
+        "messages": [{"role": "user", "content": "hi"}],
+        "plugins": [
+            {
+                "id": "auto-router",
+                "allowed_models": ["google/gemini-flash-1.5", "openai/gpt-5.2"],
+            }
+        ],
+        "reasoning": {"effort": "medium"},
+    }
+    assert response.model == "google/gemini-flash-1.5"
 
 
 def test_exec_with_tools_raises_unsupported(configured):
