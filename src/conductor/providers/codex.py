@@ -84,6 +84,9 @@ class CodexProvider:
     # User-facing login command surfaced in error messages and the wizard.
     auth_login_command = "codex login"
 
+    # One-liner shown under the failure reason in `conductor list`.
+    fix_command = "brew install codex && codex login"
+
     def __init__(
         self,
         *,

@@ -325,15 +325,16 @@ def pick(
             failure = reason or "not configured"
             skipped.append((name, failure))
             # Hard capability filters still apply to shadow candidates — we
-            # don't want to suggest "would prefer X" for a provider X that
-            # couldn't satisfy the caller's tools/sandbox even if installed.
-            if name not in exclude_set:
-                if tools_set and not tools_set.issubset(provider.supported_tools):
-                    pass
-                elif sandbox not in provider.supported_sandboxes and sandbox != "none":
-                    pass
-                else:
-                    unconfigured[name] = failure
+            # don't want to suggest "would prefer X" for a provider that,
+            # even installed, couldn't satisfy the caller's tools/sandbox.
+            tools_ok = (
+                not tools_set or tools_set.issubset(provider.supported_tools)
+            )
+            sandbox_ok = (
+                sandbox == "none" or sandbox in provider.supported_sandboxes
+            )
+            if tools_ok and sandbox_ok:
+                unconfigured[name] = failure
             continue
 
         # Hard capability filters.

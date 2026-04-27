@@ -567,6 +567,7 @@ def _format_route_ranking(decision: RouteDecision) -> list[str]:
             f"p50={c.latency_ms}ms"
             f"){marker}"
         )
+    shadow_names = {c.name for c in decision.unconfigured_shadow}
     for c in decision.unconfigured_shadow:
         tags = ",".join(c.matched_tags) or "none"
         lines.append(
@@ -577,7 +578,12 @@ def _format_route_ranking(decision: RouteDecision) -> list[str]:
             f"p50={c.latency_ms}ms"
             f") ← would rank if installed: {c.unconfigured_reason}"
         )
+    # Don't duplicate unconfigured providers in the skipped list — they
+    # already appear (with scores) in the shadow block above. Other skip
+    # reasons (excluded, missing tools, sandbox mismatch, health) still show.
     for name, reason in decision.candidates_skipped:
+        if name in shadow_names:
+            continue
         lines.append(f"  —  {name:<8} (skipped: {reason})")
     return lines
 
@@ -1199,6 +1205,13 @@ def _provider_rows() -> list[dict]:
                 "provider": name,
                 "configured": ok,
                 "reason": None if ok else reason,
+                # Copy-pasteable shell one-liner that takes the user from
+                # "not configured" to "configured". None for providers
+                # without a canonical recipe (e.g. user-defined shell
+                # providers).
+                "fix_command": (
+                    None if ok else getattr(provider, "fix_command", None)
+                ),
                 "default_model": provider.default_model,
                 "tags": list(provider.tags),
                 "tier": provider.quality_tier,
@@ -1245,6 +1258,8 @@ def list_cmd(as_json: bool) -> None:
         )
         if not r["configured"] and r["reason"]:
             click.echo(f"{'':<{name_w}}  {'':<5}  └─ {r['reason']}")
+        if not r["configured"] and r["fix_command"]:
+            click.echo(f"{'':<{name_w}}  {'':<5}  → fix: {r['fix_command']}")
 
 
 # --------------------------------------------------------------------------- #
@@ -1348,6 +1363,9 @@ def _diagnostic_payload() -> dict:
                 "provider": name,
                 "configured": ok,
                 "reason": None if ok else reason,
+                "fix_command": (
+                    None if ok else getattr(provider, "fix_command", None)
+                ),
                 "default_model": provider.default_model,
                 "tags": list(provider.tags),
                 "quality_tier": provider.quality_tier,
@@ -1459,6 +1477,8 @@ def doctor(as_json: bool) -> None:
         )
         if not p["configured"]:
             click.echo(f"        └─ {p['reason']}")
+            if p.get("fix_command"):
+                click.echo(f"        → fix: {p['fix_command']}")
         for w in p.get("warnings") or []:
             click.echo(f"        ⚠ {w}")
 

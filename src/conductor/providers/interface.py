@@ -125,6 +125,15 @@ class Provider(Protocol):
     # --- capability tags (soft matching for routing) ----------------------- #
     tags: ClassVar[list[str]]
 
+    # --- setup hint -------------------------------------------------------- #
+    # A copy-pasteable shell one-liner that takes the user from "not
+    # configured" to "configured". Surfaced beneath the failure reason in
+    # `conductor list` and `conductor doctor` so the next action is always
+    # one selection away. CLI-wrapped providers point at the install + auth
+    # commands; HTTP providers point at `conductor init --only <name>` since
+    # their setup is an env-var/credentials wizard, not a binary install.
+    fix_command: ClassVar[str | None]
+
     # --- capability declarations (hard filters + scoring dimensions) ------- #
     quality_tier: ClassVar[str]
     supported_tools: ClassVar[frozenset[str]]

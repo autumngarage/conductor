@@ -63,6 +63,9 @@ class ClaudeProvider:
     # entry point (the slash variant `/login` only works inside the REPL).
     auth_login_command = "claude auth login"
 
+    # One-liner shown under the failure reason in `conductor list`.
+    fix_command = "brew install claude && claude auth login"
+
     def __init__(
         self,
         *,

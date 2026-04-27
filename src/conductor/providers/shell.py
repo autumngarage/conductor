@@ -89,6 +89,10 @@ class ShellProvider:
     effort_to_thinking: dict[str, int] = {}  # noqa: RUF012
     cost_per_1k_thinking: float = 0.0
 
+    # User-defined shell commands have no canonical install/auth recipe —
+    # the user wrote the command, so no automated fix line in `conductor list`.
+    fix_command: str | None = None
+
     def __init__(
         self,
         spec: ShellProviderSpec,

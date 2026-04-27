@@ -76,6 +76,10 @@ class GeminiProvider:
     # the recommended fallback is `GEMINI_API_KEY`.
     auth_login_command: str | None = None
 
+    # One-liner shown under the failure reason in `conductor list`. The CLI's
+    # first interactive run triggers OAuth; there's no separate login command.
+    fix_command = "npm install -g @google/gemini-cli  # then run `gemini` once for OAuth"
+
     def __init__(
         self,
         *,

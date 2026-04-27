@@ -90,6 +90,58 @@ def test_list_json_output_returns_structured_rows(mocker):
     assert {r["provider"] for r in rows} == expected
     assert all(r["configured"] is False for r in rows)
     assert all(r["default_model"] for r in rows)
+    # Every built-in provider exposes a copy-pasteable fix_command so
+    # `conductor list` can show users their next action without any
+    # downstream knowledge of provider-specific install/auth recipes.
+    assert all(r["fix_command"] for r in rows)
+
+
+def test_list_text_output_shows_fix_command_under_unconfigured_provider(mocker):
+    """When a provider is unconfigured, `conductor list` prints the fix
+    one-liner on its own line so the user's next step is one selection away
+    instead of buried in the prose reason."""
+    _stub_all_unconfigured(mocker)
+    result = CliRunner().invoke(main, ["list"])
+    assert result.exit_code == 0, result.output
+    # Codex's fix is the install + auth one-liner, exposed verbatim.
+    assert "→ fix: brew install codex && codex login" in result.output
+    # Kimi is HTTP-backed, so the fix is the wizard.
+    assert "→ fix: conductor init --only kimi" in result.output
+
+
+def test_list_no_fix_line_for_configured_provider(mocker):
+    from conductor.providers import (
+        ClaudeProvider,
+        CodexProvider,
+        DeepSeekChatProvider,
+        DeepSeekReasonerProvider,
+        GeminiProvider,
+        KimiProvider,
+        OllamaProvider,
+    )
+
+    # All unconfigured except claude.
+    for cls in (
+        CodexProvider,
+        DeepSeekChatProvider,
+        DeepSeekReasonerProvider,
+        GeminiProvider,
+        KimiProvider,
+        OllamaProvider,
+    ):
+        mocker.patch.object(
+            cls,
+            "configured",
+            lambda self, _cls=cls: (False, f"stub: {_cls.__name__} unset"),
+        )
+    mocker.patch.object(ClaudeProvider, "configured", lambda self: (True, None))
+
+    result = CliRunner().invoke(main, ["list", "--json"])
+    rows = {r["provider"]: r for r in json.loads(result.output)}
+    # Configured row carries no fix_command — there's nothing to fix.
+    assert rows["claude"]["fix_command"] is None
+    # Unconfigured rows still carry theirs.
+    assert rows["codex"]["fix_command"] is not None
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +247,10 @@ def test_doctor_text_output_covers_every_provider(mocker, monkeypatch):
         assert name in result.output
     assert "Credentials" in result.output or "credentials" in result.output.lower()
     assert "conductor init" in result.output
+    # Doctor surfaces the same per-provider fix one-liner that `list` does,
+    # so users following any breadcrumb land on a copy-pasteable command.
+    assert "→ fix:" in result.output
+    assert "brew install codex && codex login" in result.output
 
 
 def test_doctor_json_shape(mocker, monkeypatch):
