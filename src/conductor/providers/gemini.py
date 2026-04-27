@@ -78,7 +78,10 @@ class GeminiProvider:
 
     # One-liner shown under the failure reason in `conductor list`. The CLI's
     # first interactive run triggers OAuth; there's no separate login command.
-    fix_command = "npm install -g @google/gemini-cli  # then run `gemini` once for OAuth"
+    fix_command = (
+        "brew install gemini-cli  # macOS; then run `gemini` once for OAuth "
+        "(or npm install -g @google/gemini-cli on other platforms)"
+    )
 
     def __init__(
         self,

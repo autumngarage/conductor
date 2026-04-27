@@ -28,6 +28,14 @@ def configured(monkeypatch):
 @pytest.fixture
 def no_key(monkeypatch):
     monkeypatch.delenv(OPENROUTER_API_KEY_ENV, raising=False)
+    # The credential resolver falls through env → key_command → keychain;
+    # in dev environments where conductor's keychain entry exists, deleting
+    # only the env var still resolves the key. Force the resolver to return
+    # None for these unconfigured-path tests.
+    from conductor import credentials as _credentials
+    monkeypatch.setattr(
+        _credentials, "get", lambda key: None if key == OPENROUTER_API_KEY_ENV else _credentials.get(key)
+    )
 
 
 def test_configured_true_when_env_set(configured):
