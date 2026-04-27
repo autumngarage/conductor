@@ -43,3 +43,4 @@ out/
 *.bak
 .cortex/.index.json
 .cortex/pending/
+src/conductor/_version.py
