@@ -401,15 +401,22 @@ class CodexProvider:
             _EFFORT_TO_CODEX_FLAG.get(effort) if isinstance(effort, str) else None
         )
 
-        # Codex resume uses a subcommand: `codex exec resume <id> "<prompt>"`.
-        # Build argv accordingly when we have a session to resume.
+        # Codex resume uses a subcommand: `codex exec resume <id> -`.
+        # Build argv accordingly when we have a session to resume. The task
+        # itself is passed via stdin (`exec -` / `exec resume <id> -`), not
+        # argv — see PR openai/codex#15917 (codex 0.122.0+) for the
+        # documented "primary prompt is stdin" path. argv-as-prompt has
+        # three real costs: it leaks 4KB+ briefs into `ps aux`, hits
+        # Windows command-line ceilings, and on long prompts is the path
+        # most prone to upstream regressions in the codex CLI's argv
+        # parser. Stdin is the supported path.
         if resume_session_id:
             args = [
                 self._cli,
                 "exec",
                 "resume",
                 resume_session_id,
-                task,
+                "-",
                 "--json",
                 "--sandbox",
                 sandbox,
@@ -418,7 +425,7 @@ class CodexProvider:
             args = [
                 self._cli,
                 "exec",
-                task,
+                "-",
                 "--json",
                 "--ephemeral",
                 "--sandbox",
@@ -436,6 +443,7 @@ class CodexProvider:
         if stream:
             return self._run_streaming(
                 args,
+                task=task,
                 model=model,
                 effort=effort,
                 thinking_budget=thinking_budget,
@@ -450,6 +458,7 @@ class CodexProvider:
         try:
             result = subprocess.run(
                 args,
+                input=task,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -475,6 +484,7 @@ class CodexProvider:
                     cwd=cwd,
                     captured_stdout=partial_stdout,
                     captured_stderr=partial_stderr,
+                    prompt=task,
                 )
             ) from e
         duration_ms = int((time.monotonic() - start) * 1000)
@@ -513,6 +523,7 @@ class CodexProvider:
         self,
         args: list[str],
         *,
+        task: str,
         model: str,
         effort: str | int,
         thinking_budget: int,
@@ -525,11 +536,22 @@ class CodexProvider:
         start = time.monotonic()
         process = subprocess.Popen(
             args,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             cwd=cwd,
         )
+        # Pipe the prompt via stdin and close — codex exec reads until EOF.
+        # If write blocks (huge prompt + slow consumer), we'd hang here, but
+        # codex's own ingestion is fast and the prompt fits in the pipe
+        # buffer for any realistic brief size. An os.set_blocking()-based
+        # async write is overkill until we see a brief that exceeds 64KB.
+        assert process.stdin is not None
+        try:
+            process.stdin.write(task)
+        finally:
+            process.stdin.close()
 
         stream_q: queue.Queue[tuple[str, str | None]] = queue.Queue()
         stdout_parts: list[str] = []
@@ -589,6 +611,7 @@ class CodexProvider:
                         cwd=cwd,
                         captured_stdout=stdout,
                         captured_stderr=stderr,
+                        prompt=task,
                     )
                 )
 
@@ -610,6 +633,7 @@ class CodexProvider:
                         cwd=cwd,
                         captured_stdout=stdout,
                         captured_stderr=stderr,
+                        prompt=task,
                     )
                 )
 
@@ -771,6 +795,7 @@ class CodexProvider:
         cwd: str | None,
         captured_stdout: str,
         captured_stderr: str,
+        prompt: str | None = None,
     ) -> str:
         """Build a user-facing failure message + write the forensic envelope.
 
@@ -790,6 +815,7 @@ class CodexProvider:
             cwd=cwd,
             captured_stdout=captured_stdout,
             captured_stderr=captured_stderr,
+            prompt=prompt,
         )
         parts = [prefix]
         if partial_session_id:
@@ -816,6 +842,7 @@ class CodexProvider:
         cwd: str | None,
         captured_stdout: str,
         captured_stderr: str,
+        prompt: str | None = None,
     ) -> Path | None:
         """Persist a structured failure envelope to the cache dir.
 
@@ -833,6 +860,10 @@ class CodexProvider:
             "conductor_version": _conductor_version,
             "codex_path": shutil.which(self._cli),
             "command": command,
+            # The prompt now arrives via stdin (codex exec -), so it isn't
+            # in `command`. Surface it separately so an operator inspecting
+            # the envelope can still correlate the wedge with the request.
+            "prompt": prompt,
             "cwd": cwd,
             "captured_stdout": captured_stdout,
             "captured_stderr": captured_stderr,

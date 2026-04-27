@@ -13,6 +13,7 @@ mocks; no real CLIs or HTTP endpoints are invoked.
 
 from __future__ import annotations
 
+import io
 import json
 
 import httpx
@@ -105,6 +106,9 @@ class _FakePopen:
         self._configured_returncode = returncode
         self.stdout = _FakeScheduledPipe(stdout_lines, on_eof=self._finish)
         self.stderr = _FakeScheduledPipe(stderr_lines or [])
+        # codex now reads the prompt from stdin (`codex exec -`); mock a
+        # writable pipe so the provider's write+close path works.
+        self.stdin = io.StringIO()
 
     def _finish(self) -> None:
         if self.returncode is None:
