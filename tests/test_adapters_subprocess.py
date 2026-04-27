@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import threading
 
 import pytest
 
@@ -20,6 +21,7 @@ from conductor.providers.interface import (
     ProviderConfigError,
     ProviderError,
     ProviderHTTPError,
+    ProviderStalledError,
 )
 
 
@@ -232,6 +234,98 @@ CODEX_NDJSON = (
 )
 
 
+class _FakeScheduledPipe:
+    def __init__(
+        self,
+        schedule: list[tuple[float, str]],
+        *,
+        hang_after_schedule: bool,
+        terminated: threading.Event,
+        on_eof,
+    ) -> None:
+        self._schedule = schedule
+        self._hang_after_schedule = hang_after_schedule
+        self._terminated = terminated
+        self._on_eof = on_eof
+        self._idx = 0
+
+    def readline(self) -> str:
+        if self._idx < len(self._schedule):
+            delay, line = self._schedule[self._idx]
+            self._idx += 1
+            if self._terminated.wait(delay):
+                return ""
+            return line
+        if self._hang_after_schedule:
+            self._terminated.wait()
+        if self._on_eof is not None:
+            self._on_eof()
+        return ""
+
+
+class _FakePopen:
+    def __init__(
+        self,
+        *,
+        stdout_schedule: list[tuple[float, str]],
+        stderr_schedule: list[tuple[float, str]] | None = None,
+        hang_after_stdout: bool = False,
+        returncode: int = 0,
+    ) -> None:
+        self.args = None
+        self.returncode = None
+        self.terminated = False
+        self.killed = False
+        self._configured_returncode = returncode
+        self._terminated_event = threading.Event()
+        self._finished_event = threading.Event()
+        self.stdout = _FakeScheduledPipe(
+            stdout_schedule,
+            hang_after_schedule=hang_after_stdout,
+            terminated=self._terminated_event,
+            on_eof=self._finish_success,
+        )
+        self.stderr = _FakeScheduledPipe(
+            stderr_schedule or [],
+            hang_after_schedule=False,
+            terminated=self._terminated_event,
+            on_eof=None,
+        )
+
+    def _finish_success(self) -> None:
+        if self.returncode is None:
+            self.returncode = self._configured_returncode
+            self._finished_event.set()
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        if not self._finished_event.wait(timeout):
+            raise subprocess.TimeoutExpired(cmd=self.args or "codex", timeout=timeout)
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = -15
+        self._terminated_event.set()
+        self._finished_event.set()
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+        self._terminated_event.set()
+        self._finished_event.set()
+
+
+def _patch_codex_popen(mocker, fake: _FakePopen):
+    def factory(args, **kwargs):
+        fake.args = args
+        return fake
+
+    return mocker.patch("conductor.providers.codex.subprocess.Popen", side_effect=factory)
+
+
 def test_codex_configured_when_cli_present_and_authed(mocker):
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
     mocker.patch(
@@ -361,30 +455,31 @@ def test_codex_call_raises_on_non_zero_exit(mocker):
 def test_codex_exec_default_timeout_is_unbounded(mocker):
     """Regression: `conductor exec --with codex` (no --timeout) used to default
     to 300s, which silently killed long agent sessions and lost the session_id.
-    The default is now no-timeout — subprocess.run must be invoked with
-    timeout=None when the caller does not specify."""
+    The default is now no-timeout; exec uses the streaming Popen path and
+    must complete without imposing a wall-clock cap when the caller omits it."""
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
-    captured = mocker.patch(
-        "conductor.providers.codex.subprocess.run",
-        return_value=_fake_completed(stdout=CODEX_NDJSON),
+    fake = _FakePopen(
+        stdout_schedule=[(0, line) for line in CODEX_NDJSON.splitlines(keepends=True)]
     )
+    captured = _patch_codex_popen(mocker, fake)
     CodexProvider().exec("hi")
-    assert captured.call_args.kwargs["timeout"] is None, (
-        "exec() with no explicit timeout must run unbounded. "
-        f"Got timeout={captured.call_args.kwargs['timeout']!r}"
-    )
+    assert captured.called
+    assert fake.terminated is False
 
 
 def test_codex_exec_explicit_timeout_is_honored(mocker):
     """Caller-supplied --timeout still works — sentinel pattern must not
     swallow an explicitly-passed integer."""
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
-    captured = mocker.patch(
-        "conductor.providers.codex.subprocess.run",
-        return_value=_fake_completed(stdout=CODEX_NDJSON),
+    fake = _FakePopen(
+        stdout_schedule=[(0, '{"type":"session.created","session_id":"sess-slow"}\n')],
+        hang_after_stdout=True,
     )
-    CodexProvider().exec("hi", timeout_sec=42)
-    assert captured.call_args.kwargs["timeout"] == 42
+    _patch_codex_popen(mocker, fake)
+    with pytest.raises(ProviderError) as exc:
+        CodexProvider().exec("hi", timeout_sec=0.05, max_stall_sec=None)
+    assert "timed out" in str(exc.value)
+    assert fake.terminated is True
 
 
 def test_codex_call_keeps_constructor_default_timeout(mocker):
@@ -411,14 +506,13 @@ def test_codex_timeout_recovers_session_id_from_partial_ndjson(mocker):
         '{"type":"session.created","session_id":"sess-partial-7"}\n'
         '{"type":"item.started","item":{"type":"agent_message"}}\n'
     )
-    mocker.patch(
-        "conductor.providers.codex.subprocess.run",
-        side_effect=subprocess.TimeoutExpired(
-            cmd="codex", timeout=5, output=partial, stderr=""
-        ),
+    fake = _FakePopen(
+        stdout_schedule=[(0, line) for line in partial.splitlines(keepends=True)],
+        hang_after_stdout=True,
     )
+    _patch_codex_popen(mocker, fake)
     with pytest.raises(ProviderError) as exc:
-        CodexProvider().exec("hi", timeout_sec=5)
+        CodexProvider().exec("hi", timeout_sec=0.05)
     msg = str(exc.value)
     assert "timed out" in msg
     assert "sess-partial-7" in msg, (
@@ -432,22 +526,18 @@ def test_codex_timeout_without_partial_session_id_still_raises_clean(mocker):
     """If codex died before emitting session.created, the timeout error
     should still raise cleanly without crashing on the missing ID."""
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
-    mocker.patch(
-        "conductor.providers.codex.subprocess.run",
-        side_effect=subprocess.TimeoutExpired(
-            cmd="codex", timeout=5, output="", stderr=""
-        ),
-    )
+    fake = _FakePopen(stdout_schedule=[], hang_after_stdout=True)
+    _patch_codex_popen(mocker, fake)
     with pytest.raises(ProviderError) as exc:
-        CodexProvider().exec("hi", timeout_sec=5)
+        CodexProvider().exec("hi", timeout_sec=0.05)
     msg = str(exc.value)
     assert "timed out" in msg
     assert "session_id" not in msg  # Nothing to surface
 
 
-def test_codex_timeout_handles_bytes_stdout_from_subprocess(mocker):
+def test_codex_call_timeout_handles_bytes_stdout_from_subprocess(mocker):
     """subprocess.TimeoutExpired.output can be bytes when text=False is used
-    elsewhere in the call chain. Recovery must decode defensively."""
+    elsewhere in the call path. Recovery must decode defensively."""
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
     partial_bytes = (
         b'{"type":"session.created","session_id":"sess-bytes-9"}\n'
@@ -459,8 +549,92 @@ def test_codex_timeout_handles_bytes_stdout_from_subprocess(mocker):
         ),
     )
     with pytest.raises(ProviderError) as exc:
-        CodexProvider().exec("hi", timeout_sec=5)
+        CodexProvider().call("hi")
     assert "sess-bytes-9" in str(exc.value)
+
+
+def test_codex_exec_stall_watchdog_kills_silent_provider(mocker):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    partial = '{"type":"session.created","session_id":"sess-stalled-1"}\n'
+    fake = _FakePopen(
+        stdout_schedule=[(0, partial)],
+        hang_after_stdout=True,
+    )
+    _patch_codex_popen(mocker, fake)
+
+    with pytest.raises(ProviderStalledError) as exc:
+        CodexProvider().exec("hi", max_stall_sec=0.05, liveness_interval_sec=0)
+
+    msg = str(exc.value)
+    assert "stalled" in msg
+    assert "sess-stalled-1" in msg
+    assert "--resume sess-stalled-1" in msg
+    assert fake.terminated is True
+
+
+def test_codex_exec_streams_output_resets_stall_clock(mocker):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    lines = [
+        '{"type":"session.created","session_id":"sess-streaming-1"}\n',
+        '{"type":"item.started","item":{"type":"agent_message"}}\n',
+        '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n',
+        '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":2}}\n',
+    ]
+    fake = _FakePopen(stdout_schedule=[(0.1, line) for line in lines])
+    _patch_codex_popen(mocker, fake)
+
+    response = CodexProvider().exec("hi", max_stall_sec=2, liveness_interval_sec=0)
+
+    assert response.text == "done"
+    assert response.session_id == "sess-streaming-1"
+    assert fake.terminated is False
+
+
+def test_codex_exec_no_stall_watchdog_by_default(mocker):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    partial = '{"type":"session.created","session_id":"sess-no-watchdog"}\n'
+    fake = _FakePopen(
+        stdout_schedule=[(0, partial)],
+        hang_after_stdout=True,
+    )
+    _patch_codex_popen(mocker, fake)
+
+    with pytest.raises(ProviderError) as exc:
+        CodexProvider().exec("hi", timeout_sec=0.05)
+
+    assert "timed out" in str(exc.value)
+    assert not isinstance(exc.value, ProviderStalledError)
+    assert fake.terminated is True
+
+
+def test_codex_exec_emits_liveness_signal_to_stderr(mocker, capsys):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    partial = '{"type":"session.created","session_id":"sess-liveness"}\n'
+    fake = _FakePopen(
+        stdout_schedule=[(0, partial)],
+        hang_after_stdout=True,
+    )
+    _patch_codex_popen(mocker, fake)
+
+    with pytest.raises(ProviderStalledError):
+        CodexProvider().exec("hi", max_stall_sec=0.25, liveness_interval_sec=0.1)
+
+    assert "[conductor] no output from codex for " in capsys.readouterr().err
+
+
+def test_codex_call_unaffected_by_streaming_changes(mocker):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    popen_mock = mocker.patch("conductor.providers.codex.subprocess.Popen")
+    run_mock = mocker.patch(
+        "conductor.providers.codex.subprocess.run",
+        return_value=_fake_completed(stdout=CODEX_NDJSON),
+    )
+
+    response = CodexProvider().call("hi")
+
+    assert response.text == "hello from codex"
+    assert run_mock.called
+    assert not popen_mock.called
 
 
 # ---------------------------------------------------------------------------

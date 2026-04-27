@@ -168,6 +168,14 @@ Kimi is strongest for: summarization, broad-reading across many files,
 structural extraction from long transcripts, and cheap second-opinion
 reviews.
 
+Verification reflex: If you diagnose a conductor-config-level cause for an
+error (e.g. "the Kimi provider config at ~/.conductor/providers/kimi.toml
+is wrong"), verify the named paths and flags exist before acting on the
+diagnosis. Run `ls`, `grep`, `conductor doctor`, or read the source. A
+confidently-stated wrong cause leads downstream agents to act on a
+hallucinated premise. If you cannot verify, say "I see symptom X but
+cannot verify the cause" rather than naming a cause you haven't confirmed.
+
 If conductor errors:
 - `no provider...` → kimi isn't configured. Tell the user to run
   `conductor init`.
@@ -205,6 +213,14 @@ If the user's question doesn't actually need the web (it's a coding
 task, a reasoning task, a summary of material they already provided),
 tell the parent agent to handle it directly instead of calling you —
 you exist specifically for the web-search path.
+
+Verification reflex: If you diagnose a conductor-config-level cause for an
+error (e.g. "the Gemini provider config at ~/.conductor/providers/gemini.toml
+is wrong"), verify the named paths and flags exist before acting on the
+diagnosis. Run `ls`, `grep`, `conductor doctor`, or read the source. A
+confidently-stated wrong cause leads downstream agents to act on a
+hallucinated premise. If you cannot verify, say "I see symptom X but
+cannot verify the cause" rather than naming a cause you haven't confirmed.
 
 If conductor errors:
 - `no provider...` → gemini isn't configured. Tell the user to run
@@ -245,6 +261,14 @@ When invoked:
 If the task is a quick one-shot question (no file tools needed), route
 it to a single-turn provider instead — `exec` mode carries more setup
 cost than is warranted for single-turn prompts.
+
+Verification reflex: If you diagnose a conductor-config-level cause for an
+error (e.g. "the codex provider config at ~/.conductor/providers/codex.toml
+is wrong"), verify the named paths and flags exist before acting on the
+diagnosis. Run `ls`, `grep`, `conductor doctor`, or read the source. A
+confidently-stated wrong cause leads downstream agents to act on a
+hallucinated premise. If you cannot verify, say "I see symptom X but
+cannot verify the cause" rather than naming a cause you haven't confirmed.
 
 If conductor errors:
 - `no provider...` → codex CLI isn't installed or authed. Tell the user
@@ -288,6 +312,14 @@ When invoked:
 
 3. Parse the JSON, extract `text`, and return it prefixed with
    "From Ollama (local):".
+
+Verification reflex: If you diagnose a conductor-config-level cause for an
+error (e.g. "the Ollama provider config at ~/.conductor/providers/ollama.toml
+is wrong"), verify the named paths and flags exist before acting on the
+diagnosis. Run `ls`, `grep`, `conductor doctor`, or read the source. A
+confidently-stated wrong cause leads downstream agents to act on a
+hallucinated premise. If you cannot verify, say "I see symptom X but
+cannot verify the cause" rather than naming a cause you haven't confirmed.
 
 If conductor errors:
 - Connection refused / daemon not running → tell the user to

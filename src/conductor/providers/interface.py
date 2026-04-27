@@ -71,6 +71,12 @@ class ProviderHTTPError(ProviderError):
     (non-2xx, malformed JSON, timeout)."""
 
 
+class ProviderStalledError(ProviderError):
+    """Raised when a provider produced no output for longer than the
+    configured max_stall_sec watchdog. Distinct from wall-clock timeout —
+    a stall means the subprocess is alive but not making progress."""
+
+
 class UnsupportedCapability(ProviderError):  # noqa: N818  — public API name; renaming to -Error breaks callers
     """Raised when a provider cannot satisfy the requested capability —
     e.g., tool-use requested but the provider only supports single-turn
@@ -163,11 +169,14 @@ class Provider(Protocol):
         sandbox: str = "none",
         cwd: str | None = None,
         timeout_sec: int = 300,
+        max_stall_sec: int | None = None,
         resume_session_id: str | None = None,
     ) -> CallResponse:
         """Multi-turn agent session with tool access.
 
         ``resume_session_id`` semantics match ``call()``.
+        ``max_stall_sec`` is an optional no-output watchdog; providers that
+        do not implement it accept and ignore the value for API parity.
 
         Raises UnsupportedCapability if the provider cannot drive the
         requested tools or sandbox, or cannot resume sessions when one

@@ -13,6 +13,7 @@ from conductor.providers.interface import (
     ProviderConfigError,
     ProviderError,
     ProviderHTTPError,
+    ProviderStalledError,
     UnsupportedCapability,
     resolve_effort_tokens,
 )
@@ -38,6 +39,7 @@ __all__ = [
     "ProviderConfigError",
     "ProviderError",
     "ProviderHTTPError",
+    "ProviderStalledError",
     "ShellProvider",
     "ShellProviderSpec",
     "UnsupportedCapability",

@@ -183,8 +183,10 @@ class ClaudeProvider:
         sandbox: str = "none",
         cwd: str | None = None,
         timeout_sec: int | None = None,
+        max_stall_sec: int | None = None,
         resume_session_id: str | None = None,
     ) -> CallResponse:
+        # accepted for API parity; only codex implements stall-watchdog today
         # Claude's `--allowedTools` is fine-grained; passing an empty set
         # is effectively "no tools permitted" (single-turn).
         allowed = ",".join(sorted(tools)) if tools else None

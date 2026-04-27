@@ -319,6 +319,40 @@ def test_exec_cli_explicit_timeout_passes_through(mocker):
     assert exec_mock.call_args.kwargs["timeout_sec"] == 600
 
 
+def test_exec_cli_max_stall_seconds_flag_propagates(mocker):
+    _stub_all_configured(mocker, {"codex"})
+    exec_mock = mocker.patch.object(
+        CodexProvider, "exec", return_value=_fake_response("codex")
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec", "--with", "codex",
+            "--max-stall-seconds", "60",
+            "--task", "do it",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert exec_mock.call_args.kwargs["max_stall_sec"] == 60
+
+
+def test_exec_cli_no_max_stall_seconds_defaults_none(mocker):
+    _stub_all_configured(mocker, {"codex"})
+    exec_mock = mocker.patch.object(
+        CodexProvider, "exec", return_value=_fake_response("codex")
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--with", "codex", "--task", "do it"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert exec_mock.call_args.kwargs["max_stall_sec"] is None
+
+
 def test_exec_with_kimi_tools_raises_unsupported(mocker, monkeypatch):
     # Pin kimi to its pre-v0.3.0 capability set so --tools Edit is
     # guaranteed to land in the UnsupportedCapability branch. Post-v0.3.1
