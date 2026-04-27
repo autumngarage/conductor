@@ -146,6 +146,9 @@ class OllamaProvider:
     # 4-8K. Users on a long-context local model can override per-request.
     max_context_tokens = 32_000
 
+    # One-liner shown under the failure reason in `conductor list`.
+    fix_command = "brew install ollama && ollama serve"
+
     def __init__(
         self,
         *,

@@ -245,6 +245,7 @@ class DeepSeekChatProvider(_DeepSeekBase):
     name = "deepseek-chat"
     default_model = DEEPSEEK_CHAT_MODEL
     tags = ["cheap", "code-review", "tool-use"]
+    fix_command = "conductor init --only deepseek-chat"
 
     quality_tier = "strong"
     supports_effort = False
@@ -263,6 +264,7 @@ class DeepSeekReasonerProvider(_DeepSeekBase):
     name = "deepseek-reasoner"
     default_model = DEEPSEEK_REASONER_MODEL
     tags = ["strong-reasoning", "thinking", "code-review"]
+    fix_command = "conductor init --only deepseek-reasoner"
 
     quality_tier = "strong"
     # R1 always emits reasoning_content; the dial is informational (DeepSeek's

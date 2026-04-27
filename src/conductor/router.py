@@ -144,7 +144,12 @@ def _health_penalty(name: str) -> float:
 
 @dataclass(frozen=True)
 class RankedCandidate:
-    """One provider's full scoring breakdown for a given routing request."""
+    """One provider's full scoring breakdown for a given routing request.
+
+    ``unconfigured_reason`` is set only on shadow candidates (see ``pick``'s
+    ``shadow`` parameter) — providers that would have been scored but failed
+    ``configured()``. Real (winnable) candidates leave it ``None``.
+    """
 
     name: str
     tier: str
@@ -155,11 +160,19 @@ class RankedCandidate:
     latency_ms: int
     health_penalty: float
     combined_score: float       # the key used by the current prefer mode (higher=better)
+    unconfigured_reason: str | None = None
 
 
 @dataclass(frozen=True)
 class RouteDecision:
-    """Why the router picked what it picked — the explainable output."""
+    """Why the router picked what it picked — the explainable output.
+
+    ``unconfigured_shadow`` is populated when ``pick(..., shadow=True)`` is
+    used; it ranks providers that failed ``configured()`` against the same
+    scoring rules as the winnable candidates. The CLI uses this to tell the
+    user when an unconfigured provider would have been a better fit than the
+    one auto-mode actually picked.
+    """
 
     provider: str
     prefer: str
@@ -172,6 +185,7 @@ class RouteDecision:
     sandbox: str
     ranked: tuple[RankedCandidate, ...]           # descending by combined_score
     candidates_skipped: tuple[tuple[str, str], ...]  # (name, reason)
+    unconfigured_shadow: tuple[RankedCandidate, ...] = ()  # descending; never winners
 
     # Legacy fields retained for v0.1 callers that destructured these.
     @property
@@ -188,6 +202,65 @@ class RouteDecision:
 # --------------------------------------------------------------------------- #
 
 
+def _score_one(
+    name: str,
+    provider: Provider,
+    *,
+    task_tag_set: set[str],
+    prefer: str,
+    effort: str | int,
+    priority_index: int,
+    unconfigured_reason: str | None = None,
+) -> RankedCandidate:
+    """Score a single provider under the active prefer mode.
+
+    Shared between the main winnable-candidate loop and the shadow pass that
+    re-scores unconfigured providers. ``unconfigured_reason`` is plumbed
+    through so shadow candidates carry the configured() failure text into
+    the decision; winnable candidates leave it ``None``.
+
+    Health penalty is suppressed for shadow candidates — there's no health
+    history for a provider the caller couldn't actually invoke, so applying
+    a penalty would be noise.
+    """
+    matched = tuple(sorted(task_tag_set & set(provider.tags)))
+    tag_score = len(matched)
+    tier_rank = TIER_RANK.get(provider.quality_tier, 0)
+
+    # Expected total cost per 1k tokens at the requested effort.
+    # We don't know the actual token count yet; use a per-request estimate
+    # assuming ~4k input and ~500 output (typical review sizes).
+    thinking_tokens = resolve_effort_tokens(effort, provider.effort_to_thinking)
+    cost_estimate = (
+        provider.cost_per_1k_in * 4
+        + provider.cost_per_1k_out * 0.5
+        + provider.cost_per_1k_thinking * (thinking_tokens / 1_000)
+    )
+
+    penalty = 0.0 if unconfigured_reason is not None else _health_penalty(name)
+    combined = _combined_score(
+        prefer=prefer,
+        tag_score=tag_score,
+        tier_rank=tier_rank,
+        cost_estimate=cost_estimate,
+        latency_ms=provider.typical_p50_ms,
+        priority_index=priority_index,
+    ) * (1 - penalty)
+
+    return RankedCandidate(
+        name=name,
+        tier=provider.quality_tier,
+        tier_rank=tier_rank,
+        matched_tags=matched,
+        tag_score=tag_score,
+        cost_score=cost_estimate,
+        latency_ms=provider.typical_p50_ms,
+        health_penalty=penalty,
+        combined_score=combined,
+        unconfigured_reason=unconfigured_reason,
+    )
+
+
 def pick(
     task_tags: list[str] | None = None,
     *,
@@ -197,12 +270,21 @@ def pick(
     sandbox: str = "none",
     exclude: frozenset[str] | set[str] | list[str] | None = None,
     priority: tuple[str, ...] = DEFAULT_PRIORITY,
+    shadow: bool = False,
 ) -> tuple[Provider, RouteDecision]:
     """Pick the best provider for ``task_tags`` under the given preferences.
 
     See module docstring for the full pipeline. Default ``prefer="balanced"``
     reproduces v0.1 behavior (pure tag-overlap + priority tiebreak) for
     backward compatibility.
+
+    ``shadow``: when True, providers that would otherwise be eligible but
+    failed ``configured()`` are re-scored and returned in
+    ``decision.unconfigured_shadow``. They never become the winner — this
+    is purely an explainability hook so callers can tell users *"auto would
+    have preferred X, but X isn't installed/authed"*. Off by default to
+    avoid surprising existing callers (Sentinel, Touchstone) and the CLI's
+    `--with` path that doesn't need it.
     """
     if prefer not in VALID_PREFER_MODES:
         raise InvalidRouterRequest(
@@ -229,6 +311,7 @@ def pick(
 
     ranked: list[RankedCandidate] = []
     skipped: list[tuple[str, str]] = []
+    unconfigured: dict[str, str] = {}  # name → reason; only configured() failures
 
     for name in order:
         if name in exclude_set:
@@ -239,7 +322,19 @@ def pick(
 
         ok, reason = provider.configured()
         if not ok:
-            skipped.append((name, reason or "not configured"))
+            failure = reason or "not configured"
+            skipped.append((name, failure))
+            # Hard capability filters still apply to shadow candidates — we
+            # don't want to suggest "would prefer X" for a provider that,
+            # even installed, couldn't satisfy the caller's tools/sandbox.
+            tools_ok = (
+                not tools_set or tools_set.issubset(provider.supported_tools)
+            )
+            sandbox_ok = (
+                sandbox == "none" or sandbox in provider.supported_sandboxes
+            )
+            if tools_ok and sandbox_ok:
+                unconfigured[name] = failure
             continue
 
         # Hard capability filters.
@@ -258,43 +353,14 @@ def pick(
             skipped.append((name, health_reason))
             continue
 
-        # Compute scoring dimensions.
-        matched = tuple(sorted(task_tag_set & set(provider.tags)))
-        tag_score = len(matched)
-        tier_rank = TIER_RANK.get(provider.quality_tier, 0)
-
-        # Expected total cost per 1k tokens at the requested effort.
-        # We don't know the actual token count yet; use a per-request estimate
-        # assuming ~4k input and ~500 output (typical review sizes).
-        thinking_tokens = resolve_effort_tokens(effort, provider.effort_to_thinking)
-        cost_estimate = (
-            provider.cost_per_1k_in * 4
-            + provider.cost_per_1k_out * 0.5
-            + provider.cost_per_1k_thinking * (thinking_tokens / 1_000)
-        )
-
-        penalty = _health_penalty(name)
-
-        combined = _combined_score(
-            prefer=prefer,
-            tag_score=tag_score,
-            tier_rank=tier_rank,
-            cost_estimate=cost_estimate,
-            latency_ms=provider.typical_p50_ms,
-            priority_index=priority_index[name],
-        ) * (1 - penalty)
-
         ranked.append(
-            RankedCandidate(
-                name=name,
-                tier=provider.quality_tier,
-                tier_rank=tier_rank,
-                matched_tags=matched,
-                tag_score=tag_score,
-                cost_score=cost_estimate,
-                latency_ms=provider.typical_p50_ms,
-                health_penalty=penalty,
-                combined_score=combined,
+            _score_one(
+                name,
+                provider,
+                task_tag_set=task_tag_set,
+                prefer=prefer,
+                effort=effort,
+                priority_index=priority_index[name],
             )
         )
 
@@ -312,6 +378,23 @@ def pick(
 
     thinking_budget = resolve_effort_tokens(effort, winner_provider.effort_to_thinking)
 
+    shadow_ranked: tuple[RankedCandidate, ...] = ()
+    if shadow and unconfigured:
+        shadow_list = [
+            _score_one(
+                name,
+                get_provider(name),
+                task_tag_set=task_tag_set,
+                prefer=prefer,
+                effort=effort,
+                priority_index=priority_index[name],
+                unconfigured_reason=reason,
+            )
+            for name, reason in unconfigured.items()
+        ]
+        shadow_list.sort(key=lambda c: (-c.combined_score, priority_index[c.name]))
+        shadow_ranked = tuple(shadow_list)
+
     decision = RouteDecision(
         provider=winner.name,
         prefer=prefer,
@@ -324,6 +407,7 @@ def pick(
         sandbox=sandbox,
         ranked=tuple(ranked),
         candidates_skipped=tuple(skipped),
+        unconfigured_shadow=shadow_ranked,
     )
     return winner_provider, decision
 

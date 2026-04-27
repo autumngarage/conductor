@@ -322,3 +322,119 @@ def test_route_decision_ranked_candidates_have_tier_info(mocker):
     tiers = {r.name: r.tier for r in decision.ranked}
     assert tiers["claude"] == "frontier"
     assert tiers["ollama"] == "local"
+
+
+# ---------------------------------------------------------------------------
+# Shadow ranking — surface providers that would have been preferable if
+# the user had configured them.
+# ---------------------------------------------------------------------------
+
+
+def test_shadow_off_by_default_keeps_decision_empty(mocker):
+    """The flag is opt-in; existing callers (Sentinel/Touchstone) see no change."""
+    _stub_configured(mocker, {"claude": True})
+    _, decision = pick([], prefer="best")
+    assert decision.unconfigured_shadow == ()
+
+
+def test_shadow_includes_unconfigured_providers(mocker):
+    # Only claude is configured. With shadow=True every other provider that
+    # would otherwise be eligible should appear in unconfigured_shadow.
+    _stub_configured(mocker, {"claude": True})
+    _, decision = pick([], prefer="best", shadow=True)
+    shadow_names = {c.name for c in decision.unconfigured_shadow}
+    # Every non-claude built-in provider that passes tools/sandbox filters
+    # (i.e. all of them under default args) should appear.
+    assert "codex" in shadow_names
+    assert "kimi" in shadow_names
+    assert "ollama" in shadow_names
+    assert "claude" not in shadow_names  # the picked provider is not its own shadow
+
+
+def test_shadow_never_returns_unconfigured_as_winner(mocker):
+    # Even if a frontier provider is the strongest shadow candidate by score,
+    # it must never become the winner — pick() can only return providers the
+    # caller can actually invoke. Exclude claude so codex is the unambiguous
+    # top shadow (both are frontier; priority would otherwise tiebreak claude).
+    _stub_configured(mocker, {"ollama": True})  # ollama=local; codex=frontier shadows
+    provider, decision = pick(
+        ["code-review"],
+        prefer="best",
+        exclude=frozenset({"claude"}),
+        shadow=True,
+    )
+    assert provider.name == "ollama"
+    assert decision.provider == "ollama"
+    # codex outscores ollama on tier+tag, so it should be the top shadow.
+    top_shadow = decision.unconfigured_shadow[0]
+    assert top_shadow.name == "codex"
+    assert top_shadow.combined_score > decision.ranked[0].combined_score
+
+
+def test_shadow_carries_configured_failure_reason(mocker):
+    """The reason text is what the CLI surfaces in the heads-up advisory."""
+    from conductor.providers import ClaudeProvider, CodexProvider
+
+    mocker.patch.object(
+        ClaudeProvider, "configured", lambda self: (True, None)
+    )
+    mocker.patch.object(
+        CodexProvider,
+        "configured",
+        lambda self: (False, "`codex` CLI not found on PATH"),
+    )
+    # Stub everything else as unconfigured with a generic reason.
+    from conductor.providers import (
+        DeepSeekChatProvider,
+        DeepSeekReasonerProvider,
+        GeminiProvider,
+        KimiProvider,
+        OllamaProvider,
+    )
+
+    for cls in (
+        DeepSeekChatProvider,
+        DeepSeekReasonerProvider,
+        GeminiProvider,
+        KimiProvider,
+        OllamaProvider,
+    ):
+        mocker.patch.object(
+            cls,
+            "configured",
+            lambda self: (False, "stub: not configured"),
+        )
+
+    _, decision = pick([], prefer="best", shadow=True)
+    codex_shadow = next(c for c in decision.unconfigured_shadow if c.name == "codex")
+    assert codex_shadow.unconfigured_reason == "`codex` CLI not found on PATH"
+
+
+def test_shadow_respects_exclude_filter(mocker):
+    """An excluded provider must not appear as a shadow candidate either."""
+    _stub_configured(mocker, {"claude": True})
+    _, decision = pick(
+        [], prefer="best", exclude=frozenset({"codex"}), shadow=True
+    )
+    shadow_names = {c.name for c in decision.unconfigured_shadow}
+    assert "codex" not in shadow_names
+
+
+def test_shadow_respects_tools_filter(mocker, monkeypatch):
+    """A provider that doesn't support requested tools shouldn't shadow either —
+    suggesting it would be silly when even installed it couldn't do the job."""
+    from conductor.providers.kimi import KimiProvider
+
+    monkeypatch.setattr(KimiProvider, "supported_tools", frozenset())
+    _stub_configured(mocker, {"claude": True})
+    _, decision = pick([], tools={"Edit"}, shadow=True)
+    shadow_names = {c.name for c in decision.unconfigured_shadow}
+    assert "kimi" not in shadow_names
+
+
+def test_shadow_ranked_by_score(mocker):
+    """Top shadow candidate is the one with the highest combined_score."""
+    _stub_configured(mocker, {"ollama": True})
+    _, decision = pick(["code-review"], prefer="best", shadow=True)
+    scores = [c.combined_score for c in decision.unconfigured_shadow]
+    assert scores == sorted(scores, reverse=True)

@@ -75,6 +75,11 @@ class KimiProvider:
     tags = ["long-context", "cheap", "vision", "code-review"]
     default_model = KIMI_DEFAULT_MODEL
 
+    # One-liner shown under the failure reason in `conductor list`. Kimi is
+    # an HTTP provider whose setup is purely credential-wiring; the wizard
+    # is the right entry point for both env-var and key-command paths.
+    fix_command = "conductor init --only kimi"
+
     # Capability declarations (see interface.py)
     quality_tier = "strong"
     # Full tool-use landed in v0.3.1 (Edit/Write/Bash + workspace-write
