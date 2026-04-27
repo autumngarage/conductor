@@ -681,11 +681,12 @@ def test_codex_exec_emits_session_id_only_once(mocker, capsys):
     assert "sess-second" not in err
 
 
-def test_codex_exec_writes_forensic_log_on_stall(mocker, tmp_path, monkeypatch):
-    """When the stall watchdog fires with partial NDJSON in the buffer,
-    conductor saves the raw NDJSON to the cache dir and includes the path
-    in the error message. This is the forensic trail for hangs that
-    happen without a recoverable session_id (or in addition to one)."""
+def test_codex_exec_writes_forensic_envelope_on_stall(mocker, tmp_path, monkeypatch):
+    """Envelope captures everything needed to attribute a stall:
+    command, cwd, conductor version, partial stdout, partial stderr.
+    Independent of whether codex emitted any NDJSON."""
+    import json as _json
+
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
     partial = '{"type":"session.created","session_id":"sess-forensic-1"}\n'
@@ -699,16 +700,29 @@ def test_codex_exec_writes_forensic_log_on_stall(mocker, tmp_path, monkeypatch):
         CodexProvider().exec("hi", max_stall_sec=0.05, liveness_interval_sec=0)
 
     msg = str(exc.value)
-    assert "raw NDJSON saved to" in msg
+    assert "forensic envelope:" in msg
     log_dir = tmp_path / "conductor"
-    log_files = list(log_dir.glob("codex-*.ndjson"))
-    assert len(log_files) == 1, f"expected one log file, got {log_files}"
-    assert log_files[0].read_text() == partial
+    log_files = list(log_dir.glob("codex-*.json"))
+    assert len(log_files) == 1, f"expected one envelope file, got {log_files}"
+    envelope = _json.loads(log_files[0].read_text())
+    assert envelope["kind"] == "stall"
+    # The CLI argv keeps the literal `codex` (not the resolved PATH).
+    # The envelope's separate `codex_path` field is what shutil.which()
+    # resolved at the time of failure.
+    assert envelope["command"][0] == "codex"
+    assert envelope["codex_path"] == "/usr/bin/codex"
+    assert "exec" in envelope["command"]
+    assert envelope["captured_stdout"] == partial
+    assert envelope["conductor_version"]  # whatever it is, it's set
     assert str(log_files[0]) in msg
 
 
-def test_codex_exec_writes_forensic_log_on_streaming_timeout(mocker, tmp_path, monkeypatch):
-    """Same forensic-log behavior on the wall-clock timeout path."""
+def test_codex_exec_writes_forensic_envelope_on_streaming_timeout(
+    mocker, tmp_path, monkeypatch
+):
+    """Same envelope behavior on the wall-clock timeout path."""
+    import json as _json
+
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
     partial = (
@@ -725,37 +739,59 @@ def test_codex_exec_writes_forensic_log_on_streaming_timeout(mocker, tmp_path, m
         CodexProvider().exec("hi", timeout_sec=0.1, liveness_interval_sec=0)
 
     msg = str(exc.value)
-    assert "raw NDJSON saved to" in msg
-    log_files = list((tmp_path / "conductor").glob("codex-*.ndjson"))
+    assert "forensic envelope:" in msg
+    log_files = list((tmp_path / "conductor").glob("codex-*.json"))
     assert len(log_files) == 1
-    assert log_files[0].read_text() == partial
+    envelope = _json.loads(log_files[0].read_text())
+    assert envelope["kind"] == "timeout"
+    assert envelope["captured_stdout"] == partial
 
 
-def test_codex_exec_no_forensic_log_when_no_partial_output(mocker, tmp_path, monkeypatch):
-    """If the stall fires before any output arrived, there's nothing to
-    save — don't litter the cache dir with empty files, and don't mention
-    a path that doesn't exist in the error message."""
+def test_codex_exec_writes_envelope_when_codex_emits_zero_bytes(
+    mocker, tmp_path, monkeypatch
+):
+    """The high-leverage case from .cortex/journal/2026-04-26-codex-exec-
+    wedge-trace.md: codex wedges *before* session.created fires and
+    produces no output at all. Pre-fix, this left the wrapping agent
+    with nothing — no session_id, no NDJSON file, nothing to attribute
+    the failure to. The envelope must still be written, capturing
+    (command, cwd, conductor_version) so an operator can pin the run."""
+    import json as _json
+
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
     fake = _FakePopen(stdout_schedule=[], hang_after_stdout=True)
     _patch_codex_popen(mocker, fake)
 
     with pytest.raises(ProviderStalledError) as exc:
-        CodexProvider().exec("hi", max_stall_sec=0.05, liveness_interval_sec=0)
+        CodexProvider().exec(
+            "test prompt body",
+            max_stall_sec=0.05,
+            liveness_interval_sec=0,
+        )
 
     msg = str(exc.value)
-    assert "raw NDJSON saved to" not in msg
-    log_dir = tmp_path / "conductor"
-    if log_dir.exists():
-        assert list(log_dir.glob("codex-*.ndjson")) == []
+    assert "forensic envelope:" in msg
+    log_files = list((tmp_path / "conductor").glob("codex-*.json"))
+    assert len(log_files) == 1, (
+        "Envelope MUST be written even when codex emitted zero bytes — "
+        "this is the wedge-before-session.created class of failure that "
+        "had no diagnostics pre-fix."
+    )
+    envelope = _json.loads(log_files[0].read_text())
+    assert envelope["kind"] == "stall"
+    assert envelope["captured_stdout"] == ""
+    # The prompt body must be in the captured command (last positional after
+    # `codex exec`), so an operator can correlate the wedge with the request.
+    assert "test prompt body" in envelope["command"]
 
 
-def test_codex_exec_forensic_log_disk_failure_does_not_mask_real_error(
+def test_codex_exec_forensic_envelope_disk_failure_does_not_mask_real_error(
     mocker, tmp_path, monkeypatch
 ):
     """If the cache write itself fails (read-only fs, ENOSPC, etc.), the
     original ProviderStalledError must still propagate cleanly — losing
-    the forensic log is acceptable, masking the original error is not."""
+    the forensic envelope is acceptable, masking the original error is not."""
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
     partial = '{"type":"session.created","session_id":"sess-disk-fail"}\n'
@@ -774,8 +810,8 @@ def test_codex_exec_forensic_log_disk_failure_does_not_mask_real_error(
     # Original error info still present:
     assert "stalled" in msg
     assert "sess-disk-fail" in msg
-    # No fabricated log path mentioned:
-    assert "raw NDJSON saved to" not in msg
+    # No fabricated envelope path mentioned:
+    assert "forensic envelope:" not in msg
 
 
 # ---------------------------------------------------------------------------
