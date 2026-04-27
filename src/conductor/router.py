@@ -44,6 +44,7 @@ from conductor.providers import (
     known_providers,
     resolve_effort_tokens,
 )
+from conductor.router_defaults import load_tag_defaults
 
 # --------------------------------------------------------------------------- #
 # Priority (v0.1 carry-over, tiebreak only).
@@ -186,6 +187,8 @@ class RouteDecision:
     sandbox: str
     ranked: tuple[RankedCandidate, ...]           # descending by combined_score
     candidates_skipped: tuple[tuple[str, str], ...]  # (name, reason)
+    tag_default_applied: dict[str, str] = field(default_factory=dict)
+    tag_default_considered: tuple[tuple[str, str, str], ...] = ()
     unconfigured_shadow: tuple[RankedCandidate, ...] = ()  # descending; never winners
 
     # Legacy fields retained for v0.1 callers that destructured these.
@@ -211,6 +214,7 @@ def _score_one(
     prefer: str,
     effort: str | int,
     priority_index: int,
+    tag_default_boost: int = 0,
     unconfigured_reason: str | None = None,
 ) -> RankedCandidate:
     """Score a single provider under the active prefer mode.
@@ -246,6 +250,7 @@ def _score_one(
         cost_estimate=cost_estimate,
         latency_ms=provider.typical_p50_ms,
         priority_index=priority_index,
+        tag_default_boost=tag_default_boost,
     ) * (1 - penalty)
 
     return RankedCandidate(
@@ -298,6 +303,7 @@ def pick(
     tools_set = frozenset(tools or ())
     persisted_muted = frozenset(load_muted_provider_ids(known=set(known_providers())))
     exclude_set = frozenset(exclude or ()) | persisted_muted
+    tag_defaults = load_tag_defaults()
 
     if tools_set - {"Read", "Grep", "Glob", "Edit", "Write", "Bash"}:
         unknown = sorted(tools_set - {"Read", "Grep", "Glob", "Edit", "Write", "Bash"})
@@ -315,6 +321,7 @@ def pick(
     ranked: list[RankedCandidate] = []
     skipped: list[tuple[str, str]] = []
     unconfigured: dict[str, str] = {}  # name → reason; only configured() failures
+    configured_map: dict[str, bool] = {}
 
     for name in order:
         if name in exclude_set:
@@ -327,6 +334,7 @@ def pick(
         provider = get_provider(name)
 
         ok, reason = provider.configured()
+        configured_map[name] = ok
         if not ok:
             failure = reason or "not configured"
             skipped.append((name, failure))
@@ -377,6 +385,47 @@ def pick(
             f"exclude={sorted(exclude_set)}. Skipped: {skipped}"
         )
 
+    tag_default_applied: dict[str, str] = {}
+    tag_default_boosts: dict[str, int] = {}
+    tag_default_considered: list[tuple[str, str, str]] = []
+    if prefer in {"best", "balanced"}:
+        for tag in sorted(task_tag_set):
+            preferred = tag_defaults.get(tag)
+            if preferred is None:
+                continue
+            if preferred in exclude_set:
+                reason = (
+                    "excluded by --exclude"
+                    if preferred in set(exclude or ())
+                    else "muted persistently"
+                )
+                tag_default_considered.append((tag, preferred, reason))
+                continue
+            if not configured_map.get(preferred, False):
+                tag_default_considered.append((tag, preferred, "not configured"))
+                continue
+            if preferred not in {candidate.name for candidate in ranked}:
+                skipped_reason = dict(skipped).get(preferred, "not eligible")
+                tag_default_considered.append((tag, preferred, skipped_reason))
+                continue
+            tag_default_applied[tag] = preferred
+            tag_default_boosts[preferred] = tag_default_boosts.get(preferred, 0) + 1
+            tag_default_considered.append((tag, preferred, "applied"))
+
+        if tag_default_boosts:
+            ranked = [
+                _score_one(
+                    candidate.name,
+                    get_provider(candidate.name),
+                    task_tag_set=task_tag_set,
+                    prefer=prefer,
+                    effort=effort,
+                    priority_index=priority_index[candidate.name],
+                    tag_default_boost=tag_default_boosts.get(candidate.name, 0),
+                )
+                for candidate in ranked
+            ]
+
     # Sort descending by combined_score; tiebreak by priority_index ascending.
     ranked.sort(key=lambda c: (-c.combined_score, priority_index[c.name]))
     winner = ranked[0]
@@ -394,6 +443,7 @@ def pick(
                 prefer=prefer,
                 effort=effort,
                 priority_index=priority_index[name],
+                tag_default_boost=tag_default_boosts.get(name, 0),
                 unconfigured_reason=reason,
             )
             for name, reason in unconfigured.items()
@@ -413,6 +463,8 @@ def pick(
         sandbox=sandbox,
         ranked=tuple(ranked),
         candidates_skipped=tuple(skipped),
+        tag_default_applied=tag_default_applied,
+        tag_default_considered=tuple(tag_default_considered),
         unconfigured_shadow=shadow_ranked,
     )
     return winner_provider, decision
@@ -431,6 +483,7 @@ def _combined_score(
     cost_estimate: float,
     latency_ms: int,
     priority_index: int,
+    tag_default_boost: int,
 ) -> float:
     """Return a single score where higher is better.
 
@@ -442,7 +495,7 @@ def _combined_score(
     """
     if prefer == "best":
         # tier dominates (1000× magnitude); tags are fine-grained secondary.
-        return tier_rank * 1_000 + tag_score
+        return tier_rank * 1_000 + tag_score + tag_default_boost * 100
     if prefer == "cheapest":
         # Negated cost: smaller cost → bigger score. Scale by 1e6 for precision.
         # Secondary: tier_rank for quality floor.
@@ -451,7 +504,7 @@ def _combined_score(
         # Negated latency. Secondary: tier_rank.
         return -latency_ms + tier_rank * 100
     # balanced (v0.1 carry-over): tag overlap, then priority index (lower-is-earlier).
-    return tag_score * 1_000 - priority_index
+    return tag_score * 1_000 + tag_default_boost * 100 - priority_index
 
 
 def _fuzzy_suggest(query: str, options: tuple[str, ...]) -> str:

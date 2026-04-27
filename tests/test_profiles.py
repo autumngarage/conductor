@@ -43,6 +43,7 @@ def _fake_decision(provider: str = "codex") -> RouteDecision:
         sandbox="workspace-write",
         ranked=(candidate,),
         candidates_skipped=(),
+        tag_default_applied={},
     )
 
 

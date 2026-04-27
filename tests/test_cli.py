@@ -190,3 +190,47 @@ def test_call_silent_route_suppresses_caller_banner(monkeypatch):
 
     assert result.exit_code == 0, result.stderr
     assert "Conductor" not in result.stderr
+
+
+def test_router_defaults_set_list_unset(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    runner = CliRunner()
+    set_result = runner.invoke(main, ["router", "defaults", "set", "code-review", "codex"])
+    assert set_result.exit_code == 0, set_result.output
+
+    list_result = runner.invoke(main, ["router", "defaults", "list"])
+    assert list_result.exit_code == 0, list_result.output
+    assert "code-review = codex (home)" in list_result.output
+
+    unset_result = runner.invoke(main, ["router", "defaults", "unset", "code-review"])
+    assert unset_result.exit_code == 0, unset_result.output
+
+    empty_result = runner.invoke(main, ["router", "defaults", "list"])
+    assert empty_result.exit_code == 0, empty_result.output
+    assert "(no router defaults)" in empty_result.output
+
+
+def test_router_defaults_list_marks_repo_override(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    config_dir = home / ".config" / "conductor"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "router.toml").write_text(
+        '[tag_defaults]\ncode-review = "claude"\nlong-context = "gemini"\n',
+        encoding="utf-8",
+    )
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / ".conductor").mkdir()
+    (repo_dir / ".conductor" / "router.toml").write_text(
+        '[tag_defaults]\ncode-review = "codex"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(repo_dir)
+
+    result = CliRunner().invoke(main, ["router", "defaults", "list"], catch_exceptions=False)
+
+    assert result.exit_code == 0, result.output
+    assert "code-review = codex (repo override)" in result.output
+    assert "long-context = gemini (home)" in result.output
