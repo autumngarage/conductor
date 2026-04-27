@@ -62,7 +62,13 @@
 #   CODEX_REVIEW_MAX_ITERATIONS       — fix loop cap (default: from config, or 3)
 #   CODEX_REVIEW_MAX_DIFF_LINES       — skip review if diff > this many lines (default: 5000)
 #   CODEX_REVIEW_CACHE_CLEAN          — cache exact-input clean reviews (default: true)
-#   CODEX_REVIEW_TIMEOUT              — wall-clock timeout per invocation in seconds (default: 300, 0=none)
+#   CODEX_REVIEW_MAX_STALL_SEC        — kill the reviewer if it produces no output for this many
+#                                       seconds (default: 300, 0=disable). Event-based: tolerates
+#                                       slow-but-progressing reviews; only kills wedged processes.
+#   CODEX_REVIEW_TIMEOUT              — DEPRECATED wall-clock alias kept for back-compat. If set
+#                                       and CODEX_REVIEW_MAX_STALL_SEC is unset, its value is used
+#                                       as the stall threshold (the legacy semantics shipped on
+#                                       a wall-clock cap; the new semantics are stall-based).
 #   CODEX_REVIEW_ON_ERROR             — fail-open (default) or fail-closed
 #   CODEX_REVIEW_DISABLE_CACHE        — set to true/1 to force a fresh review
 #   CODEX_REVIEW_FORCE                — set to true/1 to run even on non-default-branch pushes
@@ -94,7 +100,8 @@ CACHE_CLEAN_REVIEWS="${CODEX_REVIEW_CACHE_CLEAN:-true}"
 NO_AUTOFIX="${CODEX_REVIEW_NO_AUTOFIX:-false}"
 CONFIG_MODE=""
 REVIEW_ENABLED="${CODEX_REVIEW_ENABLED:-true}"
-REVIEW_TIMEOUT="${CODEX_REVIEW_TIMEOUT:-300}"
+REVIEW_MAX_STALL_SEC="${CODEX_REVIEW_MAX_STALL_SEC:-${CODEX_REVIEW_TIMEOUT:-300}}"
+REVIEW_TIMEOUT="$REVIEW_MAX_STALL_SEC"  # back-compat alias for legacy callers
 ON_ERROR="${CODEX_REVIEW_ON_ERROR:-fail-open}"
 UNSAFE_PATHS=""
 REVIEWER_CASCADE=()
@@ -611,7 +618,14 @@ if [ -f "$CONFIG_FILE" ]; then
         CONFIG_MODE="$val"
         ;;
       timeout*=*)
-        REVIEW_TIMEOUT="${CODEX_REVIEW_TIMEOUT:-$(trim "${line#*=}")}"
+        # Legacy wall-clock key, repurposed as stall threshold for back-compat.
+        # Prefer max_stall_sec in new configs.
+        REVIEW_MAX_STALL_SEC="${CODEX_REVIEW_MAX_STALL_SEC:-${CODEX_REVIEW_TIMEOUT:-$(trim "${line#*=}")}}"
+        REVIEW_TIMEOUT="$REVIEW_MAX_STALL_SEC"
+        ;;
+      max_stall_sec*=*)
+        REVIEW_MAX_STALL_SEC="${CODEX_REVIEW_MAX_STALL_SEC:-${CODEX_REVIEW_TIMEOUT:-$(trim "${line#*=}")}}"
+        REVIEW_TIMEOUT="$REVIEW_MAX_STALL_SEC"
         ;;
       on_error*=*)
         val="$(trim "${line#*=}")"
@@ -974,7 +988,11 @@ reviewer_conductor_exec() {
   if [ "$subcommand" = "exec" ]; then
     args+=(--tools "$tools")
     args+=(--sandbox "$sandbox")
-    args+=(--timeout "${CODEX_REVIEW_TIMEOUT:-300}")
+    # Event-based watchdog: kill only on actual silence, not slow progress.
+    # The legacy wall-clock --timeout caused PR #57's review to die at 300s on
+    # a real, still-progressing 837-line review. Stall semantics tolerate long
+    # thinking pauses but still catch wedged processes.
+    args+=(--max-stall-seconds "$REVIEW_MAX_STALL_SEC")
   fi
 
   # Pass the prompt via stdin. Avoids argv length limits on large diffs and
