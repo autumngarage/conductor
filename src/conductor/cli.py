@@ -29,6 +29,7 @@ import click
 import conductor.providers.openrouter_catalog as openrouter_catalog
 from conductor import __version__, credentials, offline_mode
 from conductor.banner import print_caller_banner
+from conductor.profiles import ProfileError, ProfileSpec, get_profile, load_profiles
 from conductor.providers import (
     QUALITY_TIERS,
     CallResponse,
@@ -54,6 +55,9 @@ from conductor.wizard import run_init_wizard
 VALID_TOOLS = ("Read", "Grep", "Glob", "Edit", "Write", "Bash")
 VALID_SANDBOXES = ("read-only", "workspace-write", "strict", "none")
 VALID_EFFORT_LEVELS = ("minimal", "low", "medium", "high", "max")
+PROFILE_PRECEDENCE_TEXT = (
+    "Resolution order: profile defaults < CONDUCTOR_* env vars < explicit CLI flags."
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -97,6 +101,29 @@ def _parse_csv(raw: str | None) -> list[str]:
     if not raw:
         return []
     return [t.strip() for t in raw.split(",") if t.strip()]
+
+
+def _resolve_layered_value(
+    cli_value: str | None,
+    *,
+    env_key: str,
+    profile_value: str | None = None,
+) -> str | None:
+    if cli_value is not None:
+        return cli_value
+    env_value = os.environ.get(env_key)
+    if env_value is not None:
+        return env_value
+    return profile_value
+
+
+def _load_named_profile(name: str | None) -> ProfileSpec | None:
+    if name is None:
+        return None
+    try:
+        return get_profile(name)
+    except ProfileError as e:
+        raise click.UsageError(str(e)) from e
 
 
 def _parse_effort(raw: str | None) -> str | int:
@@ -734,6 +761,14 @@ def main() -> None:
     ),
 )
 @click.option(
+    "--profile",
+    default=None,
+    help=(
+        "Apply defaults from a named profile before env vars and explicit flags. "
+        "Resolution order: profile defaults < CONDUCTOR_* env vars < explicit CLI flags."
+    ),
+)
+@click.option(
     "--auto",
     is_flag=True,
     default=False,
@@ -812,6 +847,7 @@ def main() -> None:
 )
 def call(
     provider_id: str | None,
+    profile: str | None,
     auto: bool,
     tags: str | None,
     prefer: str | None,
@@ -827,6 +863,25 @@ def call(
     offline: bool | None,
 ) -> None:
     """Send a task to a provider and print the response."""
+    explicit_prefer = prefer
+    profile_spec = _load_named_profile(profile)
+    provider_id = _resolve_layered_value(provider_id, env_key="CONDUCTOR_WITH")
+    tags = _resolve_layered_value(
+        tags,
+        env_key="CONDUCTOR_TAGS",
+        profile_value=profile_spec.tags if profile_spec else None,
+    )
+    prefer = _resolve_layered_value(
+        prefer,
+        env_key="CONDUCTOR_PREFER",
+        profile_value=profile_spec.prefer if profile_spec else None,
+    )
+    effort = _resolve_layered_value(
+        effort,
+        env_key="CONDUCTOR_EFFORT",
+        profile_value=profile_spec.effort if profile_spec else None,
+    )
+    exclude = _resolve_layered_value(exclude, env_key="CONDUCTOR_EXCLUDE")
     provider_id, auto = _apply_offline_flag(
         offline=offline, provider_id=provider_id, auto=auto
     )
@@ -885,7 +940,7 @@ def call(
             click.echo(f"conductor: {e}", err=True)
             sys.exit(1)
     else:
-        if prefer is not None and provider_id != "openrouter":
+        if explicit_prefer is not None and provider_id != "openrouter":
             raise click.UsageError("--prefer is only meaningful with --auto.")
         # Earlier guard `if not auto and not provider_id: raise` makes this
         # narrowing safe; the assert documents it for mypy and future readers.
@@ -940,6 +995,14 @@ def call(
     "provider_id",
     default=None,
     help="Provider identifier. Mutually exclusive with --auto.",
+)
+@click.option(
+    "--profile",
+    default=None,
+    help=(
+        "Apply defaults from a named profile before env vars and explicit flags. "
+        "Resolution order: profile defaults < CONDUCTOR_* env vars < explicit CLI flags."
+    ),
 )
 @click.option(
     "--auto",
@@ -1037,6 +1100,7 @@ def call(
 )
 def exec_cmd(
     provider_id: str | None,
+    profile: str | None,
     auto: bool,
     tags: str | None,
     prefer: str | None,
@@ -1057,6 +1121,29 @@ def exec_cmd(
     offline: bool | None,
 ) -> None:
     """Run a task as an agent session with tool access (exec mode)."""
+    profile_spec = _load_named_profile(profile)
+    provider_id = _resolve_layered_value(provider_id, env_key="CONDUCTOR_WITH")
+    tags = _resolve_layered_value(
+        tags,
+        env_key="CONDUCTOR_TAGS",
+        profile_value=profile_spec.tags if profile_spec else None,
+    )
+    prefer = _resolve_layered_value(
+        prefer,
+        env_key="CONDUCTOR_PREFER",
+        profile_value=profile_spec.prefer if profile_spec else None,
+    )
+    effort = _resolve_layered_value(
+        effort,
+        env_key="CONDUCTOR_EFFORT",
+        profile_value=profile_spec.effort if profile_spec else None,
+    )
+    sandbox = _resolve_layered_value(
+        sandbox,
+        env_key="CONDUCTOR_SANDBOX",
+        profile_value=profile_spec.sandbox if profile_spec else None,
+    )
+    exclude = _resolve_layered_value(exclude, env_key="CONDUCTOR_EXCLUDE")
     provider_id, auto = _apply_offline_flag(
         offline=offline, provider_id=provider_id, auto=auto
     )
@@ -1268,6 +1355,7 @@ def config(subcommand: str, as_json: bool) -> None:
         "CONDUCTOR_PREFER": os.environ.get("CONDUCTOR_PREFER"),
         "CONDUCTOR_EFFORT": os.environ.get("CONDUCTOR_EFFORT"),
         "CONDUCTOR_TAGS": os.environ.get("CONDUCTOR_TAGS"),
+        "CONDUCTOR_SANDBOX": os.environ.get("CONDUCTOR_SANDBOX"),
         "CONDUCTOR_WITH": os.environ.get("CONDUCTOR_WITH"),
         "CONDUCTOR_EXCLUDE": os.environ.get("CONDUCTOR_EXCLUDE"),
     }
@@ -1275,6 +1363,7 @@ def config(subcommand: str, as_json: bool) -> None:
         "prefer": env_overrides["CONDUCTOR_PREFER"] or "balanced",
         "effort": env_overrides["CONDUCTOR_EFFORT"] or "medium",
         "tags": _parse_csv(env_overrides["CONDUCTOR_TAGS"]),
+        "sandbox": env_overrides["CONDUCTOR_SANDBOX"] or "none",
         "with": env_overrides["CONDUCTOR_WITH"] or None,
         "exclude": _parse_csv(env_overrides["CONDUCTOR_EXCLUDE"]),
     }
@@ -1308,6 +1397,54 @@ def config(subcommand: str, as_json: bool) -> None:
     click.echo("")
     click.echo(f"Known providers: {', '.join(payload['known_providers'])}")
     click.echo("Run `conductor list` for per-provider configured status.")
+
+
+# --------------------------------------------------------------------------- #
+# profiles — inspect built-in + user-defined defaults
+# --------------------------------------------------------------------------- #
+
+
+@main.group(name="profiles")
+def profiles_cmd() -> None:
+    """Inspect named profiles for call/exec defaults."""
+
+
+@profiles_cmd.command(name="list")
+def profiles_list() -> None:
+    """List built-in and user-defined profiles."""
+    try:
+        profiles = load_profiles()
+    except ProfileError as e:
+        raise click.UsageError(str(e)) from e
+
+    for name in sorted(profiles):
+        spec = profiles[name]
+        click.echo(
+            f"{name:<12} "
+            f"prefer={spec.prefer or '-'} "
+            f"effort={spec.effort or '-'} "
+            f"tags={spec.tags or '-'} "
+            f"sandbox={spec.sandbox or '-'} "
+            f"[{spec.source}]"
+        )
+
+
+@profiles_cmd.command(name="show")
+@click.argument("name")
+def profiles_show(name: str) -> None:
+    """Show one profile and the precedence rules around it."""
+    try:
+        spec = get_profile(name)
+    except ProfileError as e:
+        raise click.UsageError(str(e)) from e
+
+    click.echo(f"{spec.name} [{spec.source}]")
+    click.echo(f"  prefer   = {spec.prefer or '(unset)'}")
+    click.echo(f"  effort   = {spec.effort or '(unset)'}")
+    click.echo(f"  tags     = {spec.tags or '(unset)'}")
+    click.echo(f"  sandbox  = {spec.sandbox or '(unset)'}")
+    click.echo("")
+    click.echo(PROFILE_PRECEDENCE_TEXT)
 
 
 # --------------------------------------------------------------------------- #
