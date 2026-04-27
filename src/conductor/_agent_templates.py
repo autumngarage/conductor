@@ -249,14 +249,26 @@ When invoked:
 
 1. Describe the task precisely — Codex will run its own loop and you
    are giving it the initial prompt, not mid-conversation context.
-2. Run:
+2. Run (always include the watchdog flags for unattended runs):
 
        conductor exec --with codex --tools Read,Grep,Glob,Edit,Write,Bash \\
-           --sandbox workspace-write --task "<prompt>" --json
+           --sandbox workspace-write \\
+           --max-stall-seconds 600 --timeout 1800 \\
+           --task "<prompt>" --json
+
+   `--max-stall-seconds 600` kills the run if codex produces no output
+   for 10 minutes (the documented silent-hang failure mode — see
+   conductor's .cortex/journal/2026-04-26-codex-exec-wedge-trace.md).
+   `--timeout 1800` is a 30-minute wall-clock cap. Both can be tuned
+   per task: a larger refactor can take longer, a one-line fix should
+   not. Without these flags the run can hang indefinitely.
 
 3. Parse the JSON, extract `text`, and return it verbatim prefixed with
    "From Codex:". Note `session_id` in the JSON if present — callers can
-   resume by passing it back as `--resume`.
+   resume by passing it back as `--resume`. If the run was killed by
+   the watchdog, conductor's stderr message will name a forensic
+   envelope path (under `~/.cache/conductor/codex-*.json`) — surface
+   that path to the parent agent so the failure can be triaged.
 
 If the task is a quick one-shot question (no file tools needed), route
 it to a single-turn provider instead — `exec` mode carries more setup

@@ -24,6 +24,7 @@ import threading
 import time
 from pathlib import Path  # noqa: TC003 — runtime import so tests can patch Path.write_text
 
+from conductor import __version__ as _conductor_version
 from conductor.offline_mode import _cache_dir
 from conductor.providers.interface import (
     CallResponse,
@@ -326,11 +327,19 @@ class CodexProvider:
             partial_stdout = e.stdout or ""
             if isinstance(partial_stdout, bytes):
                 partial_stdout = partial_stdout.decode("utf-8", errors="replace")
+            partial_stderr = e.stderr or ""
+            if isinstance(partial_stderr, bytes):
+                partial_stderr = partial_stderr.decode("utf-8", errors="replace")
             elapsed = time.monotonic() - start
             raise ProviderError(
-                self._message_with_partial_session_id(
+                self._failure_message(
                     f"codex CLI timed out after {elapsed:.0f}s",
-                    partial_stdout,
+                    kind="timeout",
+                    elapsed_sec=elapsed,
+                    command=args,
+                    cwd=cwd,
+                    captured_stdout=partial_stdout,
+                    captured_stderr=partial_stderr,
                 )
             ) from e
         duration_ms = int((time.monotonic() - start) * 1000)
@@ -425,11 +434,17 @@ class CodexProvider:
                 self._join_reader_threads(stdout_thread, stderr_thread)
                 self._drain_stdout_queue(stdout_q, stdout_parts)
                 stdout = "".join(stdout_parts)
+                stderr = "".join(stderr_parts)
                 elapsed = time.monotonic() - start
                 raise ProviderError(
-                    self._message_with_partial_session_id(
+                    self._failure_message(
                         f"codex CLI timed out after {elapsed:.0f}s",
-                        stdout,
+                        kind="timeout",
+                        elapsed_sec=elapsed,
+                        command=args,
+                        cwd=cwd,
+                        captured_stdout=stdout,
+                        captured_stderr=stderr,
                     )
                 )
 
@@ -438,11 +453,17 @@ class CodexProvider:
                 self._join_reader_threads(stdout_thread, stderr_thread)
                 self._drain_stdout_queue(stdout_q, stdout_parts)
                 stdout = "".join(stdout_parts)
+                stderr = "".join(stderr_parts)
                 elapsed = time.monotonic() - last_output
                 raise ProviderStalledError(
-                    self._message_with_partial_session_id(
+                    self._failure_message(
                         f"codex CLI stalled after {elapsed:.0f}s with no output",
-                        stdout,
+                        kind="stall",
+                        elapsed_sec=elapsed,
+                        command=args,
+                        cwd=cwd,
+                        captured_stdout=stdout,
+                        captured_stderr=stderr,
                     )
                 )
 
@@ -549,9 +570,36 @@ class CodexProvider:
             if item is not None:
                 stdout_parts.append(item)
 
-    def _message_with_partial_session_id(self, prefix: str, stdout: str) -> str:
-        _, _, _, partial_session_id = self._parse_ndjson(stdout)
-        log_path = self._save_forensic_log(stdout)
+    def _failure_message(
+        self,
+        prefix: str,
+        *,
+        kind: str,
+        elapsed_sec: float,
+        command: list[str],
+        cwd: str | None,
+        captured_stdout: str,
+        captured_stderr: str,
+    ) -> str:
+        """Build a user-facing failure message + write the forensic envelope.
+
+        Always writes the envelope (even when codex emitted zero bytes) so
+        that wedges *before* `session.created` — the worst class of failure
+        documented in .cortex/journal/2026-04-26-codex-exec-wedge-trace.md
+        — leave the wrapping agent something to attribute the failure to.
+        Pre-fix, a zero-byte hang produced no session_id, no NDJSON, and
+        no diagnostic file: the wrapping agent had nothing to act on.
+        """
+        _, _, _, partial_session_id = self._parse_ndjson(captured_stdout)
+        envelope_path = self._save_forensic_envelope(
+            kind=kind,
+            reason=prefix,
+            elapsed_sec=elapsed_sec,
+            command=command,
+            cwd=cwd,
+            captured_stdout=captured_stdout,
+            captured_stderr=captured_stderr,
+        )
         parts = [prefix]
         if partial_session_id:
             parts.append(
@@ -559,31 +607,54 @@ class CodexProvider:
                 f"resume with `conductor exec --with codex "
                 f"--resume {partial_session_id} ...`"
             )
-            if log_path is not None:
-                parts.append(f"; raw NDJSON saved to {log_path})")
+            if envelope_path is not None:
+                parts.append(f"; forensic envelope: {envelope_path})")
             else:
                 parts.append(")")
-        elif log_path is not None:
-            parts.append(f" (raw NDJSON saved to {log_path})")
+        elif envelope_path is not None:
+            parts.append(f" (forensic envelope: {envelope_path})")
         return "".join(parts)
 
-    def _save_forensic_log(self, stdout: str) -> Path | None:
-        """Persist captured NDJSON to the cache dir on failure.
+    def _save_forensic_envelope(
+        self,
+        *,
+        kind: str,
+        reason: str,
+        elapsed_sec: float,
+        command: list[str],
+        cwd: str | None,
+        captured_stdout: str,
+        captured_stderr: str,
+    ) -> Path | None:
+        """Persist a structured failure envelope to the cache dir.
 
-        Returns the path on success, or None if there was nothing to save
-        or the write failed. A failure here MUST NOT propagate — the call
-        is already failing for a different reason; losing the forensic
-        log is acceptable, but masking the original error with a disk
-        error is not.
+        Always writes when called: codex wedges that produce zero bytes
+        still benefit from having `(command, cwd, version)` on disk so an
+        operator or wrapping agent has *something* to pin the failure to.
+        Returns the path on success, or None if the write failed. A disk
+        failure MUST NOT mask the original error — the call is already
+        failing; losing the forensic envelope is acceptable.
         """
-        if not stdout.strip():
-            return None
+        envelope = {
+            "kind": kind,
+            "reason": reason,
+            "elapsed_sec": round(elapsed_sec, 2),
+            "conductor_version": _conductor_version,
+            "codex_path": shutil.which(self._cli),
+            "command": command,
+            "cwd": cwd,
+            "captured_stdout": captured_stdout,
+            "captured_stderr": captured_stderr,
+        }
         try:
             cache_dir = _cache_dir()
             cache_dir.mkdir(parents=True, exist_ok=True)
             ts = int(time.time())
-            path = cache_dir / f"codex-{os.getpid()}-{ts}.ndjson"
-            path.write_text(stdout, encoding="utf-8")
+            path = cache_dir / f"codex-{os.getpid()}-{ts}.json"
+            path.write_text(
+                json.dumps(envelope, indent=2, default=str),
+                encoding="utf-8",
+            )
             return path
         except OSError:
             return None
