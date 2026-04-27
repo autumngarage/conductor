@@ -12,6 +12,10 @@ from conductor.providers.kimi import (
     CLOUDFLARE_API_TOKEN_ENV,
     KIMI_DEFAULT_MODEL,
 )
+from conductor.providers.openrouter import (
+    OPENROUTER_API_KEY_ENV,
+    OPENROUTER_DEFAULT_MODEL,
+)
 
 _TEST_ACCOUNT_ID = "acct-test-1234"
 _CF_CHAT_URL = (
@@ -53,6 +57,36 @@ def test_call_kimi_happy_path(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert "hello back" in result.output
+
+
+def test_call_openrouter_happy_path(monkeypatch):
+    monkeypatch.setenv(OPENROUTER_API_KEY_ENV, "or-test-key")
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "model": OPENROUTER_DEFAULT_MODEL,
+                    "choices": [{"message": {"content": "hello from openrouter"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 2},
+                },
+            )
+        )
+        result = CliRunner().invoke(
+            main,
+            [
+                "call",
+                "--with",
+                "openrouter",
+                "--model",
+                OPENROUTER_DEFAULT_MODEL,
+                "--task",
+                "hi",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "hello from openrouter" in result.output
 
 
 def test_call_kimi_missing_token_exits_2(monkeypatch):

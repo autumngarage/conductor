@@ -141,6 +141,16 @@ def test_priority_order_is_stable():
     assert DEFAULT_PRIORITY == ("kimi", "claude", "mistral", "codex", "gemini", "ollama")
 
 
+def test_openrouter_is_not_considered_for_auto_routing(mocker):
+    from conductor.providers import OpenRouterProvider
+
+    _stub_configured(mocker, {})
+    mocker.patch.object(OpenRouterProvider, "configured", lambda self: (True, None))
+    with pytest.raises(NoConfiguredProvider) as exc:
+        pick([])
+    assert "openrouter" not in str(exc.value)
+
+
 # ---------------------------------------------------------------------------
 # v0.2 — prefer modes
 # ---------------------------------------------------------------------------

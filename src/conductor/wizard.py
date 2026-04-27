@@ -41,6 +41,7 @@ from conductor.providers.kimi import (
     CLOUDFLARE_ACCOUNT_ID_ENV,
     CLOUDFLARE_API_TOKEN_ENV,
 )
+from conductor.providers.openrouter import OPENROUTER_API_KEY_ENV
 
 # --------------------------------------------------------------------------- #
 # Provider concierge copy — descriptions, install commands, cred URLs.
@@ -207,6 +208,29 @@ _INFO: dict[str, _ProviderInfo] = {
             "not a hang.",
             "402 means the account is out of credit; reasoner uses ~2× the "
             "tokens-per-call as chat because of the reasoning trace.",
+        ],
+    ),
+    "openrouter": _ProviderInfo(
+        tagline="OpenRouter's OpenAI-compatible hosted model gateway.",
+        description=(
+            "One API key for a large hosted model catalog, including cheap, "
+            "vision-capable, and frontier-tier options. HTTP-only in this "
+            "PR: single-turn calls now, selector/catalog integration later."
+        ),
+        install_cmds=[
+            "# No install step — Conductor talks directly to OpenRouter's",
+            "# OpenAI-compatible HTTP endpoint via httpx.",
+        ],
+        auth_cmds=[
+            "# Wizard will prompt for OPENROUTER_API_KEY and store it",
+            "# in Keychain / direnv.",
+        ],
+        credential_source_url="https://openrouter.ai/keys",
+        troubleshoot_tips=[
+            "OPENROUTER_API_KEY must be in the current shell — restart your "
+            "terminal after adding it to ~/.zshrc.",
+            "Validate the key at https://openrouter.ai/keys (rotate if unsure).",
+            "401 means the key is wrong; 429 means the account or route is rate-limited.",
         ],
     ),
     "ollama": _ProviderInfo(
@@ -755,6 +779,108 @@ def _deepseek_flow(name: str) -> Callable[..., WizardOutcome]:
     return flow
 
 
+def _openrouter_flow(*, can_back: bool = False) -> WizardOutcome:
+    info = _INFO["openrouter"]
+    if can_back:
+        options = [
+            ("c", "continue — enter credentials now"),
+            ("s", "skip this provider"),
+            ("b", "back — redo the previous provider"),
+            ("q", "quit setup"),
+        ]
+        entry = _prompt_menu(options=options, default="c")
+        if entry == "s":
+            return WizardOutcome("openrouter", "skipped", "user skipped")
+        if entry == "q":
+            raise _AbortSetup()
+        if entry == "b":
+            raise _GoBack()
+        click.echo("")
+    click.echo(f"  Get a key: {info.credential_source_url}")
+    click.echo("")
+
+    if _op_cli_available():
+        choice = _credential_source_choice("openrouter")
+        if choice == "skip":
+            return WizardOutcome("openrouter", "skipped", "user skipped at source choice")
+        if choice == "1password":
+            return _attempt_1password_indirection(
+                "openrouter",
+                [(OPENROUTER_API_KEY_ENV, "OpenRouter API key")],
+            )
+
+    if credentials.get(OPENROUTER_API_KEY_ENV) is not None:
+        provider = get_provider("openrouter")
+        ok, reason = provider.smoke()
+        if ok:
+            return WizardOutcome(
+                "openrouter", "ok", "credentials already present, smoke passed"
+            )
+        return WizardOutcome(
+            "openrouter", "failed", f"credentials present but smoke failed: {reason}"
+        )
+
+    try:
+        value = click.prompt(
+            f"  OpenRouter API key ({OPENROUTER_API_KEY_ENV})",
+            hide_input=True,
+            default="",
+            show_default=False,
+        )
+    except click.Abort:
+        value = ""
+    if not value:
+        click.echo(f"  {OPENROUTER_API_KEY_ENV} not provided — skipping openrouter.")
+        return WizardOutcome(
+            "openrouter", "skipped", f"{OPENROUTER_API_KEY_ENV} not provided"
+        )
+
+    storage = _prompt_menu(
+        options=[
+            ("keychain", "keychain — macOS Keychain (recommended, no shell-env leakage)"),
+            ("envrc", "envrc — write export to .envrc via direnv"),
+            ("print", "print — show export statement, I'll store it myself"),
+            ("skip", "skip — skip openrouter entirely"),
+        ],
+    )
+    if storage == "skip":
+        return WizardOutcome("openrouter", "skipped", "user skipped during storage choice")
+
+    values = {OPENROUTER_API_KEY_ENV: value}
+
+    if storage == "keychain":
+        try:
+            credentials.set_in_keychain(OPENROUTER_API_KEY_ENV, value)
+            click.echo("  ✓ stored in macOS Keychain (service: conductor).")
+        except RuntimeError as e:
+            click.echo(f"  ✗ keychain storage failed: {e}")
+            click.echo("  falling back to print-only.")
+            storage = "print"
+
+    if storage == "envrc":
+        envrc_path = os.path.join(os.getcwd(), ".envrc")
+        _append_envrc(envrc_path, values)
+        click.echo(f"  ✓ wrote export line to {envrc_path}")
+        click.echo("    run `direnv allow` in that directory to activate.")
+
+    if storage == "print":
+        click.echo("  add this to your shell rc or .envrc:")
+        click.echo(f"    export {OPENROUTER_API_KEY_ENV}={value!r}")
+
+    os.environ[OPENROUTER_API_KEY_ENV] = value
+
+    provider = get_provider("openrouter")
+    ok, reason = provider.smoke()
+    if ok:
+        click.echo("  ✓ smoke test passed")
+        return WizardOutcome("openrouter", "ok", f"stored via {storage}, smoke passed")
+    click.echo(f"  ✗ smoke test failed: {reason}")
+    click.echo("  credential stored but the endpoint is not responding as expected.")
+    return WizardOutcome(
+        "openrouter", "failed", f"stored via {storage}, smoke failed: {reason}"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # 1Password (and other secret-manager) indirection helpers.
 #
@@ -902,6 +1028,7 @@ _FLOWS: dict[str, Callable[..., WizardOutcome]] = {
     "kimi": _kimi_flow,
     "deepseek-chat": _deepseek_flow("deepseek-chat"),
     "deepseek-reasoner": _deepseek_flow("deepseek-reasoner"),
+    "openrouter": _openrouter_flow,
 }
 
 

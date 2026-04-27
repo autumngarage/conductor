@@ -48,6 +48,7 @@ from conductor.providers import (
 # Priority (v0.1 carry-over, tiebreak only).
 # --------------------------------------------------------------------------- #
 DEFAULT_PRIORITY: tuple[str, ...] = ("kimi", "claude", "mistral", "codex", "gemini", "ollama")
+_AUTO_ROUTING_DISABLED: frozenset[str] = frozenset({"openrouter"})
 
 PreferMode = Literal["best", "cheapest", "fastest", "balanced"]
 VALID_PREFER_MODES: tuple[str, ...] = ("best", "cheapest", "fastest", "balanced")
@@ -305,8 +306,9 @@ def pick(
         )
 
     # Deterministic provider iteration order: priority first, then alphabetical.
-    order = [p for p in priority if p in set(known_providers())]
-    order += sorted(set(known_providers()) - set(order))
+    routed_names = set(known_providers()) - _AUTO_ROUTING_DISABLED
+    order = [p for p in priority if p in routed_names]
+    order += sorted(routed_names - set(order))
     priority_index = {name: i for i, name in enumerate(order)}
 
     ranked: list[RankedCandidate] = []
