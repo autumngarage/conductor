@@ -8,6 +8,7 @@ the follow-up migration PRs.
 
 from __future__ import annotations
 
+import sys
 import time
 
 import httpx
@@ -16,10 +17,13 @@ from conductor import credentials
 from conductor.providers.interface import (
     CallResponse,
     ProviderConfigError,
+    ProviderError,
     ProviderHTTPError,
     UnsupportedCapability,
     resolve_effort_tokens,
 )
+
+from . import openrouter_catalog
 
 OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -98,12 +102,7 @@ class OpenRouterProvider:
         }
 
     def _reasoning_payload(self, effort: str | int) -> dict[str, str] | None:
-        if not isinstance(effort, str):
-            return None
-        mapped = _OPENROUTER_REASONING_EFFORTS.get(effort)
-        if mapped is None:
-            return None
-        return {"effort": mapped}
+        return _reasoning_payload(effort)
 
     def configured(self) -> tuple[bool, str | None]:
         if self._api_key or credentials.get(OPENROUTER_API_KEY_ENV):
@@ -156,6 +155,10 @@ class OpenRouterProvider:
         model: str | None = None,
         *,
         effort: str | int = "medium",
+        task_tags: list[str] | tuple[str, ...] | None = None,
+        prefer: str = "balanced",
+        exclude: set[str] | frozenset[str] | None = None,
+        log_selection: bool = True,
         resume_session_id: str | None = None,
     ) -> CallResponse:
         if resume_session_id:
@@ -164,15 +167,37 @@ class OpenRouterProvider:
                 "stateless. To replay context, prepend the prior turns to `task`."
             )
 
-        model = model or self.default_model
+        # Fail on missing credentials before any selector/catalog work so an
+        # unconfigured provider doesn't mask the real setup error behind a
+        # catalog refresh failure.
+        self._resolve_key()
         thinking_budget = resolve_effort_tokens(effort, self.effort_to_thinking)
         payload: dict = {
-            "model": model,
             "messages": [{"role": "user", "content": task}],
         }
-        reasoning = self._reasoning_payload(effort)
-        if reasoning is not None:
-            payload["reasoning"] = reasoning
+        selected_model = model
+        if selected_model is None:
+            selector_payload = select_model_for_task(
+                task_tags=task_tags,
+                prefer=prefer,
+                effort=effort,
+                exclude=exclude,
+            )
+            payload.update(selector_payload)
+            selected_model = str(payload["model"])
+            if payload.get("reasoning") is None:
+                payload.pop("reasoning", None)
+            if log_selection:
+                _log_selector_choice(
+                    task_tags=task_tags,
+                    prefer=prefer,
+                    payload=selector_payload,
+                )
+        else:
+            payload["model"] = selected_model
+            reasoning = self._reasoning_payload(effort)
+            if reasoning is not None:
+                payload["reasoning"] = reasoning
 
         start = time.monotonic()
         body = self._post_chat(payload)
@@ -189,7 +214,7 @@ class OpenRouterProvider:
         return CallResponse(
             text=text,
             provider=self.name,
-            model=body.get("model", model),
+            model=body.get("model", selected_model),
             duration_ms=duration_ms,
             usage={
                 "input_tokens": usage.get("prompt_tokens"),
@@ -212,6 +237,10 @@ class OpenRouterProvider:
         model: str | None = None,
         *,
         effort: str | int = "medium",
+        task_tags: list[str] | tuple[str, ...] | None = None,
+        prefer: str = "balanced",
+        exclude: set[str] | frozenset[str] | None = None,
+        log_selection: bool = True,
         tools: frozenset[str] = frozenset(),
         sandbox: str = "none",
         cwd: str | None = None,
@@ -239,4 +268,112 @@ class OpenRouterProvider:
                 f"{self.name}.exec() sandbox={sandbox!r} is not meaningful "
                 "without tools. Use sandbox='none' for a text-only exec."
             )
-        return self.call(task, model=model, effort=effort)
+        return self.call(
+            task,
+            model=model,
+            effort=effort,
+            task_tags=task_tags,
+            prefer=prefer,
+            exclude=exclude,
+            log_selection=log_selection,
+        )
+
+
+def select_model_for_task(
+    task_tags: list[str] | tuple[str, ...] | None,
+    prefer: str,
+    effort: str | int,
+    exclude: set[str] | frozenset[str] | None = None,
+) -> dict[str, object]:
+    """Select an OpenRouter model from the live catalog.
+
+    `prefer=fastest` currently uses price as a latency proxy because the public
+    catalog has no latency field. Cheaper models tend to be smaller and faster;
+    a future version can swap in measured latency when a reliable source exists.
+    """
+    if prefer not in {"best", "balanced", "cheapest", "fastest"}:
+        raise ProviderError(
+            f"OpenRouter selector got unsupported prefer={prefer!r}. "
+            "Use best, balanced, cheapest, or fastest."
+        )
+
+    task_tag_set = set(task_tags or [])
+    exclude_set = set(exclude or ())
+    candidates = []
+    for entry in openrouter_catalog.load_catalog():
+        if entry.id in exclude_set:
+            continue
+        if {"strong-reasoning", "thinking"} & task_tag_set and not entry.supports_thinking:
+            continue
+        if "tool-use" in task_tag_set and not entry.supports_tools:
+            continue
+        if "vision" in task_tag_set and not entry.supports_vision:
+            continue
+        if "long-context" in task_tag_set and entry.context_length < 100_000:
+            continue
+        candidates.append(entry)
+
+    if not candidates:
+        raise ProviderError(
+            "OpenRouter selector found no models matching "
+            f"tags={sorted(task_tag_set)} exclude={sorted(exclude_set)}. "
+            "Run `conductor models refresh` or choose `--model` explicitly."
+        )
+
+    ranked = sorted(candidates, key=_catalog_cost_sort_key)
+    if prefer in {"cheapest", "fastest"}:
+        return {"model": ranked[0].id, "reasoning": None}
+
+    shortlist = sorted(candidates, key=_catalog_recency_sort_key)[:6]
+    return {
+        "model": OPENROUTER_DEFAULT_MODEL,
+        "plugins": [
+            {
+                "id": "auto-router",
+                "allowed_models": [entry.id for entry in shortlist],
+            }
+        ],
+        "reasoning": _reasoning_payload(effort),
+    }
+
+
+def _catalog_cost_sort_key(entry: openrouter_catalog.ModelEntry) -> tuple[float, int, str]:
+    return (entry.total_price_per_1k, -entry.created, entry.id)
+
+
+def _catalog_recency_sort_key(
+    entry: openrouter_catalog.ModelEntry,
+) -> tuple[int, float, str]:
+    return (-entry.created, entry.total_price_per_1k, entry.id)
+
+
+def _reasoning_payload(effort: str | int) -> dict[str, str] | None:
+    if not isinstance(effort, str):
+        return None
+    mapped = _OPENROUTER_REASONING_EFFORTS.get(effort)
+    if mapped is None:
+        return None
+    return {"effort": mapped}
+
+
+def _log_selector_choice(
+    *,
+    task_tags: list[str] | tuple[str, ...] | None,
+    prefer: str,
+    payload: dict[str, object],
+) -> None:
+    tags_text = ",".join(task_tags or []) or "none"
+    if payload["model"] == OPENROUTER_DEFAULT_MODEL:
+        plugins = payload.get("plugins") or []
+        shortlist = []
+        if plugins and isinstance(plugins, list):
+            first = plugins[0]
+            if isinstance(first, dict):
+                shortlist = list(first.get("allowed_models") or [])
+        target = f"auto shortlist={shortlist}"
+    else:
+        target = f"model={payload['model']}"
+    sys.stderr.write(
+        f"[conductor] openrouter selector: tags={tags_text} prefer={prefer} -> {target}\n"
+    )
+    sys.stderr.flush()

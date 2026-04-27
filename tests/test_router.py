@@ -41,6 +41,7 @@ def _stub_configured(mocker, results: dict[str, bool]):
         GeminiProvider,
         KimiProvider,
         OllamaProvider,
+        OpenRouterProvider,
     )
 
     classes = {
@@ -51,6 +52,7 @@ def _stub_configured(mocker, results: dict[str, bool]):
         "deepseek-reasoner": DeepSeekReasonerProvider,
         "gemini": GeminiProvider,
         "ollama": OllamaProvider,
+        "openrouter": OpenRouterProvider,
     }
     for name, cls in classes.items():
         ok = results.get(name, False)
@@ -129,6 +131,7 @@ def test_route_decision_surfaces_skipped_with_reasons(mocker):
         "deepseek-reasoner",
         "gemini",
         "ollama",
+        "openrouter",
     }
 
 
@@ -141,14 +144,11 @@ def test_priority_order_is_stable():
     assert DEFAULT_PRIORITY == ("kimi", "claude", "mistral", "codex", "gemini", "ollama")
 
 
-def test_openrouter_is_not_considered_for_auto_routing(mocker):
-    from conductor.providers import OpenRouterProvider
-
-    _stub_configured(mocker, {})
-    mocker.patch.object(OpenRouterProvider, "configured", lambda self: (True, None))
-    with pytest.raises(NoConfiguredProvider) as exc:
-        pick([])
-    assert "openrouter" not in str(exc.value)
+def test_openrouter_can_now_participate_in_auto_routing(mocker):
+    _stub_configured(mocker, {"claude": True, "openrouter": True})
+    provider, decision = pick(["cheap"])
+    assert provider.name == "openrouter"
+    assert decision.provider == "openrouter"
 
 
 # ---------------------------------------------------------------------------

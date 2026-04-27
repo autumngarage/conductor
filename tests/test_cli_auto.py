@@ -26,9 +26,16 @@ def _stub_only_kimi_configured(mocker):
         CodexProvider,
         GeminiProvider,
         OllamaProvider,
+        OpenRouterProvider,
     )
 
-    for cls in (ClaudeProvider, CodexProvider, GeminiProvider, OllamaProvider):
+    for cls in (
+        ClaudeProvider,
+        CodexProvider,
+        GeminiProvider,
+        OllamaProvider,
+        OpenRouterProvider,
+    ):
         mocker.patch.object(cls, "configured", lambda self: (False, "stubbed off"))
 
 
@@ -108,6 +115,7 @@ def test_call_auto_with_no_configured_providers_exits_2(mocker):
         GeminiProvider,
         KimiProvider,
         OllamaProvider,
+        OpenRouterProvider,
     )
 
     for cls in (
@@ -116,6 +124,7 @@ def test_call_auto_with_no_configured_providers_exits_2(mocker):
         GeminiProvider,
         KimiProvider,
         OllamaProvider,
+        OpenRouterProvider,
     ):
         mocker.patch.object(cls, "configured", lambda self: (False, "nope"))
 
@@ -144,6 +153,8 @@ def test_call_auto_emits_shadow_hint_when_unconfigured_outranks(monkeypatch, moc
         OllamaProvider,
     )
 
+    from conductor.providers import OpenRouterProvider
+
     mocker.patch.object(ClaudeProvider, "configured", lambda self: (False, "nope"))
     mocker.patch.object(
         CodexProvider,
@@ -152,6 +163,7 @@ def test_call_auto_emits_shadow_hint_when_unconfigured_outranks(monkeypatch, moc
     )
     mocker.patch.object(GeminiProvider, "configured", lambda self: (False, "nope"))
     mocker.patch.object(OllamaProvider, "configured", lambda self: (False, "nope"))
+    mocker.patch.object(OpenRouterProvider, "configured", lambda self: (False, "nope"))
     monkeypatch.setenv(CLOUDFLARE_API_TOKEN_ENV, "cf-test-token")
     monkeypatch.setenv(CLOUDFLARE_ACCOUNT_ID_ENV, _TEST_ACCOUNT_ID)
 
@@ -248,6 +260,8 @@ def test_call_auto_silent_route_suppresses_shadow_hint(monkeypatch, mocker):
         OllamaProvider,
     )
 
+    from conductor.providers import OpenRouterProvider
+
     mocker.patch.object(ClaudeProvider, "configured", lambda self: (False, "nope"))
     mocker.patch.object(
         CodexProvider,
@@ -256,6 +270,7 @@ def test_call_auto_silent_route_suppresses_shadow_hint(monkeypatch, mocker):
     )
     mocker.patch.object(GeminiProvider, "configured", lambda self: (False, "nope"))
     mocker.patch.object(OllamaProvider, "configured", lambda self: (False, "nope"))
+    mocker.patch.object(OpenRouterProvider, "configured", lambda self: (False, "nope"))
     monkeypatch.setenv(CLOUDFLARE_API_TOKEN_ENV, "cf-test-token")
     monkeypatch.setenv(CLOUDFLARE_ACCOUNT_ID_ENV, _TEST_ACCOUNT_ID)
 

@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import json
 
+import httpx
 import pytest
+import respx
 from click.testing import CliRunner
 
 from conductor.cli import main
@@ -26,6 +28,7 @@ from conductor.providers import (
     GeminiProvider,
     KimiProvider,
     OllamaProvider,
+    OpenRouterProvider,
 )
 from conductor.router import reset_health
 
@@ -45,6 +48,7 @@ def _stub_all_configured(mocker, configured_names: set[str]) -> None:
         "codex": CodexProvider,
         "gemini": GeminiProvider,
         "ollama": OllamaProvider,
+        "openrouter": OpenRouterProvider,
     }
     for name, cls in classes.items():
         ok = name in configured_names
@@ -227,6 +231,68 @@ def test_call_verbose_route_prints_full_ranking(mocker):
     assert "1. claude" in result.stderr
     assert "codex" in result.stderr
     assert "ollama" in result.stderr
+
+
+def test_call_auto_can_route_to_openrouter_and_shortlist_cheap_models(
+    mocker, monkeypatch
+):
+    import conductor.providers.openrouter_catalog as openrouter_catalog
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-test-key")
+    _stub_all_configured(mocker, {"claude", "openrouter"})
+    mocker.patch(
+        "conductor.providers.openrouter_catalog.load_catalog",
+        return_value=[
+            openrouter_catalog.ModelEntry(
+                id="cheap/newest",
+                name="Cheap Newest",
+                created=500,
+                context_length=64_000,
+                pricing_prompt=0.001,
+                pricing_completion=0.001,
+                pricing_thinking=None,
+                supports_thinking=False,
+                supports_tools=False,
+                supports_vision=False,
+            ),
+            openrouter_catalog.ModelEntry(
+                id="expensive/older",
+                name="Expensive Older",
+                created=400,
+                context_length=64_000,
+                pricing_prompt=0.010,
+                pricing_completion=0.010,
+                pricing_thinking=None,
+                supports_thinking=False,
+                supports_tools=False,
+                supports_vision=False,
+            ),
+        ],
+    )
+    captured: dict[str, object] = {}
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "model": "cheap/newest",
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {},
+            },
+        )
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        result = CliRunner().invoke(
+            main,
+            ["call", "--auto", "--tags", "cheap", "--task", "hi"],
+        )
+
+    assert result.exit_code == 0, result.stderr
+    assert "→ openrouter" in result.stderr
+    assert captured["payload"]["model"] == "openrouter/auto"
+    assert captured["payload"]["plugins"][0]["allowed_models"][0] == "cheap/newest"
 
 
 # ---------------------------------------------------------------------------
