@@ -51,6 +51,12 @@ def test_shell_provider_configured_false_when_binary_missing():
     assert "PATH" in reason
 
 
+def test_shell_provider_health_probe_only_checks_binary_presence():
+    spec = ShellProviderSpec(name="demo", shell="/bin/cat")
+    ok, reason = ShellProvider(spec).health_probe()
+    assert ok is True and reason is None
+
+
 def test_shell_provider_call_stdin_round_trips():
     # /bin/cat on stdin echoes its input — perfect stub.
     spec = ShellProviderSpec(name="echo", shell="/bin/cat", accepts="stdin")

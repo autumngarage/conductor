@@ -156,6 +156,16 @@ class Provider(Protocol):
     def smoke(self) -> tuple[bool, str | None]:
         """Cheapest possible round-trip that proves auth + endpoint work."""
 
+    def health_probe(self, *, timeout_sec: float = 30.0) -> tuple[bool, str | None]:
+        """Cheapest possible end-to-end check that the provider can be invoked
+        right now.
+
+        Distinct from configured() (cheap, static config check) and smoke()
+        (full round-trip). Providers override this with a fast probe suited to
+        their transport.
+        """
+        raise NotImplementedError
+
     def call(
         self,
         task: str,

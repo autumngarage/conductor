@@ -330,6 +330,26 @@ def _stderr_is_tty() -> bool:
         return False
 
 
+def _provider_for_preflight(provider_or_name):
+    if hasattr(provider_or_name, "health_probe"):
+        return provider_or_name
+    return get_provider(str(provider_or_name))
+
+
+def _run_exec_preflight(provider_or_name) -> tuple[bool, str | None]:
+    provider = _provider_for_preflight(provider_or_name)
+    return provider.health_probe()
+
+
+def _echo_preflight_failure(provider_or_name, reason: str | None) -> None:
+    provider = _provider_for_preflight(provider_or_name)
+    detail = reason or "provider health probe failed"
+    click.echo(f"[conductor] preflight failed for {provider.name}: {detail}", err=True)
+    fix = getattr(provider, "fix_command", None)
+    if fix:
+        click.echo(f"[conductor] try: {fix}", err=True)
+
+
 def _echo_offline_hint(failed_name: str, *, silent: bool) -> None:
     """Print a hint pointing at ollama when we couldn't prompt."""
     if silent:
@@ -1292,6 +1312,12 @@ def call(
     help="--offline: force local (ollama) routing and set the sticky offline "
     "flag. --no-offline: clear the sticky flag before running.",
 )
+@click.option(
+    "--preflight/--no-preflight",
+    "preflight",
+    default=True,
+    help="Run a provider health probe before forwarding the task.",
+)
 def exec_cmd(
     provider_id: str | None,
     profile: str | None,
@@ -1314,6 +1340,7 @@ def exec_cmd(
     silent_route: bool,
     resume_session_id: str | None,
     offline: bool | None,
+    preflight: bool,
 ) -> None:
     """Run a task as an agent session with tool access (exec mode)."""
     profile_spec = _load_named_profile(profile)
@@ -1379,6 +1406,18 @@ def exec_cmd(
         _emit_session_route_decision(session_log, decision)
         print_caller_banner(decision.provider, silent=silent_route or as_json)
         _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
+        if preflight:
+            ok, reason = _run_exec_preflight(provider)
+            if not ok:
+                if session_log is not None:
+                    session_log.bind_provider(provider.name)
+                    session_log.emit(
+                        "provider_failed",
+                        {"provider": provider.name, "error": reason or "preflight failed"},
+                    )
+                    session_log.mark_finished()
+                _echo_preflight_failure(provider, reason)
+                sys.exit(2)
 
         try:
             response, _fallbacks = _invoke_with_fallback(
@@ -1429,6 +1468,16 @@ def exec_cmd(
         )
         session_log.bind_provider(provider_id)
         print_caller_banner(provider_id, silent=silent_route or as_json)
+        if preflight:
+            ok, reason = _run_exec_preflight(provider)
+            if not ok:
+                session_log.emit(
+                    "provider_failed",
+                    {"provider": provider_id, "error": reason or "preflight failed"},
+                )
+                session_log.mark_finished()
+                _echo_preflight_failure(provider, reason)
+                sys.exit(2)
         try:
             session_log.emit(
                 "provider_started",

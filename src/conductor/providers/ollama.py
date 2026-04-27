@@ -196,6 +196,26 @@ class OllamaProvider:
     def smoke(self) -> tuple[bool, str | None]:
         return self.configured()
 
+    def health_probe(self, *, timeout_sec: float = 10.0) -> tuple[bool, str | None]:
+        url = f"{self._base_url()}/api/tags"
+        try:
+            with httpx.Client(timeout=timeout_sec) as client:
+                resp = client.get(url)
+        except httpx.TimeoutException:
+            return False, f"`GET {url}` timed out after {timeout_sec:.0f}s"
+        except httpx.HTTPError as e:
+            return False, (
+                f"cannot reach Ollama at {self._base_url()}: {e}. "
+                "Install with `brew install ollama`, run `ollama serve`, "
+                f"and `ollama pull {self.default_model}`."
+            )
+        if resp.status_code != 200:
+            return False, (
+                f"Ollama at {self._base_url()} returned {resp.status_code} — "
+                "is the server healthy?"
+            )
+        return True, None
+
     def default_model_available(self) -> tuple[bool, str | None]:
         """Check whether ``default_model`` is pulled on the running daemon.
 
