@@ -29,6 +29,15 @@ Then walk the setup wizard:
 conductor init       # credentials + optional agent-tool wiring
 ```
 
+## Recommended credential setup
+
+Conductor's runtime resolution order stays `env -> key_command -> keychain`. The wizard chooses a storage path that is fast to use day-to-day and keeps the secret encrypted at rest when the host supports it.
+
+- macOS: default to `macOS Keychain`. The wizard writes the key, then immediately probe-reads it so macOS can show the first-read prompt. Click `Always Allow` and later `conductor` reads stay silent.
+- Linux: if `secret-tool` is available, default to `libsecret` via `secret-tool store` plus a generated `key_command` lookup. That keeps the secret encrypted at rest without changing the runtime resolution order. If `secret-tool` is unavailable, the wizard falls back to an environment-variable export and tells you that path is not encrypted at rest.
+- 1Password: available when the `op` CLI is on `PATH`. The wizard stores an `op read op://...` command in `~/.config/conductor/credentials.toml`; the secret itself never lands on disk. For zero-friction reads, set `1Password -> Settings -> Security -> Auto-Lock` to `Never`.
+- CI: use environment variables from your runner or secret store, e.g. GitHub Actions repository or environment secrets mapped to `OPENROUTER_API_KEY`.
+
 ### Alternatives
 
 ```sh
@@ -72,15 +81,15 @@ Shipped:
 - `conductor list [--json]` — shows every provider with ready/not-ready status, default model, and capability tags.
 - `conductor smoke <id>` / `conductor smoke --all [--json]` — proves a provider's auth + endpoint work (cheapest round-trip that exercises the full path).
 - `conductor doctor [--json]` — diagnostic report: which providers are configured, which env vars are set, what's in the macOS Keychain.
-- `conductor init [-y]` — interactive first-run wizard (TTY-detected, `--yes` for non-TTY). For providers needing credentials (`openrouter`, plus OpenRouter-backed `kimi` / `deepseek-*`), prompts, offers macOS Keychain / direnv `.envrc` / print-only storage, runs the smoke test, prints the equivalent non-interactive setup.
-- Credentials resolver (`conductor.credentials`): env var first, then macOS Keychain under service `conductor`.
+- `conductor init [-y]` — interactive first-run wizard (TTY-detected, `--yes` for non-TTY). For providers needing credentials (`openrouter`, plus OpenRouter-backed `kimi` / `deepseek-*`), prompts, recommends macOS Keychain or Linux `secret-tool` when available, keeps 1Password available via `op read`, runs a setup verification smoke test, and prints the manual env-var fallback when no encrypted store is available.
+- Credentials resolver (`conductor.credentials`): env var first, then `key_command`, then macOS Keychain under service `conductor`.
 - Offline-mode fallback: on a real connectivity failure (DNS, TCP reset, unreachable host) during `--auto` routing, Conductor prompts once to switch to the local `ollama` provider and remembers that choice for a short window. `conductor call --offline --task "..."` is the non-interactive form — useful on a plane, in CI, or any time you want to force local. Clear the sticky flag with `--no-offline`.
 
 Deferred (see `autumn-garage/.cortex/plans/conductor-bootstrap.md`):
 
 - Streaming, cost aggregation — post-v0.1. (Tool use shipped in v0.3.x.)
 - LLM-based meta-routing for `--auto` (today: rule-based tag scoring).
-- 1Password (`op run`) storage backend for `conductor init`.
+- Native `op run` environment injection inside `conductor init`.
 
 ## Agent integration
 

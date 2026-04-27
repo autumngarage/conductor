@@ -638,86 +638,74 @@ def _openrouter_flow(*, can_back: bool = False) -> WizardOutcome:
         click.echo("")
     click.echo(f"  Get a key: {info.credential_source_url}")
     click.echo("")
+    existing_value = credentials.get(OPENROUTER_API_KEY_ENV)
 
-    if _op_cli_available():
-        choice = _credential_source_choice("openrouter")
-        if choice == "skip":
-            return WizardOutcome("openrouter", "skipped", "user skipped at source choice")
-        if choice == "1password":
-            return _attempt_1password_indirection(
-                "openrouter",
-                [(OPENROUTER_API_KEY_ENV, "OpenRouter API key")],
-            )
-
-    if credentials.get(OPENROUTER_API_KEY_ENV) is not None:
-        provider = get_provider("openrouter")
-        ok, reason = provider.smoke()
-        if ok:
-            return WizardOutcome(
-                "openrouter", "ok", "credentials already present, smoke passed"
-            )
-        return WizardOutcome(
-            "openrouter", "failed", f"credentials present but smoke failed: {reason}"
+    storage = _credential_storage_choice("openrouter")
+    if storage == "skip":
+        return WizardOutcome("openrouter", "skipped", "user skipped at source choice")
+    if storage == "1password":
+        return _attempt_1password_indirection(
+            "openrouter",
+            [(OPENROUTER_API_KEY_ENV, "OpenRouter API key")],
         )
 
-    try:
-        value = click.prompt(
-            f"  OpenRouter API key ({OPENROUTER_API_KEY_ENV})",
-            hide_input=True,
-            default="",
-            show_default=False,
-        )
-    except click.Abort:
-        value = ""
+    value = existing_value
+    if value is not None:
+        click.echo(f"  using the currently resolved {OPENROUTER_API_KEY_ENV} value.")
+    else:
+        value = _prompt_secret_value(OPENROUTER_API_KEY_ENV)
     if not value:
         click.echo(f"  {OPENROUTER_API_KEY_ENV} not provided — skipping openrouter.")
         return WizardOutcome(
             "openrouter", "skipped", f"{OPENROUTER_API_KEY_ENV} not provided"
         )
 
-    storage = _prompt_menu(
-        options=[
-            ("keychain", "keychain — macOS Keychain (recommended, no shell-env leakage)"),
-            ("envrc", "envrc — write export to .envrc via direnv"),
-            ("print", "print — show export statement, I'll store it myself"),
-            ("skip", "skip — skip openrouter entirely"),
-        ],
-    )
-    if storage == "skip":
-        return WizardOutcome("openrouter", "skipped", "user skipped during storage choice")
-
-    values = {OPENROUTER_API_KEY_ENV: value}
+    verification_tip: str | None = None
 
     if storage == "keychain":
         try:
             credentials.set_in_keychain(OPENROUTER_API_KEY_ENV, value)
             click.echo("  ✓ stored in macOS Keychain (service: conductor).")
+            click.echo(
+                "  macOS will prompt to allow Conductor to read this "
+                'credential. Click "Always Allow" to silence future prompts.'
+            )
+            if credentials.probe_keychain_read(OPENROUTER_API_KEY_ENV):
+                verification_tip = None
+            else:
+                verification_tip = (
+                    'If macOS prompts during verification, click "Always '
+                    'Allow" so future reads stay silent.'
+                )
         except RuntimeError as e:
             click.echo(f"  ✗ keychain storage failed: {e}")
-            click.echo("  falling back to print-only.")
-            storage = "print"
-
-    if storage == "envrc":
-        envrc_path = os.path.join(os.getcwd(), ".envrc")
-        _append_envrc(envrc_path, values)
-        click.echo(f"  ✓ wrote export line to {envrc_path}")
-        click.echo("    run `direnv allow` in that directory to activate.")
-
-    if storage == "print":
-        click.echo("  add this to your shell rc or .envrc:")
+            return WizardOutcome("openrouter", "failed", f"keychain storage failed: {e}")
+    elif storage == "libsecret":
+        command = credentials.libsecret_lookup_command(OPENROUTER_API_KEY_ENV)
+        try:
+            credentials.set_in_libsecret(OPENROUTER_API_KEY_ENV, value)
+            resolved = credentials.run_key_command(OPENROUTER_API_KEY_ENV, command)
+            if resolved is None:
+                raise RuntimeError("secret-tool lookup failed after write")
+            credentials.set_key_commands({OPENROUTER_API_KEY_ENV: command})
+            credentials.delete_from_keychain(OPENROUTER_API_KEY_ENV)
+            click.echo("  ✓ stored in libsecret via secret-tool.")
+        except (OSError, RuntimeError, ValueError) as e:
+            credentials.delete_from_libsecret(OPENROUTER_API_KEY_ENV)
+            click.echo(f"  ✗ libsecret setup failed: {e}")
+            click.echo("  no changes were persisted; falling back is manual.")
+            return WizardOutcome("openrouter", "failed", f"libsecret setup failed: {e}")
+    elif storage == "env":
+        click.echo("  add this to your shell rc, CI secret, or a direnv-managed .envrc:")
         click.echo(f"    export {OPENROUTER_API_KEY_ENV}={value!r}")
+        click.echo("  note: environment variables are not encrypted at rest.")
+        os.environ[OPENROUTER_API_KEY_ENV] = value
 
-    os.environ[OPENROUTER_API_KEY_ENV] = value
-
-    provider = get_provider("openrouter")
-    ok, reason = provider.smoke()
-    if ok:
-        click.echo("  ✓ smoke test passed")
-        return WizardOutcome("openrouter", "ok", f"stored via {storage}, smoke passed")
-    click.echo(f"  ✗ smoke test failed: {reason}")
-    click.echo("  credential stored but the endpoint is not responding as expected.")
-    return WizardOutcome(
-        "openrouter", "failed", f"stored via {storage}, smoke failed: {reason}"
+    return _verify_provider_setup(
+        "openrouter",
+        success_detail=f"stored via {storage}, verification passed",
+        failure_detail_prefix=f"stored via {storage}, verification failed",
+        prompt_tip=verification_tip,
     )
 
 
@@ -753,6 +741,10 @@ def _attempt_1password_indirection(
     click.echo("  1Password indirection: conductor will fetch each credential")
     click.echo("  via `op read <reference>` on every call. The secret is NOT")
     click.echo("  stored on this machine.")
+    click.echo(
+        "  TIP: For zero-friction reads, set 1Password → Settings → "
+        'Security → Auto-Lock to "Never".'
+    )
     click.echo("")
     click.echo("  Tip: copy a reference from 1Password's UI via right-click →")
     click.echo("  Copy Secret Reference. Format: op://<vault>/<item>/<field>.")
@@ -837,31 +829,83 @@ def _attempt_1password_indirection(
         f"{credentials.credentials_file_path()}"
     )
 
+    return _verify_provider_setup(
+        name,
+        success_detail="stored via 1password, verification passed",
+        failure_detail_prefix="stored via 1password, verification failed",
+    )
+
+
+def _credential_storage_choice(name: str) -> str:
+    """Return the selected credential-storage path for an API-key provider."""
+    options: list[tuple[str, str]] = []
+    default = "env"
+
+    if sys.platform == "darwin":
+        options.append(
+            (
+                "keychain",
+                "macOS Keychain — Recommended — encrypted at rest, no auth after first prompt",
+            )
+        )
+        default = "keychain"
+    elif credentials.libsecret_available():
+        options.append(
+            (
+                "libsecret",
+                "libsecret / secret-tool — Recommended — encrypted at rest, "
+                "no auth after first prompt",
+            )
+        )
+        default = "libsecret"
+    else:
+        click.echo(
+            "  Note: no encrypted desktop secret store detected on this "
+            "host; defaulting to a plain environment variable."
+        )
+
+    if _op_cli_available():
+        options.append(
+            (
+                "1password",
+                "1Password — encrypted at rest; zero-friction if Auto-Lock is set to Never",
+            )
+        )
+    options.append(("env", "Environment variable — plain text in shell / CI config"))
+    options.append(("skip", f"skip — skip {name} entirely"))
+    return _prompt_menu(options=options, default=default)
+
+
+def _prompt_secret_value(env_var: str) -> str:
+    try:
+        return click.prompt(
+            f"  OpenRouter API key ({env_var})",
+            hide_input=True,
+            default="",
+            show_default=False,
+        )
+    except click.Abort:
+        return ""
+
+
+def _verify_provider_setup(
+    name: str,
+    *,
+    success_detail: str,
+    failure_detail_prefix: str,
+    prompt_tip: str | None = None,
+) -> WizardOutcome:
     provider = get_provider(name)
     ok, reason = provider.smoke()
     if ok:
-        click.echo("  ✓ smoke test passed")
-        return WizardOutcome(name, "ok", "stored via 1password, smoke passed")
-    click.echo(f"  ✗ smoke test failed: {reason}")
-    return WizardOutcome(name, "failed", f"stored via 1password, smoke failed: {reason}")
-
-
-def _credential_source_choice(name: str) -> str:
-    """Ask whether to source the credential from 1Password or enter manually.
-
-    Returns ``"1password"`` or ``"manual"``. Only shown when ``op`` is on
-    PATH; otherwise callers go straight to manual entry. ``"skip"`` returns
-    early and propagates as a skip outcome.
-    """
-    options = [
-        ("manual", "manual — I'll enter the secret now and store it locally"),
-        (
-            "1password",
-            "1password — fetch via `op read` on every call (no local copy)",
-        ),
-        ("skip", f"skip — skip {name} entirely"),
-    ]
-    return _prompt_menu(options=options, default="manual")
+        click.echo("  ✓ Setup verified. Future calls will be silent.")
+        if prompt_tip:
+            click.echo(f"  Tip: {prompt_tip}")
+        return WizardOutcome(name, "ok", success_detail)
+    click.echo(f"  ✗ Setup verification failed: {reason}")
+    if prompt_tip:
+        click.echo(f"  Tip: {prompt_tip}")
+    return WizardOutcome(name, "failed", f"{failure_detail_prefix}: {reason}")
 
 
 _FLOWS: dict[str, Callable[..., WizardOutcome]] = {
@@ -929,21 +973,6 @@ def _prompt_menu(
         if choice in aliases:
             return aliases[choice]
         click.echo(f"  (pick one of: {', '.join(valid_keys)})")
-
-
-def _append_envrc(path: str, values: dict[str, str]) -> None:
-    existing = ""
-    if os.path.exists(path):
-        with open(path, encoding="utf-8") as f:
-            existing = f.read()
-    with open(path, "a", encoding="utf-8") as f:
-        if existing and not existing.endswith("\n"):
-            f.write("\n")
-        f.write("\n# Added by `conductor init`\n")
-        for var, value in values.items():
-            f.write(f"export {var}={value!r}\n")
-
-
 # --------------------------------------------------------------------------- #
 # Summary + next steps.
 # --------------------------------------------------------------------------- #

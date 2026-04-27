@@ -85,6 +85,7 @@ def test_init_skips_already_configured_providers(mocker):
 
 def test_init_kimi_interactive_stores_in_keychain(mocker, monkeypatch):
     mocker.patch("conductor.wizard._is_tty", return_value=True)
+    monkeypatch.setattr("sys.platform", "darwin")
 
     from conductor.providers import KimiProvider, OpenRouterProvider
 
@@ -98,17 +99,19 @@ def test_init_kimi_interactive_stores_in_keychain(mocker, monkeypatch):
 
     mocker.patch("conductor.wizard.credentials.get", return_value=None)
     set_mock = mocker.patch("conductor.wizard.credentials.set_in_keychain")
+    mocker.patch("conductor.wizard.credentials.probe_keychain_read", return_value=True)
     result = CliRunner().invoke(
         main,
         ["init", "--only", "kimi"],
-        input="or-test-key\nkeychain\n",
+        input="\nor-test-key\n",
     )
 
     assert result.exit_code == 0, result.output
     assert set_mock.call_count == 1
     keys = [call.args[0] for call in set_mock.call_args_list]
     assert OPENROUTER_API_KEY_ENV in keys
-    assert "smoke test passed" in result.output.lower()
+    assert "macos keychain — recommended" in result.output.lower()
+    assert "setup verified. future calls will be silent." in result.output.lower()
 
 
 def test_init_kimi_interactive_print_only(mocker, monkeypatch):
@@ -124,7 +127,7 @@ def test_init_kimi_interactive_print_only(mocker, monkeypatch):
     result = CliRunner().invoke(
         main,
         ["init", "--only", "kimi"],
-        input="or-test-key\nprint\n",
+        input="env\nor-test-key\n",
     )
 
     assert result.exit_code == 0
@@ -181,7 +184,8 @@ def test_init_kimi_1password_indirection_writes_key_command(
     )
 
     assert result.exit_code == 0, result.output
-    assert "smoke test passed" in result.output.lower()
+    assert "auto-lock to \"never\"" in result.output.lower()
+    assert "setup verified. future calls will be silent." in result.output.lower()
     assert cred_file.exists()
     text = cred_file.read_text()
     assert "OPENROUTER_API_KEY" in text
@@ -206,7 +210,7 @@ def test_init_1password_choice_only_appears_when_op_detected(
     result = CliRunner().invoke(
         main,
         ["init", "--only", "kimi"],
-        input="or-test-key\nkeychain\n",
+        input="env\nor-test-key\n",
     )
 
     assert result.exit_code == 0, result.output
@@ -346,6 +350,7 @@ def test_init_1password_env_var_does_not_mask_broken_reference(
         creds_mod.clear_key_command_cache()
         assert OPENROUTER_API_KEY_ENV not in creds_mod.load_key_commands()
 
+
 def test_init_1password_preserves_unrelated_entries_on_write_failure(
     mocker, monkeypatch, tmp_path
 ):
@@ -469,6 +474,7 @@ def test_init_1password_preserves_keychain_until_file_write_commits(
         side_effect=fake_delete_from_keychain,
     )
     mocker.patch.object(OpenRouterProvider, "smoke", return_value=(True, None))
+    mocker.patch("conductor.wizard.credentials.probe_keychain_read", return_value=True)
 
     result = CliRunner().invoke(
         main,
@@ -500,6 +506,34 @@ def test_init_kimi_aborts_when_credential_left_empty(mocker, monkeypatch):
     assert result.exit_code == 0
     assert "not provided" in result.output.lower() or "skipping" in result.output.lower()
     set_mock.assert_not_called()
+
+
+def test_init_post_setup_verification_calls_smoke_and_surfaces_failure(
+    mocker, monkeypatch
+):
+    mocker.patch("conductor.wizard._is_tty", return_value=True)
+
+    from conductor.providers import OpenRouterProvider
+
+    smoke_mock = mocker.patch.object(
+        OpenRouterProvider,
+        "smoke",
+        return_value=(False, "simulated auth failure"),
+    )
+    mocker.patch.object(
+        OpenRouterProvider, "configured", lambda self: (False, "missing")
+    )
+    mocker.patch("conductor.wizard.credentials.get", return_value=None)
+
+    result = CliRunner().invoke(
+        main,
+        ["init", "--only", "openrouter"],
+        input="env\nor-test-key\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    smoke_mock.assert_called_once()
+    assert "setup verification failed: simulated auth failure" in result.output.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -1178,10 +1212,13 @@ def test_init_prints_setup_complete_verify_nudge_after_success(mocker):
     mocker.patch.object(OpenRouterProvider, "smoke", return_value=(True, None))
     mocker.patch("conductor.wizard.credentials.get", return_value=None)
 
+    # #60 added the credential-source picker (keychain / env / skip on macOS).
+    # Pick `env`, paste the key, then choose to print it back to the user
+    # (the wizard's confirm-or-print prompt).
     result = CliRunner().invoke(
         main,
         ["init", "--only", "kimi"],
-        input="or-test-key\nprint\n",
+        input="env\nor-test-key\nprint\n",
     )
 
     assert result.exit_code == 0, result.output
