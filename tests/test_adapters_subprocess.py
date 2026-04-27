@@ -6,6 +6,7 @@ All three call external CLIs. We stub ``subprocess.run`` and
 
 from __future__ import annotations
 
+import io
 import os
 import shutil
 import subprocess
@@ -320,6 +321,9 @@ class _FakePopen:
             terminated=self._terminated_event,
             on_eof=None,
         )
+        # codex now reads the prompt from stdin (`codex exec -`); mock a
+        # writable pipe so the provider's write+close path doesn't blow up.
+        self.stdin = io.StringIO()
 
     def _finish_success(self) -> None:
         if self.returncode is None:
@@ -449,10 +453,13 @@ def test_codex_call_with_resume_uses_resume_subcommand(mocker):
     )
     CodexProvider().call("follow-up", resume_session_id="sess-codex-1")
     args = captured.call_args.args[0]
-    # `codex exec resume <id> "<prompt>"` is the documented shape
+    # `codex exec resume <id> -` is the documented shape (stdin-as-prompt
+    # via PR openai/codex#15917; argv-as-prompt is no longer used).
     assert args[1] == "exec" and args[2] == "resume"
     assert args[3] == "sess-codex-1"
-    assert args[4] == "follow-up"
+    assert args[4] == "-"
+    # The actual prompt arrives via stdin (the `input=` kwarg).
+    assert captured.call_args.kwargs.get("input") == "follow-up"
     # When resuming, --ephemeral does not apply (resume implies persistence).
     assert "--ephemeral" not in args
 
@@ -944,9 +951,13 @@ def test_codex_exec_writes_envelope_when_codex_emits_zero_bytes(
     envelope = _json.loads(log_files[0].read_text())
     assert envelope["kind"] == "stall"
     assert envelope["captured_stdout"] == ""
-    # The prompt body must be in the captured command (last positional after
-    # `codex exec`), so an operator can correlate the wedge with the request.
-    assert "test prompt body" in envelope["command"]
+    # The prompt body now arrives via stdin (`codex exec -`), not argv, so
+    # the envelope surfaces it as a separate `prompt` field. An operator
+    # can still correlate the wedge with the request — just not by reading
+    # `command`. argv contains only the flags + sandbox + effort overrides.
+    assert envelope["prompt"] == "test prompt body"
+    assert "-" in envelope["command"]  # stdin sentinel
+    assert "test prompt body" not in envelope["command"]
 
 
 def test_codex_exec_forensic_envelope_disk_failure_does_not_mask_real_error(

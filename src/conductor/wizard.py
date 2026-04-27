@@ -104,7 +104,9 @@ _INFO: dict[str, _ProviderInfo] = {
         ],
         troubleshoot_tips=[
             "`codex login` requires a ChatGPT Plus/Team/Enterprise subscription.",
-            "Verify with `codex --version` (need >= 0.20) and `codex exec --help`.",
+            "Verify with `codex --version` (need >= 0.125) and `codex exec --help`. "
+            "0.122+ is required for stdin-piped prompts (which conductor uses); "
+            "0.125 fixed exec-server output retention. Older versions hang silently.",
             "Browser fails to open? try `codex login --no-browser` and follow URL.",
             "Session expired? `codex logout && codex login` forces a fresh auth.",
         ],
