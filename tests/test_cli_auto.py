@@ -151,9 +151,8 @@ def test_call_auto_emits_shadow_hint_when_unconfigured_outranks(monkeypatch, moc
         CodexProvider,
         GeminiProvider,
         OllamaProvider,
+        OpenRouterProvider,
     )
-
-    from conductor.providers import OpenRouterProvider
 
     mocker.patch.object(ClaudeProvider, "configured", lambda self: (False, "nope"))
     mocker.patch.object(
@@ -258,9 +257,8 @@ def test_call_auto_silent_route_suppresses_shadow_hint(monkeypatch, mocker):
         CodexProvider,
         GeminiProvider,
         OllamaProvider,
+        OpenRouterProvider,
     )
-
-    from conductor.providers import OpenRouterProvider
 
     mocker.patch.object(ClaudeProvider, "configured", lambda self: (False, "nope"))
     mocker.patch.object(
