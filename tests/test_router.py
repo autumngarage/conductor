@@ -30,6 +30,14 @@ def _clean_health():
 @pytest.fixture(autouse=True)
 def _isolated_conductor_home(tmp_path, monkeypatch):
     monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path / ".conductor"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+
+
+def _write_router_defaults(home_dir, body: str) -> None:
+    config_dir = home_dir / ".config" / "conductor"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "router.toml").write_text(body, encoding="utf-8")
 
 
 def _stub_configured(mocker, results: dict[str, bool]):
@@ -468,3 +476,86 @@ def test_shadow_ranked_by_score(mocker):
     _, decision = pick(["code-review"], prefer="best", shadow=True)
     scores = [c.combined_score for c in decision.unconfigured_shadow]
     assert scores == sorted(scores, reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# Tag defaults — explicit natural-provider preferences from router.toml.
+# ---------------------------------------------------------------------------
+
+
+def test_tag_default_prefers_codex_over_claude_for_code_review(mocker, tmp_path):
+    _write_router_defaults(
+        tmp_path / "home",
+        '[tag_defaults]\ncode-review = "codex"\n',
+    )
+    _stub_configured(mocker, {"claude": True, "codex": True})
+
+    provider, decision = pick(["code-review"], prefer="best")
+
+    assert provider.name == "codex"
+    assert decision.tag_default_applied == {"code-review": "codex"}
+
+
+def test_tag_default_does_not_apply_when_provider_is_unconfigured(mocker, tmp_path):
+    _write_router_defaults(
+        tmp_path / "home",
+        '[tag_defaults]\ncode-review = "codex"\n',
+    )
+    _stub_configured(mocker, {"claude": True})
+
+    provider, decision = pick(["code-review"], prefer="best")
+
+    assert provider.name == "claude"
+    assert decision.tag_default_applied == {}
+    assert ("code-review", "codex", "not configured") in decision.tag_default_considered
+
+
+def test_tag_default_does_not_apply_when_provider_is_excluded(mocker, tmp_path):
+    _write_router_defaults(
+        tmp_path / "home",
+        '[tag_defaults]\ncode-review = "codex"\n',
+    )
+    _stub_configured(mocker, {"claude": True, "codex": True})
+
+    provider, decision = pick(
+        ["code-review"],
+        prefer="best",
+        exclude={"codex"},
+    )
+
+    assert provider.name == "claude"
+    assert decision.tag_default_applied == {}
+    assert ("code-review", "codex", "excluded by --exclude") in decision.tag_default_considered
+
+
+def test_prefer_cheapest_ignores_tag_default(mocker, tmp_path):
+    _write_router_defaults(
+        tmp_path / "home",
+        '[tag_defaults]\ncode-review = "codex"\n',
+    )
+    _stub_configured(mocker, {"codex": True, "ollama": True})
+
+    provider, decision = pick(["code-review"], prefer="cheapest")
+
+    assert provider.name == "ollama"
+    assert decision.tag_default_applied == {}
+    assert decision.tag_default_considered == ()
+
+
+def test_repo_local_tag_default_overrides_home_config(mocker, tmp_path):
+    _write_router_defaults(
+        tmp_path / "home",
+        '[tag_defaults]\ncode-review = "claude"\n',
+    )
+    repo_config = tmp_path / ".conductor"
+    repo_config.mkdir(parents=True, exist_ok=True)
+    (repo_config / "router.toml").write_text(
+        '[tag_defaults]\ncode-review = "codex"\n',
+        encoding="utf-8",
+    )
+    _stub_configured(mocker, {"claude": True, "codex": True})
+
+    provider, decision = pick(["code-review"], prefer="best")
+
+    assert provider.name == "codex"
+    assert decision.tag_default_applied == {"code-review": "codex"}

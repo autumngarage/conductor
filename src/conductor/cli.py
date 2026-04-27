@@ -58,6 +58,14 @@ from conductor.router import (
     mark_rate_limited,
     pick,
 )
+from conductor.router_defaults import (
+    RouterDefaultsError,
+    load_home_tag_defaults,
+    load_tag_defaults,
+    repo_router_defaults_path,
+    set_home_tag_default,
+    unset_home_tag_default,
+)
 from conductor.session_log import (
     SessionLog,
     SessionLogError,
@@ -719,6 +727,14 @@ def _format_usage_line(response: CallResponse) -> str:
 def _format_route_ranking(decision: RouteDecision) -> list[str]:
     """Verbose ranking table for --verbose-route."""
     lines = [f"[conductor] route decision (prefer={decision.prefer}, effort={decision.effort}):"]
+    if decision.tag_default_considered:
+        for tag, provider, status in decision.tag_default_considered:
+            picked_note = ""
+            if decision.provider == provider and status == "applied":
+                picked_note = ", picked"
+            lines.append(
+                f"[conductor] tag_default: {tag} → {provider} ({status}{picked_note})"
+            )
     for i, c in enumerate(decision.ranked, start=1):
         marker = " ← picked" if i == 1 else ""
         tags = ",".join(c.matched_tags) or "none"
@@ -834,6 +850,11 @@ def _emit_session_route_decision(
             "matched_tags": list(decision.matched_tags),
             "tools_requested": list(decision.tools_requested),
             "sandbox": decision.sandbox,
+            "tag_default_applied": decision.tag_default_applied,
+            "tag_default_considered": [
+                {"tag": tag, "provider": provider, "status": status}
+                for tag, provider, status in decision.tag_default_considered
+            ],
             "ranked": [asdict(candidate) for candidate in decision.ranked],
         },
     )
@@ -1568,6 +1589,83 @@ def route(
     click.echo("Full ranking:")
     for line in _format_route_ranking(decision):
         click.echo("  " + line.removeprefix("[conductor] "))
+
+
+# --------------------------------------------------------------------------- #
+# router defaults — manage persistent tag-default preferences
+# --------------------------------------------------------------------------- #
+
+
+@main.group(name="router")
+def router_cmd() -> None:
+    """Manage persistent auto-router defaults."""
+
+
+@router_cmd.group(name="defaults")
+def router_defaults_cmd() -> None:
+    """Inspect or edit tag → provider defaults for auto-routing."""
+
+
+@router_defaults_cmd.command(name="list")
+def router_defaults_list() -> None:
+    """Print the effective tag-default mappings."""
+    try:
+        home_defaults = load_home_tag_defaults()
+        effective = load_tag_defaults()
+        repo_path = repo_router_defaults_path()
+        repo_defaults = {}
+        if repo_path.exists():
+            repo_merged = load_tag_defaults(cwd=repo_path.parent.parent)
+            repo_defaults = {
+                tag: provider
+                for tag, provider in repo_merged.items()
+                if home_defaults.get(tag) != provider or tag not in home_defaults
+            }
+    except RouterDefaultsError as e:
+        raise click.ClickException(str(e)) from e
+
+    if not effective:
+        click.echo("(no router defaults)")
+        return
+
+    for tag, provider in sorted(effective.items()):
+        if tag in repo_defaults:
+            source = "repo override"
+        elif tag in home_defaults:
+            source = "home"
+        else:
+            source = "effective"
+        click.echo(f"{tag} = {provider} ({source})")
+
+
+@router_defaults_cmd.command(name="set")
+@click.argument("tag")
+@click.argument("provider")
+def router_defaults_set(tag: str, provider: str) -> None:
+    """Write a home-level tag-default mapping."""
+    if provider not in known_providers():
+        raise click.UsageError(
+            f"unknown provider {provider!r}. Known providers: {', '.join(known_providers())}."
+        )
+    try:
+        path = set_home_tag_default(tag, provider)
+    except RouterDefaultsError as e:
+        raise click.UsageError(str(e)) from e
+    click.echo(f"set {tag} → {provider} in {path}")
+
+
+@router_defaults_cmd.command(name="unset")
+@click.argument("tag")
+def router_defaults_unset(tag: str) -> None:
+    """Remove a home-level tag-default mapping."""
+    try:
+        path, existed = unset_home_tag_default(tag)
+    except RouterDefaultsError as e:
+        raise click.UsageError(str(e)) from e
+    if existed:
+        click.echo(f"unset {tag} from {path}")
+        return
+    click.echo(f"no router default for {tag} in {path}")
 
 
 # --------------------------------------------------------------------------- #

@@ -243,6 +243,52 @@ def test_call_auto_no_hint_when_winner_is_top(monkeypatch, mocker):
     assert "heads-up" not in result.output
 
 
+def test_route_output_mentions_tag_default_when_applied(monkeypatch, mocker, tmp_path):
+    from conductor.providers import ClaudeProvider, CodexProvider
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    config_dir = home / ".config" / "conductor"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "router.toml").write_text(
+        '[tag_defaults]\ncode-review = "codex"\n',
+        encoding="utf-8",
+    )
+    mocker.patch.object(ClaudeProvider, "configured", lambda self: (True, None))
+    mocker.patch.object(CodexProvider, "configured", lambda self: (True, None))
+
+    result = CliRunner().invoke(
+        main,
+        ["route", "--tags", "code-review", "--prefer", "best"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "tag_default: code-review → codex (applied, picked)" in result.output
+
+
+def test_route_output_mentions_tag_default_fallthrough(monkeypatch, mocker, tmp_path):
+    from conductor.providers import ClaudeProvider, CodexProvider
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    config_dir = home / ".config" / "conductor"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "router.toml").write_text(
+        '[tag_defaults]\ncode-review = "codex"\n',
+        encoding="utf-8",
+    )
+    mocker.patch.object(ClaudeProvider, "configured", lambda self: (True, None))
+    mocker.patch.object(CodexProvider, "configured", lambda self: (True, None))
+
+    result = CliRunner().invoke(
+        main,
+        ["route", "--tags", "code-review", "--prefer", "best", "--exclude", "codex"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "tag_default: code-review → codex (excluded by --exclude)" in result.output
+
+
 def test_call_auto_silent_route_suppresses_shadow_hint(monkeypatch, mocker):
     """--silent-route is the documented escape hatch for scripted callers;
     it must squelch the shadow hint along with the rest of the route log."""
