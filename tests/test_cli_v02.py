@@ -36,8 +36,9 @@ from conductor.router import reset_health
 
 
 @pytest.fixture(autouse=True)
-def _clean_health():
+def _clean_health(monkeypatch, tmp_path):
     reset_health()
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     yield
     reset_health()
 
@@ -78,6 +79,49 @@ def _fake_response(provider: str = "claude", model: str = "sonnet") -> CallRespo
         cost_usd=0.01,
         raw={},
     )
+
+
+class _FakeScheduledPipe:
+    def __init__(self, schedule, *, on_eof=None) -> None:
+        self._schedule = schedule
+        self._idx = 0
+        self._on_eof = on_eof
+
+    def readline(self) -> str:
+        if self._idx < len(self._schedule):
+            line = self._schedule[self._idx]
+            self._idx += 1
+            return line
+        if self._on_eof is not None:
+            self._on_eof()
+            self._on_eof = None
+        return ""
+
+
+class _FakePopen:
+    def __init__(self, *, stdout_lines, stderr_lines=None, returncode: int = 0) -> None:
+        self.args = None
+        self.returncode = None
+        self._configured_returncode = returncode
+        self.stdout = _FakeScheduledPipe(stdout_lines, on_eof=self._finish)
+        self.stderr = _FakeScheduledPipe(stderr_lines or [])
+
+    def _finish(self) -> None:
+        if self.returncode is None:
+            self.returncode = self._configured_returncode
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        self._finish()
+        return self.returncode
+
+    def terminate(self):
+        self.returncode = -15
+
+    def kill(self):
+        self.returncode = -9
 
 
 # ---------------------------------------------------------------------------
@@ -463,6 +507,101 @@ def test_exec_cli_no_max_stall_seconds_defaults_none(mocker):
 
     assert result.exit_code == 0, result.output
     assert exec_mock.call_args.kwargs["max_stall_sec"] is None
+
+
+def test_exec_json_surfaces_codex_auth_prompt_and_records_auth_prompts(
+    mocker, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    ndjson = [
+        '{"type":"session.created","session_id":"sess-auth-1"}\n',
+        '{"type":"item.completed","item":{"type":"agent_message","text":"hello from codex"}}\n',
+        '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":2}}\n',
+    ]
+    fake = _FakePopen(
+        stdout_lines=ndjson,
+        stderr_lines=[
+            "Please visit https://chatgpt.com/oauth/device to authenticate\n"
+        ],
+    )
+    mocker.patch(
+        "conductor.providers.codex.subprocess.Popen",
+        side_effect=lambda args, **kwargs: fake,
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--with", "codex", "--task", "hi", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["text"] == "hello from codex"
+    assert payload["auth_prompts"] == [
+        {
+            "provider": "codex",
+            "message": "provider is waiting for OAuth completion",
+            "source": "stderr",
+            "url": "https://chatgpt.com/oauth/device",
+        }
+    ]
+    assert "[conductor] auth required for codex" in result.stderr
+    assert "complete the flow at: https://chatgpt.com/oauth/device" in result.stderr
+
+
+def test_exec_json_omits_auth_prompts_when_no_notice(mocker, monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    ndjson = [
+        '{"type":"session.created","session_id":"sess-auth-2"}\n',
+        '{"type":"item.completed","item":{"type":"agent_message","text":"hello from codex"}}\n',
+        '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":2}}\n',
+    ]
+    fake = _FakePopen(stdout_lines=ndjson)
+    mocker.patch(
+        "conductor.providers.codex.subprocess.Popen",
+        side_effect=lambda args, **kwargs: fake,
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--with", "codex", "--task", "hi", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert "auth_prompts" not in payload
+    assert "[conductor] auth required for codex" not in result.stderr
+
+
+def test_exec_non_json_still_surfaces_codex_auth_prompt(mocker, monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    ndjson = [
+        '{"type":"session.created","session_id":"sess-auth-3"}\n',
+        '{"type":"item.completed","item":{"type":"agent_message","text":"hello from codex"}}\n',
+        '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":2}}\n',
+    ]
+    fake = _FakePopen(
+        stdout_lines=ndjson,
+        stderr_lines=[
+            "Please visit https://chatgpt.com/oauth/device to authenticate\n"
+        ],
+    )
+    mocker.patch(
+        "conductor.providers.codex.subprocess.Popen",
+        side_effect=lambda args, **kwargs: fake,
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--with", "codex", "--task", "hi"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip() == "hello from codex"
+    assert "[conductor] auth required for codex" in result.stderr
 
 
 def test_exec_with_kimi_tools_raises_unsupported(mocker, monkeypatch):

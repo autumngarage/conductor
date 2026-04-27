@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 
 from conductor import __version__ as _conductor_version
 from conductor.offline_mode import _cache_dir
+from conductor.providers.cli_auth import AuthPromptTracker
 from conductor.providers.interface import (
     CallResponse,
     ProviderConfigError,
@@ -530,9 +531,10 @@ class CodexProvider:
             cwd=cwd,
         )
 
-        stdout_q: queue.Queue[str | None] = queue.Queue()
+        stream_q: queue.Queue[tuple[str, str | None]] = queue.Queue()
         stdout_parts: list[str] = []
         stderr_parts: list[str] = []
+        auth_tracker = AuthPromptTracker(self.name, session_log=session_log)
 
         def read_stdout() -> None:
             assert process.stdout is not None
@@ -541,17 +543,20 @@ class CodexProvider:
                     line = process.stdout.readline()
                     if line == "":
                         break
-                    stdout_q.put(line)
+                    stream_q.put(("stdout", line))
             finally:
-                stdout_q.put(None)
+                stream_q.put(("stdout", None))
 
         def read_stderr() -> None:
             assert process.stderr is not None
-            while True:
-                chunk = process.stderr.readline()
-                if chunk == "":
-                    break
-                stderr_parts.append(chunk)
+            try:
+                while True:
+                    chunk = process.stderr.readline()
+                    if chunk == "":
+                        break
+                    stream_q.put(("stderr", chunk))
+            finally:
+                stream_q.put(("stderr", None))
 
         stdout_thread = threading.Thread(target=read_stdout, daemon=True)
         stderr_thread = threading.Thread(target=read_stderr, daemon=True)
@@ -559,6 +564,7 @@ class CodexProvider:
         stderr_thread.start()
 
         stdout_done = False
+        stderr_done = False
         last_output = start
         last_liveness = start
         heartbeat_log_offset = 0
@@ -568,7 +574,9 @@ class CodexProvider:
             if timeout is not None and now - start > timeout:
                 self._terminate_process(process)
                 self._join_reader_threads(stdout_thread, stderr_thread)
-                self._drain_stdout_queue(stdout_q, stdout_parts)
+                self._drain_stream_queue(
+                    stream_q, stdout_parts, stderr_parts, auth_tracker
+                )
                 stdout = "".join(stdout_parts)
                 stderr = "".join(stderr_parts)
                 elapsed = time.monotonic() - start
@@ -587,7 +595,9 @@ class CodexProvider:
             if max_stall_sec is not None and now - last_output > max_stall_sec:
                 self._terminate_process(process)
                 self._join_reader_threads(stdout_thread, stderr_thread)
-                self._drain_stdout_queue(stdout_q, stdout_parts)
+                self._drain_stream_queue(
+                    stream_q, stdout_parts, stderr_parts, auth_tracker
+                )
                 stdout = "".join(stdout_parts)
                 stderr = "".join(stderr_parts)
                 elapsed = time.monotonic() - last_output
@@ -635,21 +645,32 @@ class CodexProvider:
                 last_liveness = now
 
             try:
-                item = stdout_q.get(timeout=0.05)
+                stream_name, item = stream_q.get(timeout=0.05)
             except queue.Empty:
-                if stdout_done and process.poll() is not None:
+                if stdout_done and stderr_done and process.poll() is not None:
                     break
                 continue
 
             if item is None:
-                stdout_done = True
-                if process.poll() is not None:
+                if stream_name == "stdout":
+                    stdout_done = True
+                else:
+                    stderr_done = True
+                if stdout_done and stderr_done and process.poll() is not None:
                     break
+                continue
+
+            if stream_name == "stderr":
+                stderr_parts.append(item)
+                last_output = time.monotonic()
+                last_liveness = last_output
+                auth_tracker.observe_text(item, source="stderr")
                 continue
 
             stdout_parts.append(item)
             last_output = time.monotonic()
             last_liveness = last_output
+            auth_tracker.observe_json_line(item, source="stdout")
             self._emit_stream_event(item, session_log=session_log)
 
             if not session_id_emitted:
@@ -663,7 +684,7 @@ class CodexProvider:
 
         returncode = process.wait()
         self._join_reader_threads(stdout_thread, stderr_thread)
-        self._drain_stdout_queue(stdout_q, stdout_parts)
+        self._drain_stream_queue(stream_q, stdout_parts, stderr_parts, auth_tracker)
         duration_ms = int((time.monotonic() - start) * 1000)
         stdout = "".join(stdout_parts)
         stderr = "".join(stderr_parts)
@@ -696,6 +717,7 @@ class CodexProvider:
             },
             session_id=session_id,
             raw={"stdout": stdout},
+            auth_prompts=auth_tracker.prompts or None,
         )
 
     def _terminate_process(self, process: subprocess.Popen[str]) -> None:
@@ -718,18 +740,26 @@ class CodexProvider:
         stdout_thread.join(timeout=1)
         stderr_thread.join(timeout=1)
 
-    def _drain_stdout_queue(
+    def _drain_stream_queue(
         self,
-        stdout_q: queue.Queue[str | None],
+        stream_q: queue.Queue[tuple[str, str | None]],
         stdout_parts: list[str],
+        stderr_parts: list[str],
+        auth_tracker: AuthPromptTracker,
     ) -> None:
         while True:
             try:
-                item = stdout_q.get_nowait()
+                stream_name, item = stream_q.get_nowait()
             except queue.Empty:
                 return
-            if item is not None:
+            if item is None:
+                continue
+            if stream_name == "stdout":
                 stdout_parts.append(item)
+                auth_tracker.observe_json_line(item, source="stdout")
+                continue
+            stderr_parts.append(item)
+            auth_tracker.observe_text(item, source="stderr")
 
     def _failure_message(
         self,

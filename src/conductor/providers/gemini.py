@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from conductor.providers.cli_auth import AuthPromptTracker, run_subprocess_with_live_stderr
 from conductor.providers.interface import (
     CallResponse,
     ProviderConfigError,
@@ -235,6 +236,8 @@ class GeminiProvider:
             cwd=cwd,
             timeout_sec_override=timeout_sec,
             resume_session_id=resume_session_id,
+            live_auth_capture=True,
+            session_log=session_log,
         )
 
     def _run(
@@ -247,6 +250,8 @@ class GeminiProvider:
         cwd: str | None = None,
         timeout_sec_override: float | None | object = _USE_DEFAULT,
         resume_session_id: str | None = None,
+        live_auth_capture: bool = False,
+        session_log: SessionLog | None = None,
     ) -> CallResponse:
         # Cheap PATH check on the hot path; auth state surfaces as a CLI
         # exit failure below if needed. configured() (with auth probe) is
@@ -287,21 +292,36 @@ class GeminiProvider:
         else:
             timeout = timeout_sec_override  # type: ignore[assignment]
         start = time.monotonic()
+        tracker = AuthPromptTracker(self.name, session_log=session_log)
         try:
-            result = subprocess.run(
-                args,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=cwd,
-                env=proc_env,
-            )
+            if live_auth_capture:
+                result = run_subprocess_with_live_stderr(
+                    args=args,
+                    cwd=cwd,
+                    env=proc_env,
+                    timeout=timeout,
+                    tracker=tracker,
+                    popen_factory=subprocess.Popen,
+                )
+            else:
+                result = subprocess.run(
+                    args,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    cwd=cwd,
+                    env=proc_env,
+                )
         except subprocess.TimeoutExpired as e:
             elapsed = time.monotonic() - start
             raise ProviderError(
                 f"gemini CLI timed out after {elapsed:.0f}s"
             ) from e
-        duration_ms = int((time.monotonic() - start) * 1000)
+        duration_ms = (
+            result.duration_ms
+            if live_auth_capture
+            else int((time.monotonic() - start) * 1000)
+        )
 
         if result.returncode != 0:
             raise ProviderHTTPError(
@@ -329,6 +349,7 @@ class GeminiProvider:
                     "thinking_budget": thinking_budget,
                 },
                 raw={"stdout": stdout},
+                auth_prompts=tracker.prompts or None,
             )
 
         input_tokens, output_tokens = self._sum_usage(data)
@@ -358,6 +379,7 @@ class GeminiProvider:
             },
             session_id=session_id,
             raw=data,
+            auth_prompts=tracker.prompts or None,
         )
 
     @staticmethod
