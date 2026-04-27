@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -56,6 +57,14 @@ from conductor.router import (
     mark_outcome,
     mark_rate_limited,
     pick,
+)
+from conductor.session_log import (
+    SessionLog,
+    SessionLogError,
+    SessionRecord,
+    find_session_record,
+    latest_active_session,
+    list_session_records,
 )
 from conductor.wizard import run_init_wizard
 
@@ -434,6 +443,7 @@ def _invoke_with_fallback(
     max_stall_sec: int | None,
     silent: bool,
     resume_session_id: str | None = None,
+    session_log: SessionLog | None = None,
 ) -> tuple[CallResponse, list[str]]:
     """Try the decision's ranked providers in order; fallback on retryable errors.
 
@@ -482,6 +492,20 @@ def _invoke_with_fallback(
     while idx < len(candidates):
         candidate = candidates[idx]
         provider = get_provider(candidate.name)
+        if session_log is not None:
+            session_log.bind_provider(candidate.name)
+            session_log.emit(
+                "provider_started",
+                {
+                    "provider": candidate.name,
+                    "mode": mode,
+                    "model": model,
+                    "tools": sorted(tools),
+                    "sandbox": sandbox,
+                    "cwd": cwd,
+                    "resume_session_id": resume_session_id,
+                },
+            )
         try:
             if mode == "exec":
                 if isinstance(provider, OpenRouterProvider):
@@ -498,6 +522,7 @@ def _invoke_with_fallback(
                         timeout_sec=timeout_sec,
                         max_stall_sec=max_stall_sec,
                         resume_session_id=resume_session_id,
+                        session_log=session_log,
                     )
                 else:
                     response = provider.exec(
@@ -510,6 +535,7 @@ def _invoke_with_fallback(
                         timeout_sec=timeout_sec,
                         max_stall_sec=max_stall_sec,
                         resume_session_id=resume_session_id,
+                        session_log=session_log,
                     )
             else:
                 if isinstance(provider, OpenRouterProvider):
@@ -530,6 +556,17 @@ def _invoke_with_fallback(
                         resume_session_id=resume_session_id,
                     )
             mark_outcome(candidate.name, "success")
+            if session_log is not None:
+                session_log.set_session_id(response.session_id)
+                session_log.emit(
+                    "provider_finished",
+                    {
+                        "provider": response.provider,
+                        "model": response.model,
+                        "duration_ms": response.duration_ms,
+                        "session_id": response.session_id,
+                    },
+                )
             return response, fallbacks
         except ProviderConfigError:
             # Config problems don't recover with a different provider using
@@ -546,6 +583,15 @@ def _invoke_with_fallback(
                 mark_rate_limited(candidate.name)
             mark_outcome(candidate.name, category)
             last_exc = e
+            if session_log is not None:
+                session_log.emit(
+                    "provider_failed",
+                    {
+                        "provider": candidate.name,
+                        "category": category,
+                        "error": str(e),
+                    },
+                )
             if not retryable:
                 raise
             fallbacks.append(candidate.name)
@@ -720,6 +766,83 @@ def _emit_usage_log(response: CallResponse, *, silent: bool) -> None:
     if silent:
         return
     click.echo(_format_usage_line(response), err=True)
+
+
+def _start_exec_session_log(
+    *,
+    log_file: str | None,
+    resume_session_id: str | None,
+) -> SessionLog:
+    try:
+        return SessionLog(
+            path=Path(log_file).expanduser() if log_file else None,
+            session_id=resume_session_id,
+        )
+    except SessionLogError as e:
+        raise click.ClickException(str(e)) from e
+
+
+def _emit_session_route_decision(
+    session_log: SessionLog | None,
+    decision: RouteDecision,
+) -> None:
+    if session_log is None:
+        return
+    session_log.emit(
+        "route_decision",
+        {
+            "provider": decision.provider,
+            "prefer": decision.prefer,
+            "effort": decision.effort,
+            "thinking_budget": decision.thinking_budget,
+            "task_tags": list(decision.task_tags),
+            "matched_tags": list(decision.matched_tags),
+            "tools_requested": list(decision.tools_requested),
+            "sandbox": decision.sandbox,
+            "ranked": [asdict(candidate) for candidate in decision.ranked],
+        },
+    )
+
+
+def _emit_session_usage(
+    session_log: SessionLog | None,
+    response: CallResponse,
+) -> None:
+    if session_log is None:
+        return
+    session_log.emit(
+        "usage",
+        {
+            "provider": response.provider,
+            "model": response.model,
+            "session_id": response.session_id,
+            "usage": response.usage,
+            "cost_usd": response.cost_usd,
+            "duration_ms": response.duration_ms,
+        },
+    )
+
+
+def _tail_record(record: SessionRecord) -> None:
+    offset = 0
+    current_path = record.log_path
+    current_status = record.status
+    while True:
+        if current_path.exists():
+            with current_path.open("r", encoding="utf-8") as fh:
+                fh.seek(offset)
+                chunk = fh.read()
+                if chunk:
+                    click.echo(chunk, nl=False)
+                offset = fh.tell()
+        if current_status != "running":
+            return
+        time.sleep(0.1)
+        refreshed = find_session_record(record.session_id) or find_session_record(record.run_id)
+        if refreshed is None:
+            return
+        current_path = refreshed.log_path
+        current_status = refreshed.status
 
 
 def _openrouter_catalog_or_exit() -> openrouter_catalog.CatalogSnapshot:
@@ -1084,6 +1207,14 @@ def call(
 )
 @click.option("--model", default=None, help="Override the provider's default model.")
 @click.option(
+    "--log-file",
+    default=None,
+    help=(
+        "Write structured NDJSON progress events to PATH. Defaults to "
+        "~/.cache/conductor/sessions/<session_id>.ndjson."
+    ),
+)
+@click.option(
     "--json",
     "as_json",
     is_flag=True,
@@ -1121,6 +1252,7 @@ def exec_cmd(
     task: str | None,
     task_file: str | None,
     model: str | None,
+    log_file: str | None,
     as_json: bool,
     verbose_route: bool,
     silent_route: bool,
@@ -1169,6 +1301,7 @@ def exec_cmd(
     effort_value = _parse_effort(effort)
 
     decision: RouteDecision | None = None
+    session_log: SessionLog | None = None
     if auto:
         try:
             provider, decision = pick(
@@ -1183,6 +1316,11 @@ def exec_cmd(
         except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
+        session_log = _start_exec_session_log(
+            log_file=log_file,
+            resume_session_id=resume_session_id,
+        )
+        _emit_session_route_decision(session_log, decision)
         print_caller_banner(decision.provider, silent=silent_route or as_json)
         _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
 
@@ -1199,14 +1337,24 @@ def exec_cmd(
                 timeout_sec=timeout_sec,
                 max_stall_sec=max_stall_sec,
                 silent=silent_route or as_json,
+                resume_session_id=resume_session_id,
+                session_log=session_log,
             )
         except UnsupportedCapability as e:
+            if session_log is not None:
+                session_log.emit("provider_failed", {"error": str(e)})
+                session_log.mark_finished()
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
         except ProviderConfigError as e:
+            if session_log is not None:
+                session_log.emit("provider_failed", {"error": str(e)})
+                session_log.mark_finished()
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
         except ProviderError as e:
+            if session_log is not None:
+                session_log.mark_finished()
             click.echo(f"conductor: {e}", err=True)
             sys.exit(1)
     else:
@@ -1219,8 +1367,25 @@ def exec_cmd(
             provider = get_provider(provider_id)
         except KeyError as e:
             raise click.UsageError(str(e)) from e
+        session_log = _start_exec_session_log(
+            log_file=log_file,
+            resume_session_id=resume_session_id,
+        )
+        session_log.bind_provider(provider_id)
         print_caller_banner(provider_id, silent=silent_route or as_json)
         try:
+            session_log.emit(
+                "provider_started",
+                {
+                    "provider": provider_id,
+                    "mode": "exec",
+                    "model": model,
+                    "tools": sorted(tools_set),
+                    "sandbox": sandbox_value,
+                    "cwd": cwd,
+                    "resume_session_id": resume_session_id,
+                },
+            )
             if isinstance(provider, OpenRouterProvider):
                 response = provider.exec(
                     body,
@@ -1235,6 +1400,7 @@ def exec_cmd(
                     timeout_sec=timeout_sec,
                     max_stall_sec=max_stall_sec,
                     resume_session_id=resume_session_id,
+                    session_log=session_log,
                 )
             else:
                 response = provider.exec(
@@ -1247,20 +1413,40 @@ def exec_cmd(
                     timeout_sec=timeout_sec,
                     max_stall_sec=max_stall_sec,
                     resume_session_id=resume_session_id,
+                    session_log=session_log,
                 )
         except UnsupportedCapability as e:
+            session_log.emit("provider_failed", {"provider": provider_id, "error": str(e)})
+            session_log.mark_finished()
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
         except ProviderConfigError as e:
+            session_log.emit("provider_failed", {"provider": provider_id, "error": str(e)})
+            session_log.mark_finished()
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
         except ProviderError as e:
+            session_log.emit("provider_failed", {"provider": provider_id, "error": str(e)})
+            session_log.mark_finished()
             click.echo(f"conductor: {e}", err=True)
             _maybe_echo_explicit_network_hint(provider_id, e)
             sys.exit(1)
+        session_log.set_session_id(response.session_id)
+        session_log.emit(
+            "provider_finished",
+            {
+                "provider": response.provider,
+                "model": response.model,
+                "duration_ms": response.duration_ms,
+                "session_id": response.session_id,
+            },
+        )
 
     if auto and not as_json:
         _emit_usage_log(response, silent=silent_route)
+    _emit_session_usage(session_log, response)
+    if session_log is not None:
+        session_log.mark_finished()
     _emit_call(response, as_json=as_json, decision=decision)
 
 
@@ -2144,6 +2330,55 @@ def _run_unwire() -> int:
         for path, reason in report.skipped:
             click.echo(f"  {path}  — {reason}")
     return 0
+
+
+# --------------------------------------------------------------------------- #
+# sessions — inspect structured exec logs
+# --------------------------------------------------------------------------- #
+
+
+@main.group()
+def sessions() -> None:
+    """Inspect structured session logs for `conductor exec`."""
+
+
+@sessions.command("list")
+def sessions_list() -> None:
+    """List known session logs with their latest status."""
+    records = list_session_records()
+    if not records:
+        click.echo("(no session logs)")
+        return
+
+    click.echo(
+        "SESSION ID                           STATUS    UPDATED                      PROVIDER"
+    )
+    click.echo("--------------------------------------------------------------------------------------")
+    for record in reversed(records):
+        provider = record.provider or "-"
+        click.echo(
+            f"{record.session_id:<36}  "
+            f"{record.status:<8}  "
+            f"{record.updated_at:<27}  "
+            f"{provider}"
+        )
+
+
+@sessions.command("tail")
+@click.argument("session_id", required=False)
+def sessions_tail(session_id: str | None) -> None:
+    """Print a session log and follow it while the session is running."""
+    if session_id is None:
+        record = latest_active_session()
+        if record is None:
+            click.echo("no active session")
+            return
+    else:
+        record = find_session_record(session_id)
+        if record is None:
+            raise click.ClickException(f"unknown session {session_id!r}")
+
+    _tail_record(record)
 
 
 # --------------------------------------------------------------------------- #

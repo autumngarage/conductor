@@ -15,6 +15,7 @@ import json
 import os
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 
@@ -24,6 +25,9 @@ from conductor.providers.interface import (
     ProviderHTTPError,
     UnsupportedCapability,
 )
+
+if TYPE_CHECKING:
+    from conductor.session_log import SessionLog
 from conductor.tools import (
     ToolExecutionError,
     ToolExecutor,
@@ -301,6 +305,7 @@ class OllamaProvider:
         timeout_sec: int | None = None,
         max_stall_sec: int | None = None,
         resume_session_id: str | None = None,
+        session_log: SessionLog | None = None,
     ) -> CallResponse:
         # accepted for API parity; only codex implements stall-watchdog today
         if resume_session_id:
@@ -463,6 +468,19 @@ class OllamaProvider:
                         result = executor.run(name, args)
                     except ToolExecutionError as e:
                         result = f"error: {e}"
+                if session_log is not None:
+                    session_log.emit(
+                        "tool_call",
+                        {
+                            "provider": self.name,
+                            "iteration": iteration,
+                            "name": name,
+                            "args": args,
+                            "result_preview": (
+                                result[:200] if isinstance(result, str) else result
+                            ),
+                        },
+                    )
 
                 # Ollama does not always emit `id`; fall back to a synthesized one.
                 tool_msg: dict = {

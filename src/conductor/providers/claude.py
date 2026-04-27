@@ -15,6 +15,7 @@ import json
 import shutil
 import subprocess
 import time
+from typing import TYPE_CHECKING
 
 from conductor.providers.interface import (
     CallResponse,
@@ -23,6 +24,9 @@ from conductor.providers.interface import (
     ProviderHTTPError,
     resolve_effort_tokens,
 )
+
+if TYPE_CHECKING:
+    from conductor.session_log import SessionLog
 
 CLAUDE_DEFAULT_MODEL = "sonnet"
 CLAUDE_REQUEST_TIMEOUT_SEC = 180.0
@@ -188,6 +192,7 @@ class ClaudeProvider:
         timeout_sec: int | None = None,
         max_stall_sec: int | None = None,
         resume_session_id: str | None = None,
+        session_log: SessionLog | None = None,
     ) -> CallResponse:
         # accepted for API parity; only codex implements stall-watchdog today
         # Claude's `--allowedTools` is fine-grained; passing an empty set

@@ -37,7 +37,7 @@ import shutil
 import subprocess
 import time
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from conductor.providers.interface import (
     CallResponse,
@@ -46,6 +46,9 @@ from conductor.providers.interface import (
     ProviderHTTPError,
     UnsupportedCapability,
 )
+
+if TYPE_CHECKING:
+    from conductor.session_log import SessionLog
 
 SHELL_PROVIDER_TIMEOUT_SEC = 180.0
 
@@ -194,6 +197,7 @@ class ShellProvider:
         timeout_sec: int | None = None,
         max_stall_sec: int | None = None,
         resume_session_id: str | None = None,
+        session_log: SessionLog | None = None,
     ) -> CallResponse:
         # accepted for API parity; only codex implements stall-watchdog today
         if tools:
