@@ -33,6 +33,7 @@ OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_DEFAULT_MODEL = "openrouter/auto"
 OPENROUTER_REQUEST_TIMEOUT_SEC = 120.0
+OPENROUTER_HEALTH_PROBE_TIMEOUT_SEC = 10.0
 OPENROUTER_HTTP_REFERER = "https://github.com/autumngarage/conductor"
 OPENROUTER_X_TITLE = "conductor"
 
@@ -131,6 +132,27 @@ class OpenRouterProvider:
             return False, str(e)
         if "choices" not in response:
             return False, f"unexpected response shape: {sorted(response)[:5]}"
+        return True, None
+
+    def health_probe(
+        self, *, timeout_sec: float = OPENROUTER_HEALTH_PROBE_TIMEOUT_SEC
+    ) -> tuple[bool, str | None]:
+        try:
+            headers = self._headers()
+        except ProviderConfigError as e:
+            return False, str(e)
+
+        url = f"{self._base_url}/models"
+        try:
+            with httpx.Client(timeout=timeout_sec) as client:
+                resp = client.get(url, headers=headers)
+        except httpx.TimeoutException:
+            return False, f"`GET {url}` timed out after {timeout_sec:.0f}s"
+        except httpx.HTTPError as e:
+            return False, f"network error calling OpenRouter: {e}"
+
+        if resp.status_code != 200:
+            return False, f"OpenRouter returned HTTP {resp.status_code}: {resp.text[:200]}"
         return True, None
 
     def _post_chat(self, payload: dict) -> dict:

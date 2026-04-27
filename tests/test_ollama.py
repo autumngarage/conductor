@@ -95,6 +95,43 @@ def test_configured_honors_env_override(monkeypatch):
     assert ok is True
 
 
+def test_health_probe_success():
+    with respx.mock() as router:
+        router.get(TAGS_URL).mock(
+            return_value=httpx.Response(200, json={"models": []})
+        )
+        ok, reason = OllamaProvider().health_probe()
+    assert ok is True and reason is None
+
+
+def test_health_probe_timeout():
+    with respx.mock() as router:
+        router.get(TAGS_URL).mock(
+            side_effect=httpx.ReadTimeout(
+                "timed out", request=httpx.Request("GET", TAGS_URL)
+            )
+        )
+        ok, reason = OllamaProvider().health_probe(timeout_sec=9)
+    assert ok is False
+    assert "timed out" in reason
+
+
+def test_health_probe_non_200():
+    with respx.mock() as router:
+        router.get(TAGS_URL).mock(return_value=httpx.Response(503, text="down"))
+        ok, reason = OllamaProvider().health_probe()
+    assert ok is False
+    assert "returned 503" in reason
+
+
+def test_health_probe_network_error():
+    with respx.mock() as router:
+        router.get(TAGS_URL).mock(side_effect=httpx.ConnectError("refused"))
+        ok, reason = OllamaProvider().health_probe()
+    assert ok is False
+    assert "cannot reach Ollama" in reason
+
+
 def test_call_returns_normalized_response():
     body = {
         "model": OLLAMA_DEFAULT_MODEL,

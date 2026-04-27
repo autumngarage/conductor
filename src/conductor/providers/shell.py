@@ -160,6 +160,10 @@ class ShellProvider:
         # `conductor call --with <name> --task "ping"` for that.
         return self.configured()
 
+    def health_probe(self, *, timeout_sec: float = 30.0) -> tuple[bool, str | None]:
+        del timeout_sec
+        return self.configured()
+
     def _binary(self) -> str:
         parts = shlex.split(self._spec.shell)
         return parts[0] if parts else ""

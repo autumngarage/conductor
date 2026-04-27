@@ -190,6 +190,28 @@ class GeminiProvider:
             )
         return True, None
 
+    def health_probe(self, *, timeout_sec: float = 30.0) -> tuple[bool, str | None]:
+        ok, reason = self._check_cli_path()
+        if not ok:
+            return False, reason
+        try:
+            result = subprocess.run(
+                [self._cli, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+            )
+        except subprocess.TimeoutExpired:
+            return False, f"`{self._cli} --version` timed out after {timeout_sec:.0f}s"
+        except OSError as e:
+            return False, f"could not run `{self._cli} --version`: {e}"
+        if result.returncode != 0:
+            return False, (
+                f"`{self._cli} --version` exited {result.returncode}: "
+                f"{(result.stderr or result.stdout).strip()[:200]}"
+            )
+        return True, None
+
     def call(
         self,
         task: str,

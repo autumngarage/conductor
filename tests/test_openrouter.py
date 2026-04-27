@@ -8,11 +8,13 @@ import httpx
 import pytest
 import respx
 
+from conductor.providers.deepseek import DeepSeekChatProvider, DeepSeekReasonerProvider
 from conductor.providers.interface import (
     CallResponse,
     ProviderConfigError,
     UnsupportedCapability,
 )
+from conductor.providers.kimi import KimiProvider
 from conductor.providers.openrouter import (
     OPENROUTER_API_KEY_ENV,
     OPENROUTER_DEFAULT_MODEL,
@@ -111,6 +113,77 @@ def test_smoke_returns_true_on_well_formed_response(configured):
         ok, reason = OpenRouterProvider().smoke()
     assert ok is True
     assert reason is None
+
+
+@pytest.mark.parametrize(
+    "provider_cls,model_url",
+    [
+        (OpenRouterProvider, "https://openrouter.ai/api/v1/models"),
+        (KimiProvider, "https://openrouter.ai/api/v1/models"),
+        (DeepSeekChatProvider, "https://openrouter.ai/api/v1/models"),
+        (DeepSeekReasonerProvider, "https://openrouter.ai/api/v1/models"),
+    ],
+)
+def test_openrouter_family_health_probe_success(configured, provider_cls, model_url):
+    with respx.mock() as router:
+        router.get(model_url).mock(return_value=httpx.Response(200, json={"data": []}))
+        ok, reason = provider_cls().health_probe()
+    assert ok is True and reason is None
+
+
+@pytest.mark.parametrize(
+    "provider_cls,model_url",
+    [
+        (OpenRouterProvider, "https://openrouter.ai/api/v1/models"),
+        (KimiProvider, "https://openrouter.ai/api/v1/models"),
+        (DeepSeekChatProvider, "https://openrouter.ai/api/v1/models"),
+        (DeepSeekReasonerProvider, "https://openrouter.ai/api/v1/models"),
+    ],
+)
+def test_openrouter_family_health_probe_timeout(configured, provider_cls, model_url):
+    with respx.mock() as router:
+        router.get(model_url).mock(
+            side_effect=httpx.ReadTimeout("timed out", request=httpx.Request("GET", model_url))
+        )
+        ok, reason = provider_cls().health_probe(timeout_sec=9)
+    assert ok is False
+    assert "timed out" in reason
+
+
+@pytest.mark.parametrize(
+    "provider_cls,model_url",
+    [
+        (OpenRouterProvider, "https://openrouter.ai/api/v1/models"),
+        (KimiProvider, "https://openrouter.ai/api/v1/models"),
+        (DeepSeekChatProvider, "https://openrouter.ai/api/v1/models"),
+        (DeepSeekReasonerProvider, "https://openrouter.ai/api/v1/models"),
+    ],
+)
+def test_openrouter_family_health_probe_4xx(configured, provider_cls, model_url):
+    with respx.mock() as router:
+        router.get(model_url).mock(return_value=httpx.Response(401, text="bad key"))
+        ok, reason = provider_cls().health_probe()
+    assert ok is False
+    assert "HTTP 401" in reason
+
+
+@pytest.mark.parametrize(
+    "provider_cls,model_url",
+    [
+        (OpenRouterProvider, "https://openrouter.ai/api/v1/models"),
+        (KimiProvider, "https://openrouter.ai/api/v1/models"),
+        (DeepSeekChatProvider, "https://openrouter.ai/api/v1/models"),
+        (DeepSeekReasonerProvider, "https://openrouter.ai/api/v1/models"),
+    ],
+)
+def test_openrouter_family_health_probe_network_error(
+    configured, provider_cls, model_url
+):
+    with respx.mock() as router:
+        router.get(model_url).mock(side_effect=httpx.ConnectError("refused"))
+        ok, reason = provider_cls().health_probe()
+    assert ok is False
+    assert "network error" in reason
 
 
 def test_call_sends_reasoning_effort_and_openrouter_headers(configured):

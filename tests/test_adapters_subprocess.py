@@ -127,6 +127,65 @@ def test_claude_configured_false_when_auth_probe_returns_non_json(mocker):
     assert "not JSON" in reason
 
 
+@pytest.mark.parametrize("provider_cls,module_path,cli_name", [
+    (ClaudeProvider, "conductor.providers.claude", "claude"),
+    (CodexProvider, "conductor.providers.codex", "codex"),
+    (GeminiProvider, "conductor.providers.gemini", "gemini"),
+])
+def test_cli_health_probe_success(mocker, provider_cls, module_path, cli_name):
+    mocker.patch(f"{module_path}.shutil.which", return_value=f"/usr/bin/{cli_name}")
+    mocker.patch(
+        f"{module_path}.subprocess.run",
+        return_value=_fake_completed(stdout=f"{cli_name} 1.2.3"),
+    )
+    ok, reason = provider_cls().health_probe(timeout_sec=7)
+    assert ok is True and reason is None
+
+
+@pytest.mark.parametrize("provider_cls,module_path,cli_name", [
+    (ClaudeProvider, "conductor.providers.claude", "claude"),
+    (CodexProvider, "conductor.providers.codex", "codex"),
+    (GeminiProvider, "conductor.providers.gemini", "gemini"),
+])
+def test_cli_health_probe_timeout(mocker, provider_cls, module_path, cli_name):
+    mocker.patch(f"{module_path}.shutil.which", return_value=f"/usr/bin/{cli_name}")
+    mocker.patch(
+        f"{module_path}.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd=cli_name, timeout=7),
+    )
+    ok, reason = provider_cls().health_probe(timeout_sec=7)
+    assert ok is False
+    assert "timed out" in reason
+
+
+@pytest.mark.parametrize("provider_cls,module_path,cli_name", [
+    (ClaudeProvider, "conductor.providers.claude", "claude"),
+    (CodexProvider, "conductor.providers.codex", "codex"),
+    (GeminiProvider, "conductor.providers.gemini", "gemini"),
+])
+def test_cli_health_probe_nonzero_exit(mocker, provider_cls, module_path, cli_name):
+    mocker.patch(f"{module_path}.shutil.which", return_value=f"/usr/bin/{cli_name}")
+    mocker.patch(
+        f"{module_path}.subprocess.run",
+        return_value=_fake_completed(stderr="broken", returncode=2),
+    )
+    ok, reason = provider_cls().health_probe()
+    assert ok is False
+    assert "exited 2" in reason
+
+
+@pytest.mark.parametrize("provider_cls,module_path", [
+    (ClaudeProvider, "conductor.providers.claude"),
+    (CodexProvider, "conductor.providers.codex"),
+    (GeminiProvider, "conductor.providers.gemini"),
+])
+def test_cli_health_probe_missing_binary(mocker, provider_cls, module_path):
+    mocker.patch(f"{module_path}.shutil.which", return_value=None)
+    ok, reason = provider_cls().health_probe()
+    assert ok is False
+    assert "not found on PATH" in reason
+
+
 def test_claude_call_returns_normalized_response(mocker):
     mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
     mocker.patch(

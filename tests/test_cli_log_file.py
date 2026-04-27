@@ -45,6 +45,14 @@ def _stub_all_configured(mocker, configured_names: set[str]) -> None:
                 None if _ok else f"{_name} stub not configured",
             ),
         )
+        mocker.patch.object(
+            cls,
+            "health_probe",
+            lambda self, timeout_sec=30.0, _ok=ok, _name=name: (
+                _ok,
+                None if _ok else f"{_name} preflight failed",
+            ),
+        )
 
 
 def _read_events(path: Path) -> list[dict]:

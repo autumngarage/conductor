@@ -63,6 +63,14 @@ def _stub_all_configured(mocker, configured_names: set[str]) -> None:
             "configured",
             lambda self, _ok=ok, _n=name: (_ok, None if _ok else f"{_n} stub not configured"),
         )
+        mocker.patch.object(
+            cls,
+            "health_probe",
+            lambda self, timeout_sec=30.0, _ok=ok, _n=name: (
+                _ok,
+                None if _ok else f"{_n} preflight failed",
+            ),
+        )
 
 
 def _fake_response(provider: str = "claude", model: str = "sonnet") -> CallResponse:
@@ -513,6 +521,49 @@ def test_exec_cli_no_max_stall_seconds_defaults_none(mocker):
     assert exec_mock.call_args.kwargs["max_stall_sec"] is None
 
 
+def test_exec_cli_preflight_blocks_exec_and_surfaces_fix_hint(mocker):
+    _stub_all_configured(mocker, {"codex"})
+    mocker.patch.object(
+        CodexProvider,
+        "health_probe",
+        return_value=(False, "network is unreachable"),
+    )
+    exec_mock = mocker.patch.object(
+        CodexProvider, "exec", return_value=_fake_response("codex")
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--with", "codex", "--task", "do it"],
+    )
+
+    assert result.exit_code == 2
+    assert not exec_mock.called
+    assert "[conductor] preflight failed for codex: network is unreachable" in result.stderr
+    assert "[conductor] try: brew install codex && codex login" in result.stderr
+
+
+def test_exec_cli_no_preflight_skips_probe(mocker):
+    _stub_all_configured(mocker, {"codex"})
+    probe_mock = mocker.patch.object(
+        CodexProvider,
+        "health_probe",
+        return_value=(False, "network is unreachable"),
+    )
+    exec_mock = mocker.patch.object(
+        CodexProvider, "exec", return_value=_fake_response("codex")
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--with", "codex", "--no-preflight", "--task", "do it"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert not probe_mock.called
+    assert exec_mock.called
+
+
 def test_exec_json_surfaces_codex_auth_prompt_and_records_auth_prompts(
     mocker, monkeypatch, tmp_path
 ):
@@ -536,7 +587,7 @@ def test_exec_json_surfaces_codex_auth_prompt_and_records_auth_prompts(
 
     result = CliRunner().invoke(
         main,
-        ["exec", "--with", "codex", "--task", "hi", "--json"],
+        ["exec", "--with", "codex", "--no-preflight", "--task", "hi", "--json"],
     )
 
     assert result.exit_code == 0, result.output
@@ -570,7 +621,7 @@ def test_exec_json_omits_auth_prompts_when_no_notice(mocker, monkeypatch, tmp_pa
 
     result = CliRunner().invoke(
         main,
-        ["exec", "--with", "codex", "--task", "hi", "--json"],
+        ["exec", "--with", "codex", "--no-preflight", "--task", "hi", "--json"],
     )
 
     assert result.exit_code == 0, result.output
@@ -600,7 +651,7 @@ def test_exec_non_json_still_surfaces_codex_auth_prompt(mocker, monkeypatch, tmp
 
     result = CliRunner().invoke(
         main,
-        ["exec", "--with", "codex", "--task", "hi"],
+        ["exec", "--with", "codex", "--no-preflight", "--task", "hi"],
     )
 
     assert result.exit_code == 0, result.output
