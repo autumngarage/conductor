@@ -32,6 +32,12 @@ jobs:
         run: uv sync --group dev
 
       - name: Run pre-commit hygiene
+        # `no-commit-to-branch` always fails on main pushes by definition —
+        # it's the local-developer guard against direct commits, not a CI
+        # check. PRs run on feature branches so the hook is silent there;
+        # only post-merge main pushes hit it. Skip explicitly in CI.
+        env:
+          SKIP: no-commit-to-branch
         run: |
           pipx install pre-commit
           pre-commit run --all-files --hook-stage pre-commit --show-diff-on-failure
