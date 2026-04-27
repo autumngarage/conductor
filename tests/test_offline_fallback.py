@@ -26,22 +26,15 @@ from click.testing import CliRunner
 from conductor import offline_mode
 from conductor.cli import _is_retryable, main
 from conductor.providers.interface import ProviderHTTPError
-from conductor.providers.kimi import (
-    CLOUDFLARE_ACCOUNT_ID_ENV,
-    CLOUDFLARE_API_TOKEN_ENV,
-    KIMI_DEFAULT_MODEL,
-)
+from conductor.providers.kimi import KIMI_DEFAULT_MODEL
 from conductor.providers.ollama import (
     OLLAMA_BASE_URL_ENV,
     OLLAMA_DEFAULT_BASE_URL,
     OLLAMA_DEFAULT_MODEL,
 )
+from conductor.providers.openrouter import OPENROUTER_API_KEY_ENV
 
-_TEST_ACCOUNT_ID = "acct-offline-test"
-_CF_CHAT_URL = (
-    f"https://api.cloudflare.com/client/v4/accounts/{_TEST_ACCOUNT_ID}"
-    "/ai/v1/chat/completions"
-)
+_OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 _OLLAMA_CHAT_URL = f"{OLLAMA_DEFAULT_BASE_URL}/api/chat"
 _OLLAMA_TAGS_URL = f"{OLLAMA_DEFAULT_BASE_URL}/api/tags"
 
@@ -61,8 +54,7 @@ def _isolate_offline_cache(tmp_path, monkeypatch):
 @pytest.fixture
 def _kimi_configured(monkeypatch):
     """Populate the env so KimiProvider.configured() returns True."""
-    monkeypatch.setenv(CLOUDFLARE_API_TOKEN_ENV, "cf-test-token")
-    monkeypatch.setenv(CLOUDFLARE_ACCOUNT_ID_ENV, _TEST_ACCOUNT_ID)
+    monkeypatch.setenv(OPENROUTER_API_KEY_ENV, "or-test-key")
 
 
 def _stub_other_providers_unconfigured(mocker, *, include_ollama: bool = False):
@@ -119,7 +111,7 @@ def _ollama_tags_response() -> dict:
 @pytest.mark.parametrize(
     "msg",
     [
-        "network error calling Cloudflare: ConnectError: Connection refused",
+        "network error calling OpenRouter: ConnectError: Connection refused",
         "httpx.ConnectError: [Errno 61] Connection refused",
         "[Errno 8] nodename nor servname provided, or not known",
         "[Errno 51] Network is unreachable",
@@ -230,7 +222,7 @@ def _invoke_auto_with_kimi_down(cli_input: str | None = None):
     care about the CLI outcome, not respx bookkeeping.
     """
     with respx.mock(assert_all_called=False) as router:
-        router.post(_CF_CHAT_URL).mock(
+        router.post(_OPENROUTER_CHAT_URL).mock(
             side_effect=httpx.ConnectError("Connection refused")
         )
         router.get(_OLLAMA_TAGS_URL).mock(
@@ -456,7 +448,7 @@ def test_no_offline_flag_clears_sticky_flag(mocker, _kimi_configured):
     _stub_other_providers_unconfigured(mocker, include_ollama=True)
 
     with respx.mock() as router:
-        router.post(_CF_CHAT_URL).mock(
+        router.post(_OPENROUTER_CHAT_URL).mock(
             return_value=httpx.Response(
                 200,
                 json={
@@ -485,7 +477,7 @@ def test_explicit_with_kimi_network_error_shows_hint(mocker, _kimi_configured):
     _stub_other_providers_unconfigured(mocker)
 
     with respx.mock() as router:
-        router.post(_CF_CHAT_URL).mock(
+        router.post(_OPENROUTER_CHAT_URL).mock(
             side_effect=httpx.ConnectError("Connection refused")
         )
         result = CliRunner().invoke(

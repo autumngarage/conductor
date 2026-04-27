@@ -466,10 +466,9 @@ def test_exec_cli_no_max_stall_seconds_defaults_none(mocker):
 
 
 def test_exec_with_kimi_tools_raises_unsupported(mocker, monkeypatch):
-    # Pin kimi to its pre-v0.3.0 capability set so --tools Edit is
-    # guaranteed to land in the UnsupportedCapability branch. Post-v0.3.1
-    # all six tools are supported, so exercising the error path needs
-    # a synthetic "this tool isn't in the supported set" scenario.
+    # Kimi now inherits OpenRouter's HTTP-only exec path. Pinning the
+    # supported tool set empty keeps the CLI on the unsupported-capability
+    # branch deterministically.
     from conductor.providers.kimi import KimiProvider
 
     monkeypatch.setattr(KimiProvider, "supported_tools", frozenset())
@@ -485,6 +484,7 @@ def test_exec_with_kimi_tools_raises_unsupported(mocker, monkeypatch):
         "UnsupportedCapability" in result.stderr
         or "not supported" in result.stderr
         or "does not support" in result.stderr
+        or "does not yet drive a tool-use loop" in result.stderr
     )
 
 

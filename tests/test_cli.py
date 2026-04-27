@@ -7,21 +7,13 @@ import respx
 from click.testing import CliRunner
 
 from conductor.cli import main
-from conductor.providers.kimi import (
-    CLOUDFLARE_ACCOUNT_ID_ENV,
-    CLOUDFLARE_API_TOKEN_ENV,
-    KIMI_DEFAULT_MODEL,
-)
+from conductor.providers.kimi import KIMI_DEFAULT_MODEL
 from conductor.providers.openrouter import (
     OPENROUTER_API_KEY_ENV,
     OPENROUTER_DEFAULT_MODEL,
 )
 
-_TEST_ACCOUNT_ID = "acct-test-1234"
-_CF_CHAT_URL = (
-    f"https://api.cloudflare.com/client/v4/accounts/{_TEST_ACCOUNT_ID}"
-    "/ai/v1/chat/completions"
-)
+_OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
 def test_call_unknown_provider_shows_usage_error():
@@ -40,13 +32,12 @@ def test_call_missing_task_and_no_stdin_errors():
 
 
 def test_call_task_file_reads_file(monkeypatch, tmp_path):
-    monkeypatch.setenv(CLOUDFLARE_API_TOKEN_ENV, "cf-test-token")
-    monkeypatch.setenv(CLOUDFLARE_ACCOUNT_ID_ENV, _TEST_ACCOUNT_ID)
+    monkeypatch.setenv(OPENROUTER_API_KEY_ENV, "or-test-key")
     brief = tmp_path / "brief.md"
     brief.write_text("brief from file\n", encoding="utf-8")
 
     with respx.mock() as router:
-        route = router.post(_CF_CHAT_URL).mock(
+        route = router.post(_OPENROUTER_CHAT_URL).mock(
             return_value=httpx.Response(
                 200,
                 json={
@@ -66,10 +57,9 @@ def test_call_task_file_reads_file(monkeypatch, tmp_path):
 
 
 def test_call_kimi_happy_path(monkeypatch):
-    monkeypatch.setenv(CLOUDFLARE_API_TOKEN_ENV, "cf-test-token")
-    monkeypatch.setenv(CLOUDFLARE_ACCOUNT_ID_ENV, _TEST_ACCOUNT_ID)
+    monkeypatch.setenv(OPENROUTER_API_KEY_ENV, "or-test-key")
     with respx.mock() as router:
-        router.post(_CF_CHAT_URL).mock(
+        router.post(_OPENROUTER_CHAT_URL).mock(
             return_value=httpx.Response(
                 200,
                 json={
@@ -115,29 +105,20 @@ def test_call_openrouter_happy_path(monkeypatch):
     assert "hello from openrouter" in result.output
 
 
-def test_call_kimi_missing_token_exits_2(monkeypatch):
-    monkeypatch.delenv(CLOUDFLARE_API_TOKEN_ENV, raising=False)
-    monkeypatch.setenv(CLOUDFLARE_ACCOUNT_ID_ENV, _TEST_ACCOUNT_ID)
+def test_call_kimi_missing_openrouter_key_exits_2(monkeypatch, mocker):
+    monkeypatch.delenv(OPENROUTER_API_KEY_ENV, raising=False)
+    mocker.patch("conductor.providers.openrouter.credentials.get", return_value=None)
     result = CliRunner().invoke(main, ["call", "--with", "kimi", "--task", "hi"])
     assert result.exit_code == 2
-    assert CLOUDFLARE_API_TOKEN_ENV in result.output
-
-
-def test_call_kimi_missing_account_exits_2(monkeypatch):
-    monkeypatch.setenv(CLOUDFLARE_API_TOKEN_ENV, "cf-test-token")
-    monkeypatch.delenv(CLOUDFLARE_ACCOUNT_ID_ENV, raising=False)
-    result = CliRunner().invoke(main, ["call", "--with", "kimi", "--task", "hi"])
-    assert result.exit_code == 2
-    assert CLOUDFLARE_ACCOUNT_ID_ENV in result.output
+    assert OPENROUTER_API_KEY_ENV in result.output
 
 
 def test_call_json_output(monkeypatch):
-    monkeypatch.setenv(CLOUDFLARE_API_TOKEN_ENV, "cf-test-token")
-    monkeypatch.setenv(CLOUDFLARE_ACCOUNT_ID_ENV, _TEST_ACCOUNT_ID)
+    monkeypatch.setenv(OPENROUTER_API_KEY_ENV, "or-test-key")
     # The caller banner is silenced under --json (matches existing route-log
     # silencing), so stdout stays clean for json.loads().
     with respx.mock() as router:
-        router.post(_CF_CHAT_URL).mock(
+        router.post(_OPENROUTER_CHAT_URL).mock(
             return_value=httpx.Response(
                 200,
                 json={
@@ -161,13 +142,12 @@ def test_call_json_output(monkeypatch):
 
 def test_call_emits_caller_banner_when_claude_detected(monkeypatch):
     """When CLAUDECODE is set, `conductor call` announces itself on stderr."""
-    monkeypatch.setenv(CLOUDFLARE_API_TOKEN_ENV, "cf-test-token")
-    monkeypatch.setenv(CLOUDFLARE_ACCOUNT_ID_ENV, _TEST_ACCOUNT_ID)
+    monkeypatch.setenv(OPENROUTER_API_KEY_ENV, "or-test-key")
     monkeypatch.setenv("CLAUDECODE", "1")
     monkeypatch.setenv("NO_COLOR", "1")  # plain ASCII for stable assertion
 
     with respx.mock() as router:
-        router.post(_CF_CHAT_URL).mock(
+        router.post(_OPENROUTER_CHAT_URL).mock(
             return_value=httpx.Response(
                 200,
                 json={
@@ -190,12 +170,11 @@ def test_call_emits_caller_banner_when_claude_detected(monkeypatch):
 
 def test_call_silent_route_suppresses_caller_banner(monkeypatch):
     """--silent-route silences the caller banner (and the route log)."""
-    monkeypatch.setenv(CLOUDFLARE_API_TOKEN_ENV, "cf-test-token")
-    monkeypatch.setenv(CLOUDFLARE_ACCOUNT_ID_ENV, _TEST_ACCOUNT_ID)
+    monkeypatch.setenv(OPENROUTER_API_KEY_ENV, "or-test-key")
     monkeypatch.setenv("CLAUDECODE", "1")
 
     with respx.mock() as router:
-        router.post(_CF_CHAT_URL).mock(
+        router.post(_OPENROUTER_CHAT_URL).mock(
             return_value=httpx.Response(
                 200,
                 json={

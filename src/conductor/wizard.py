@@ -36,13 +36,13 @@ if TYPE_CHECKING:
 
 from conductor import credentials
 from conductor.providers import get_provider, known_providers
-from conductor.providers.kimi import (
-    CLOUDFLARE_ACCOUNT_ID_ENV,
-    CLOUDFLARE_API_TOKEN_ENV,
-)
 from conductor.providers.openrouter import OPENROUTER_API_KEY_ENV
 
 DEEPSEEK_API_KEY_ENV = "DEEPSEEK_API_KEY"
+_KIMI_LEGACY_ENV_VARS = (
+    "CLOUDFLARE_API_TOKEN",
+    "CLOUDFLARE_ACCOUNT_ID",
+)
 
 # --------------------------------------------------------------------------- #
 # Provider concierge copy — descriptions, install commands, cred URLs.
@@ -136,30 +136,27 @@ _INFO: dict[str, _ProviderInfo] = {
         ],
     ),
     "kimi": _ProviderInfo(
-        tagline="Moonshot Kimi K2.6 via Cloudflare Workers AI.",
+        tagline="Moonshot Kimi via OpenRouter.",
         description=(
-            "Strong on long contexts (1M tokens) and tool use. Strong "
-            "tier; among the cheapest options per token. Free tier "
-            "covers ~10k tokens/day. Requires a Cloudflare API token "
-            "and account ID."
+            "Strong on long contexts and cheap review/summarization. "
+            "Strong tier. Kimi now routes through OpenRouter, so setup "
+            "uses the shared OPENROUTER_API_KEY credential."
         ),
         install_cmds=[
-            "# No install step — Conductor talks directly to Cloudflare's",
-            "# Workers AI OpenAI-compatible endpoint via httpx.",
+            "# No install step — Conductor talks to OpenRouter's",
+            "# OpenAI-compatible HTTP endpoint via httpx.",
         ],
         auth_cmds=[
-            "# Wizard will prompt for CLOUDFLARE_API_TOKEN and",
-            "# CLOUDFLARE_ACCOUNT_ID and store them in Keychain / direnv.",
+            "# Configure OpenRouter once:",
+            "conductor init --only openrouter",
         ],
-        credential_source_url="https://dash.cloudflare.com/profile/api-tokens",
+        credential_source_url="https://openrouter.ai/keys",
         troubleshoot_tips=[
-            "The token needs 'Workers AI:Read' permission — create a scoped token, "
-            "not a global API key.",
-            "Account ID is the hex string on the right sidebar of dash.cloudflare.com "
-            "— NOT your email.",
-            "Quick check: curl -H 'Authorization: Bearer $TOKEN' "
-            "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT/ai/models/search",
-            "Free tier = 10k tokens/day; 429 errors mean you've hit the cap.",
+            "Use OPENROUTER_API_KEY, not CLOUDFLARE_API_TOKEN / "
+            "CLOUDFLARE_ACCOUNT_ID.",
+            "Run `conductor init --only openrouter` to store the credential "
+            "in Keychain / direnv.",
+            "401 means the OpenRouter key is wrong; 429 means the route is rate-limited.",
         ],
     ),
     "deepseek-chat": _ProviderInfo(
@@ -262,12 +259,7 @@ _INFO: dict[str, _ProviderInfo] = {
     ),
 }
 
-
-_KIMI_CREDS = (
-    (CLOUDFLARE_API_TOKEN_ENV, "Cloudflare API token with Workers AI read permission"),
-    (CLOUDFLARE_ACCOUNT_ID_ENV, "Cloudflare account ID"),
-)
-
+_kimi_migration_notice_emitted = False
 _deepseek_migration_notice_emitted = False
 
 
@@ -322,9 +314,10 @@ def run_init_wizard(
     Returns a shell exit code: 0 on success, non-zero if the user
     explicitly aborted.
     """
-    global _deepseek_migration_notice_emitted
+    global _deepseek_migration_notice_emitted, _kimi_migration_notice_emitted
 
     _deepseek_migration_notice_emitted = False
+    _kimi_migration_notice_emitted = False
     interactive = _is_tty() and not accept_defaults
 
     _print_intro(interactive, only=only, remaining=remaining)
@@ -558,117 +551,33 @@ def _default_cli_flow(name: str) -> Callable[..., WizardOutcome]:
     return flow
 
 
-def _kimi_flow(*, can_back: bool = False) -> WizardOutcome:
-    """API-key flow with credential collection + storage choice."""
-    info = _INFO["kimi"]
-    if can_back:
-        # Offer [b]ack before prompting for sensitive credentials so the user
-        # can bail out to the previous provider without being forced to type
-        # a token or hit Ctrl-C.
-        options = [
-            ("c", "continue — enter credentials now"),
-            ("s", "skip this provider"),
-            ("b", "back — redo the previous provider"),
-            ("q", "quit setup"),
-        ]
-        entry = _prompt_menu(options=options, default="c")
-        if entry == "s":
-            return WizardOutcome("kimi", "skipped", "user skipped")
-        if entry == "q":
-            raise _AbortSetup()
-        if entry == "b":
-            raise _GoBack()
-        click.echo("")
-    click.echo(f"  Get credentials: {info.credential_source_url}")
-    click.echo("  You need two values:")
-    click.echo("    1. CLOUDFLARE_API_TOKEN — API token with Workers AI:Read permission")
-    click.echo("    2. CLOUDFLARE_ACCOUNT_ID — shown on the right sidebar of dash.cloudflare.com")
-    click.echo("")
+def _maybe_warn_kimi_openrouter_migration() -> None:
+    global _kimi_migration_notice_emitted
 
-    if _op_cli_available():
-        choice = _credential_source_choice("kimi")
-        if choice == "skip":
-            return WizardOutcome("kimi", "skipped", "user skipped at source choice")
-        if choice == "1password":
-            return _attempt_1password_indirection("kimi", list(_KIMI_CREDS))
+    if _kimi_migration_notice_emitted:
+        return
+    if credentials.get(OPENROUTER_API_KEY_ENV) is not None:
+        return
 
-    missing = [
-        (var, label)
-        for var, label in _KIMI_CREDS
-        if credentials.get(var) is None
-    ]
-
-    values: dict[str, str] = {}
-    for var, label in missing:
-        try:
-            value = click.prompt(
-                f"  {label} ({var})",
-                hide_input=True,
-                default="",
-                show_default=False,
-            )
-        except click.Abort:
-            # EOF on stdin (test runners, piped input) → treat as user
-            # declining to provide the credential.
-            value = ""
-        if not value:
-            click.echo(f"  {var} not provided — skipping kimi.")
-            return WizardOutcome("kimi", "skipped", f"{var} not provided")
-        values[var] = value
-
-    if not values:
-        # Both creds already present in env/keychain.
-        provider = get_provider("kimi")
-        ok, reason = provider.smoke()
-        if ok:
-            return WizardOutcome("kimi", "ok", "credentials already present, smoke passed")
-        return WizardOutcome("kimi", "failed", f"credentials present but smoke failed: {reason}")
-
-    storage = _prompt_menu(
-        options=[
-            ("keychain", "keychain — macOS Keychain (recommended, no shell-env leakage)"),
-            ("envrc", "envrc — write exports to .envrc via direnv"),
-            ("print", "print — show export statements, I'll store them myself"),
-            ("skip", "skip — skip kimi entirely"),
-        ],
+    detected = next(
+        (
+            var
+            for var in _KIMI_LEGACY_ENV_VARS
+            if var in os.environ or credentials.keychain_has(var)
+        ),
+        None,
     )
-    if storage == "skip":
-        return WizardOutcome("kimi", "skipped", "user skipped during storage choice")
+    if detected is None:
+        return
 
-    if storage == "keychain":
-        try:
-            for var, value in values.items():
-                credentials.set_in_keychain(var, value)
-            click.echo("  ✓ stored in macOS Keychain (service: conductor).")
-        except RuntimeError as e:
-            click.echo(f"  ✗ keychain storage failed: {e}")
-            click.echo("  falling back to print-only.")
-            storage = "print"
-
-    if storage == "envrc":
-        envrc_path = os.path.join(os.getcwd(), ".envrc")
-        _append_envrc(envrc_path, values)
-        click.echo(f"  ✓ wrote export lines to {envrc_path}")
-        click.echo("    run `direnv allow` in that directory to activate.")
-
-    if storage == "print":
-        click.echo("  add these to your shell rc or .envrc:")
-        for var, value in values.items():
-            click.echo(f"    export {var}={value!r}")
-
-    # Populate in-process env so the smoke test succeeds even on Keychain
-    # or direnv paths where the current shell hasn't re-sourced.
-    for var, value in values.items():
-        os.environ[var] = value
-
-    provider = get_provider("kimi")
-    ok, reason = provider.smoke()
-    if ok:
-        click.echo("  ✓ smoke test passed")
-        return WizardOutcome("kimi", "ok", f"stored via {storage}, smoke passed")
-    click.echo(f"  ✗ smoke test failed: {reason}")
-    click.echo("  credentials stored but the endpoint is not responding as expected.")
-    return WizardOutcome("kimi", "failed", f"stored via {storage}, smoke failed: {reason}")
+    click.echo(
+        f"  Detected legacy {detected} — kimi now routes through OpenRouter."
+    )
+    click.echo(
+        f"  Set {OPENROUTER_API_KEY_ENV} (`conductor init --only openrouter`)."
+    )
+    click.echo("")
+    _kimi_migration_notice_emitted = True
 
 
 def _maybe_warn_deepseek_openrouter_migration() -> None:
@@ -691,11 +600,16 @@ def _maybe_warn_deepseek_openrouter_migration() -> None:
     _deepseek_migration_notice_emitted = True
 
 
-def _deepseek_openrouter_alias_flow(name: str) -> Callable[..., WizardOutcome]:
-    """Route DeepSeek setup through the shared OpenRouter credential flow."""
+def _openrouter_alias_flow(
+    name: str,
+    *,
+    migration_warning: Callable[[], None] | None = None,
+) -> Callable[..., WizardOutcome]:
+    """Route a provider's setup through the shared OpenRouter credential flow."""
 
     def flow(*, can_back: bool = False) -> WizardOutcome:
-        _maybe_warn_deepseek_openrouter_migration()
+        if migration_warning is not None:
+            migration_warning()
         click.echo(f"  {name} now uses OpenRouter for credentials and transport.")
         click.echo("  Running the shared OpenRouter setup flow.")
         click.echo("")
@@ -951,9 +865,18 @@ def _credential_source_choice(name: str) -> str:
 
 
 _FLOWS: dict[str, Callable[..., WizardOutcome]] = {
-    "kimi": _kimi_flow,
-    "deepseek-chat": _deepseek_openrouter_alias_flow("deepseek-chat"),
-    "deepseek-reasoner": _deepseek_openrouter_alias_flow("deepseek-reasoner"),
+    "kimi": _openrouter_alias_flow(
+        "kimi",
+        migration_warning=_maybe_warn_kimi_openrouter_migration,
+    ),
+    "deepseek-chat": _openrouter_alias_flow(
+        "deepseek-chat",
+        migration_warning=_maybe_warn_deepseek_openrouter_migration,
+    ),
+    "deepseek-reasoner": _openrouter_alias_flow(
+        "deepseek-reasoner",
+        migration_warning=_maybe_warn_deepseek_openrouter_migration,
+    ),
     "openrouter": _openrouter_flow,
 }
 

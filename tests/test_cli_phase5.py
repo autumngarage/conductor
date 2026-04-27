@@ -18,9 +18,15 @@ def _isolated_agent_homes(tmp_path, monkeypatch):
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
     monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path / ".conductor"))
+    monkeypatch.setenv(
+        "CONDUCTOR_CREDENTIALS_FILE", str(tmp_path / ".config" / "credentials.toml")
+    )
     monkeypatch.setenv("CLAUDE_HOME", str(tmp_path / ".claude"))
     monkeypatch.chdir(repo_dir)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("CLOUDFLARE_API_TOKEN", raising=False)
+    monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.setattr("shutil.which", lambda _cmd: None)
 
 
@@ -111,7 +117,7 @@ def test_list_text_output_shows_fix_command_under_unconfigured_provider(mocker):
     # Codex's fix is the install + auth one-liner, exposed verbatim.
     assert "→ fix: brew install codex && codex login" in result.output
     # Kimi is HTTP-backed, so the fix is the wizard.
-    assert "→ fix: conductor init --only kimi" in result.output
+    assert "→ fix: conductor init --only openrouter" in result.output
 
 
 def test_list_no_fix_line_for_configured_provider(mocker):
@@ -266,10 +272,10 @@ def test_doctor_json_shape(mocker, monkeypatch):
     from conductor.providers import known_providers
 
     _stub_all_unconfigured(mocker)
-    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "x")
-    monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "x")
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("CLOUDFLARE_API_TOKEN", raising=False)
+    monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     mocker.patch("conductor.cli.credentials.keychain_has", return_value=False)
 
@@ -289,10 +295,10 @@ def test_doctor_json_shape(mocker, monkeypatch):
     assert len(payload["providers"]) == len(known_providers())
     assert payload["muted"] == []
     cred_map = {c["name"]: c for c in payload["credentials"]}
-    assert cred_map["CLOUDFLARE_API_TOKEN"]["in_env"] is True
-    assert cred_map["CLOUDFLARE_API_TOKEN"]["source"] == "env"
-    assert cred_map["CLOUDFLARE_ACCOUNT_ID"]["in_env"] is False
-    assert cred_map["CLOUDFLARE_ACCOUNT_ID"]["source"] is None
+    assert cred_map["OPENROUTER_API_KEY"]["in_env"] is True
+    assert cred_map["OPENROUTER_API_KEY"]["source"] == "env"
+    assert cred_map["OLLAMA_BASE_URL"]["in_env"] is False
+    assert cred_map["OLLAMA_BASE_URL"]["source"] is None
     # Every credential row carries the new fields.
     for row in payload["credentials"]:
         assert "has_key_command" in row
@@ -342,7 +348,9 @@ def test_doctor_mute_unmute_shifts_counts_and_hides_fix_lines(mocker, monkeypatc
     unmuted_available = unmuted_result.output.split("  Available (not configured):\n", 1)[1]
     unmuted_available = unmuted_available.split("\n\n  Muted:", 1)[0]
     assert "kimi" in unmuted_available
-    assert "→ fix: conductor init --only kimi" in unmuted_available
+    # After PR 3 (kimi → OpenRouter migration), kimi's fix_command points at
+    # the openrouter wizard rather than a kimi-specific one.
+    assert "→ fix: conductor init --only openrouter" in unmuted_available
 
 
 def test_doctor_json_includes_muted_state(mocker):
@@ -442,11 +450,23 @@ def test_doctor_reports_key_command_source(mocker, monkeypatch, tmp_path):
 
     cred_file = tmp_path / "credentials.toml"
     monkeypatch.setenv("CONDUCTOR_CREDENTIALS_FILE", str(cred_file))
+    import subprocess
+
     from conductor import credentials as creds_mod
 
     creds_mod.clear_key_command_cache()
     creds_mod.save_key_command(
         "OPENROUTER_API_KEY", "op read op://Personal/OpenRouter/credential"
+    )
+    mocker.patch(
+        "conductor.credentials.shutil.which",
+        lambda cmd: "/opt/homebrew/bin/op" if cmd == "op" else None,
+    )
+    mocker.patch(
+        "conductor.credentials.subprocess.run",
+        return_value=subprocess.CompletedProcess(
+            args=["op"], returncode=0, stdout="resolved-openrouter-key\n", stderr=""
+        ),
     )
 
     result = CliRunner().invoke(main, ["doctor", "--json"])
@@ -500,6 +520,28 @@ def test_doctor_warns_when_deepseek_key_is_set_without_openrouter(
     payload = json.loads(result_json.output)
     assert any(
         "DEEPSEEK_API_KEY is deprecated" in warning["message"]
+        for warning in payload["warnings"]
+    )
+
+
+def test_doctor_warns_when_legacy_kimi_creds_are_set_without_openrouter(
+    mocker, monkeypatch
+):
+    _stub_all_unconfigured(mocker)
+    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "legacy-token")
+    monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    mocker.patch("conductor.cli.credentials.keychain_has", return_value=False)
+
+    result = CliRunner().invoke(main, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "kimi now routes through OpenRouter" in result.output
+    assert "CLOUDFLARE_* credentials are no longer used" in result.output
+
+    result_json = CliRunner().invoke(main, ["doctor", "--json"])
+    payload = json.loads(result_json.output)
+    assert any(
+        "kimi now routes through OpenRouter" in warning["message"]
         for warning in payload["warnings"]
     )
 

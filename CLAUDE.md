@@ -91,7 +91,7 @@ Both modes return the same `CallResponse` shape on stdout (text or JSON via `--j
 
 ### Two physical adapter shapes
 
-- **HTTP adapters** (e.g. `kimi`, `deepseek-chat`, `deepseek-reasoner`, `ollama`) talk to an OpenAI-compatible endpoint via `httpx`. These are the only adapters that touch API keys directly. DeepSeek is still registered as two provider identifiers so the router can distinguish V3 chat from R1 reasoning, but both now ride through the shared `OpenRouterProvider` transport and use `OPENROUTER_API_KEY` rather than a direct `DEEPSEEK_API_KEY`.
+- **HTTP adapters** (e.g. `kimi`, `deepseek-chat`, `deepseek-reasoner`, `openrouter`, `ollama`) talk to an OpenAI-compatible endpoint via `httpx`. These are the only adapters that touch API keys directly. Kimi and DeepSeek are still exposed as separate provider identifiers for routing purposes, but both now ride through the shared `OpenRouterProvider` transport and use `OPENROUTER_API_KEY`.
 - **Subprocess adapters** (e.g. `claude`, `codex`, `gemini`) shell out to a CLI that owns its own auth. These never touch API keys.
 
 Both shapes implement the same `Provider` Protocol (`configured()`, `smoke()`, `call()`) so the rest of Conductor doesn't care which physical shape it's calling.
@@ -105,12 +105,12 @@ src/conductor/
 ├── providers/
 │   ├── __init__.py          # registry: `get_provider(name)`
 │   ├── interface.py         # Provider Protocol, CallResponse, error hierarchy
-│   ├── kimi.py              # HTTP, MOONSHOT_API_KEY, OpenAI-compatible
+│   ├── kimi.py              # OpenRouter-backed Kimi preset
 │   └── (future: claude, codex, gemini, ollama)
 └── (future: router.py, wizard.py, config.py)
 tests/
 ├── test_cli.py              # CliRunner + respx — no live calls
-└── test_kimi.py             # respx-mocked HTTP — no live calls
+└── test_kimi_migration.py   # shim + migration coverage
 ```
 
 ### v0.1 scope (in flight)
@@ -127,13 +127,13 @@ Deferred (see `~/Repos/autumn-garage/.cortex/plans/conductor-bootstrap.md` for t
 | `src/conductor/providers/interface.py` | `Provider` Protocol, `CallResponse`, error hierarchy — the contract every adapter satisfies. |
 | `src/conductor/providers/kimi.py` | First adapter; HTTP via httpx; the v0.1 integration test case. |
 | `src/conductor/providers/__init__.py` | `get_provider(name)` registry — single source of truth for canonical identifiers. |
-| `tests/test_kimi.py` | Provider-level tests, all mocked httpx via `respx`. |
+| `tests/test_kimi_migration.py` | Kimi shim + migration coverage. |
 | `tests/test_cli.py` | CLI smoke tests via `CliRunner`. |
 
 ## State & Config
 
 - **No project-level config in v0.1.** Config support (`~/.config/conductor/config.toml`) lands with the auto-mode router and `conductor init` wizard.
-- **API credentials come from the environment.** Kimi reads `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` because Conductor calls Kimi K2.6 via Cloudflare Workers AI (Cloudflare added Day 0 Kimi hosting on 2026-04-20; the direct Moonshot backend is deferred as a future config option per autumn-garage journal `2026-04-21-kimi-via-cloudflare.md`). DeepSeek now reads `OPENROUTER_API_KEY` via the shared OpenRouter transport; `DEEPSEEK_API_KEY` is deprecated. See `~/Repos/autumn-garage/integration/providers.md` for the canonical mapping.
+- **API credentials come from the environment.** Kimi, DeepSeek, and the explicit `openrouter` provider all read `OPENROUTER_API_KEY` via the shared OpenRouter transport. Legacy `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` (old kimi path) and `DEEPSEEK_API_KEY` are deprecated. See `~/Repos/autumn-garage/integration/providers.md` for the canonical mapping.
 - **Credential resolution order is `env → key_command → keychain`** (see `src/conductor/credentials.py`). The `key_command` indirection reads `[key_commands]` from `~/.config/conductor/credentials.toml` and shells out to fetch the secret on every call — supports 1Password (`op read op://...`), Doppler, Vault, Bitwarden CLI, or any user-supplied script that prints the credential to stdout. A configured `key_command` that fails does NOT silently fall through to keychain; the failure prints to stderr and resolution returns None, so a broken secret-manager wiring is visible to the operator. The wizard's `1password` storage option (offered when `op` is on PATH) writes the entries automatically; power users can hand-edit the file.
 - **Minimal persistent state.** Conductor avoids caches, logs, and usage aggregation. The two exceptions today are the `~/.config/conductor/credentials.toml` credential store (written by `conductor init`) and the `~/.cache/conductor/offline_until` sticky-flag file (a short-TTL marker that tells auto-mode to prefer the local ollama provider while the user is offline — see `src/conductor/offline_mode.py`). Consumers that want usage aggregation parse the `--json` output themselves.
 
