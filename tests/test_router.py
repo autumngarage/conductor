@@ -27,6 +27,11 @@ def _clean_health():
     reset_health()
 
 
+@pytest.fixture(autouse=True)
+def _isolated_conductor_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path / ".conductor"))
+
+
 def _stub_configured(mocker, results: dict[str, bool]):
     """Patch ``configured()`` on each provider class with a fixed result.
 
@@ -258,6 +263,21 @@ def test_exclude_all_raises(mocker):
     _stub_configured(mocker, {"claude": True})
     with pytest.raises(NoConfiguredProvider):
         pick([], exclude={"claude"})
+
+
+def test_pick_skips_persistently_muted_providers(mocker):
+    from click.testing import CliRunner
+
+    from conductor.cli import main
+
+    _stub_configured(mocker, {"claude": True, "codex": True})
+    muted = CliRunner().invoke(main, ["providers", "mute", "claude"])
+    assert muted.exit_code == 0, muted.output
+
+    provider, decision = pick([], prefer="best")
+    assert provider.name == "codex"
+    skipped = dict(decision.candidates_skipped)
+    assert skipped["claude"] == "muted persistently"
 
 
 # ---------------------------------------------------------------------------

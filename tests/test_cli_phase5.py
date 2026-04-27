@@ -281,11 +281,13 @@ def test_doctor_json_shape(mocker, monkeypatch):
         "platform",
         "python",
         "providers",
+        "muted",
         "credentials",
         "active_credentials",
         "warnings",
     }
     assert len(payload["providers"]) == len(known_providers())
+    assert payload["muted"] == []
     cred_map = {c["name"]: c for c in payload["credentials"]}
     assert cred_map["CLOUDFLARE_API_TOKEN"]["in_env"] is True
     assert cred_map["CLOUDFLARE_API_TOKEN"]["source"] == "env"
@@ -295,6 +297,68 @@ def test_doctor_json_shape(mocker, monkeypatch):
     for row in payload["credentials"]:
         assert "has_key_command" in row
         assert "source" in row
+    for row in payload["providers"]:
+        assert "muted" in row
+
+
+def test_doctor_mute_unmute_shifts_counts_and_hides_fix_lines(mocker, monkeypatch):
+    _stub_all_unconfigured(mocker)
+    for var in (
+        "CLOUDFLARE_API_TOKEN",
+        "CLOUDFLARE_ACCOUNT_ID",
+        "OLLAMA_BASE_URL",
+        "OPENROUTER_API_KEY",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    runner = CliRunner()
+    mute = runner.invoke(
+        main, ["providers", "mute", "kimi", "ollama", "deepseek-chat"]
+    )
+    assert mute.exit_code == 0, mute.output
+
+    result = runner.invoke(main, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "Providers (0/5 active, 3 muted):" in result.output
+    assert "Muted: deepseek-chat, kimi, ollama" in result.output
+
+    available_section = result.output.split("  Available (not configured):\n", 1)[1]
+    available_section = available_section.split("\n\n  Muted:", 1)[0]
+    assert "kimi" not in available_section
+    assert "ollama" not in available_section
+    assert "deepseek-chat" not in available_section
+    assert "conductor init --only kimi" not in available_section
+    assert "conductor init --only ollama" not in available_section
+    assert "deepseek-chat" in result.output
+
+    unmute = runner.invoke(main, ["providers", "unmute", "kimi"])
+    assert unmute.exit_code == 0, unmute.output
+
+    unmuted_result = runner.invoke(main, ["doctor"])
+    assert unmuted_result.exit_code == 0, unmuted_result.output
+    assert "Providers (0/6 active, 2 muted):" in unmuted_result.output
+    assert "Muted: deepseek-chat, ollama" in unmuted_result.output
+    unmuted_available = unmuted_result.output.split("  Available (not configured):\n", 1)[1]
+    unmuted_available = unmuted_available.split("\n\n  Muted:", 1)[0]
+    assert "kimi" in unmuted_available
+    assert "→ fix: conductor init --only kimi" in unmuted_available
+
+
+def test_doctor_json_includes_muted_state(mocker):
+    _stub_all_unconfigured(mocker)
+    runner = CliRunner()
+    mute = runner.invoke(main, ["providers", "mute", "kimi", "ollama"])
+    assert mute.exit_code == 0, mute.output
+
+    result = runner.invoke(main, ["doctor", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["muted"] == ["kimi", "ollama"]
+    providers = {row["provider"]: row for row in payload["providers"]}
+    assert providers["kimi"]["muted"] is True
+    assert providers["ollama"]["muted"] is True
+    assert providers["claude"]["muted"] is False
 
 
 def test_doctor_active_credentials_http_provider_shows_source_and_last4(
