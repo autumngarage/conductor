@@ -275,7 +275,13 @@ def test_doctor_json_shape(mocker, monkeypatch):
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert set(payload.keys()) >= {
-        "version", "platform", "python", "providers", "credentials", "warnings"
+        "version",
+        "platform",
+        "python",
+        "providers",
+        "credentials",
+        "active_credentials",
+        "warnings",
     }
     assert len(payload["providers"]) == len(known_providers())
     cred_map = {c["name"]: c for c in payload["credentials"]}
@@ -287,6 +293,71 @@ def test_doctor_json_shape(mocker, monkeypatch):
     for row in payload["credentials"]:
         assert "has_key_command" in row
         assert "source" in row
+
+
+def test_doctor_active_credentials_http_provider_shows_source_and_last4(
+    mocker, monkeypatch
+):
+    from conductor.providers import OpenRouterProvider
+
+    _stub_all_unconfigured(mocker)
+    mocker.patch.object(OpenRouterProvider, "configured", lambda self: (True, None))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test-4f3a")
+    mocker.patch("conductor.cli.credentials.keychain_has", return_value=False)
+
+    result = CliRunner().invoke(main, ["doctor", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    rows = {row["provider"]: row for row in payload["active_credentials"]}
+    assert rows["openrouter"]["env_var"] == "OPENROUTER_API_KEY"
+    assert rows["openrouter"]["source"] == "env"
+    assert rows["openrouter"]["fingerprint"] == "sk-or-v1-test-...4f3a"
+
+    text_result = CliRunner().invoke(main, ["doctor"])
+    assert "Active credentials (per provider):" in text_result.output
+    assert "openrouter" in text_result.output
+    assert "OPENROUTER_API_KEY (env, sk-or-v1-test-...4f3a)" in text_result.output
+
+
+def test_doctor_active_credentials_cli_provider_shows_oauth_session(
+    mocker, monkeypatch
+):
+    from conductor.providers import CodexProvider
+
+    _stub_all_unconfigured(mocker)
+    mocker.patch.object(CodexProvider, "configured", lambda self: (True, None))
+    mocker.patch("conductor.cli.credentials.keychain_has", return_value=False)
+
+    result = CliRunner().invoke(main, ["doctor", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    rows = {row["provider"]: row for row in payload["active_credentials"]}
+    assert rows["codex"]["kind"] == "cli_session"
+    assert rows["codex"]["source"] == "cli_session"
+    assert rows["codex"]["env_var"] is None
+    assert rows["codex"]["fingerprint"] is None
+
+    text_result = CliRunner().invoke(main, ["doctor"])
+    assert "OAuth via `codex` CLI session (no env var)" in text_result.output
+
+
+def test_doctor_active_credentials_omits_unconfigured_providers(mocker, monkeypatch):
+    from conductor.providers import CodexProvider
+
+    _stub_all_unconfigured(mocker)
+    mocker.patch.object(CodexProvider, "configured", lambda self: (True, None))
+    mocker.patch("conductor.cli.credentials.keychain_has", return_value=False)
+
+    result = CliRunner().invoke(main, ["doctor", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert [row["provider"] for row in payload["active_credentials"]] == ["codex"]
+
+    text_result = CliRunner().invoke(main, ["doctor"])
+    active_section = text_result.output.split("Active credentials (per provider):\n", 1)[1]
+    active_section = active_section.split("\n\nAgent integration:", 1)[0]
+    assert "codex" in active_section
+    assert "openrouter" not in active_section
 
 
 def test_doctor_reports_key_command_source(mocker, monkeypatch, tmp_path):
