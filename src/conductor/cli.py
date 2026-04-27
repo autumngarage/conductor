@@ -1895,6 +1895,9 @@ def models_list() -> None:
     click.echo("")
 
     sorted_models = sorted(snapshot.models, key=lambda model: model.id)
+    if not sorted_models:
+        click.echo("(catalog cache is empty — run `conductor models refresh` to populate)")
+        return
     id_w = max(len("MODEL"), max(len(model.id) for model in sorted_models))
     ctx_w = max(len("CTX"), max(len(f"{model.context_length:,}") for model in sorted_models))
     header = (
