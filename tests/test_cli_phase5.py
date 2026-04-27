@@ -20,6 +20,7 @@ def _isolated_agent_homes(tmp_path, monkeypatch):
     monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path / ".conductor"))
     monkeypatch.setenv("CLAUDE_HOME", str(tmp_path / ".claude"))
     monkeypatch.chdir(repo_dir)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.setattr("shutil.which", lambda _cmd: None)
 
 
@@ -32,6 +33,7 @@ def _stub_all_unconfigured(mocker):
         GeminiProvider,
         KimiProvider,
         OllamaProvider,
+        OpenRouterProvider,
     )
 
     for cls in (
@@ -42,6 +44,7 @@ def _stub_all_unconfigured(mocker):
         GeminiProvider,
         KimiProvider,
         OllamaProvider,
+        OpenRouterProvider,
     ):
         mocker.patch.object(
             cls,
@@ -68,6 +71,7 @@ def test_list_text_output_shows_all_builtin_providers(mocker):
         "deepseek-reasoner",
         "gemini",
         "ollama",
+        "openrouter",
     ):
         assert name in result.output
 
@@ -85,6 +89,7 @@ def test_list_json_output_returns_structured_rows(mocker):
         "deepseek-reasoner",
         "gemini",
         "ollama",
+        "openrouter",
     }
     assert len(rows) == len(expected)
     assert {r["provider"] for r in rows} == expected
@@ -118,6 +123,7 @@ def test_list_no_fix_line_for_configured_provider(mocker):
         GeminiProvider,
         KimiProvider,
         OllamaProvider,
+        OpenRouterProvider,
     )
 
     # All unconfigured except claude.
@@ -128,6 +134,7 @@ def test_list_no_fix_line_for_configured_provider(mocker):
         GeminiProvider,
         KimiProvider,
         OllamaProvider,
+        OpenRouterProvider,
     ):
         mocker.patch.object(
             cls,
@@ -243,6 +250,7 @@ def test_doctor_text_output_covers_every_provider(mocker, monkeypatch):
         "deepseek-reasoner",
         "gemini",
         "ollama",
+        "openrouter",
     ):
         assert name in result.output
     assert "Credentials" in result.output or "credentials" in result.output.lower()

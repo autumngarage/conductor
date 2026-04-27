@@ -19,6 +19,7 @@ from conductor.providers.interface import (
 )
 from conductor.providers.kimi import KimiProvider
 from conductor.providers.ollama import OllamaProvider
+from conductor.providers.openrouter import OpenRouterProvider
 from conductor.providers.shell import ShellProvider, ShellProviderSpec
 
 __all__ = [
@@ -35,6 +36,7 @@ __all__ = [
     "GeminiProvider",
     "KimiProvider",
     "OllamaProvider",
+    "OpenRouterProvider",
     "Provider",
     "ProviderConfigError",
     "ProviderError",
@@ -56,6 +58,7 @@ _BUILTIN_REGISTRY: dict[str, type] = {
     "deepseek-reasoner": DeepSeekReasonerProvider,
     "gemini": GeminiProvider,
     "ollama": OllamaProvider,
+    "openrouter": OpenRouterProvider,
 }
 
 

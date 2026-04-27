@@ -12,6 +12,7 @@ from conductor.providers import (
     GeminiProvider,
     KimiProvider,
     OllamaProvider,
+    OpenRouterProvider,
     get_provider,
     known_providers,
 )
@@ -26,6 +27,7 @@ def test_known_providers_returns_all_builtins():
         "gemini",
         "kimi",
         "ollama",
+        "openrouter",
     ]
 
 
@@ -37,6 +39,7 @@ def test_get_provider_returns_correct_class():
     assert isinstance(get_provider("deepseek-reasoner"), DeepSeekReasonerProvider)
     assert isinstance(get_provider("gemini"), GeminiProvider)
     assert isinstance(get_provider("ollama"), OllamaProvider)
+    assert isinstance(get_provider("openrouter"), OpenRouterProvider)
 
 
 def test_get_provider_unknown_raises_keyerror_with_hint():

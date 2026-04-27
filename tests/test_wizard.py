@@ -22,6 +22,7 @@ def _isolated_agent_homes(tmp_path, monkeypatch):
     monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path / ".conductor"))
     monkeypatch.setenv("CLAUDE_HOME", str(tmp_path / ".claude"))
     monkeypatch.chdir(repo_dir)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     # Default: Claude CLI not on PATH. Tests that need it patch explicitly.
     monkeypatch.setattr("shutil.which", lambda _cmd: None)
 
@@ -34,6 +35,7 @@ def test_init_non_interactive_mode_reports_state(mocker, monkeypatch):
         GeminiProvider,
         KimiProvider,
         OllamaProvider,
+        OpenRouterProvider,
     )
 
     for cls in (
@@ -42,6 +44,7 @@ def test_init_non_interactive_mode_reports_state(mocker, monkeypatch):
         GeminiProvider,
         KimiProvider,
         OllamaProvider,
+        OpenRouterProvider,
     ):
         mocker.patch.object(cls, "configured", lambda self: (False, "stubbed"))
     monkeypatch.delenv(CLOUDFLARE_API_TOKEN_ENV, raising=False)
@@ -51,7 +54,7 @@ def test_init_non_interactive_mode_reports_state(mocker, monkeypatch):
     result = CliRunner().invoke(main, ["init", "--yes"])
     assert result.exit_code == 0, result.output
     assert "Summary" in result.output
-    for name in ("kimi", "claude", "codex", "gemini", "ollama"):
+    for name in ("kimi", "claude", "codex", "gemini", "ollama", "openrouter"):
         assert name in result.output
 
 
@@ -62,10 +65,17 @@ def test_init_skips_already_configured_providers(mocker):
         GeminiProvider,
         KimiProvider,
         OllamaProvider,
+        OpenRouterProvider,
     )
 
     mocker.patch.object(ClaudeProvider, "configured", lambda self: (True, None))
-    for cls in (CodexProvider, GeminiProvider, KimiProvider, OllamaProvider):
+    for cls in (
+        CodexProvider,
+        GeminiProvider,
+        KimiProvider,
+        OllamaProvider,
+        OpenRouterProvider,
+    ):
         mocker.patch.object(cls, "configured", lambda self: (False, "nope"))
 
     result = CliRunner().invoke(main, ["init", "--yes"])
