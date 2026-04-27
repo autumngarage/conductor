@@ -84,6 +84,29 @@
 #
 set -euo pipefail
 
+extract_review_sentinel() {
+  awk '
+    /^[[:space:]]*CODEX_REVIEW_(CLEAN|FIXED|BLOCKED)[[:space:]]*$/ {
+      line = $0
+      gsub(/\r/, "", line)
+      sub(/^[[:space:]]+/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      sentinel = line
+      count++
+    }
+    END {
+      if (count == 1) {
+        print sentinel
+      }
+    }
+  '
+}
+
+if [ "${CODEX_REVIEW_TEST_SENTINEL:-0}" = "1" ]; then
+  extract_review_sentinel
+  exit 0
+fi
+
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 CONFIG_FILE="$REPO_ROOT/.codex-review.toml"
 cd "$REPO_ROOT"
@@ -2088,8 +2111,8 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
     fi
   fi
 
-  LAST_LINE="$(printf '%s\n' "$OUTPUT" | tail -1 | tr -d '\r ')"
-  case "$LAST_LINE" in
+  LAST_SENTINEL="$(printf '%s\n' "$OUTPUT" | extract_review_sentinel)"
+  case "$LAST_SENTINEL" in
     CODEX_REVIEW_CLEAN)
       phase "done — clean"
       clean_subtitle="${REVIEWER_LABEL} · ${DIFF_LINE_COUNT} lines · push approved"
@@ -2166,8 +2189,14 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
       ;;
 
     *)
+      LAST_LINE="$(printf '%s\n' "$OUTPUT" | awk 'NF { line = $0 } END { print line }' | tr -d '\r')"
       echo "==> $REVIEWER_LABEL output did not match the expected sentinel contract."
-      echo "    Last line was: '$LAST_LINE'"
+      if [ -n "$LAST_SENTINEL" ]; then
+        echo "    Last matching sentinel line was: '$LAST_SENTINEL'"
+      else
+        echo "    No unique standalone sentinel line was found."
+      fi
+      echo "    Last non-blank line was: '$LAST_LINE'"
       echo "    Raw output (first 20 lines):"
       printf '%s\n' "$OUTPUT" | head -20 | sed 's/^/    /'
       REVIEW_EXIT_REASON="malformed-sentinel"
