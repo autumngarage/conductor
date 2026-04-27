@@ -567,9 +567,47 @@ def _format_route_ranking(decision: RouteDecision) -> list[str]:
             f"p50={c.latency_ms}ms"
             f"){marker}"
         )
+    for c in decision.unconfigured_shadow:
+        tags = ",".join(c.matched_tags) or "none"
+        lines.append(
+            f"  ?  {c.name:<8} "
+            f"(tier={c.tier}[{c.tier_rank}] "
+            f"tags=+{c.tag_score}:{tags} "
+            f"cost≈${c.cost_score:.4f}/1k "
+            f"p50={c.latency_ms}ms"
+            f") ← would rank if installed: {c.unconfigured_reason}"
+        )
     for name, reason in decision.candidates_skipped:
         lines.append(f"  —  {name:<8} (skipped: {reason})")
     return lines
+
+
+def _format_shadow_hint(decision: RouteDecision) -> str | None:
+    """Return a stderr advisory if an unconfigured provider outranks the winner.
+
+    Returns None when the unconfigured-shadow ranking is empty (no provider
+    we couldn't actually call would have been preferable) or when the top
+    shadow candidate's score isn't strictly higher than the picked provider's.
+    Equal scores resolve in favor of the configured provider — there's no
+    reason to nag the user about a tie.
+
+    The advisory exists because auto-mode falling back silently to the only
+    configured provider hides the cost of missing integrations. Surfacing
+    this at call-time turns "I didn't know codex wasn't installed" into
+    "I see codex would be a better fit; here's how to install it."
+    """
+    if not decision.unconfigured_shadow or not decision.ranked:
+        return None
+    top_shadow = decision.unconfigured_shadow[0]
+    winner = decision.ranked[0]
+    if top_shadow.combined_score <= winner.combined_score:
+        return None
+    reason = top_shadow.unconfigured_reason or "not configured"
+    return (
+        f"[conductor] heads-up: `{top_shadow.name}` would rank above "
+        f"`{winner.name}` if configured — {reason} "
+        f"(run `conductor list` for the fix)"
+    )
 
 
 def _emit_route_log(
@@ -585,6 +623,9 @@ def _emit_route_log(
             click.echo(line, err=True)
     else:
         click.echo(_format_route_log_line(decision), err=True)
+    hint = _format_shadow_hint(decision)
+    if hint is not None:
+        click.echo(hint, err=True)
 
 
 def _emit_usage_log(response: CallResponse, *, silent: bool) -> None:
@@ -730,6 +771,7 @@ def call(
                 prefer=_validate_prefer(prefer),
                 effort=effort_value,
                 exclude=frozenset(_parse_csv(exclude)),
+                shadow=True,
             )
         except (NoConfiguredProvider, InvalidRouterRequest) as e:
             click.echo(f"conductor: {e}", err=True)
@@ -934,6 +976,7 @@ def exec_cmd(
                 tools=tools_set,
                 sandbox=sandbox_value,
                 exclude=frozenset(_parse_csv(exclude)),
+                shadow=True,
             )
         except (NoConfiguredProvider, InvalidRouterRequest) as e:
             click.echo(f"conductor: {e}", err=True)
@@ -1048,6 +1091,7 @@ def route(
             tools=tools_set,
             sandbox=sandbox_value,
             exclude=frozenset(_parse_csv(exclude)),
+            shadow=True,
         )
     except (NoConfiguredProvider, InvalidRouterRequest) as e:
         if as_json:
