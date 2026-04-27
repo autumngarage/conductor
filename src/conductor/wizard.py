@@ -116,7 +116,8 @@ _INFO: dict[str, _ProviderInfo] = {
             "`gemini` CLI with GEMINI_API_KEY or gcloud ADC."
         ),
         install_cmds=[
-            "npm install -g @google/gemini-cli",
+            "brew install gemini-cli                    # macOS",
+            "npm install -g @google/gemini-cli          # any platform",
         ],
         auth_cmds=[
             "export GEMINI_API_KEY=...                   # from aistudio.google.com",
