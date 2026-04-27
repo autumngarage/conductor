@@ -235,10 +235,11 @@ def test_doctor_text_output_covers_every_provider(mocker, monkeypatch):
     for var in (
         "CLOUDFLARE_API_TOKEN",
         "CLOUDFLARE_ACCOUNT_ID",
-        "DEEPSEEK_API_KEY",
         "OLLAMA_BASE_URL",
+        "OPENROUTER_API_KEY",
     ):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
 
     result = CliRunner().invoke(main, ["doctor"])
     assert result.exit_code == 0, result.output
@@ -267,8 +268,9 @@ def test_doctor_json_shape(mocker, monkeypatch):
     _stub_all_unconfigured(mocker)
     monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "x")
     monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     mocker.patch("conductor.cli.credentials.keychain_has", return_value=False)
 
     result = CliRunner().invoke(main, ["doctor", "--json"])
@@ -367,10 +369,11 @@ def test_doctor_reports_key_command_source(mocker, monkeypatch, tmp_path):
     for var in (
         "CLOUDFLARE_API_TOKEN",
         "CLOUDFLARE_ACCOUNT_ID",
-        "DEEPSEEK_API_KEY",
         "OLLAMA_BASE_URL",
+        "OPENROUTER_API_KEY",
     ):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     mocker.patch("conductor.cli.credentials.keychain_has", return_value=False)
 
     cred_file = tmp_path / "credentials.toml"
@@ -379,16 +382,16 @@ def test_doctor_reports_key_command_source(mocker, monkeypatch, tmp_path):
 
     creds_mod.clear_key_command_cache()
     creds_mod.save_key_command(
-        "DEEPSEEK_API_KEY", "op read op://Personal/DeepSeek/credential"
+        "OPENROUTER_API_KEY", "op read op://Personal/OpenRouter/credential"
     )
 
     result = CliRunner().invoke(main, ["doctor", "--json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     cred_map = {c["name"]: c for c in payload["credentials"]}
-    assert cred_map["DEEPSEEK_API_KEY"]["source"] == "key_command"
-    assert cred_map["DEEPSEEK_API_KEY"]["has_key_command"] is True
-    assert cred_map["DEEPSEEK_API_KEY"]["in_env"] is False
+    assert cred_map["OPENROUTER_API_KEY"]["source"] == "key_command"
+    assert cred_map["OPENROUTER_API_KEY"]["has_key_command"] is True
+    assert cred_map["OPENROUTER_API_KEY"]["in_env"] is False
 
     # Text rendering surfaces the secret-manager label.
     text_result = CliRunner().invoke(main, ["doctor"])
@@ -399,7 +402,7 @@ def test_doctor_env_beats_key_command_in_source(mocker, monkeypatch, tmp_path):
     """Env var wins over key_command — operator can override secret-manager
     config from a single shell session for debugging/CI."""
     _stub_all_unconfigured(mocker)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "from-env")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "from-env")
     mocker.patch("conductor.cli.credentials.keychain_has", return_value=False)
 
     cred_file = tmp_path / "credentials.toml"
@@ -407,13 +410,34 @@ def test_doctor_env_beats_key_command_in_source(mocker, monkeypatch, tmp_path):
     from conductor import credentials as creds_mod
 
     creds_mod.clear_key_command_cache()
-    creds_mod.save_key_command("DEEPSEEK_API_KEY", "echo from-op")
+    creds_mod.save_key_command("OPENROUTER_API_KEY", "echo from-op")
 
     result = CliRunner().invoke(main, ["doctor", "--json"])
     payload = json.loads(result.output)
     cred_map = {c["name"]: c for c in payload["credentials"]}
-    assert cred_map["DEEPSEEK_API_KEY"]["source"] == "env"
-    assert cred_map["DEEPSEEK_API_KEY"]["has_key_command"] is True
+    assert cred_map["OPENROUTER_API_KEY"]["source"] == "env"
+    assert cred_map["OPENROUTER_API_KEY"]["has_key_command"] is True
+
+
+def test_doctor_warns_when_deepseek_key_is_set_without_openrouter(
+    mocker, monkeypatch
+):
+    _stub_all_unconfigured(mocker)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "from-env")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    mocker.patch("conductor.cli.credentials.keychain_has", return_value=False)
+
+    result = CliRunner().invoke(main, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "DEEPSEEK_API_KEY is deprecated" in result.output
+    assert "conductor init --only openrouter" in result.output
+
+    result_json = CliRunner().invoke(main, ["doctor", "--json"])
+    payload = json.loads(result_json.output)
+    assert any(
+        "DEEPSEEK_API_KEY is deprecated" in warning["message"]
+        for warning in payload["warnings"]
+    )
 
 
 def test_doctor_reports_agent_integration_not_detected(mocker, monkeypatch):

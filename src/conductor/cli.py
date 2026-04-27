@@ -1591,7 +1591,6 @@ def smoke(provider_id: str | None, run_all: bool, as_json: bool) -> None:
 _DIAGNOSTIC_ENV_VARS = (
     "CLOUDFLARE_API_TOKEN",
     "CLOUDFLARE_ACCOUNT_ID",
-    "DEEPSEEK_API_KEY",
     "OLLAMA_BASE_URL",
     "OPENROUTER_API_KEY",
 )
@@ -1730,6 +1729,22 @@ def _diagnostic_payload() -> dict:
             }
         )
 
+    if (
+        "DEEPSEEK_API_KEY" in os.environ
+        and "OPENROUTER_API_KEY" not in os.environ
+    ):
+        warnings.append(
+            {
+                "provider": "deepseek-chat",
+                "level": "warning",
+                "message": (
+                    "DEEPSEEK_API_KEY is deprecated for deepseek-chat and "
+                    "deepseek-reasoner. Set OPENROUTER_API_KEY and run "
+                    "`conductor init --only openrouter`."
+                ),
+            }
+        )
+
     return {
         "version": __version__,
         "platform": sys.platform,
@@ -1837,6 +1852,12 @@ def doctor(as_json: bool) -> None:
             None: "—",
         }.get(c["source"], "—")
         click.echo(f"  {c['name']:<24}  {source_label}")
+
+    if payload["warnings"]:
+        click.echo("")
+        click.echo("Warnings:")
+        for warning in payload["warnings"]:
+            click.echo(f"  ⚠ {warning['message']}")
 
     click.echo("")
     click.echo("Active credentials (per provider):")
