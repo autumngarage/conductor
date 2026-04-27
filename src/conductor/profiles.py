@@ -8,7 +8,7 @@ File schema:
 
     [profiles.my-coding]
     prefer = "best"
-    effort = "high"
+    effort = "medium"
     tags = "coding,tool-use"
     sandbox = "workspace-write"
 """
@@ -46,7 +46,11 @@ BUILTIN_PROFILES: dict[str, ProfileSpec] = {
     "coding": ProfileSpec(
         name="coding",
         prefer="best",
-        effort="high",
+        # OpenAI's Codex prompting guide recommends medium as the default
+        # reasoning effort; reserve high/xhigh-style settings for the
+        # hardest tasks instead of making every autonomous coding run pay
+        # the latency/cost tax by default.
+        effort="medium",
         tags="coding,tool-use",
         sandbox="workspace-write",
         source="built-in",

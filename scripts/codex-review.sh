@@ -52,7 +52,7 @@
 #   TOUCHSTONE_REVIEWER               — DEPRECATED in 2.0.0; auto-translates to TOUCHSTONE_CONDUCTOR_WITH=<provider>
 #   TOUCHSTONE_CONDUCTOR_WITH         — pin a specific provider for auto-routing
 #   TOUCHSTONE_CONDUCTOR_PREFER       — best|cheapest|fastest|balanced (default: best)
-#   TOUCHSTONE_CONDUCTOR_EFFORT       — minimal|low|medium|high|max (default: max)
+#   TOUCHSTONE_CONDUCTOR_EFFORT       — minimal|low|medium|high|max (default: medium)
 #   TOUCHSTONE_CONDUCTOR_TAGS         — comma-separated tag hints (default: code-review)
 #   TOUCHSTONE_CONDUCTOR_EXCLUDE      — comma-separated providers to skip
 #   CODEX_REVIEW_SUPPRESS_LEGACY_WARNINGS — silence one-time migration hints
@@ -760,7 +760,9 @@ fi
 # Env overrides for the conductor adapter (take precedence over .codex-review.toml).
 CONDUCTOR_WITH="${TOUCHSTONE_CONDUCTOR_WITH:-${CONDUCTOR_WITH:-}}"
 CONDUCTOR_PREFER="${TOUCHSTONE_CONDUCTOR_PREFER:-${CONDUCTOR_PREFER:-best}}"
-CONDUCTOR_EFFORT="${TOUCHSTONE_CONDUCTOR_EFFORT:-${CONDUCTOR_EFFORT:-max}}"
+# OpenAI's Codex prompting guide recommends medium as the default
+# reasoning effort; keep higher settings opt-in for genuinely hard tasks.
+CONDUCTOR_EFFORT="${TOUCHSTONE_CONDUCTOR_EFFORT:-${CONDUCTOR_EFFORT:-medium}}"
 CONDUCTOR_TAGS="${TOUCHSTONE_CONDUCTOR_TAGS:-${CONDUCTOR_TAGS:-code-review}}"
 CONDUCTOR_EXCLUDE="${TOUCHSTONE_CONDUCTOR_EXCLUDE:-${CONDUCTOR_EXCLUDE:-}}"
 
@@ -976,7 +978,7 @@ reviewer_conductor_exec() {
   fi
 
   # Effort applies whether manual-provider or auto-routed.
-  args+=(--effort "${CONDUCTOR_EFFORT:-max}")
+  args+=(--effort "${CONDUCTOR_EFFORT:-medium}")
 
   # REVIEW_MODE → subcommand + tools + sandbox. Conductor translates these
   # portable names into each provider's native flag dialect.

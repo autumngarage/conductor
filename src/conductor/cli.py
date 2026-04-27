@@ -82,6 +82,7 @@ VALID_EFFORT_LEVELS = ("minimal", "low", "medium", "high", "max")
 PROFILE_PRECEDENCE_TEXT = (
     "Resolution order: profile defaults < CONDUCTOR_* env vars < explicit CLI flags."
 )
+DEFAULT_EXEC_MAX_STALL_SEC = 360
 
 
 # --------------------------------------------------------------------------- #
@@ -206,6 +207,18 @@ def _validate_prefer(raw: str | None) -> str:
             f"Use one of: {list(VALID_PREFER_MODES)}. "
             f"Did you mean '{hint}'?"
         )
+    return raw
+
+
+def _normalize_max_stall_sec(raw: int | None) -> int | None:
+    if raw is None:
+        return None
+    if raw < 0:
+        raise click.UsageError(
+            f"--max-stall-seconds must be >= 0, got {raw}."
+        )
+    if raw == 0:
+        return None
     return raw
 
 
@@ -1261,12 +1274,13 @@ def call(
 @click.option(
     "--max-stall-seconds",
     "max_stall_sec",
-    default=None,
+    default=DEFAULT_EXEC_MAX_STALL_SEC,
     type=int,
     help=(
         "Kill the underlying provider if it produces no output for this many "
-        "seconds. Default: off (let it run). Recommended for unattended runs: "
-        "--max-stall-seconds 600 (10 minutes of silence = stalled)."
+        "seconds. Default: 360, just past codex's 5-minute internal websocket "
+        "idle (openai/codex#17003) so codex gets one retry attempt before "
+        "conductor kills it. Set 0 to disable."
     ),
 )
 @click.option(
@@ -1382,6 +1396,7 @@ def exec_cmd(
     tools_set = _validate_tools(tools)
     sandbox_value = _validate_sandbox(sandbox)
     effort_value = _parse_effort(effort)
+    max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
 
     decision: RouteDecision | None = None
     session_log: SessionLog | None = None
