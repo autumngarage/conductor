@@ -376,6 +376,7 @@ def _invoke_with_fallback(
     sandbox: str,
     cwd: str | None,
     timeout_sec: int | None,
+    max_stall_sec: int | None,
     silent: bool,
     resume_session_id: str | None = None,
 ) -> tuple[CallResponse, list[str]]:
@@ -436,6 +437,7 @@ def _invoke_with_fallback(
                     sandbox=sandbox,
                     cwd=cwd,
                     timeout_sec=timeout_sec,
+                    max_stall_sec=max_stall_sec,
                     resume_session_id=resume_session_id,
                 )
             else:
@@ -746,6 +748,7 @@ def call(
                 sandbox="none",
                 cwd=None,
                 timeout_sec=None,
+                max_stall_sec=None,
                 silent=silent_route or as_json,
             )
         except ProviderConfigError as e:
@@ -845,6 +848,17 @@ def call(
         "for CI or unattended runs that must bound runtime."
     ),
 )
+@click.option(
+    "--max-stall-seconds",
+    "max_stall_sec",
+    default=None,
+    type=int,
+    help=(
+        "Kill the underlying provider if it produces no output for this many "
+        "seconds. Default: off (let it run). Recommended for unattended runs: "
+        "--max-stall-seconds 600 (10 minutes of silence = stalled)."
+    ),
+)
 @click.option("--task", default=None, help="The task / prompt. Reads stdin if omitted.")
 @click.option("--model", default=None, help="Override the provider's default model.")
 @click.option(
@@ -880,6 +894,7 @@ def exec_cmd(
     exclude: str | None,
     cwd: str | None,
     timeout_sec: int | None,
+    max_stall_sec: int | None,
     task: str | None,
     model: str | None,
     as_json: bool,
@@ -934,6 +949,7 @@ def exec_cmd(
                 sandbox=sandbox_value,
                 cwd=cwd,
                 timeout_sec=timeout_sec,
+                max_stall_sec=max_stall_sec,
                 silent=silent_route or as_json,
             )
         except UnsupportedCapability as e:
@@ -960,6 +976,7 @@ def exec_cmd(
                 sandbox=sandbox_value,
                 cwd=cwd,
                 timeout_sec=timeout_sec,
+                max_stall_sec=max_stall_sec,
                 resume_session_id=resume_session_id,
             )
         except UnsupportedCapability as e:

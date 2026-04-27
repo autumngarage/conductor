@@ -15,8 +15,11 @@ autumn-garage `plans/sentinel-conductor-migration.md`, future).
 from __future__ import annotations
 
 import json
+import queue
 import shutil
 import subprocess
+import sys
+import threading
 import time
 
 from conductor.providers.interface import (
@@ -24,6 +27,7 @@ from conductor.providers.interface import (
     ProviderConfigError,
     ProviderError,
     ProviderHTTPError,
+    ProviderStalledError,
     resolve_effort_tokens,
 )
 
@@ -210,6 +214,8 @@ class CodexProvider:
         sandbox: str = "none",
         cwd: str | None = None,
         timeout_sec: int | None = None,
+        max_stall_sec: int | None = None,
+        liveness_interval_sec: float = 30.0,
         resume_session_id: str | None = None,
     ) -> CallResponse:
         codex_sandbox = {
@@ -224,6 +230,9 @@ class CodexProvider:
             sandbox=codex_sandbox,
             cwd=cwd,
             timeout_sec_override=timeout_sec,
+            max_stall_sec=max_stall_sec,
+            liveness_interval_sec=liveness_interval_sec,
+            stream=True,
             resume_session_id=resume_session_id,
         )
 
@@ -236,6 +245,9 @@ class CodexProvider:
         sandbox: str,
         cwd: str | None = None,
         timeout_sec_override: float | None | object = _USE_DEFAULT,
+        max_stall_sec: int | None = None,
+        liveness_interval_sec: float = 30.0,
+        stream: bool = False,
         resume_session_id: str | None = None,
     ) -> CallResponse:
         # Cheap PATH check on the hot path; auth state surfaces as a CLI
@@ -282,6 +294,19 @@ class CodexProvider:
         else:
             # `None` means "run unbounded" (subprocess.run accepts timeout=None).
             timeout = timeout_sec_override  # type: ignore[assignment]
+
+        if stream:
+            return self._run_streaming(
+                args,
+                model=model,
+                effort=effort,
+                thinking_budget=thinking_budget,
+                cwd=cwd,
+                timeout=timeout,
+                max_stall_sec=max_stall_sec,
+                liveness_interval_sec=liveness_interval_sec,
+            )
+
         start = time.monotonic()
         try:
             result = subprocess.run(
@@ -298,16 +323,13 @@ class CodexProvider:
             partial_stdout = e.stdout or ""
             if isinstance(partial_stdout, bytes):
                 partial_stdout = partial_stdout.decode("utf-8", errors="replace")
-            _, _, _, partial_session_id = self._parse_ndjson(partial_stdout)
             elapsed = time.monotonic() - start
-            msg = f"codex CLI timed out after {elapsed:.0f}s"
-            if partial_session_id:
-                msg += (
-                    f" (partial session_id={partial_session_id} — "
-                    f"resume with `conductor exec --with codex "
-                    f"--resume {partial_session_id} ...`)"
+            raise ProviderError(
+                self._message_with_partial_session_id(
+                    f"codex CLI timed out after {elapsed:.0f}s",
+                    partial_stdout,
                 )
-            raise ProviderError(msg) from e
+            ) from e
         duration_ms = int((time.monotonic() - start) * 1000)
 
         if result.returncode != 0:
@@ -338,4 +360,190 @@ class CodexProvider:
             },
             session_id=session_id,
             raw={"stdout": result.stdout},
+        )
+
+    def _run_streaming(
+        self,
+        args: list[str],
+        *,
+        model: str,
+        effort: str | int,
+        thinking_budget: int,
+        cwd: str | None,
+        timeout: float | None,
+        max_stall_sec: int | None,
+        liveness_interval_sec: float,
+    ) -> CallResponse:
+        start = time.monotonic()
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=cwd,
+        )
+
+        stdout_q: queue.Queue[str | None] = queue.Queue()
+        stdout_parts: list[str] = []
+        stderr_parts: list[str] = []
+
+        def read_stdout() -> None:
+            assert process.stdout is not None
+            try:
+                while True:
+                    line = process.stdout.readline()
+                    if line == "":
+                        break
+                    stdout_q.put(line)
+            finally:
+                stdout_q.put(None)
+
+        def read_stderr() -> None:
+            assert process.stderr is not None
+            while True:
+                chunk = process.stderr.readline()
+                if chunk == "":
+                    break
+                stderr_parts.append(chunk)
+
+        stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+        stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
+
+        stdout_done = False
+        last_output = start
+        last_liveness = start
+        while True:
+            now = time.monotonic()
+            if timeout is not None and now - start > timeout:
+                self._terminate_process(process)
+                self._join_reader_threads(stdout_thread, stderr_thread)
+                self._drain_stdout_queue(stdout_q, stdout_parts)
+                stdout = "".join(stdout_parts)
+                elapsed = time.monotonic() - start
+                raise ProviderError(
+                    self._message_with_partial_session_id(
+                        f"codex CLI timed out after {elapsed:.0f}s",
+                        stdout,
+                    )
+                )
+
+            if max_stall_sec is not None and now - last_output > max_stall_sec:
+                self._terminate_process(process)
+                self._join_reader_threads(stdout_thread, stderr_thread)
+                self._drain_stdout_queue(stdout_q, stdout_parts)
+                stdout = "".join(stdout_parts)
+                elapsed = time.monotonic() - last_output
+                raise ProviderStalledError(
+                    self._message_with_partial_session_id(
+                        f"codex CLI stalled after {elapsed:.0f}s with no output",
+                        stdout,
+                    )
+                )
+
+            if (
+                liveness_interval_sec > 0
+                and now - last_output >= liveness_interval_sec
+                and now - last_liveness >= liveness_interval_sec
+            ):
+                sys.stderr.write(
+                    f"[conductor] no output from codex for {now - last_output:.0f}s...\n"
+                )
+                sys.stderr.flush()
+                last_liveness = now
+
+            try:
+                item = stdout_q.get(timeout=0.05)
+            except queue.Empty:
+                if stdout_done and process.poll() is not None:
+                    break
+                continue
+
+            if item is None:
+                stdout_done = True
+                if process.poll() is not None:
+                    break
+                continue
+
+            stdout_parts.append(item)
+            last_output = time.monotonic()
+            last_liveness = last_output
+
+        returncode = process.wait()
+        self._join_reader_threads(stdout_thread, stderr_thread)
+        self._drain_stdout_queue(stdout_q, stdout_parts)
+        duration_ms = int((time.monotonic() - start) * 1000)
+        stdout = "".join(stdout_parts)
+        stderr = "".join(stderr_parts)
+
+        if returncode != 0:
+            raise ProviderHTTPError(
+                f"codex exited {returncode}: "
+                f"{(stderr or stdout).strip()[:500]}"
+            )
+
+        content, input_tokens, output_tokens, session_id = self._parse_ndjson(stdout)
+        if not content:
+            raise ProviderHTTPError(
+                f"codex NDJSON stream had no agent_message: {stdout[:500]!r}"
+            )
+        return CallResponse(
+            text=content,
+            provider=self.name,
+            model=model,
+            duration_ms=duration_ms,
+            usage={
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cached_tokens": None,
+                "thinking_tokens": None,
+                "effort": effort if isinstance(effort, str) else None,
+                "thinking_budget": thinking_budget,
+            },
+            session_id=session_id,
+            raw={"stdout": stdout},
+        )
+
+    def _terminate_process(self, process: subprocess.Popen[str]) -> None:
+        if process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+
+    def _join_reader_threads(
+        self,
+        stdout_thread: threading.Thread,
+        stderr_thread: threading.Thread,
+    ) -> None:
+        stdout_thread.join(timeout=1)
+        stderr_thread.join(timeout=1)
+
+    def _drain_stdout_queue(
+        self,
+        stdout_q: queue.Queue[str | None],
+        stdout_parts: list[str],
+    ) -> None:
+        while True:
+            try:
+                item = stdout_q.get_nowait()
+            except queue.Empty:
+                return
+            if item is not None:
+                stdout_parts.append(item)
+
+    def _message_with_partial_session_id(self, prefix: str, stdout: str) -> str:
+        _, _, _, partial_session_id = self._parse_ndjson(stdout)
+        if not partial_session_id:
+            return prefix
+        return (
+            f"{prefix} (partial session_id={partial_session_id} — "
+            f"resume with `conductor exec --with codex "
+            f"--resume {partial_session_id} ...`)"
         )

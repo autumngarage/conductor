@@ -212,8 +212,10 @@ class _DeepSeekBase:
         sandbox: str = "none",
         cwd: str | None = None,
         timeout_sec: int | None = None,
+        max_stall_sec: int | None = None,
         resume_session_id: str | None = None,
     ) -> CallResponse:
+        # accepted for API parity; only codex implements stall-watchdog today
         if resume_session_id:
             raise UnsupportedCapability(
                 f"{self.name} has no session model — each DeepSeek API call is "
