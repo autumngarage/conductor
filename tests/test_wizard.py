@@ -10,6 +10,7 @@ from conductor.providers.kimi import (
     CLOUDFLARE_ACCOUNT_ID_ENV,
     CLOUDFLARE_API_TOKEN_ENV,
 )
+from conductor.providers.openrouter import OPENROUTER_API_KEY_ENV
 
 
 @pytest.fixture(autouse=True)
@@ -279,12 +280,12 @@ def test_init_1password_resolution_failure_rolls_back(mocker, monkeypatch, tmp_p
         lambda cmd: "/opt/homebrew/bin/op" if cmd == "op" else None,
     )
 
-    from conductor.providers import DeepSeekChatProvider
+    from conductor.providers import OpenRouterProvider
 
     mocker.patch.object(
-        DeepSeekChatProvider, "configured", lambda self: (False, "missing")
+        OpenRouterProvider, "configured", lambda self: (False, "missing")
     )
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv(OPENROUTER_API_KEY_ENV, raising=False)
 
     cred_file = tmp_path / "credentials.toml"
     monkeypatch.setenv("CONDUCTOR_CREDENTIALS_FILE", str(cred_file))
@@ -301,8 +302,8 @@ def test_init_1password_resolution_failure_rolls_back(mocker, monkeypatch, tmp_p
 
     result = CliRunner().invoke(
         main,
-        ["init", "--only", "deepseek-chat"],
-        input="1password\nop://Personal/DeepSeek/credential\n",
+        ["init", "--only", "openrouter"],
+        input="1password\nop://Personal/OpenRouter/credential\n",
     )
 
     assert result.exit_code == 0
@@ -313,7 +314,7 @@ def test_init_1password_resolution_failure_rolls_back(mocker, monkeypatch, tmp_p
         from conductor import credentials as creds_mod
 
         creds_mod.clear_key_command_cache()
-        assert "DEEPSEEK_API_KEY" not in creds_mod.load_key_commands()
+        assert OPENROUTER_API_KEY_ENV not in creds_mod.load_key_commands()
 
 
 def test_init_1password_env_var_does_not_mask_broken_reference(
@@ -333,14 +334,14 @@ def test_init_1password_env_var_does_not_mask_broken_reference(
         lambda cmd: "/opt/homebrew/bin/op" if cmd == "op" else None,
     )
 
-    from conductor.providers import DeepSeekChatProvider
+    from conductor.providers import OpenRouterProvider
 
     mocker.patch.object(
-        DeepSeekChatProvider, "configured", lambda self: (False, "missing")
+        OpenRouterProvider, "configured", lambda self: (False, "missing")
     )
     # The env var IS set — which would mask credentials.get() returning
     # a value even if `op read` itself fails.
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "from-env-stray")
+    monkeypatch.setenv(OPENROUTER_API_KEY_ENV, "from-env-stray")
 
     cred_file = tmp_path / "credentials.toml"
     monkeypatch.setenv("CONDUCTOR_CREDENTIALS_FILE", str(cred_file))
@@ -358,8 +359,8 @@ def test_init_1password_env_var_does_not_mask_broken_reference(
 
     result = CliRunner().invoke(
         main,
-        ["init", "--only", "deepseek-chat"],
-        input="1password\nop://Personal/DeepSeek/credential\n",
+        ["init", "--only", "openrouter"],
+        input="1password\nop://Personal/OpenRouter/credential\n",
     )
 
     assert result.exit_code == 0
@@ -369,7 +370,7 @@ def test_init_1password_env_var_does_not_mask_broken_reference(
         from conductor import credentials as creds_mod
 
         creds_mod.clear_key_command_cache()
-        assert "DEEPSEEK_API_KEY" not in creds_mod.load_key_commands()
+        assert OPENROUTER_API_KEY_ENV not in creds_mod.load_key_commands()
 
 
 def test_init_1password_partial_failure_does_not_persist_first_credential(
@@ -470,12 +471,12 @@ def test_init_1password_preserves_unrelated_entries_on_write_failure(
     )
     creds_mod.clear_key_command_cache()
 
-    from conductor.providers import DeepSeekChatProvider
+    from conductor.providers import OpenRouterProvider
 
     mocker.patch.object(
-        DeepSeekChatProvider, "configured", lambda self: (False, "missing")
+        OpenRouterProvider, "configured", lambda self: (False, "missing")
     )
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv(OPENROUTER_API_KEY_ENV, raising=False)
 
     import subprocess
 
@@ -494,8 +495,8 @@ def test_init_1password_preserves_unrelated_entries_on_write_failure(
 
     result = CliRunner().invoke(
         main,
-        ["init", "--only", "deepseek-chat"],
-        input="1password\nop://Personal/DeepSeek/credential\n",
+        ["init", "--only", "openrouter"],
+        input="1password\nop://Personal/OpenRouter/credential\n",
     )
 
     assert result.exit_code == 0
@@ -526,12 +527,12 @@ def test_init_1password_preserves_keychain_until_file_write_commits(
         lambda cmd: "/opt/homebrew/bin/op" if cmd == "op" else None,
     )
 
-    from conductor.providers import DeepSeekChatProvider
+    from conductor.providers import OpenRouterProvider
 
     mocker.patch.object(
-        DeepSeekChatProvider, "configured", lambda self: (False, "missing")
+        OpenRouterProvider, "configured", lambda self: (False, "missing")
     )
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv(OPENROUTER_API_KEY_ENV, raising=False)
 
     cred_file = tmp_path / "credentials.toml"
     monkeypatch.setenv("CONDUCTOR_CREDENTIALS_FILE", str(cred_file))
@@ -544,7 +545,7 @@ def test_init_1password_preserves_keychain_until_file_write_commits(
 
     def fake_set_key_commands(updates):
         call_order.append("set_key_commands")
-        cred_file.write_text("[key_commands]\nDEEPSEEK_API_KEY = \"echo x\"\n")
+        cred_file.write_text("[key_commands]\nOPENROUTER_API_KEY = \"echo x\"\n")
         return cred_file
 
     def fake_delete_from_keychain(key):
@@ -564,21 +565,21 @@ def test_init_1password_preserves_keychain_until_file_write_commits(
         "conductor.credentials.delete_from_keychain",
         side_effect=fake_delete_from_keychain,
     )
-    mocker.patch.object(DeepSeekChatProvider, "smoke", return_value=(True, None))
+    mocker.patch.object(OpenRouterProvider, "smoke", return_value=(True, None))
 
     result = CliRunner().invoke(
         main,
-        ["init", "--only", "deepseek-chat"],
-        input="1password\nop://Personal/DeepSeek/credential\n",
+        ["init", "--only", "openrouter"],
+        input="1password\nop://Personal/OpenRouter/credential\n",
     )
 
     assert result.exit_code == 0, result.output
     # File write commits first, THEN keychain cleanup. Critical ordering:
     # delete_from_keychain must never appear before set_key_commands.
     assert call_order[0] == "set_key_commands"
-    assert "delete_from_keychain:DEEPSEEK_API_KEY" in call_order
+    assert f"delete_from_keychain:{OPENROUTER_API_KEY_ENV}" in call_order
     assert call_order.index("set_key_commands") < call_order.index(
-        "delete_from_keychain:DEEPSEEK_API_KEY"
+        f"delete_from_keychain:{OPENROUTER_API_KEY_ENV}"
     )
 
 
@@ -771,6 +772,7 @@ _ALL_PROVIDER_CLASSES = (
     "GeminiProvider",
     "KimiProvider",
     "OllamaProvider",
+    "OpenRouterProvider",
 )
 
 

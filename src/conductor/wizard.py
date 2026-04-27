@@ -36,12 +36,13 @@ if TYPE_CHECKING:
 
 from conductor import credentials
 from conductor.providers import get_provider, known_providers
-from conductor.providers.deepseek import DEEPSEEK_API_KEY_ENV
 from conductor.providers.kimi import (
     CLOUDFLARE_ACCOUNT_ID_ENV,
     CLOUDFLARE_API_TOKEN_ENV,
 )
 from conductor.providers.openrouter import OPENROUTER_API_KEY_ENV
+
+DEEPSEEK_API_KEY_ENV = "DEEPSEEK_API_KEY"
 
 # --------------------------------------------------------------------------- #
 # Provider concierge copy — descriptions, install commands, cred URLs.
@@ -166,49 +167,47 @@ _INFO: dict[str, _ProviderInfo] = {
         description=(
             "Cheap and fast; strong tier; good default for code-review "
             "and general chat when latency and cost matter more than "
-            "deep reasoning. Requires a DeepSeek API key."
+            "deep reasoning. Conductor now reaches it via OpenRouter, so "
+            "it uses OPENROUTER_API_KEY rather than a direct DeepSeek key."
         ),
         install_cmds=[
-            "# No install step — Conductor talks directly to DeepSeek's",
+            "# No install step — Conductor talks to OpenRouter's",
             "# OpenAI-compatible HTTP endpoint via httpx.",
         ],
         auth_cmds=[
-            "# Wizard will prompt for DEEPSEEK_API_KEY and store it",
-            "# in Keychain / direnv. The same key serves deepseek-reasoner.",
+            "# Configure OpenRouter once:",
+            "conductor init --only openrouter",
         ],
-        credential_source_url="https://platform.deepseek.com/api_keys",
+        credential_source_url="https://openrouter.ai/keys",
         troubleshoot_tips=[
-            "DEEPSEEK_API_KEY must be in the current shell — restart your "
-            "terminal after adding it to ~/.zshrc.",
-            "Validate the key: https://platform.deepseek.com/api_keys "
-            "(regenerate if unsure).",
-            "401 means the key is wrong; 402 means the account is out of credit.",
+            "Use OPENROUTER_API_KEY, not DEEPSEEK_API_KEY.",
+            "Run `conductor init --only openrouter` to store the credential "
+            "in Keychain / direnv.",
+            "401 means the OpenRouter key is wrong; 429 means the route is rate-limited.",
         ],
     ),
     "deepseek-reasoner": _ProviderInfo(
         tagline="DeepSeek R1 reasoning — strong reasoning with built-in CoT.",
         description=(
             "Picks up tasks tagged 'strong-reasoning' or 'thinking'. "
-            "Slower (12s p50) and more expensive than deepseek-chat, but "
-            "emits a chain-of-thought before the answer. Reuses the same "
-            "DEEPSEEK_API_KEY as deepseek-chat — set up once."
+            "Slower (12s p50) and more expensive than deepseek-chat. "
+            "Conductor now reaches it via OpenRouter, so setup is the same "
+            "OPENROUTER_API_KEY used by deepseek-chat."
         ),
         install_cmds=[
-            "# No install step — Conductor talks directly to DeepSeek's",
+            "# No install step — Conductor talks to OpenRouter's",
             "# OpenAI-compatible HTTP endpoint via httpx.",
         ],
         auth_cmds=[
-            "# Wizard will prompt for DEEPSEEK_API_KEY and store it",
-            "# in Keychain / direnv. Same key as deepseek-chat.",
+            "# Configure OpenRouter once:",
+            "conductor init --only openrouter",
         ],
-        credential_source_url="https://platform.deepseek.com/api_keys",
+        credential_source_url="https://openrouter.ai/keys",
         troubleshoot_tips=[
-            "Same DEEPSEEK_API_KEY as deepseek-chat — if chat works and "
-            "reasoner doesn't, the key is fine; check the model id.",
-            "Reasoner is slow (12s p50 typical); long timeouts are normal, "
-            "not a hang.",
-            "402 means the account is out of credit; reasoner uses ~2× the "
-            "tokens-per-call as chat because of the reasoning trace.",
+            "Use OPENROUTER_API_KEY, not DEEPSEEK_API_KEY.",
+            "Reasoner is slow (12s p50 typical); long timeouts are normal, not a hang.",
+            "If chat works and reasoner doesn't, check the OpenRouter model "
+            "route, not a direct DeepSeek key.",
         ],
     ),
     "openrouter": _ProviderInfo(
@@ -269,6 +268,8 @@ _KIMI_CREDS = (
     (CLOUDFLARE_ACCOUNT_ID_ENV, "Cloudflare account ID"),
 )
 
+_deepseek_migration_notice_emitted = False
+
 
 @dataclass
 class WizardOutcome:
@@ -321,6 +322,9 @@ def run_init_wizard(
     Returns a shell exit code: 0 on success, non-zero if the user
     explicitly aborted.
     """
+    global _deepseek_migration_notice_emitted
+
+    _deepseek_migration_notice_emitted = False
     interactive = _is_tty() and not accept_defaults
 
     _print_intro(interactive, only=only, remaining=remaining)
@@ -667,115 +671,36 @@ def _kimi_flow(*, can_back: bool = False) -> WizardOutcome:
     return WizardOutcome("kimi", "failed", f"stored via {storage}, smoke failed: {reason}")
 
 
-def _deepseek_flow(name: str) -> Callable[..., WizardOutcome]:
-    """API-key flow for either deepseek-chat or deepseek-reasoner.
+def _maybe_warn_deepseek_openrouter_migration() -> None:
+    global _deepseek_migration_notice_emitted
 
-    Both providers share one credential (``DEEPSEEK_API_KEY``); once one
-    flow stores it, the other detects it as already-configured and skips
-    the prompt.
-    """
+    if _deepseek_migration_notice_emitted:
+        return
+    if DEEPSEEK_API_KEY_ENV not in os.environ:
+        return
+    if OPENROUTER_API_KEY_ENV in os.environ:
+        return
+
+    click.echo(
+        f"  Migration: {DEEPSEEK_API_KEY_ENV} is deprecated for DeepSeek providers."
+    )
+    click.echo(
+        f"  Configure {OPENROUTER_API_KEY_ENV} instead: `conductor init --only openrouter`."
+    )
+    click.echo("")
+    _deepseek_migration_notice_emitted = True
+
+
+def _deepseek_openrouter_alias_flow(name: str) -> Callable[..., WizardOutcome]:
+    """Route DeepSeek setup through the shared OpenRouter credential flow."""
 
     def flow(*, can_back: bool = False) -> WizardOutcome:
-        info = _INFO[name]
-        if can_back:
-            options = [
-                ("c", "continue — enter credentials now"),
-                ("s", "skip this provider"),
-                ("b", "back — redo the previous provider"),
-                ("q", "quit setup"),
-            ]
-            entry = _prompt_menu(options=options, default="c")
-            if entry == "s":
-                return WizardOutcome(name, "skipped", "user skipped")
-            if entry == "q":
-                raise _AbortSetup()
-            if entry == "b":
-                raise _GoBack()
-            click.echo("")
-        click.echo(f"  Get a key: {info.credential_source_url}")
+        _maybe_warn_deepseek_openrouter_migration()
+        click.echo(f"  {name} now uses OpenRouter for credentials and transport.")
+        click.echo("  Running the shared OpenRouter setup flow.")
         click.echo("")
-
-        # Source choice always offered when op is on PATH, even if a value
-        # is already in env/keychain — the user may want to migrate from
-        # local storage to indirection to remove the local copy.
-        if _op_cli_available():
-            choice = _credential_source_choice(name)
-            if choice == "skip":
-                return WizardOutcome(name, "skipped", "user skipped at source choice")
-            if choice == "1password":
-                return _attempt_1password_indirection(
-                    name,
-                    [(DEEPSEEK_API_KEY_ENV, "DeepSeek API key")],
-                )
-
-        if credentials.get(DEEPSEEK_API_KEY_ENV) is not None:
-            provider = get_provider(name)
-            ok, reason = provider.smoke()
-            if ok:
-                return WizardOutcome(
-                    name, "ok", "credentials already present, smoke passed"
-                )
-            return WizardOutcome(
-                name, "failed", f"credentials present but smoke failed: {reason}"
-            )
-
-        try:
-            value = click.prompt(
-                f"  DeepSeek API key ({DEEPSEEK_API_KEY_ENV})",
-                hide_input=True,
-                default="",
-                show_default=False,
-            )
-        except click.Abort:
-            value = ""
-        if not value:
-            click.echo(f"  {DEEPSEEK_API_KEY_ENV} not provided — skipping {name}.")
-            return WizardOutcome(name, "skipped", f"{DEEPSEEK_API_KEY_ENV} not provided")
-
-        storage = _prompt_menu(
-            options=[
-                ("keychain", "keychain — macOS Keychain (recommended, no shell-env leakage)"),
-                ("envrc", "envrc — write export to .envrc via direnv"),
-                ("print", "print — show export statement, I'll store it myself"),
-                ("skip", f"skip — skip {name} entirely"),
-            ],
-        )
-        if storage == "skip":
-            return WizardOutcome(name, "skipped", "user skipped during storage choice")
-
-        values = {DEEPSEEK_API_KEY_ENV: value}
-
-        if storage == "keychain":
-            try:
-                credentials.set_in_keychain(DEEPSEEK_API_KEY_ENV, value)
-                click.echo("  ✓ stored in macOS Keychain (service: conductor).")
-            except RuntimeError as e:
-                click.echo(f"  ✗ keychain storage failed: {e}")
-                click.echo("  falling back to print-only.")
-                storage = "print"
-
-        if storage == "envrc":
-            envrc_path = os.path.join(os.getcwd(), ".envrc")
-            _append_envrc(envrc_path, values)
-            click.echo(f"  ✓ wrote export line to {envrc_path}")
-            click.echo("    run `direnv allow` in that directory to activate.")
-
-        if storage == "print":
-            click.echo("  add this to your shell rc or .envrc:")
-            click.echo(f"    export {DEEPSEEK_API_KEY_ENV}={value!r}")
-
-        os.environ[DEEPSEEK_API_KEY_ENV] = value
-
-        provider = get_provider(name)
-        ok, reason = provider.smoke()
-        if ok:
-            click.echo("  ✓ smoke test passed")
-            return WizardOutcome(name, "ok", f"stored via {storage}, smoke passed")
-        click.echo(f"  ✗ smoke test failed: {reason}")
-        click.echo("  credential stored but the endpoint is not responding as expected.")
-        return WizardOutcome(
-            name, "failed", f"stored via {storage}, smoke failed: {reason}"
-        )
+        outcome = _openrouter_flow(can_back=can_back)
+        return WizardOutcome(name, outcome.status, outcome.detail)
 
     return flow
 
@@ -1027,8 +952,8 @@ def _credential_source_choice(name: str) -> str:
 
 _FLOWS: dict[str, Callable[..., WizardOutcome]] = {
     "kimi": _kimi_flow,
-    "deepseek-chat": _deepseek_flow("deepseek-chat"),
-    "deepseek-reasoner": _deepseek_flow("deepseek-reasoner"),
+    "deepseek-chat": _deepseek_openrouter_alias_flow("deepseek-chat"),
+    "deepseek-reasoner": _deepseek_openrouter_alias_flow("deepseek-reasoner"),
     "openrouter": _openrouter_flow,
 }
 
