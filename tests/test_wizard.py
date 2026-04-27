@@ -1166,3 +1166,25 @@ def test_init_summary_and_next_steps_printed(mocker):
     assert "prefer=balanced" in result.output
     assert "effort=medium" in result.output
     assert "Touchstone" in result.output  # callers override example
+
+
+def test_init_prints_setup_complete_verify_nudge_after_success(mocker):
+    mocker.patch("conductor.wizard._is_tty", return_value=True)
+    mocker.patch("conductor.wizard._op_cli_available", return_value=False)
+
+    from conductor.providers import KimiProvider, OpenRouterProvider
+
+    mocker.patch.object(KimiProvider, "configured", lambda self: (False, "missing"))
+    mocker.patch.object(OpenRouterProvider, "smoke", return_value=(True, None))
+    mocker.patch("conductor.wizard.credentials.get", return_value=None)
+
+    result = CliRunner().invoke(
+        main,
+        ["init", "--only", "kimi"],
+        input="or-test-key\nprint\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Setup complete. Verify with:" in result.output
+    assert "conductor smoke <name>          (per provider)" in result.output
+    assert "conductor smoke --all           (everything)" in result.output

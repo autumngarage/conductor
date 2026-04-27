@@ -268,6 +268,21 @@ def test_doctor_text_output_covers_every_provider(mocker, monkeypatch):
     assert "brew install codex && codex login" in result.output
 
 
+def test_doctor_text_output_shows_smoke_nudge_for_each_configured_provider(mocker):
+    from conductor.providers import CodexProvider, OpenRouterProvider
+
+    _stub_all_unconfigured(mocker)
+    mocker.patch.object(CodexProvider, "configured", lambda self: (True, None))
+    mocker.patch.object(OpenRouterProvider, "configured", lambda self: (True, None))
+
+    result = CliRunner().invoke(main, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "✓ codex" in result.output
+    assert "Verify end-to-end: conductor smoke codex" in result.output
+    assert "✓ openrouter" in result.output
+    assert "Verify end-to-end: conductor smoke openrouter" in result.output
+
+
 def test_doctor_json_shape(mocker, monkeypatch):
     from conductor.providers import known_providers
 

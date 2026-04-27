@@ -1862,6 +1862,10 @@ def doctor(as_json: bool) -> None:
             f"tier={p['quality_tier']:<8}  "
             f"default={p['default_model']}{effort_note}"
         )
+        if p["configured"]:
+            click.echo(
+                f"        Verify end-to-end: conductor smoke {p['provider']}"
+            )
         if not p["configured"]:
             click.echo(f"        └─ {p['reason']}")
             if p.get("fix_command"):
