@@ -15,13 +15,16 @@ autumn-garage `plans/sentinel-conductor-migration.md`, future).
 from __future__ import annotations
 
 import json
+import os
 import queue
 import shutil
 import subprocess
 import sys
 import threading
 import time
+from pathlib import Path  # noqa: TC003 — runtime import so tests can patch Path.write_text
 
+from conductor.offline_mode import _cache_dir
 from conductor.providers.interface import (
     CallResponse,
     ProviderConfigError,
@@ -414,6 +417,7 @@ class CodexProvider:
         stdout_done = False
         last_output = start
         last_liveness = start
+        session_id_emitted = False
         while True:
             now = time.monotonic()
             if timeout is not None and now - start > timeout:
@@ -469,6 +473,13 @@ class CodexProvider:
             stdout_parts.append(item)
             last_output = time.monotonic()
             last_liveness = last_output
+
+            if not session_id_emitted:
+                sid = self._extract_session_id_fast(item)
+                if sid is not None:
+                    sys.stderr.write(f"[conductor] codex session_id={sid}\n")
+                    sys.stderr.flush()
+                    session_id_emitted = True
 
         returncode = process.wait()
         self._join_reader_threads(stdout_thread, stderr_thread)
@@ -540,10 +551,57 @@ class CodexProvider:
 
     def _message_with_partial_session_id(self, prefix: str, stdout: str) -> str:
         _, _, _, partial_session_id = self._parse_ndjson(stdout)
-        if not partial_session_id:
-            return prefix
-        return (
-            f"{prefix} (partial session_id={partial_session_id} — "
-            f"resume with `conductor exec --with codex "
-            f"--resume {partial_session_id} ...`)"
-        )
+        log_path = self._save_forensic_log(stdout)
+        parts = [prefix]
+        if partial_session_id:
+            parts.append(
+                f" (partial session_id={partial_session_id} — "
+                f"resume with `conductor exec --with codex "
+                f"--resume {partial_session_id} ...`"
+            )
+            if log_path is not None:
+                parts.append(f"; raw NDJSON saved to {log_path})")
+            else:
+                parts.append(")")
+        elif log_path is not None:
+            parts.append(f" (raw NDJSON saved to {log_path})")
+        return "".join(parts)
+
+    def _save_forensic_log(self, stdout: str) -> Path | None:
+        """Persist captured NDJSON to the cache dir on failure.
+
+        Returns the path on success, or None if there was nothing to save
+        or the write failed. A failure here MUST NOT propagate — the call
+        is already failing for a different reason; losing the forensic
+        log is acceptable, but masking the original error with a disk
+        error is not.
+        """
+        if not stdout.strip():
+            return None
+        try:
+            cache_dir = _cache_dir()
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            ts = int(time.time())
+            path = cache_dir / f"codex-{os.getpid()}-{ts}.ndjson"
+            path.write_text(stdout, encoding="utf-8")
+            return path
+        except OSError:
+            return None
+
+    @staticmethod
+    def _extract_session_id_fast(line: str) -> str | None:
+        """Cheap substring filter + JSON parse for the session.created event.
+
+        Called on every line in the streaming read loop, so the substring
+        check matters: full json.loads on every NDJSON event would parse
+        events we never care about (item.started, turn.completed, etc.).
+        """
+        if "session.created" not in line:
+            return None
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+        if event.get("type") != "session.created":
+            return None
+        return event.get("session_id") or event.get("id")
