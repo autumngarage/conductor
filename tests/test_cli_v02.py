@@ -506,7 +506,7 @@ def test_exec_cli_max_stall_seconds_flag_propagates(mocker):
     assert exec_mock.call_args.kwargs["max_stall_sec"] == 60
 
 
-def test_exec_cli_no_max_stall_seconds_defaults_none(mocker):
+def test_exec_cli_no_max_stall_seconds_defaults_to_360(mocker):
     _stub_all_configured(mocker, {"codex"})
     exec_mock = mocker.patch.object(
         CodexProvider, "exec", return_value=_fake_response("codex")
@@ -515,6 +515,21 @@ def test_exec_cli_no_max_stall_seconds_defaults_none(mocker):
     result = CliRunner().invoke(
         main,
         ["exec", "--with", "codex", "--task", "do it"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert exec_mock.call_args.kwargs["max_stall_sec"] == 360
+
+
+def test_exec_cli_max_stall_seconds_zero_disables_watchdog(mocker):
+    _stub_all_configured(mocker, {"codex"})
+    exec_mock = mocker.patch.object(
+        CodexProvider, "exec", return_value=_fake_response("codex")
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--with", "codex", "--max-stall-seconds", "0", "--task", "do it"],
     )
 
     assert result.exit_code == 0, result.output

@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -418,6 +419,19 @@ def _patch_codex_popen(mocker, fake: _FakePopen):
     return mocker.patch("conductor.providers.codex.subprocess.Popen", side_effect=factory)
 
 
+def _patch_codex_popen_with_output_backstop(
+    mocker, fake: _FakePopen, *, backstop_text: str
+):
+    def factory(args, **kwargs):
+        fake.args = args
+        output_path = Path(args[args.index("-o") + 1])
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(backstop_text, encoding="utf-8")
+        return fake
+
+    return mocker.patch("conductor.providers.codex.subprocess.Popen", side_effect=factory)
+
+
 def test_codex_configured_when_cli_present_and_authed(mocker):
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
     mocker.patch(
@@ -477,6 +491,38 @@ def test_codex_call_parses_ndjson_and_usage(mocker):
     assert response.usage["input_tokens"] == 5
     assert response.usage["output_tokens"] == 2
     assert response.session_id == "sess-codex-1"
+
+
+def test_codex_call_reads_output_backstop_when_ndjson_loses_agent_message(
+    mocker, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+
+    def fake_run(args, **kwargs):
+        output_path = Path(args[args.index("-o") + 1])
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text("hello from output backstop\n", encoding="utf-8")
+        return _fake_completed(
+            stdout=(
+                '{"type":"session.created","session_id":"sess-codex-backstop"}\n'
+                '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":2}}\n'
+            )
+        )
+
+    captured = mocker.patch(
+        "conductor.providers.codex.subprocess.run",
+        side_effect=fake_run,
+    )
+
+    response = CodexProvider().call("hi")
+
+    args = captured.call_args.args[0]
+    output_path = Path(args[args.index("-o") + 1])
+    assert response.text == "hello from output backstop"
+    assert output_path.exists()
+    assert output_path.name.startswith("codex-exec-")
+    assert response.raw["output_path"] == str(output_path)
 
 
 def test_codex_call_translates_effort_to_reasoning_effort_config(mocker):
@@ -908,6 +954,32 @@ def test_codex_exec_surfaces_auth_prompt_and_records_notice(mocker, capsys):
     err = capsys.readouterr().err
     assert "[conductor] auth required for codex" in err
     assert "https://chatgpt.com/oauth/device" in err
+
+
+def test_codex_exec_reads_output_backstop_when_stream_loses_agent_message(
+    mocker, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    lines = [
+        '{"type":"session.created","session_id":"sess-stream-backstop"}\n',
+        '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n',
+    ]
+    fake = _FakePopen(stdout_schedule=[(0, line) for line in lines])
+    _patch_codex_popen_with_output_backstop(
+        mocker,
+        fake,
+        backstop_text="hello from streaming backstop\n",
+    )
+
+    response = CodexProvider().exec("hi", liveness_interval_sec=0)
+
+    assert fake.args is not None
+    output_path = Path(fake.args[fake.args.index("-o") + 1])
+    assert response.text == "hello from streaming backstop"
+    assert output_path.exists()
+    assert output_path.name.startswith("codex-exec-")
+    assert response.raw["output_path"] == str(output_path)
 
 
 def test_codex_exec_writes_forensic_envelope_on_stall(mocker, tmp_path, monkeypatch):

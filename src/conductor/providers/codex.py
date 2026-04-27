@@ -22,6 +22,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path  # noqa: TC003 — runtime import so tests can patch Path.write_text
 from typing import TYPE_CHECKING
 
@@ -60,6 +61,11 @@ _EFFORT_TO_CODEX_FLAG = {
     "high": "high",
     "max": "high",  # codex's ceiling
 }
+
+
+def _codex_output_path(resume_session_id: str | None) -> Path:
+    sessionish = resume_session_id or uuid.uuid4().hex
+    return _cache_dir() / f"codex-exec-{sessionish}.json"
 
 
 def _format_compact_count(value: int) -> str:
@@ -345,6 +351,16 @@ class CodexProvider:
             end_offset,
         )
 
+    @staticmethod
+    def _read_output_backstop(path: Path) -> str | None:
+        try:
+            content = path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return None
+        return content or None
+
     def call(
         self,
         task: str,
@@ -422,6 +438,7 @@ class CodexProvider:
         codex_effort_flag = (
             _EFFORT_TO_CODEX_FLAG.get(effort) if isinstance(effort, str) else None
         )
+        output_path = _codex_output_path(resume_session_id)
 
         # Codex resume uses a subcommand: `codex exec resume <id> -`.
         # Build argv accordingly when we have a session to resume. The task
@@ -440,6 +457,8 @@ class CodexProvider:
                 resume_session_id,
                 "-",
                 "--json",
+                "-o",
+                str(output_path),
                 "--sandbox",
                 sandbox,
             ]
@@ -449,6 +468,8 @@ class CodexProvider:
                 "exec",
                 "-",
                 "--json",
+                "-o",
+                str(output_path),
                 "--ephemeral",
                 "--sandbox",
                 sandbox,
@@ -473,6 +494,7 @@ class CodexProvider:
                 timeout=timeout,
                 max_stall_sec=max_stall_sec,
                 liveness_interval_sec=liveness_interval_sec,
+                output_path=output_path,
                 session_log=session_log,
             )
 
@@ -517,9 +539,9 @@ class CodexProvider:
                 f"{(result.stderr or result.stdout).strip()[:500]}"
             )
 
-        content, input_tokens, output_tokens, session_id = self._parse_ndjson(
-            result.stdout
-        )
+        content, input_tokens, output_tokens, session_id = self._parse_ndjson(result.stdout)
+        if not content:
+            content = self._read_output_backstop(output_path) or ""
         if not content:
             raise ProviderHTTPError(
                 f"codex NDJSON stream had no agent_message: {result.stdout[:500]!r}"
@@ -538,7 +560,7 @@ class CodexProvider:
                 "thinking_budget": thinking_budget,
             },
             session_id=session_id,
-            raw={"stdout": result.stdout},
+            raw={"stdout": result.stdout, "output_path": str(output_path)},
         )
 
     def _run_streaming(
@@ -553,6 +575,7 @@ class CodexProvider:
         timeout: float | None,
         max_stall_sec: int | None,
         liveness_interval_sec: float,
+        output_path: Path,
         session_log: SessionLog | None,
     ) -> CallResponse:
         start = time.monotonic()
@@ -745,6 +768,8 @@ class CodexProvider:
         if session_log is not None:
             session_log.set_session_id(session_id)
         if not content:
+            content = self._read_output_backstop(output_path) or ""
+        if not content:
             raise ProviderHTTPError(
                 f"codex NDJSON stream had no agent_message: {stdout[:500]!r}"
             )
@@ -762,7 +787,7 @@ class CodexProvider:
                 "thinking_budget": thinking_budget,
             },
             session_id=session_id,
-            raw={"stdout": stdout},
+            raw={"stdout": stdout, "output_path": str(output_path)},
             auth_prompts=auth_tracker.prompts or None,
         )
 

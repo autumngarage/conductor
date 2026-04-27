@@ -34,8 +34,8 @@ def _fake_decision(provider: str = "codex") -> RouteDecision:
     return RouteDecision(
         provider=provider,
         prefer="best",
-        effort="high",
-        thinking_budget=4000,
+        effort="medium",
+        thinking_budget=8000,
         tier="frontier",
         task_tags=("coding",),
         matched_tags=("coding",),
@@ -65,7 +65,7 @@ def test_call_profile_applies_builtin_defaults(mocker):
     assert result.exit_code == 0, result.output
     assert pick_mock.call_args.args[0] == ["coding", "tool-use"]
     assert pick_mock.call_args.kwargs["prefer"] == "best"
-    assert pick_mock.call_args.kwargs["effort"] == "high"
+    assert pick_mock.call_args.kwargs["effort"] == "medium"
 
 
 def test_exec_profile_applies_builtin_sandbox(mocker):
