@@ -272,8 +272,8 @@ class _FakePopen:
         hang_after_stdout: bool = False,
         returncode: int = 0,
     ) -> None:
-        self.args = None
-        self.returncode = None
+        self.args: list[str] | None = None
+        self.returncode: int | None = None
         self.terminated = False
         self.killed = False
         self._configured_returncode = returncode

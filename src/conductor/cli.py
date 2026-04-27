@@ -760,6 +760,9 @@ def call(
     else:
         if prefer is not None:
             raise click.UsageError("--prefer is only meaningful with --auto.")
+        # Earlier guard `if not auto and not provider_id: raise` makes this
+        # narrowing safe; the assert documents it for mypy and future readers.
+        assert provider_id is not None
         try:
             provider = get_provider(provider_id)
         except KeyError as e:
@@ -962,6 +965,9 @@ def exec_cmd(
             click.echo(f"conductor: {e}", err=True)
             sys.exit(1)
     else:
+        # Same narrowing as in `call()` — the early guard rejects the case
+        # where neither --auto nor --with was passed.
+        assert provider_id is not None
         try:
             provider = get_provider(provider_id)
         except KeyError as e:
@@ -1103,13 +1109,14 @@ def config(subcommand: str, as_json: bool) -> None:
         "exclude": _parse_csv(env_overrides["CONDUCTOR_EXCLUDE"]),
     }
 
+    sources: dict[str, str] = {
+        key: ("env" if val is not None else "default")
+        for key, val in env_overrides.items()
+    }
     payload = {
         "version": __version__,
         "effective": effective,
-        "sources": {
-            key: ("env" if val is not None else "default")
-            for key, val in env_overrides.items()
-        },
+        "sources": sources,
         "known_providers": known_providers(),
     }
 
@@ -1120,7 +1127,7 @@ def config(subcommand: str, as_json: bool) -> None:
     click.echo(f"conductor v{payload['version']} — effective config")
     click.echo("")
     for key, val in effective.items():
-        src = payload["sources"][f"CONDUCTOR_{key.upper()}"]
+        src = sources[f"CONDUCTOR_{key.upper()}"]
         if isinstance(val, list):
             val_str = ",".join(val) or "(none)"
         elif val is None:

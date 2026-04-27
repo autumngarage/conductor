@@ -48,7 +48,7 @@ __all__ = [
     "resolve_effort_tokens",
 ]
 
-_BUILTIN_REGISTRY: dict[str, type[Provider]] = {
+_BUILTIN_REGISTRY: dict[str, type] = {
     "kimi": KimiProvider,
     "claude": ClaudeProvider,
     "codex": CodexProvider,
@@ -80,7 +80,13 @@ def get_provider(name: str) -> Provider:
 
     for spec in _custom_specs():
         if spec.name == name:
-            return ShellProvider(spec)
+            # ShellProvider exposes spec-derived fields via @property (because
+            # they vary per instance, not per class). mypy can't reconcile a
+            # read-only property with the Protocol's settable attribute, but
+            # runtime isinstance(_, Provider) passes — the conformance is
+            # structurally valid, just outside what mypy's variance check
+            # encodes.
+            return ShellProvider(spec)  # type: ignore[return-value]
 
     raise KeyError(
         f"unknown provider {name!r}; known: {known_providers()}"

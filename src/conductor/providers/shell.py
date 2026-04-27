@@ -228,7 +228,8 @@ class ShellProvider:
         else:  # argv
             argv = [*argv, task]
 
-        timeout = (
+        # Sentinel branch: caller passed an explicit float | None when not _USE_DEFAULT.
+        timeout: float | None = (
             self._timeout_sec
             if timeout_override is _USE_DEFAULT
             else timeout_override  # type: ignore[assignment]

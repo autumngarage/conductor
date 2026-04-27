@@ -186,7 +186,7 @@ def _spec_from_dict(raw: dict, *, source_path: Path) -> ShellProviderSpec:
     return ShellProviderSpec(
         name=name,
         shell=shell.strip(),
-        accepts=accepts,  # type: ignore[arg-type]  (Literal check above)
+        accepts=accepts,  # type: ignore[arg-type]
         tags=tuple(tags_raw),
         quality_tier=tier,
         cost_per_1k_in=float(raw.get("cost_per_1k_in", 0.0)),
