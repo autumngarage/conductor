@@ -7,17 +7,10 @@ import respx
 from click.testing import CliRunner
 
 from conductor.cli import main
-from conductor.providers.kimi import (
-    CLOUDFLARE_ACCOUNT_ID_ENV,
-    CLOUDFLARE_API_TOKEN_ENV,
-    KIMI_DEFAULT_MODEL,
-)
+from conductor.providers.kimi import KIMI_DEFAULT_MODEL
+from conductor.providers.openrouter import OPENROUTER_API_KEY_ENV
 
-_TEST_ACCOUNT_ID = "acct-test-1234"
-_CF_CHAT_URL = (
-    f"https://api.cloudflare.com/client/v4/accounts/{_TEST_ACCOUNT_ID}"
-    "/ai/v1/chat/completions"
-)
+_OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
 def _stub_only_kimi_configured(mocker):
@@ -25,6 +18,7 @@ def _stub_only_kimi_configured(mocker):
         ClaudeProvider,
         CodexProvider,
         GeminiProvider,
+        KimiProvider,
         OllamaProvider,
         OpenRouterProvider,
     )
@@ -37,6 +31,7 @@ def _stub_only_kimi_configured(mocker):
         OpenRouterProvider,
     ):
         mocker.patch.object(cls, "configured", lambda self: (False, "stubbed off"))
+    mocker.patch.object(KimiProvider, "configured", lambda self: (True, None))
 
 
 def test_call_auto_and_with_are_mutually_exclusive(mocker):
@@ -56,11 +51,10 @@ def test_call_requires_with_or_auto(mocker):
 
 def test_call_auto_picks_configured_provider(monkeypatch, mocker):
     _stub_only_kimi_configured(mocker)
-    monkeypatch.setenv(CLOUDFLARE_API_TOKEN_ENV, "cf-test-token")
-    monkeypatch.setenv(CLOUDFLARE_ACCOUNT_ID_ENV, _TEST_ACCOUNT_ID)
+    monkeypatch.setenv(OPENROUTER_API_KEY_ENV, "or-test-key")
 
     with respx.mock() as router:
-        router.post(_CF_CHAT_URL).mock(
+        router.post(_OPENROUTER_CHAT_URL).mock(
             return_value=httpx.Response(
                 200,
                 json={
@@ -80,11 +74,10 @@ def test_call_auto_picks_configured_provider(monkeypatch, mocker):
 
 def test_call_auto_json_includes_route_decision(monkeypatch, mocker):
     _stub_only_kimi_configured(mocker)
-    monkeypatch.setenv(CLOUDFLARE_API_TOKEN_ENV, "cf-test-token")
-    monkeypatch.setenv(CLOUDFLARE_ACCOUNT_ID_ENV, _TEST_ACCOUNT_ID)
+    monkeypatch.setenv(OPENROUTER_API_KEY_ENV, "or-test-key")
 
     with respx.mock() as router:
-        router.post(_CF_CHAT_URL).mock(
+        router.post(_OPENROUTER_CHAT_URL).mock(
             return_value=httpx.Response(
                 200,
                 json={
@@ -150,6 +143,7 @@ def test_call_auto_emits_shadow_hint_when_unconfigured_outranks(monkeypatch, moc
         ClaudeProvider,
         CodexProvider,
         GeminiProvider,
+        KimiProvider,
         OllamaProvider,
         OpenRouterProvider,
     )
@@ -161,13 +155,13 @@ def test_call_auto_emits_shadow_hint_when_unconfigured_outranks(monkeypatch, moc
         lambda self: (False, "`codex` CLI not found on PATH"),
     )
     mocker.patch.object(GeminiProvider, "configured", lambda self: (False, "nope"))
+    mocker.patch.object(KimiProvider, "configured", lambda self: (True, None))
     mocker.patch.object(OllamaProvider, "configured", lambda self: (False, "nope"))
     mocker.patch.object(OpenRouterProvider, "configured", lambda self: (False, "nope"))
-    monkeypatch.setenv(CLOUDFLARE_API_TOKEN_ENV, "cf-test-token")
-    monkeypatch.setenv(CLOUDFLARE_ACCOUNT_ID_ENV, _TEST_ACCOUNT_ID)
+    monkeypatch.setenv(OPENROUTER_API_KEY_ENV, "or-test-key")
 
     with respx.mock() as router:
-        router.post(_CF_CHAT_URL).mock(
+        router.post(_OPENROUTER_CHAT_URL).mock(
             return_value=httpx.Response(
                 200,
                 json={
@@ -256,6 +250,7 @@ def test_call_auto_silent_route_suppresses_shadow_hint(monkeypatch, mocker):
         ClaudeProvider,
         CodexProvider,
         GeminiProvider,
+        KimiProvider,
         OllamaProvider,
         OpenRouterProvider,
     )
@@ -267,13 +262,13 @@ def test_call_auto_silent_route_suppresses_shadow_hint(monkeypatch, mocker):
         lambda self: (False, "`codex` CLI not found on PATH"),
     )
     mocker.patch.object(GeminiProvider, "configured", lambda self: (False, "nope"))
+    mocker.patch.object(KimiProvider, "configured", lambda self: (True, None))
     mocker.patch.object(OllamaProvider, "configured", lambda self: (False, "nope"))
     mocker.patch.object(OpenRouterProvider, "configured", lambda self: (False, "nope"))
-    monkeypatch.setenv(CLOUDFLARE_API_TOKEN_ENV, "cf-test-token")
-    monkeypatch.setenv(CLOUDFLARE_ACCOUNT_ID_ENV, _TEST_ACCOUNT_ID)
+    monkeypatch.setenv(OPENROUTER_API_KEY_ENV, "or-test-key")
 
     with respx.mock() as router:
-        router.post(_CF_CHAT_URL).mock(
+        router.post(_OPENROUTER_CHAT_URL).mock(
             return_value=httpx.Response(
                 200,
                 json={

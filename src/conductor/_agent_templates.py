@@ -66,7 +66,7 @@ Get JSON for scripting / piping into other tools:
 
 | Provider | Best for                     | Cost   | Notes                        |
 |----------|------------------------------|--------|------------------------------|
-| kimi     | long-context, cheap reviews  | $      | Cloudflare Workers AI        |
+| kimi     | long-context, cheap reviews  | $      | OpenRouter-backed            |
 | gemini   | web search, multimodal       | $$     | Google AI Studio or gcloud   |
 | claude   | strongest reasoning          | $$$    | your Claude subscription     |
 | codex    | coding agent                 | $$$    | your ChatGPT subscription    |

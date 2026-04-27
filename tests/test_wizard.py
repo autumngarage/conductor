@@ -6,10 +6,6 @@ import pytest
 from click.testing import CliRunner
 
 from conductor.cli import main
-from conductor.providers.kimi import (
-    CLOUDFLARE_ACCOUNT_ID_ENV,
-    CLOUDFLARE_API_TOKEN_ENV,
-)
 from conductor.providers.openrouter import OPENROUTER_API_KEY_ENV
 
 
@@ -21,9 +17,14 @@ def _isolated_agent_homes(tmp_path, monkeypatch):
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
     monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path / ".conductor"))
+    monkeypatch.setenv(
+        "CONDUCTOR_CREDENTIALS_FILE", str(tmp_path / ".config" / "credentials.toml")
+    )
     monkeypatch.setenv("CLAUDE_HOME", str(tmp_path / ".claude"))
     monkeypatch.chdir(repo_dir)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("CLOUDFLARE_API_TOKEN", raising=False)
+    monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
     # Default: Claude CLI not on PATH. Tests that need it patch explicitly.
     monkeypatch.setattr("shutil.which", lambda _cmd: None)
 
@@ -48,8 +49,6 @@ def test_init_non_interactive_mode_reports_state(mocker, monkeypatch):
         OpenRouterProvider,
     ):
         mocker.patch.object(cls, "configured", lambda self: (False, "stubbed"))
-    monkeypatch.delenv(CLOUDFLARE_API_TOKEN_ENV, raising=False)
-    monkeypatch.delenv(CLOUDFLARE_ACCOUNT_ID_ENV, raising=False)
     mocker.patch("conductor.wizard.credentials.get", return_value=None)
 
     result = CliRunner().invoke(main, ["init", "--yes"])
@@ -85,12 +84,9 @@ def test_init_skips_already_configured_providers(mocker):
 
 
 def test_init_kimi_interactive_stores_in_keychain(mocker, monkeypatch):
-    # Use --only kimi to target the kimi flow directly; the concierge
-    # CLI-flow for claude/codex/gemini/ollama would otherwise consume
-    # stdin first.
     mocker.patch("conductor.wizard._is_tty", return_value=True)
 
-    from conductor.providers import KimiProvider
+    from conductor.providers import KimiProvider, OpenRouterProvider
 
     state = {"configured": False}
 
@@ -98,51 +94,42 @@ def test_init_kimi_interactive_stores_in_keychain(mocker, monkeypatch):
         return (state["configured"], None if state["configured"] else "missing")
 
     mocker.patch.object(KimiProvider, "configured", _kimi_configured)
-    mocker.patch.object(KimiProvider, "smoke", return_value=(True, None))
+    mocker.patch.object(OpenRouterProvider, "smoke", return_value=(True, None))
 
     mocker.patch("conductor.wizard.credentials.get", return_value=None)
     set_mock = mocker.patch("conductor.wizard.credentials.set_in_keychain")
-
-    monkeypatch.delenv(CLOUDFLARE_API_TOKEN_ENV, raising=False)
-    monkeypatch.delenv(CLOUDFLARE_ACCOUNT_ID_ENV, raising=False)
-
-    # stdin order: api token, account id, storage choice (full word accepted)
     result = CliRunner().invoke(
         main,
         ["init", "--only", "kimi"],
-        input="my-cf-token\nmy-account-id\nkeychain\n",
+        input="or-test-key\nkeychain\n",
     )
 
     assert result.exit_code == 0, result.output
-    assert set_mock.call_count == 2
+    assert set_mock.call_count == 1
     keys = [call.args[0] for call in set_mock.call_args_list]
-    assert CLOUDFLARE_API_TOKEN_ENV in keys
-    assert CLOUDFLARE_ACCOUNT_ID_ENV in keys
+    assert OPENROUTER_API_KEY_ENV in keys
     assert "smoke test passed" in result.output.lower()
 
 
 def test_init_kimi_interactive_print_only(mocker, monkeypatch):
     mocker.patch("conductor.wizard._is_tty", return_value=True)
 
-    from conductor.providers import KimiProvider
+    from conductor.providers import KimiProvider, OpenRouterProvider
 
     mocker.patch.object(KimiProvider, "configured", lambda self: (False, "missing"))
-    mocker.patch.object(KimiProvider, "smoke", return_value=(True, None))
+    mocker.patch.object(OpenRouterProvider, "smoke", return_value=(True, None))
     mocker.patch("conductor.wizard.credentials.get", return_value=None)
     set_mock = mocker.patch("conductor.wizard.credentials.set_in_keychain")
-
-    monkeypatch.delenv(CLOUDFLARE_API_TOKEN_ENV, raising=False)
-    monkeypatch.delenv(CLOUDFLARE_ACCOUNT_ID_ENV, raising=False)
 
     result = CliRunner().invoke(
         main,
         ["init", "--only", "kimi"],
-        input="tok\nacct\nprint\n",
+        input="or-test-key\nprint\n",
     )
 
     assert result.exit_code == 0
     set_mock.assert_not_called()
-    assert f"export {CLOUDFLARE_API_TOKEN_ENV}" in result.output
+    assert f"export {OPENROUTER_API_KEY_ENV}" in result.output
 
 
 def test_init_kimi_1password_indirection_writes_key_command(
@@ -156,12 +143,10 @@ def test_init_kimi_1password_indirection_writes_key_command(
         lambda cmd: "/opt/homebrew/bin/op" if cmd == "op" else None,
     )
 
-    from conductor.providers import KimiProvider
+    from conductor.providers import KimiProvider, OpenRouterProvider
 
     mocker.patch.object(KimiProvider, "configured", lambda self: (False, "missing"))
-    mocker.patch.object(KimiProvider, "smoke", return_value=(True, None))
-    monkeypatch.delenv(CLOUDFLARE_API_TOKEN_ENV, raising=False)
-    monkeypatch.delenv(CLOUDFLARE_ACCOUNT_ID_ENV, raising=False)
+    mocker.patch.object(OpenRouterProvider, "smoke", return_value=(True, None))
 
     # Force credentials.toml to a tmp path so the test doesn't touch real config.
     cred_file = tmp_path / "credentials.toml"
@@ -189,25 +174,18 @@ def test_init_kimi_1password_indirection_writes_key_command(
         lambda cmd: "/opt/homebrew/bin/op" if cmd == "op" else None,
     )
 
-    # Inputs: source-choice "1password", then op:// reference per credential.
     result = CliRunner().invoke(
         main,
         ["init", "--only", "kimi"],
-        input=(
-            "1password\n"
-            "op://Personal/Cloudflare/token\n"
-            "op://Personal/Cloudflare/account_id\n"
-        ),
+        input="1password\nop://Personal/OpenRouter/credential\n",
     )
 
     assert result.exit_code == 0, result.output
     assert "smoke test passed" in result.output.lower()
-    # File written, both keys present, raw secrets NOT in the file.
     assert cred_file.exists()
     text = cred_file.read_text()
-    assert "CLOUDFLARE_API_TOKEN" in text
-    assert "CLOUDFLARE_ACCOUNT_ID" in text
-    assert "op://Personal/Cloudflare/token" in text
+    assert "OPENROUTER_API_KEY" in text
+    assert "op://Personal/OpenRouter/credential" in text
     assert "resolved-" not in text  # the secret value never persists
 
 
@@ -219,18 +197,16 @@ def test_init_1password_choice_only_appears_when_op_detected(
     mocker.patch("conductor.wizard._is_tty", return_value=True)
     # Default fixture already stubs shutil.which → None; just confirm.
 
-    from conductor.providers import KimiProvider
+    from conductor.providers import KimiProvider, OpenRouterProvider
 
     mocker.patch.object(KimiProvider, "configured", lambda self: (False, "missing"))
-    mocker.patch.object(KimiProvider, "smoke", return_value=(True, None))
+    mocker.patch.object(OpenRouterProvider, "smoke", return_value=(True, None))
     mocker.patch("conductor.wizard.credentials.set_in_keychain")
-    monkeypatch.delenv(CLOUDFLARE_API_TOKEN_ENV, raising=False)
-    monkeypatch.delenv(CLOUDFLARE_ACCOUNT_ID_ENV, raising=False)
 
     result = CliRunner().invoke(
         main,
         ["init", "--only", "kimi"],
-        input="tok\nacct\nkeychain\n",
+        input="or-test-key\nkeychain\n",
     )
 
     assert result.exit_code == 0, result.output
@@ -250,8 +226,6 @@ def test_init_1password_invalid_reference_aborts(mocker, monkeypatch, tmp_path):
     from conductor.providers import KimiProvider
 
     mocker.patch.object(KimiProvider, "configured", lambda self: (False, "missing"))
-    monkeypatch.delenv(CLOUDFLARE_API_TOKEN_ENV, raising=False)
-    monkeypatch.delenv(CLOUDFLARE_ACCOUNT_ID_ENV, raising=False)
 
     cred_file = tmp_path / "credentials.toml"
     monkeypatch.setenv("CONDUCTOR_CREDENTIALS_FILE", str(cred_file))
@@ -371,77 +345,6 @@ def test_init_1password_env_var_does_not_mask_broken_reference(
 
         creds_mod.clear_key_command_cache()
         assert OPENROUTER_API_KEY_ENV not in creds_mod.load_key_commands()
-
-
-def test_init_1password_partial_failure_does_not_persist_first_credential(
-    mocker, monkeypatch, tmp_path
-):
-    """Kimi has two credentials. If the first resolves but the second
-    fails, the wizard MUST NOT leave the first one persisted (and MUST
-    NOT have already deleted its keychain backup)."""
-    mocker.patch("conductor.wizard._is_tty", return_value=True)
-    monkeypatch.setattr(
-        "shutil.which",
-        lambda cmd: "/opt/homebrew/bin/op" if cmd == "op" else None,
-    )
-    mocker.patch(
-        "conductor.credentials.shutil.which",
-        lambda cmd: "/opt/homebrew/bin/op" if cmd == "op" else None,
-    )
-
-    from conductor.providers import KimiProvider
-
-    mocker.patch.object(KimiProvider, "configured", lambda self: (False, "missing"))
-    monkeypatch.delenv(CLOUDFLARE_API_TOKEN_ENV, raising=False)
-    monkeypatch.delenv(CLOUDFLARE_ACCOUNT_ID_ENV, raising=False)
-
-    cred_file = tmp_path / "credentials.toml"
-    monkeypatch.setenv("CONDUCTOR_CREDENTIALS_FILE", str(cred_file))
-
-    # Track keychain deletes — must be zero on this failure path.
-    delete_keychain_mock = mocker.patch(
-        "conductor.credentials.delete_from_keychain"
-    )
-
-    import subprocess
-
-    # First op call succeeds; second fails. (CompletedProcess is consumed
-    # in order via side_effect.)
-    mocker.patch(
-        "conductor.credentials.subprocess.run",
-        side_effect=[
-            subprocess.CompletedProcess(
-                args=["op"], returncode=0, stdout="resolved-token\n", stderr=""
-            ),
-            subprocess.CompletedProcess(
-                args=["op"], returncode=1, stdout="", stderr="not found"
-            ),
-        ],
-    )
-
-    result = CliRunner().invoke(
-        main,
-        ["init", "--only", "kimi"],
-        input=(
-            "1password\n"
-            "op://Personal/Cloudflare/token\n"
-            "op://Personal/Cloudflare/account_id\n"
-        ),
-    )
-
-    assert result.exit_code == 0
-    assert "did not return a value" in result.output
-    # Neither key persisted — atomic save means both or neither.
-    if cred_file.exists():
-        from conductor import credentials as creds_mod
-
-        creds_mod.clear_key_command_cache()
-        loaded = creds_mod.load_key_commands()
-        assert CLOUDFLARE_API_TOKEN_ENV not in loaded
-        assert CLOUDFLARE_ACCOUNT_ID_ENV not in loaded
-    # No keychain deletes either — that step happens after persist.
-    delete_keychain_mock.assert_not_called()
-
 
 def test_init_1password_preserves_unrelated_entries_on_write_failure(
     mocker, monkeypatch, tmp_path
@@ -592,9 +495,6 @@ def test_init_kimi_aborts_when_credential_left_empty(mocker, monkeypatch):
     mocker.patch("conductor.wizard.credentials.get", return_value=None)
     set_mock = mocker.patch("conductor.wizard.credentials.set_in_keychain")
 
-    monkeypatch.delenv(CLOUDFLARE_API_TOKEN_ENV, raising=False)
-    monkeypatch.delenv(CLOUDFLARE_ACCOUNT_ID_ENV, raising=False)
-
     # User hits enter at the first credential prompt — empty → skip.
     result = CliRunner().invoke(main, ["init", "--only", "kimi"], input="\n")
     assert result.exit_code == 0
@@ -632,7 +532,7 @@ def test_init_shows_description_and_tier_per_provider(mocker):
     # Copy-pasteable install command for at least one shell-out provider.
     assert "brew install claude" in result.output
     # Credential-source URL for an API-key provider.
-    assert "dash.cloudflare.com" in result.output
+    assert "openrouter.ai/keys" in result.output
 
 
 def test_init_only_flag_walks_single_provider(mocker):

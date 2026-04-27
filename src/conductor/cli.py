@@ -1601,16 +1601,14 @@ def smoke(provider_id: str | None, run_all: bool, as_json: bool) -> None:
 
 
 _DIAGNOSTIC_ENV_VARS = (
-    "CLOUDFLARE_API_TOKEN",
-    "CLOUDFLARE_ACCOUNT_ID",
     "OLLAMA_BASE_URL",
     "OPENROUTER_API_KEY",
 )
 
 _HTTP_PROVIDER_CREDENTIAL_ENV_VARS = {
-    "deepseek-chat": "DEEPSEEK_API_KEY",
-    "deepseek-reasoner": "DEEPSEEK_API_KEY",
-    "kimi": "CLOUDFLARE_API_TOKEN",
+    "deepseek-chat": "OPENROUTER_API_KEY",
+    "deepseek-reasoner": "OPENROUTER_API_KEY",
+    "kimi": "OPENROUTER_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
 }
 
@@ -1744,10 +1742,17 @@ def _diagnostic_payload() -> dict:
             }
         )
 
-    if (
-        "DEEPSEEK_API_KEY" in os.environ
-        and "OPENROUTER_API_KEY" not in os.environ
-    ):
+    openrouter_value, _ = credentials.resolve_with_source("OPENROUTER_API_KEY")
+    legacy_kimi_detected = any(
+        (
+            var in os.environ
+            or var in credentials.load_key_commands()
+            or credentials.keychain_has(var)
+        )
+        for var in ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID")
+    )
+
+    if "DEEPSEEK_API_KEY" in os.environ and openrouter_value is None:
         warnings.append(
             {
                 "provider": "deepseek-chat",
@@ -1755,6 +1760,18 @@ def _diagnostic_payload() -> dict:
                 "message": (
                     "DEEPSEEK_API_KEY is deprecated for deepseek-chat and "
                     "deepseek-reasoner. Set OPENROUTER_API_KEY and run "
+                    "`conductor init --only openrouter`."
+                ),
+            }
+        )
+    if legacy_kimi_detected and openrouter_value is None:
+        warnings.append(
+            {
+                "provider": "kimi",
+                "level": "warning",
+                "message": (
+                    "kimi now routes through OpenRouter; CLOUDFLARE_* credentials "
+                    "are no longer used. Set OPENROUTER_API_KEY and run "
                     "`conductor init --only openrouter`."
                 ),
             }

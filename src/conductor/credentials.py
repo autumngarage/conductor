@@ -1,6 +1,6 @@
 """Credential resolution for Conductor providers.
 
-Provider adapters call ``credentials.get("CLOUDFLARE_API_TOKEN")`` instead of
+Provider adapters call ``credentials.get("OPENROUTER_API_KEY")`` instead of
 ``os.environ.get`` directly. Resolution order:
 
   1. Environment variable — wins if set. Covers CI runners, ``direnv``,
