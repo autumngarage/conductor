@@ -639,14 +639,49 @@ def _emit_call(
     *,
     as_json: bool,
     decision: RouteDecision | None = None,
+    auth_prompts: list[dict] | None = None,
 ) -> None:
     if as_json:
         payload = asdict(response)
+        effective_auth_prompts = auth_prompts or response.auth_prompts
+        if effective_auth_prompts:
+            payload["auth_prompts"] = effective_auth_prompts
+        else:
+            payload.pop("auth_prompts", None)
         if decision is not None:
             payload["route"] = asdict(decision)
         click.echo(json.dumps(payload, default=str, indent=2))
     else:
         click.echo(response.text)
+
+
+def _collect_session_auth_prompts(session_log: SessionLog | None) -> list[dict] | None:
+    if session_log is None:
+        return None
+    try:
+        lines = session_log.log_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+
+    prompts: list[dict] = []
+    seen: set[tuple[str, str | None]] = set()
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("event") != "auth_prompt":
+            continue
+        data = event.get("data") or {}
+        provider = data.get("provider")
+        if not isinstance(provider, str) or not provider:
+            continue
+        key = (provider, data.get("url"))
+        if key in seen:
+            continue
+        seen.add(key)
+        prompts.append(data)
+    return prompts or None
 
 
 def _format_route_log_line(decision: RouteDecision) -> str:
@@ -1447,7 +1482,12 @@ def exec_cmd(
     _emit_session_usage(session_log, response)
     if session_log is not None:
         session_log.mark_finished()
-    _emit_call(response, as_json=as_json, decision=decision)
+    _emit_call(
+        response,
+        as_json=as_json,
+        decision=decision,
+        auth_prompts=_collect_session_auth_prompts(session_log),
+    )
 
 
 # --------------------------------------------------------------------------- #

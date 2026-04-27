@@ -223,6 +223,34 @@ def test_claude_timeout_maps_to_provider_error(mocker):
     assert "timed out" in str(exc.value)
 
 
+def test_claude_exec_surfaces_auth_prompt_and_records_notice(mocker, capsys):
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    fake = _FakePopen(
+        stdout_schedule=[(0, CLAUDE_JSON)],
+        stderr_schedule=[
+            (0, "Please visit https://claude.ai/oauth/authorize to authenticate\n")
+        ],
+    )
+    mocker.patch(
+        "conductor.providers.claude.subprocess.Popen",
+        side_effect=lambda args, **kwargs: fake,
+    )
+
+    response = ClaudeProvider().exec("hi")
+
+    assert response.auth_prompts == [
+        {
+            "provider": "claude",
+            "message": "provider is waiting for OAuth completion",
+            "source": "stderr",
+            "url": "https://claude.ai/oauth/authorize",
+        }
+    ]
+    err = capsys.readouterr().err
+    assert "[conductor] auth required for claude" in err
+    assert "https://claude.ai/oauth/authorize" in err
+
+
 # ---------------------------------------------------------------------------
 # Codex
 # ---------------------------------------------------------------------------
@@ -788,6 +816,34 @@ def test_codex_exec_emits_session_id_only_once(mocker, capsys):
     assert "sess-second" not in err
 
 
+def test_codex_exec_surfaces_auth_prompt_and_records_notice(mocker, capsys):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    fake = _FakePopen(
+        stdout_schedule=[(0, line) for line in CODEX_NDJSON.splitlines(keepends=True)],
+        stderr_schedule=[
+            (
+                0,
+                "Please visit https://chatgpt.com/oauth/device to authenticate\n",
+            )
+        ],
+    )
+    _patch_codex_popen(mocker, fake)
+
+    response = CodexProvider().exec("hi", liveness_interval_sec=0)
+
+    assert response.auth_prompts == [
+        {
+            "provider": "codex",
+            "message": "provider is waiting for OAuth completion",
+            "source": "stderr",
+            "url": "https://chatgpt.com/oauth/device",
+        }
+    ]
+    err = capsys.readouterr().err
+    assert "[conductor] auth required for codex" in err
+    assert "https://chatgpt.com/oauth/device" in err
+
+
 def test_codex_exec_writes_forensic_envelope_on_stall(mocker, tmp_path, monkeypatch):
     """Envelope captures everything needed to attribute a stall:
     command, cwd, conductor version, partial stdout, partial stderr.
@@ -1078,6 +1134,37 @@ def test_gemini_call_raises_on_empty_stdout(mocker):
     )
     with pytest.raises(ProviderHTTPError):
         GeminiProvider().call("hi")
+
+
+def test_gemini_exec_surfaces_auth_prompt_and_records_notice(mocker, capsys):
+    mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
+    fake = _FakePopen(
+        stdout_schedule=[(0, GEMINI_JSON)],
+        stderr_schedule=[
+            (
+                0,
+                "Please visit https://accounts.google.com/o/oauth2/auth to authenticate\n",
+            )
+        ],
+    )
+    mocker.patch(
+        "conductor.providers.gemini.subprocess.Popen",
+        side_effect=lambda args, **kwargs: fake,
+    )
+
+    response = GeminiProvider().exec("hi")
+
+    assert response.auth_prompts == [
+        {
+            "provider": "gemini",
+            "message": "provider is waiting for OAuth completion",
+            "source": "stderr",
+            "url": "https://accounts.google.com/o/oauth2/auth",
+        }
+    ]
+    err = capsys.readouterr().err
+    assert "[conductor] auth required for gemini" in err
+    assert "https://accounts.google.com/o/oauth2/auth" in err
 
 
 # ---------------------------------------------------------------------------

@@ -113,6 +113,7 @@ class CallResponse:
     cost_usd: float | None = None
     session_id: str | None = None
     raw: dict = field(default_factory=dict)
+    auth_prompts: list[dict] | None = None
 
 
 @runtime_checkable

@@ -30,13 +30,18 @@ def _iso8601_now() -> str:
 
 def sessions_dir() -> Path:
     primary = _cache_dir() / "sessions"
-    try:
-        primary.mkdir(parents=True, exist_ok=True)
-        return primary
-    except OSError:
-        fallback = Path(tempfile.gettempdir()) / "conductor" / "sessions"
-        fallback.mkdir(parents=True, exist_ok=True)
-        return fallback
+    fallback = Path(tempfile.gettempdir()) / "conductor" / "sessions"
+    for candidate in (primary, fallback):
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            probe = candidate / f".write-probe-{uuid.uuid4().hex}"
+            probe.write_text("", encoding="utf-8")
+            probe.unlink()
+            return candidate
+        except OSError:
+            continue
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
 
 
 def _meta_path(run_id: str) -> Path:
