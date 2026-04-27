@@ -279,6 +279,48 @@ def test_exec_unknown_sandbox_errors_with_hint():
     assert "read-only" in result.output
 
 
+def test_exec_task_file_dash_reads_stdin(mocker):
+    _stub_all_configured(mocker, {"codex"})
+    exec_mock = mocker.patch.object(
+        CodexProvider, "exec", return_value=_fake_response("codex")
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--with", "codex", "--task-file", "-"],
+        input="do the thing from stdin\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert exec_mock.call_args.args[0] == "do the thing from stdin"
+
+
+def test_exec_rejects_task_and_task_file_together(mocker):
+    _stub_all_configured(mocker, {"codex"})
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--with", "codex", "--task", "hi", "--task-file", "brief.md"],
+    )
+
+    assert result.exit_code == 2
+    assert "exactly one of --task, --task-file, or stdin" in result.output
+
+
+def test_exec_missing_task_file_errors(mocker, tmp_path):
+    _stub_all_configured(mocker, {"codex"})
+    missing = tmp_path / "missing-brief.md"
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--with", "codex", "--task-file", str(missing)],
+    )
+
+    assert result.exit_code == 2
+    assert "could not read --task-file" in result.output
+    assert str(missing) in result.output
+
+
 def test_exec_cli_default_passes_no_timeout_to_provider(mocker):
     """`conductor exec --with codex --task ...` (no --timeout) must hand
     the provider `timeout_sec=None` so subprocess.run runs unbounded.
