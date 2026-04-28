@@ -14,10 +14,10 @@ from __future__ import annotations
 
 DELEGATION_GUIDANCE = """# Conductor delegation
 
-Conductor exposes other LLMs behind a uniform CLI (`conductor call`,
-`conductor review`, `conductor exec`). When a task is a better fit for a
-different model than the one you're running as, delegate: run conductor,
-read back the answer, present it to the user with attribution.
+Conductor exposes other LLMs behind a uniform CLI (`conductor ask`,
+`conductor call`, `conductor review`, `conductor exec`). When a task is a
+better fit for a different model than the one you're running as, delegate:
+run conductor, read back the answer, present it to the user with attribution.
 
 ## When to delegate
 
@@ -47,13 +47,42 @@ context, scope, constraints, expected output, and validation. For
 multi-turn `exec` work, prefer `--brief-file` so the handoff is durable
 and not squeezed through shell quoting.
 
-Single-turn call:
+Default to semantic routing. Choose only `kind` and `effort`; let
+Conductor choose providers and models unless the user explicitly asks for
+a specific provider.
 
-    conductor call --with <provider> --brief "..."
+Invocation moment:
 
-Let the router pick by tags:
+- Quick factual/background ask:
+  `conductor ask --kind research --effort minimal --brief-file /tmp/brief.md`
+- Deeper synthesis/research:
+  `conductor ask --kind research --effort medium --brief-file /tmp/brief.md`
+- Code explanation or small coding judgment:
+  `conductor ask --kind code --effort low --brief-file /tmp/brief.md`
+- Repo-changing implementation/debugging:
+  `conductor ask --kind code --effort high --brief-file /tmp/brief.md`
+- Merge/PR/diff review:
+  `conductor ask --kind review --base origin/main --brief-file /tmp/review.md`
+- Architecture/product judgment needing multiple views:
+  `conductor ask --kind council --effort medium --brief-file /tmp/brief.md`
+
+Semantic routing by kind and effort:
+
+    conductor ask --kind research --effort medium --brief-file /tmp/brief.md
+    conductor ask --kind code --effort high --brief-file /tmp/brief.md
+    conductor ask --kind council --effort medium --brief-file /tmp/brief.md
+
+Use `council` when the user wants multiple perspectives. Council always
+routes through OpenRouter and asks multiple models independently before a
+synthesis pass. Do not route council to Codex, Claude, Gemini CLI, or Ollama.
+
+Let the lower-level router pick by tags:
 
     conductor call --auto --tags long-context,cheap --brief "..."
+
+Manual provider calls are the escape hatch, not the default:
+
+    conductor call --with <provider> --brief "..."
 
 Read-only code review using native provider review mode:
 
@@ -385,19 +414,26 @@ You can shell out to it instead of trying to do everything yourself.
 
 Quick reference:
 
-- `conductor call --with <provider> --brief "..."` — single-turn call.
-- `conductor call --auto --tags <tag1>,<tag2> --brief "..."` — let the
-  router pick a provider based on task tags.
-- `conductor review --auto --base <ref> --brief-file /tmp/review.md` —
-  read-only code review through native review modes.
-- `conductor exec --with <provider> --tools Read,Edit,Bash \\
-       --sandbox workspace-write --brief-file /tmp/conductor-brief.md` — agent loop with file
-  tools, in a sandbox.
+- Quick factual/background ask:
+  `conductor ask --kind research --effort minimal --brief-file /tmp/brief.md`.
+- Deeper synthesis/research:
+  `conductor ask --kind research --effort medium --brief-file /tmp/brief.md`.
+- Code explanation or small coding judgment:
+  `conductor ask --kind code --effort low --brief-file /tmp/brief.md`.
+- Repo-changing implementation/debugging:
+  `conductor ask --kind code --effort high --brief-file /tmp/brief.md`.
+- Merge/PR/diff review:
+  `conductor ask --kind review --base <ref> --brief-file /tmp/review.md`.
+- Architecture/product judgment needing multiple views:
+  `conductor ask --kind council --effort medium --brief-file /tmp/brief.md`.
 - `conductor list` — show configured providers and their tags.
 
 Conductor does not inherit your conversation context. For delegation,
 write a complete brief with goal, context, scope, constraints, expected
 output, and validation; use `--brief-file` for nontrivial `exec` tasks.
+Default to `conductor ask`; use provider-specific `call` / `exec` only
+when the user explicitly asks for a provider or the semantic API does not
+fit.
 
 Providers commonly worth delegating to:
 
@@ -405,6 +441,7 @@ Providers commonly worth delegating to:
 - `gemini` — web search, multimodal.
 - `claude` / `codex` — strongest reasoning / coding agent loops.
 - `ollama` — local, offline, privacy-sensitive.
+- `council` kind — OpenRouter-only multi-model deliberation and synthesis.
 
 Full delegation guidance (when to delegate, when not to, error handling):
 
@@ -430,6 +467,18 @@ available — a CLI that dispatches work to other LLMs (Kimi, Gemini,
 Claude, Codex, Ollama) under a uniform interface.
 
 Use it when:
+- Quick factual/background ask:
+  `conductor ask --kind research --effort minimal --brief-file /tmp/brief.md`.
+- Deeper synthesis/research:
+  `conductor ask --kind research --effort medium --brief-file /tmp/brief.md`.
+- Code explanation or small coding judgment:
+  `conductor ask --kind code --effort low --brief-file /tmp/brief.md`.
+- Repo-changing implementation/debugging:
+  `conductor ask --kind code --effort high --brief-file /tmp/brief.md`.
+- Merge/PR/diff review:
+  `conductor ask --kind review --base <ref> --brief-file /tmp/review.md`.
+- You want multiple model perspectives:
+  `conductor ask --kind council --effort medium --brief-file /tmp/brief.md`.
 - You want a cheap second opinion (`conductor call --with kimi --brief "..."`).
 - You need fresh web information (`conductor call --with gemini --brief "..."`).
 - You want to stay local / offline (`conductor call --with ollama --brief "..."`).
@@ -441,6 +490,9 @@ Use it when:
 Conductor does not inherit your conversation context. Write a complete
 brief before delegating; for `exec`, prefer `--brief-file` with goal,
 context, scope, constraints, expected output, and validation.
+Default to `conductor ask`; use provider-specific `call` / `exec` only
+when the user explicitly asks for a provider or the semantic API does not
+fit.
 
 For longer running tool-using sessions:
 
@@ -455,13 +507,28 @@ Full delegation guidance (when to delegate, when not to, error handling):
 
 
 SUBAGENT_CONDUCTOR_AUTO = """You are a delegation subagent that uses conductor's
-auto-router to pick a provider based on the task's tags — not a fixed
-model. Use me when the parent agent wants to delegate but doesn't know
-which provider is best.
+semantic router and auto-router to pick a provider based on the task's kind,
+effort, and tags — not a fixed model. Use me when the parent agent wants to
+delegate but doesn't know which provider is best.
 
 When invoked:
 
-1. Look at the task and decide which capability tags apply:
+1. First decide whether the task fits one of the semantic kinds:
+   - `research` — broad reading, synthesis, summarization, current context
+   - `code` — code explanation, implementation, debugging, or engineering
+   - `review` — read-only code review of a diff, merge, PR, or commit
+   - `council` — multiple reasoning models should debate and synthesize
+   If it does, prefer:
+
+       conductor ask --kind <kind> --effort <minimal|low|medium|high|max> \\
+           --brief-file /tmp/conductor-brief.md --json
+
+   `council` always calls OpenRouter. Do not override council to a local
+   provider or a single CLI model.
+   For a quick factual ask, use `research` with `minimal` or `low` effort;
+   do not invent a separate semantic kind.
+
+2. If the task does not fit the semantic API, decide which capability tags apply:
    - `long-context` — task involves >50 KB of text
    - `web-search` — task needs fresh web information
    - `vision` — task involves images
@@ -470,7 +537,8 @@ When invoked:
    - `cheap` — user explicitly asked for a cheap run
    - `offline` — user explicitly asked for local-only
    Pick 1–3 tags; do NOT invent new ones.
-2. If the task is a read-only code review, use native review mode:
+3. If the task is a read-only code review and you are not using `ask`, use
+   native review mode:
 
        conductor review --auto --tags code-review,<tag> --base <base-ref> \\
            --brief-file /tmp/conductor-review-brief.md --json
@@ -478,7 +546,7 @@ When invoked:
    Use this for PR/merge review. Do not use it for auto-fix work; fixes
    are engineering tasks and belong in `conductor exec`.
 
-3. For normal single-turn routing, run:
+4. For normal single-turn routing, run:
 
        conductor call --auto --tags <tag1>,<tag2> --prefer <mode> \\
            --brief "<prompt>" --json
@@ -493,11 +561,16 @@ When invoked:
    different thinking budget. Valid levels are `minimal`, `low`, `medium`,
    `high`, and `max` (or an integer budget).
 
-   If the task needs file/code tools, use exec mode instead:
+   If the task needs file/code tools and does not fit `ask --kind code`,
+   use exec mode instead:
 
        conductor exec --auto --tags tool-use,<tag> \\
            --tools Read,Grep,Glob,Edit,Write,Bash \\
            --sandbox <mode> --brief-file /tmp/conductor-brief.md --json
+
+   OpenRouter can participate in exec mode through Conductor's local
+   tool-call loop; Codex and Claude remain the first choice for high-effort
+   coding, with OpenRouter as the remote fallback before local Ollama.
 
    Sandbox modes are: `read-only` for inspection, `workspace-write` for
    edits in the workspace, `strict` for the strongest isolation supported
@@ -507,7 +580,7 @@ When invoked:
    If the user explicitly requires local/offline execution, prefer the
    `ollama-offline` subagent. If you must run directly, use `--offline`
    rather than relying only on the soft `offline` tag.
-3. Parse the JSON, extract `text`, and return it prefixed with
+5. Parse the JSON, extract `text`, and return it prefixed with
    "From <provider> (auto-routed by conductor):". The chosen provider
    is in the JSON under `provider`.
 

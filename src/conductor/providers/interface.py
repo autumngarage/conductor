@@ -5,7 +5,7 @@ provider exposes a uniform contract — `configured()`, `smoke()`, `call()`,
 `exec()` — so the CLI and router can treat them uniformly.
 
 Two physical shapes are supported:
-  - HTTP adapters (e.g. kimi, ollama) that talk to an OpenAI-compatible
+  - HTTP adapters (e.g. openrouter, kimi, ollama) that talk to an OpenAI-compatible
     endpoint via httpx. These touch API keys directly.
   - Subprocess adapters (e.g. claude, codex, gemini) that shell out to a CLI
     that owns its own auth. These never touch API keys.
@@ -100,7 +100,7 @@ class CallResponse:
 
     ``session_id`` is the underlying CLI's identifier for this conversation
     when one exists (claude/codex/gemini all assign one per call). HTTP
-    providers (kimi, ollama) leave it None — they're stateless. Callers
+    providers (openrouter, kimi, ollama) leave it None — they're stateless. Callers
     can persist this and pass it back via ``resume_session_id`` to resume
     a multi-turn conversation; routing-layer use is opaque.
     """
@@ -180,7 +180,7 @@ class Provider(Protocol):
 
         ``resume_session_id`` resumes a prior conversation when supported
         by the underlying CLI (claude, codex, gemini). Providers without
-        a session model (kimi, ollama) raise UnsupportedCapability if a
+        a session model (openrouter, kimi, ollama) raise UnsupportedCapability if a
         non-None value is passed.
 
         Raises ProviderError on failure.

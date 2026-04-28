@@ -3,7 +3,8 @@
 Shell-out providers (claude/codex/gemini) own their own tool-use: we
 hand them ``--tools Read,Grep,...`` and they execute the tools inside
 their own process, inside their own sandbox. For HTTP providers
-(kimi, ollama), Conductor has to drive the loop itself. That means
+(openrouter, ollama, and compatible presets when enabled), Conductor has to
+drive the loop itself. That means
 registering tools with the model, executing whichever the model
 picks, feeding results back, and repeating until the model answers.
 

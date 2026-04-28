@@ -450,6 +450,39 @@ def test_detect_ignores_agents_md_without_conductor_block():
     assert not any(a.kind == "agents-md-import" for a in d.managed)
 
 
+def test_agent_wiring_notice_reports_stale_repo_block():
+    aw.wire_agents_md(version="0.1.0")
+
+    notice = aw.agent_wiring_notice(current_version="0.2.0")
+
+    assert notice is not None
+    _key, message = notice
+    assert "out of date" in message
+    assert "AGENTS.md has conductor v0.1.0" in message
+    assert "conductor init --yes" in message
+
+
+def test_agent_wiring_notice_reports_missing_when_requested():
+    from pathlib import Path
+
+    (Path.cwd() / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
+
+    notice = aw.agent_wiring_notice(current_version="0.2.0", include_missing=True)
+
+    assert notice is not None
+    _key, message = notice
+    assert "missing" in message
+    assert "AGENTS.md has no current conductor delegation block" in message
+
+
+def test_agent_wiring_notice_seen_marker_is_one_time(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    key = "abc123"
+
+    assert aw.should_emit_agent_wiring_notice(key) is True
+    assert aw.should_emit_agent_wiring_notice(key) is False
+
+
 def test_unwire_removes_agents_md_block_only():
     """unwire() removes our block; user-written sections of AGENTS.md are
     preserved, the file stays on disk if it still has user content."""

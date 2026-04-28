@@ -38,6 +38,8 @@ class DeepSeekChatProvider(OpenRouterProvider):
     fix_command = "conductor init --only openrouter"
 
     quality_tier = "strong"
+    supported_tools: frozenset[str] = frozenset()
+    supported_sandboxes: frozenset[str] = frozenset({"none"})
     supports_effort = False
     effort_to_thinking: dict[str, int] = {}
     cost_per_1k_in = 0.00032
@@ -72,6 +74,8 @@ class DeepSeekReasonerProvider(OpenRouterProvider):
     fix_command = "conductor init --only openrouter"
 
     quality_tier = "strong"
+    supported_tools: frozenset[str] = frozenset()
+    supported_sandboxes: frozenset[str] = frozenset({"none"})
     supports_effort = True
     effort_to_thinking = {
         "minimal": 0,

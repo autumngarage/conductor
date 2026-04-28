@@ -23,7 +23,7 @@ import os
 import subprocess
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import click
@@ -69,6 +69,12 @@ from conductor.router_defaults import (
     set_home_tag_default,
     unset_home_tag_default,
 )
+from conductor.semantic import (
+    SEMANTIC_KINDS,
+    SemanticPlan,
+    plan_for,
+    with_candidate_override,
+)
 from conductor.session_log import (
     SessionLog,
     SessionLogError,
@@ -92,6 +98,7 @@ GIT_RECOVERY_MAX_COMMITS = 5
 GIT_RECOVERY_MAX_STATUS_PATHS = 8
 NATIVE_REVIEW_TAG = "code-review"
 NATIVE_REVIEW_PRIORITY = ("codex", "claude", "gemini")
+DEFAULT_COUNCIL_ROUNDS = 1
 
 
 @dataclass(frozen=True)
@@ -465,6 +472,46 @@ def _native_review_unavailable_message(reasons: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
+def _semantic_candidate_exclude_set(
+    plan: SemanticPlan,
+    user_exclude: frozenset[str],
+) -> frozenset[str]:
+    allowed = {candidate.provider for candidate in plan.candidates}
+    if not allowed:
+        return user_exclude
+    return frozenset(set(known_providers()) - allowed) | user_exclude
+
+
+def _semantic_priority(plan: SemanticPlan) -> tuple[str, ...]:
+    return tuple(candidate.provider for candidate in plan.candidates)
+
+
+def _format_semantic_plan_line(plan: SemanticPlan) -> str:
+    stack = " > ".join(candidate.label() for candidate in plan.candidates)
+    return (
+        f"[conductor] ask kind={plan.kind} effort={plan.effort_bucket} "
+        f"mode={plan.mode} stack={stack}"
+    )
+
+
+def _semantic_plan_payload(plan: SemanticPlan) -> dict[str, object]:
+    return {
+        "kind": plan.kind,
+        "effort_bucket": plan.effort_bucket,
+        "mode": plan.mode,
+        "tags": list(plan.tags),
+        "prefer": plan.prefer,
+        "tools": sorted(plan.tools),
+        "sandbox": plan.sandbox,
+        "candidates": [
+            {"provider": candidate.provider, "models": list(candidate.models)}
+            for candidate in plan.candidates
+        ],
+        "council_member_models": list(plan.council_member_models),
+        "council_synthesis_models": list(plan.council_synthesis_models),
+    }
+
+
 def _echo_preflight_failure(provider_or_name, reason: str | None) -> None:
     provider = _provider_for_preflight(provider_or_name)
     detail = reason or "provider health probe failed"
@@ -596,6 +643,7 @@ def _invoke_with_fallback(
     silent: bool,
     resume_session_id: str | None = None,
     session_log: SessionLog | None = None,
+    models_by_provider: dict[str, tuple[str, ...]] | None = None,
 ) -> tuple[CallResponse, list[str]]:
     """Try the decision's ranked providers in order; fallback on retryable errors.
 
@@ -644,6 +692,7 @@ def _invoke_with_fallback(
     while idx < len(candidates):
         candidate = candidates[idx]
         provider = get_provider(candidate.name)
+        candidate_models = (models_by_provider or {}).get(candidate.name)
         if session_log is not None:
             session_log.bind_provider(candidate.name)
             session_log.emit(
@@ -664,6 +713,7 @@ def _invoke_with_fallback(
                     response = provider.exec(
                         task,
                         model=model,
+                        models=candidate_models,
                         effort=effort,
                         task_tags=list(decision.task_tags),
                         prefer=decision.prefer,
@@ -694,6 +744,7 @@ def _invoke_with_fallback(
                     response = provider.call(
                         task,
                         model=model,
+                        models=candidate_models,
                         effort=effort,
                         task_tags=list(decision.task_tags),
                         prefer=decision.prefer,
@@ -852,11 +903,126 @@ def _invoke_review_with_fallback(
     raise last_exc
 
 
+def _invoke_council(
+    plan: SemanticPlan,
+    *,
+    task: str,
+    effort: str | int,
+    timeout_sec: int | None,
+    rounds: int,
+    silent: bool,
+) -> CallResponse:
+    """Run a deterministic OpenRouter council request.
+
+    Council is intentionally OpenRouter-only: it fans out to the policy's
+    member model stack, then asks a synthesis model to reconcile disagreements.
+    """
+    if plan.candidates[0].provider != "openrouter":
+        raise ProviderConfigError(
+            "council policy invariant violated: council must route through openrouter."
+        )
+    if not plan.council_member_models:
+        raise ProviderConfigError(
+            "council policy invariant violated: no member models configured."
+        )
+
+    provider = get_provider("openrouter")
+    if not isinstance(provider, OpenRouterProvider):
+        raise ProviderConfigError(
+            "provider registry invariant violated: openrouter is not OpenRouterProvider."
+        )
+    if timeout_sec is not None:
+        provider = OpenRouterProvider(timeout_sec=float(timeout_sec))
+
+    member_responses: list[CallResponse] = []
+    member_prompt = _council_member_prompt(task, rounds=rounds)
+    for idx, model in enumerate(plan.council_member_models, start=1):
+        if not silent:
+            click.echo(f"[conductor] council member {idx}: {model}", err=True)
+        response = provider.call(
+            member_prompt,
+            model=model,
+            effort=effort,
+            task_tags=list(plan.tags),
+            prefer=plan.prefer,
+            log_selection=False,
+        )
+        member_responses.append(response)
+
+    synthesis_models = plan.council_synthesis_models or plan.council_member_models[:1]
+    if not silent:
+        click.echo(
+            "[conductor] council synthesis: " + ",".join(synthesis_models),
+            err=True,
+        )
+    synthesis = provider.call(
+        _council_synthesis_prompt(task, member_responses),
+        models=synthesis_models,
+        effort=effort,
+        task_tags=list(plan.tags),
+        prefer=plan.prefer,
+        log_selection=False,
+    )
+
+    raw = {
+        **(synthesis.raw or {}),
+        "conductor_council": {
+            "member_models": [response.model for response in member_responses],
+            "requested_member_models": list(plan.council_member_models),
+            "requested_synthesis_models": list(synthesis_models),
+            "rounds": rounds,
+            "member_usage": [response.usage for response in member_responses],
+            "member_duration_ms": [response.duration_ms for response in member_responses],
+        },
+    }
+    usage = {
+        **synthesis.usage,
+        "council_members": len(member_responses),
+        "council_rounds": rounds,
+    }
+    cost_usd = synthesis.cost_usd
+    if cost_usd is not None and all(
+        response.cost_usd is not None for response in member_responses
+    ):
+        cost_usd += sum(response.cost_usd or 0 for response in member_responses)
+    return replace(synthesis, usage=usage, cost_usd=cost_usd, raw=raw)
+
+
+def _council_member_prompt(task: str, *, rounds: int) -> str:
+    return (
+        "You are one member of a multi-model council. Give an independent, "
+        "critical answer to the request below. Name assumptions, risks, and "
+        "where another strong model might disagree. Do not claim consensus.\n\n"
+        f"Council rounds requested: {rounds}\n\n"
+        "Request:\n"
+        f"{task}"
+    )
+
+
+def _council_synthesis_prompt(task: str, member_responses: list[CallResponse]) -> str:
+    sections = []
+    for i, response in enumerate(member_responses, start=1):
+        sections.append(
+            f"## Member {i}: {response.model}\n\n{response.text.strip()}"
+        )
+    return (
+        "You are synthesizing a multi-model council. Compare the independent "
+        "responses, call out meaningful disagreements, resolve them when the "
+        "evidence supports it, and give the final answer. Preserve uncertainty "
+        "instead of flattening it into false consensus.\n\n"
+        "Original request:\n"
+        f"{task}\n\n"
+        "Council member responses:\n\n"
+        + "\n\n".join(sections)
+    )
+
+
 def _emit_call(
     response: CallResponse,
     *,
     as_json: bool,
     decision: RouteDecision | None = None,
+    semantic_plan: SemanticPlan | None = None,
     auth_prompts: list[dict] | None = None,
 ) -> None:
     if as_json:
@@ -868,6 +1034,8 @@ def _emit_call(
             payload.pop("auth_prompts", None)
         if decision is not None:
             payload["route"] = asdict(decision)
+        if semantic_plan is not None:
+            payload["semantic"] = _semantic_plan_payload(semantic_plan)
         click.echo(json.dumps(payload, default=str, indent=2))
     else:
         click.echo(response.text)
@@ -1235,10 +1403,323 @@ def _model_capabilities(model: openrouter_catalog.ModelEntry) -> str:
     return ",".join(caps) or "-"
 
 
+def _maybe_emit_agent_wiring_notice(ctx: click.Context) -> None:
+    if ctx.invoked_subcommand in {None, "init"}:
+        return
+    if os.environ.get("CONDUCTOR_AGENT_WIRING_NOTICE") == "0":
+        return
+
+    try:
+        from conductor.agent_wiring import (
+            agent_wiring_notice,
+            should_emit_agent_wiring_notice,
+        )
+
+        include_missing = bool(getattr(sys.stderr, "isatty", lambda: False)())
+        notice = agent_wiring_notice(
+            current_version=__version__,
+            include_missing=include_missing,
+        )
+        if notice is None:
+            return
+        key, message = notice
+        if should_emit_agent_wiring_notice(key):
+            click.echo(message, err=True)
+    except Exception:
+        # Advisory wiring freshness checks must never break the command the
+        # user actually asked conductor to run.
+        return
+
+
 @click.group()
 @click.version_option(__version__, prog_name="conductor")
-def main() -> None:
+@click.pass_context
+def main(ctx: click.Context) -> None:
     """Pick an LLM, give it a job."""
+    _maybe_emit_agent_wiring_notice(ctx)
+
+
+# --------------------------------------------------------------------------- #
+# ask — semantic intent API
+# --------------------------------------------------------------------------- #
+
+
+@main.command()
+@click.option(
+    "--kind",
+    required=True,
+    type=click.Choice(SEMANTIC_KINDS),
+    help="Semantic work category: research, code, review, or council.",
+)
+@click.option(
+    "--effort",
+    default=None,
+    help=f"Thinking depth: {' | '.join(VALID_EFFORT_LEVELS)} or integer budget.",
+)
+@click.option("--cwd", default=None, help="Repository working directory for code/review.")
+@click.option(
+    "--timeout",
+    "timeout_sec",
+    default=None,
+    type=int,
+    help="Wall-clock timeout in seconds for review/exec/council provider calls.",
+)
+@click.option(
+    "--max-stall-seconds",
+    "max_stall_sec",
+    default=DEFAULT_EXEC_MAX_STALL_SEC,
+    type=int,
+    help="Kill streaming exec/review providers after this many silent seconds. Set 0 to disable.",
+)
+@click.option("--base", default=None, help="For review: compare changes against this ref.")
+@click.option("--commit", default=None, help="For review: review one commit.")
+@click.option(
+    "--uncommitted",
+    is_flag=True,
+    default=False,
+    help="For review: review staged, unstaged, and untracked changes.",
+)
+@click.option("--title", default=None, help="For review: optional review title.")
+@click.option("--task", default=None, help="The task / prompt. Alias: --brief.")
+@click.option(
+    "--task-file",
+    default=None,
+    help="Read task / prompt from a UTF-8 file. Alias: --brief-file.",
+)
+@click.option("--brief", default=None, help="Delegation brief / prompt.")
+@click.option(
+    "--brief-file",
+    default=None,
+    help="Read the delegation brief from a UTF-8 file. Use '-' to read stdin.",
+)
+@click.option("--log-file", default=None, help="For exec: write structured NDJSON events.")
+@click.option("--json", "as_json", is_flag=True, default=False)
+@click.option("--verbose-route", is_flag=True, default=False)
+@click.option("--silent-route", is_flag=True, default=False)
+@click.option(
+    "--offline/--no-offline",
+    "offline",
+    default=None,
+    help="--offline: force local ollama for supported semantic kinds. --no-offline clears it.",
+)
+@click.option(
+    "--preflight/--no-preflight",
+    "preflight",
+    default=True,
+    help="For exec: run a provider health probe before forwarding the task.",
+)
+@click.option(
+    "--allow-short-brief",
+    is_flag=True,
+    default=False,
+    help="Suppress the short-brief warning when semantic code routes to exec.",
+)
+def ask(
+    kind: str,
+    effort: str | None,
+    cwd: str | None,
+    timeout_sec: int | None,
+    max_stall_sec: int | None,
+    base: str | None,
+    commit: str | None,
+    uncommitted: bool,
+    title: str | None,
+    task: str | None,
+    task_file: str | None,
+    brief: str | None,
+    brief_file: str | None,
+    log_file: str | None,
+    as_json: bool,
+    verbose_route: bool,
+    silent_route: bool,
+    offline: bool | None,
+    preflight: bool,
+    allow_short_brief: bool,
+) -> None:
+    """Run a task through Conductor's deterministic semantic routing matrix."""
+    effort_value = _parse_effort(effort)
+    plan = plan_for(kind, effort_value)
+    max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
+
+    if offline is False:
+        offline_mode.clear()
+    elif offline is True:
+        if kind == "council":
+            raise click.UsageError(
+                "council always routes through OpenRouter; --offline contradicts it."
+            )
+        if kind == "review":
+            raise click.UsageError("review uses native review modes; --offline is not supported.")
+        offline_mode.set_active()
+        plan = with_candidate_override(plan, provider="ollama")
+
+    if kind == "council" and plan.candidates[0].provider != "openrouter":
+        raise click.UsageError("council always routes through OpenRouter.")
+
+    review_target_count = sum(1 for value in (base, commit, uncommitted) if value)
+    if review_target_count > 1:
+        raise click.UsageError("use only one of --base, --commit, or --uncommitted.")
+
+    brief_input = _read_task(task, task_file, brief=brief, brief_file=brief_file)
+    if plan.mode == "exec":
+        _warn_if_short_exec_brief(brief_input, allow_short_brief=allow_short_brief)
+    body = brief_input.body
+
+    if not (silent_route or as_json):
+        click.echo(_format_semantic_plan_line(plan), err=True)
+
+    if plan.mode == "council":
+        try:
+            response = _invoke_council(
+                plan,
+                task=body,
+                effort=effort_value,
+                timeout_sec=timeout_sec,
+                rounds=DEFAULT_COUNCIL_ROUNDS,
+                silent=silent_route or as_json,
+            )
+        except ProviderConfigError as e:
+            click.echo(f"conductor: {e}", err=True)
+            sys.exit(2)
+        except ProviderError as e:
+            click.echo(f"conductor: {e}", err=True)
+            sys.exit(1)
+        _emit_usage_log(response, silent=silent_route or as_json)
+        _emit_call(response, as_json=as_json, semantic_plan=plan)
+        return
+
+    if plan.mode == "review":
+        review_exclude, review_reasons = _review_exclude_set(
+            _semantic_candidate_exclude_set(plan, frozenset())
+        )
+        try:
+            _provider, decision = pick(
+                list(plan.tags),
+                prefer=plan.prefer,
+                effort=effort_value,
+                exclude=review_exclude,
+                priority=_semantic_priority(plan) or NATIVE_REVIEW_PRIORITY,
+                shadow=True,
+            )
+        except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
+            click.echo(f"conductor: {_native_review_unavailable_message(review_reasons)}", err=True)
+            click.echo(f"conductor: {e}", err=True)
+            sys.exit(2)
+        print_caller_banner(decision.provider, silent=silent_route or as_json)
+        _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
+        try:
+            response, _fallbacks = _invoke_review_with_fallback(
+                decision,
+                task=body,
+                effort=effort_value,
+                cwd=cwd,
+                timeout_sec=timeout_sec,
+                max_stall_sec=max_stall_sec,
+                base=base,
+                commit=commit,
+                uncommitted=uncommitted,
+                title=title,
+                silent=silent_route or as_json,
+            )
+        except ProviderConfigError as e:
+            click.echo(f"conductor: {e}", err=True)
+            sys.exit(2)
+        except ProviderError as e:
+            click.echo(f"conductor: {e}", err=True)
+            sys.exit(1)
+        _emit_usage_log(response, silent=silent_route or as_json)
+        _emit_call(response, as_json=as_json, decision=decision, semantic_plan=plan)
+        return
+
+    tools_set = plan.tools
+    sandbox_value = plan.sandbox
+    exclude_set = _semantic_candidate_exclude_set(plan, frozenset())
+    try:
+        provider, decision = pick(
+            list(plan.tags),
+            prefer=plan.prefer,
+            effort=effort_value,
+            tools=tools_set,
+            sandbox=sandbox_value,
+            exclude=exclude_set,
+            priority=_semantic_priority(plan),
+            shadow=True,
+        )
+    except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
+        click.echo(f"conductor: {e}", err=True)
+        sys.exit(2)
+
+    session_log: SessionLog | None = None
+    if plan.mode == "exec":
+        session_log = _start_exec_session_log(log_file=log_file, resume_session_id=None)
+        _emit_session_route_decision(session_log, decision)
+    print_caller_banner(decision.provider, silent=silent_route or as_json)
+    _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
+    if plan.mode == "exec" and preflight:
+        provider_obj = _provider_for_preflight(provider)
+        ok, reason = provider_obj.health_probe()
+        if not ok:
+            if session_log is not None:
+                session_log.bind_provider(provider_obj.name)
+                session_log.emit(
+                    "provider_failed",
+                    {"provider": provider_obj.name, "error": reason or "preflight failed"},
+                )
+                session_log.mark_finished()
+            _echo_preflight_failure(provider_obj, reason)
+            sys.exit(2)
+
+    models_by_provider = {
+        candidate.provider: candidate.models
+        for candidate in plan.candidates
+        if candidate.models
+    }
+    try:
+        response, _fallbacks = _invoke_with_fallback(
+            decision,
+            mode=plan.mode,
+            task=body,
+            model=None,
+            effort=effort_value,
+            tools=tools_set,
+            sandbox=sandbox_value,
+            cwd=cwd,
+            timeout_sec=timeout_sec,
+            max_stall_sec=max_stall_sec,
+            silent=silent_route or as_json,
+            session_log=session_log,
+            models_by_provider=models_by_provider,
+        )
+    except UnsupportedCapability as e:
+        if session_log is not None:
+            session_log.emit("provider_failed", {"error": str(e)})
+            session_log.mark_finished()
+        click.echo(f"conductor: {e}", err=True)
+        sys.exit(2)
+    except ProviderConfigError as e:
+        if session_log is not None:
+            session_log.emit("provider_failed", {"error": str(e)})
+            session_log.mark_finished()
+        click.echo(f"conductor: {e}", err=True)
+        sys.exit(2)
+    except ProviderError as e:
+        if session_log is not None:
+            session_log.mark_finished()
+        click.echo(f"conductor: {e}", err=True)
+        _maybe_echo_stall_recovery_hint(e, cwd=cwd)
+        sys.exit(1)
+
+    _emit_usage_log(response, silent=silent_route or as_json)
+    _emit_session_usage(session_log, response)
+    if session_log is not None:
+        session_log.mark_finished()
+    _emit_call(
+        response,
+        as_json=as_json,
+        decision=decision,
+        semantic_plan=plan,
+        auth_prompts=_collect_session_auth_prompts(session_log),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -3040,35 +3521,35 @@ def doctor(as_json: bool) -> None:
     type=click.Choice(["yes", "no", "ask"]),
     default=None,
     help="Wire conductor into detected agent tools (Claude Code today). "
-    "Default: ask on TTY, skip on non-TTY.",
+    "Default: yes for unscoped init; pass no to opt out.",
 )
 @click.option(
     "--patch-claude-md",
     type=click.Choice(["yes", "no", "ask"]),
     default=None,
     help="Add the delegation-guidance @import line to ~/.claude/CLAUDE.md. "
-    "Default: ask on TTY, skip on non-TTY.",
+    "Default: yes when Claude Code is detected; pass no to opt out.",
 )
 @click.option(
     "--patch-agents-md",
     type=click.Choice(["yes", "no", "ask"]),
     default=None,
     help="Inject a conductor delegation block into ./AGENTS.md "
-    "(Codex / Cursor / Zed convention). Default: ask on TTY when present.",
+    "(Codex / Cursor / Zed convention). Default: yes for unscoped init.",
 )
 @click.option(
     "--patch-gemini-md",
     type=click.Choice(["yes", "no", "ask"]),
     default=None,
     help="Inject a conductor delegation block into ./GEMINI.md "
-    "(Gemini CLI convention). Default: ask on TTY when present.",
+    "(Gemini CLI convention). Default: yes when GEMINI.md exists.",
 )
 @click.option(
     "--patch-claude-md-repo",
     type=click.Choice(["yes", "no", "ask"]),
     default=None,
     help="Inject @import into repo-scope ./CLAUDE.md (parallel to "
-    "--patch-claude-md for user-scope). Default: ask on TTY when present.",
+    "--patch-claude-md for user-scope). Default: yes when CLAUDE.md exists.",
 )
 @click.option(
     "--wire-cursor",
@@ -3076,7 +3557,7 @@ def doctor(as_json: bool) -> None:
     type=click.Choice(["yes", "no", "ask"]),
     default=None,
     help="Write a managed Cursor rule at .cursor/rules/conductor-delegation.mdc. "
-    "Default: ask on TTY when .cursor/rules/ exists.",
+    "Default: yes when .cursor/rules/ exists.",
 )
 @click.option(
     "--unwire",

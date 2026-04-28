@@ -1,15 +1,16 @@
 """OpenRouter provider — OpenAI-compatible HTTP adapter.
 
-PR 1 scope: a single-turn adapter that lets callers target OpenRouter
-explicitly via ``--with openrouter --model <slug>``. Auto-mode selection,
-catalog-driven model discovery, and tool-use orchestration are deferred to
-the follow-up migration PRs.
+Supports single-turn chat plus Conductor's local tool-call loop for
+``exec`` requests. OpenRouter chooses or hosts the model; Conductor still
+executes local filesystem/shell tools and feeds results back to the model.
 """
 
 from __future__ import annotations
 
+import json
 import sys
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
@@ -23,6 +24,7 @@ from conductor.providers.interface import (
     UnsupportedCapability,
     resolve_effort_tokens,
 )
+from conductor.tools import ToolExecutionError, ToolExecutor, build_tool_specs
 
 if TYPE_CHECKING:
     from conductor.session_log import SessionLog
@@ -34,6 +36,7 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_DEFAULT_MODEL = "openrouter/auto"
 OPENROUTER_REQUEST_TIMEOUT_SEC = 120.0
 OPENROUTER_HEALTH_PROBE_TIMEOUT_SEC = 10.0
+OPENROUTER_MAX_TOOL_ITERATIONS = 10
 OPENROUTER_HTTP_REFERER = "https://github.com/autumngarage/conductor"
 OPENROUTER_X_TITLE = "conductor"
 
@@ -61,8 +64,12 @@ class OpenRouterProvider:
     fix_command = "conductor init --only openrouter"
 
     quality_tier = "frontier"
-    supported_tools: frozenset[str] = frozenset()
-    supported_sandboxes: frozenset[str] = frozenset({"none"})
+    supported_tools: frozenset[str] = frozenset(
+        {"Read", "Grep", "Glob", "Edit", "Write", "Bash"}
+    )
+    supported_sandboxes: frozenset[str] = frozenset(
+        {"none", "read-only", "workspace-write", "strict"}
+    )
     supports_effort = True
     effort_to_thinking = {
         "minimal": 0,
@@ -181,35 +188,38 @@ class OpenRouterProvider:
         except ValueError as e:
             raise ProviderHTTPError(f"OpenRouter response was not JSON: {e}") from e
 
-    def call(
+    def _completion_target_payload(
         self,
-        task: str,
-        model: str | None = None,
         *,
-        effort: str | int = "medium",
-        task_tags: list[str] | tuple[str, ...] | None = None,
-        prefer: str = "balanced",
-        exclude: set[str] | frozenset[str] | None = None,
-        log_selection: bool = True,
-        resume_session_id: str | None = None,
-    ) -> CallResponse:
-        if resume_session_id:
+        model: str | None,
+        models: tuple[str, ...] | list[str] | None,
+        effort: str | int,
+        task_tags: list[str] | tuple[str, ...] | None,
+        prefer: str,
+        exclude: set[str] | frozenset[str] | None,
+        log_selection: bool,
+    ) -> tuple[dict, str]:
+        if model is not None and models:
             raise UnsupportedCapability(
-                "openrouter has no session model — each OpenRouter API call is "
-                "stateless. To replay context, prepend the prior turns to `task`."
+                "openrouter received both `model` and `models`; pass one explicit "
+                "model or an ordered fallback list, not both."
             )
 
-        # Fail on missing credentials before any selector/catalog work so an
-        # unconfigured provider doesn't mask the real setup error behind a
-        # catalog refresh failure.
-        self._resolve_key()
-        thinking_budget = resolve_effort_tokens(effort, self.effort_to_thinking)
-        payload: dict = {
-            "messages": [{"role": "user", "content": task}],
-        }
         selected_model = model
-        preset_model = self._preset_model() if selected_model is None else None
-        if preset_model is not None:
+        ordered_models = tuple(models or ())
+        preset_model = (
+            self._preset_model()
+            if selected_model is None and not ordered_models
+            else None
+        )
+        payload: dict = {}
+        if ordered_models:
+            payload["models"] = list(ordered_models)
+            selected_model = ordered_models[0]
+            reasoning = self._reasoning_payload(effort)
+            if reasoning is not None:
+                payload["reasoning"] = reasoning
+        elif preset_model is not None:
             selected_model = preset_model
             payload["model"] = selected_model
             reasoning = self._reasoning_payload(effort)
@@ -237,6 +247,46 @@ class OpenRouterProvider:
             reasoning = self._reasoning_payload(effort)
             if reasoning is not None:
                 payload["reasoning"] = reasoning
+
+        return payload, selected_model
+
+    def call(
+        self,
+        task: str,
+        model: str | None = None,
+        *,
+        models: tuple[str, ...] | list[str] | None = None,
+        effort: str | int = "medium",
+        task_tags: list[str] | tuple[str, ...] | None = None,
+        prefer: str = "balanced",
+        exclude: set[str] | frozenset[str] | None = None,
+        log_selection: bool = True,
+        resume_session_id: str | None = None,
+    ) -> CallResponse:
+        if resume_session_id:
+            raise UnsupportedCapability(
+                "openrouter has no session model — each OpenRouter API call is "
+                "stateless. To replay context, prepend the prior turns to `task`."
+            )
+
+        # Fail on missing credentials before any selector/catalog work so an
+        # unconfigured provider doesn't mask the real setup error behind a
+        # catalog refresh failure.
+        self._resolve_key()
+        thinking_budget = resolve_effort_tokens(effort, self.effort_to_thinking)
+        target_payload, selected_model = self._completion_target_payload(
+            model=model,
+            models=models,
+            effort=effort,
+            task_tags=task_tags,
+            prefer=prefer,
+            exclude=exclude,
+            log_selection=log_selection,
+        )
+        payload: dict = {
+            **target_payload,
+            "messages": [{"role": "user", "content": task}],
+        }
 
         start = time.monotonic()
         body = self._post_chat(payload)
@@ -275,6 +325,7 @@ class OpenRouterProvider:
         task: str,
         model: str | None = None,
         *,
+        models: tuple[str, ...] | list[str] | None = None,
         effort: str | int = "medium",
         task_tags: list[str] | tuple[str, ...] | None = None,
         prefer: str = "balanced",
@@ -296,26 +347,192 @@ class OpenRouterProvider:
         if sandbox == "":
             sandbox = "none"
 
-        if tools:
-            raise UnsupportedCapability(
-                f"{self.name} does not yet drive a tool-use loop in conductor "
-                f"(supported tools: {sorted(self.supported_tools) or 'none'}). "
-                "Use a provider with tool support (claude, codex, gemini, "
-                "kimi, ollama) or run this task without --tools."
+        if not tools:
+            if sandbox != "none":
+                raise UnsupportedCapability(
+                    f"{self.name}.exec() sandbox={sandbox!r} is not meaningful "
+                    "without tools. Use sandbox='none' for a text-only exec, "
+                    "or pass --tools with a supported tool set."
+                )
+            return self.call(
+                task,
+                model=model,
+                models=models,
+                effort=effort,
+                task_tags=task_tags,
+                prefer=prefer,
+                exclude=exclude,
+                log_selection=log_selection,
             )
-        if sandbox != "none":
+
+        unknown = tools - self.supported_tools
+        if unknown:
             raise UnsupportedCapability(
-                f"{self.name}.exec() sandbox={sandbox!r} is not meaningful "
-                "without tools. Use sandbox='none' for a text-only exec."
+                f"{self.name} does not support tools {sorted(unknown)} "
+                f"(supported: {sorted(self.supported_tools)})."
             )
-        return self.call(
-            task,
+        if sandbox not in self.supported_sandboxes:
+            raise UnsupportedCapability(
+                f"{self.name} does not support sandbox={sandbox!r} "
+                f"(supported: {sorted(self.supported_sandboxes)})."
+            )
+        if sandbox == "none":
+            raise UnsupportedCapability(
+                "openrouter.exec() with tools requires at least sandbox='read-only'."
+            )
+
+        thinking_budget = resolve_effort_tokens(effort, self.effort_to_thinking)
+        effective_task_tags = tuple(task_tags or ())
+        if "tool-use" not in effective_task_tags:
+            effective_task_tags = (*effective_task_tags, "tool-use")
+        target_payload, selected_model = self._completion_target_payload(
             model=model,
+            models=models,
             effort=effort,
-            task_tags=task_tags,
+            task_tags=effective_task_tags,
             prefer=prefer,
             exclude=exclude,
             log_selection=log_selection,
+        )
+
+        workdir = Path(cwd) if cwd else Path.cwd()
+        executor = ToolExecutor(cwd=workdir, sandbox=sandbox)
+        tool_specs = build_tool_specs(tools)
+
+        messages: list[dict] = [{"role": "user", "content": task}]
+        iteration = 0
+        totals = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_tokens": 0,
+            "thinking_tokens": 0,
+        }
+        iterations_log: list[dict] = []
+        final_text = ""
+        final_body: dict = {}
+        hit_cap = False
+
+        start = time.monotonic()
+        while iteration < OPENROUTER_MAX_TOOL_ITERATIONS:
+            iteration += 1
+            payload: dict = {
+                **target_payload,
+                "messages": messages,
+                "tools": tool_specs,
+                "tool_choice": "auto",
+            }
+            body = self._post_chat(payload)
+            final_body = body
+            message = _first_message(body)
+
+            usage = body.get("usage") or {}
+            prompt_tokens = _usage_int(usage, "prompt_tokens")
+            completion_tokens = _usage_int(usage, "completion_tokens")
+            cached_tokens = _usage_int(
+                usage.get("prompt_tokens_details") or {},
+                "cached_tokens",
+            )
+            thinking_tokens = _usage_int(
+                usage.get("completion_tokens_details") or {},
+                "reasoning_tokens",
+            )
+            totals["input_tokens"] += prompt_tokens
+            totals["output_tokens"] += completion_tokens
+            totals["cached_tokens"] += cached_tokens
+            totals["thinking_tokens"] += thinking_tokens
+            iterations_log.append(
+                {
+                    "iteration": iteration,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "cached_tokens": cached_tokens,
+                    "thinking_tokens": thinking_tokens,
+                }
+            )
+
+            actual_model = body.get("model")
+            if (
+                isinstance(actual_model, str)
+                and actual_model
+                and actual_model != OPENROUTER_DEFAULT_MODEL
+            ):
+                selected_model = actual_model
+                target_payload = {"model": actual_model}
+                reasoning = self._reasoning_payload(effort)
+                if reasoning is not None:
+                    target_payload["reasoning"] = reasoning
+
+            tool_calls = message.get("tool_calls") or []
+            final_text = _message_content_text(message)
+            if not tool_calls:
+                break
+
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": final_text,
+                    "tool_calls": tool_calls,
+                }
+            )
+
+            for idx, call in enumerate(tool_calls):
+                name, args, result = _parse_tool_call(call)
+                if result is None:
+                    try:
+                        result = executor.run(name, args or {})
+                    except ToolExecutionError as e:
+                        result = f"error: {e}"
+
+                if session_log is not None:
+                    session_log.emit(
+                        "tool_call",
+                        {
+                            "provider": self.name,
+                            "iteration": iteration,
+                            "name": name,
+                            "args": args,
+                            "result_preview": (
+                                result[:200] if isinstance(result, str) else result
+                            ),
+                        },
+                    )
+
+                tool_msg = {
+                    "role": "tool",
+                    "tool_call_id": call.get("id") or f"call_{iteration}_{idx}",
+                    "name": name,
+                    "content": result,
+                }
+                messages.append(tool_msg)
+        else:
+            hit_cap = True
+
+        if hit_cap:
+            final_text = (final_text or "(no content)") + (
+                f"\n\n[conductor: OpenRouter tool-use loop hit max iterations "
+                f"({OPENROUTER_MAX_TOOL_ITERATIONS}); model kept requesting tools. "
+                "Re-run with a narrower task or a larger budget.]"
+            )
+
+        duration_ms = int((time.monotonic() - start) * 1000)
+        return CallResponse(
+            text=final_text,
+            provider=self.name,
+            model=final_body.get("model", selected_model) if final_body else selected_model,
+            duration_ms=duration_ms,
+            usage={
+                "input_tokens": totals["input_tokens"],
+                "output_tokens": totals["output_tokens"],
+                "cached_tokens": totals["cached_tokens"],
+                "thinking_tokens": totals["thinking_tokens"],
+                "effort": effort if isinstance(effort, str) else None,
+                "thinking_budget": thinking_budget,
+                "tool_iterations": iteration,
+                "tool_names": sorted(tools),
+                "hit_iteration_cap": hit_cap,
+                "iterations": iterations_log,
+            },
+            raw=final_body,
         )
 
 
@@ -417,3 +634,61 @@ def _log_selector_choice(
         f"[conductor] openrouter selector: tags={tags_text} prefer={prefer} -> {target}\n"
     )
     sys.stderr.flush()
+
+
+def _first_message(body: dict) -> dict:
+    try:
+        message = body["choices"][0]["message"]
+    except (KeyError, IndexError, TypeError) as e:
+        raise ProviderHTTPError(
+            f"OpenRouter response missing choices[0].message: {body!r:.500}"
+        ) from e
+    if not isinstance(message, dict):
+        raise ProviderHTTPError(
+            f"OpenRouter response choices[0].message was not an object: {message!r:.500}"
+        )
+    return message
+
+
+def _message_content_text(message: dict) -> str:
+    content = message.get("content")
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    return json.dumps(content)
+
+
+def _usage_int(usage: dict, key: str) -> int:
+    value = usage.get(key)
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _parse_tool_call(call: dict) -> tuple[str, dict | None, str | None]:
+    fn = call.get("function") or {}
+    name = fn.get("name") or ""
+    raw_args = fn.get("arguments")
+    if isinstance(raw_args, dict):
+        return name, raw_args, None
+    if isinstance(raw_args, str):
+        try:
+            args = json.loads(raw_args) if raw_args.strip() else {}
+        except json.JSONDecodeError as e:
+            return (
+                name,
+                None,
+                f"error: tool `{name}` arguments were not valid JSON: {e}",
+            )
+        if not isinstance(args, dict):
+            return (
+                name,
+                None,
+                f"error: tool `{name}` arguments must decode to a JSON object.",
+            )
+        return name, args, None
+    return name, {}, None

@@ -300,18 +300,15 @@ def run_init_wizard(
         only: configure only this one provider; skip the rest.
         remaining: skip providers that are already configured (resume flow).
         wire_agents: one of "yes" / "no" / "ask" / None. Controls whether
-            the wizard offers to wire conductor into detected agent tools
-            (Claude Code user-scope artifacts). None means ask on TTY,
-            skip on non-TTY.
+            the wizard wires conductor into detected agent tools. None means
+            yes for unscoped init; callers opt out with "no".
         patch_claude_md: same tri-state, for the one-line ``@import`` edit
-            in ``~/.claude/CLAUDE.md``. Separate from ``wire_agents`` so
-            users can accept the artifacts while declining the import
-            edit (and vice versa).
+            in ``~/.claude/CLAUDE.md``. None follows the top-level wiring
+            decision so detected Claude installs receive readable guidance.
         patch_agents_md: same tri-state, for inlining a delegation block
             into the cwd's ``./AGENTS.md`` (the cross-tool convention used
-            by Codex / Cursor / Zed). Separate from ``patch_claude_md``
-            because user-scope and repo-scope patching are independent
-            consents.
+            by Codex / Cursor / Zed). None creates or refreshes AGENTS.md
+            during unscoped init.
 
     Returns a shell exit code: 0 on success, non-zero if the user
     explicitly aborted.
@@ -1024,14 +1021,18 @@ def _maybe_wire_agents(
 
     claude_detected = detection.claude_detected
 
-    # Decide the top-level wire-agents decision.
-    decision = wire_agents if wire_agents is not None else ("ask" if interactive else "no")
+    # Decide the top-level wire-agents decision. Fresh project installs should
+    # leave agent-readable instructions by default; flags exist to opt out or
+    # force the older prompt-first behavior.
+    decision = wire_agents if wire_agents is not None else "yes"
     if decision == "no":
         return True
 
     # Per-section "this section runs" flags. A section runs if its artifact
-    # is detected OR the user explicitly forced creation via a flag.
-    run_agents_md = detection.agents_md_exists or patch_agents_md == "yes"
+    # is detected OR the user explicitly forced creation via a flag. AGENTS.md
+    # is the universal repo-scope convention, so unscoped init creates it by
+    # default unless explicitly disabled.
+    run_agents_md = patch_agents_md != "no"
     run_gemini_md = detection.gemini_md_exists or patch_gemini_md == "yes"
     run_claude_md_repo = (
         detection.claude_md_repo_exists or patch_claude_md_repo == "yes"
@@ -1163,7 +1164,7 @@ def _wire_claude_code_section(
     pcm = (
         patch_claude_md
         if patch_claude_md is not None
-        else ("ask" if interactive else "no")
+        else ("ask" if decision == "ask" else decision)
     )
     if pcm == "ask":
         import_line = f"@{detection.conductor_home}/delegation-guidance.md"
@@ -1229,6 +1230,7 @@ def _wire_sentinel_section(
     wire_fn,
     version: str,
     interactive: bool,
+    decision: str,
     patch_flag: str | None,
 ) -> bool:
     """Generic prompt + wire for any sentinel-block-style patch.
@@ -1258,7 +1260,7 @@ def _wire_sentinel_section(
         click.echo(f"  unless this repo is intended to use {filename} going forward.")
     click.echo("")
 
-    pam = patch_flag if patch_flag is not None else ("ask" if interactive else "no")
+    pam = patch_flag if patch_flag is not None else decision
     if pam == "ask":
         verb = "refresh" if already_wired else ("patch" if path_exists else "create")
         choice = _prompt_menu(
@@ -1309,6 +1311,7 @@ def _wire_agents_md_section(
         wire_fn=wire_agents_md,
         version=version,
         interactive=interactive,
+        decision=decision,
         patch_flag=patch_agents_md,
     )
 
@@ -1334,6 +1337,7 @@ def _wire_gemini_md_section(
         wire_fn=wire_gemini_md,
         version=version,
         interactive=interactive,
+        decision=decision,
         patch_flag=patch_gemini_md,
     )
 
@@ -1359,6 +1363,7 @@ def _wire_claude_md_repo_section(
         wire_fn=wire_claude_md_repo,
         version=version,
         interactive=interactive,
+        decision=decision,
         patch_flag=patch_claude_md_repo,
     )
 

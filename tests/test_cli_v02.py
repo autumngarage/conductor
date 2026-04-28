@@ -356,6 +356,200 @@ def test_call_auto_can_route_to_openrouter_and_shortlist_cheap_models(
 
 
 # ---------------------------------------------------------------------------
+# ask — semantic intent API
+# ---------------------------------------------------------------------------
+
+
+def test_ask_research_low_lets_openrouter_auto_select(mocker):
+    _stub_all_configured(mocker, {"openrouter"})
+    call_mock = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response("openrouter", "openrouter/auto"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "research",
+            "--effort",
+            "low",
+            "--brief",
+            "Find the relevant background and summarize it.",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert call_mock.called
+    assert call_mock.call_args.kwargs["models"] is None
+    assert set(call_mock.call_args.kwargs["task_tags"]) == {
+        "research",
+        "long-context",
+        "cheap",
+    }
+    payload = json.loads(result.stdout)
+    assert payload["semantic"]["kind"] == "research"
+    assert payload["semantic"]["mode"] == "call"
+    assert payload["semantic"]["candidates"][0]["provider"] == "openrouter"
+    assert payload["semantic"]["candidates"][0]["models"] == []
+
+
+def test_ask_code_high_routes_to_codex_exec_with_default_tools(mocker):
+    _stub_all_configured(mocker, {"codex"})
+    exec_mock = mocker.patch.object(
+        CodexProvider, "exec", return_value=_fake_response("codex")
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "code",
+            "--effort",
+            "high",
+            "--allow-short-brief",
+            "--brief",
+            "Implement the scoped coding change.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert exec_mock.called
+    assert exec_mock.call_args.kwargs["tools"] == frozenset(
+        {"Read", "Grep", "Glob", "Edit", "Write", "Bash"}
+    )
+    assert exec_mock.call_args.kwargs["sandbox"] == "workspace-write"
+
+
+def test_ask_code_high_falls_back_to_openrouter_exec_before_ollama(mocker):
+    _stub_all_configured(mocker, {"openrouter", "ollama"})
+    exec_mock = mocker.patch.object(
+        OpenRouterProvider,
+        "exec",
+        return_value=_fake_response("openrouter", "openrouter/auto"),
+    )
+    mocker.patch.object(OllamaProvider, "exec", return_value=_fake_response("ollama"))
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "code",
+            "--effort",
+            "high",
+            "--allow-short-brief",
+            "--brief",
+            "Implement the scoped coding change.",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert exec_mock.called
+    assert exec_mock.call_args.kwargs["tools"] == frozenset(
+        {"Read", "Grep", "Glob", "Edit", "Write", "Bash"}
+    )
+    payload = json.loads(result.stdout)
+    assert [candidate["provider"] for candidate in payload["semantic"]["candidates"]] == [
+        "codex",
+        "claude",
+        "openrouter",
+        "ollama",
+    ]
+
+
+def test_ask_review_uses_native_review_route(mocker):
+    _stub_all_configured(mocker, {"codex", "openrouter"})
+    mocker.patch.object(CodexProvider, "review_configured", return_value=(True, None))
+    review_mock = mocker.patch.object(
+        CodexProvider,
+        "review",
+        return_value=_fake_response("codex", "codex-review"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "review",
+            "--base",
+            "origin/main",
+            "--brief",
+            "Review this merge.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert review_mock.called
+    assert review_mock.call_args.kwargs["base"] == "origin/main"
+    assert "→ codex" in result.stderr
+
+
+def test_ask_council_fans_out_through_openrouter_only(mocker):
+    _stub_all_configured(mocker, {"openrouter"})
+    responses = [
+        _fake_response("openrouter", "member-a"),
+        _fake_response("openrouter", "member-b"),
+        _fake_response("openrouter", "member-c"),
+        _fake_response("openrouter", "synthesis"),
+    ]
+    call_mock = mocker.patch.object(OpenRouterProvider, "call", side_effect=responses)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "council",
+            "--effort",
+            "medium",
+            "--brief",
+            "Debate this architecture decision.",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert call_mock.call_count == 4
+    first_three = [call.kwargs["model"] for call in call_mock.call_args_list[:3]]
+    assert first_three == [
+        "~google/gemini-pro-latest",
+        "~moonshotai/kimi-latest",
+        "deepseek/deepseek-v4-pro",
+    ]
+    assert call_mock.call_args_list[3].kwargs["models"] == (
+        "~google/gemini-pro-latest",
+        "~openai/gpt-latest",
+    )
+    payload = json.loads(result.stdout)
+    assert payload["semantic"]["kind"] == "council"
+    assert payload["semantic"]["candidates"][0]["provider"] == "openrouter"
+
+
+def test_ask_council_rejects_offline():
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "council",
+            "--offline",
+            "--brief",
+            "Debate this.",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "council always routes through OpenRouter" in result.output
+
+
+# ---------------------------------------------------------------------------
 # review — native provider review mode
 # ---------------------------------------------------------------------------
 
@@ -848,9 +1042,8 @@ def test_exec_non_json_still_surfaces_codex_auth_prompt(mocker, monkeypatch, tmp
 
 
 def test_exec_with_kimi_tools_raises_unsupported(mocker, monkeypatch):
-    # Kimi now inherits OpenRouter's HTTP-only exec path. Pinning the
-    # supported tool set empty keeps the CLI on the unsupported-capability
-    # branch deterministically.
+    # Kimi remains a preset chat provider; OpenRouter's generic provider owns
+    # the tool-loop fallback.
     from conductor.providers.kimi import KimiProvider
 
     monkeypatch.setattr(KimiProvider, "supported_tools", frozenset())
@@ -866,7 +1059,6 @@ def test_exec_with_kimi_tools_raises_unsupported(mocker, monkeypatch):
         "UnsupportedCapability" in result.stderr
         or "not supported" in result.stderr
         or "does not support" in result.stderr
-        or "does not yet drive a tool-use loop" in result.stderr
     )
 
 

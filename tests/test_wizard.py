@@ -718,20 +718,20 @@ def _stub_all_providers_unconfigured(mocker):
         mocker.patch.object(cls, "configured", lambda self: (False, "stubbed"))
 
 
-def test_init_yes_does_not_auto_wire_without_flag(mocker, tmp_path):
-    """Non-interactive run with default flags must NOT write agent files.
-
-    Doctrine 0002: non-TTY paths are flag-driven; silent side effects on
-    fresh installs are forbidden.
-    """
+def test_init_yes_auto_wires_without_flag(mocker, tmp_path):
+    """Fresh unscoped init writes agent-readable guidance by default."""
     _stub_all_providers_unconfigured(mocker)
     claude_dir = tmp_path / ".claude"
-    claude_dir.mkdir()  # Claude detected but no --wire-agents flag
+    claude_dir.mkdir()  # Claude detected; no --wire-agents flag needed.
 
     result = CliRunner().invoke(main, ["init", "--yes"])
-    assert result.exit_code == 0
-    assert not (claude_dir / "commands" / "conductor.md").exists()
-    assert not (claude_dir / "agents" / "kimi-long-context.md").exists()
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / ".conductor" / "delegation-guidance.md").exists()
+    assert (claude_dir / "commands" / "conductor.md").exists()
+    assert (claude_dir / "agents" / "kimi-long-context.md").exists()
+    assert (tmp_path / "repo" / "AGENTS.md").exists()
+    claude_md = (claude_dir / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "delegation-guidance.md" in claude_md
 
 
 def test_init_yes_with_wire_agents_yes_writes_files(mocker, tmp_path):
@@ -793,22 +793,22 @@ def test_init_only_skips_agent_wiring_entirely(mocker, tmp_path):
     assert not (tmp_path / ".conductor" / "delegation-guidance.md").exists()
 
 
-def test_init_interactive_claude_detected_prompts(mocker, tmp_path):
-    """On TTY with Claude detected, the wizard prompts and honors [n]."""
+def test_init_interactive_claude_detected_auto_wires(mocker, tmp_path):
+    """On TTY, the default unscoped flow wires guidance after provider setup."""
     _stub_all_providers_unconfigured(mocker)
     mocker.patch("conductor.wizard._is_tty", return_value=True)
     (tmp_path / ".claude").mkdir()
 
-    # For each provider's concierge flow: [s]kip. Then at the agent prompt: [n]o.
-    # One "s" per built-in provider + agent-wiring "n" (decline).
+    # For each provider's concierge flow: [s]kip. Agent wiring no longer
+    # needs a separate prompt in the default path.
     from conductor.providers import known_providers
 
     skips = "s\n" * len(known_providers())
-    result = CliRunner().invoke(main, ["init"], input=f"{skips}n\n")
+    result = CliRunner().invoke(main, ["init"], input=skips)
     assert result.exit_code == 0
     assert "Agent integration — Claude Code" in result.output
-    # User declined — no files written.
-    assert not (tmp_path / ".conductor" / "delegation-guidance.md").exists()
+    assert (tmp_path / ".conductor" / "delegation-guidance.md").exists()
+    assert (tmp_path / "repo" / "AGENTS.md").exists()
 
 
 def test_init_unwire_removes_managed_files(mocker, tmp_path):

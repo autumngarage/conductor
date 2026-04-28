@@ -217,6 +217,40 @@ def test_call_sends_reasoning_effort_and_openrouter_headers(configured):
     }
 
 
+def test_call_sends_ordered_models_stack(configured):
+    captured: dict[str, object] = {}
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "model": "google/gemini-flash-latest",
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {},
+            },
+        )
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        OpenRouterProvider().call(
+            "hi",
+            models=("google/gemini-flash-latest", "moonshotai/kimi-k2.6"),
+            effort="low",
+        )
+
+    assert captured["payload"] == {
+        "models": ["google/gemini-flash-latest", "moonshotai/kimi-k2.6"],
+        "messages": [{"role": "user", "content": "hi"}],
+        "reasoning": {"effort": "low"},
+    }
+
+
+def test_call_rejects_model_and_models_together(configured):
+    with pytest.raises(UnsupportedCapability, match="both `model` and `models`"):
+        OpenRouterProvider().call("hi", model="openai/gpt-5.5", models=("x/y",))
+
+
 def test_call_without_model_invokes_selector_and_builds_payload(configured, mocker):
     selector = mocker.patch(
         "conductor.providers.openrouter.select_model_for_task",
@@ -272,6 +306,88 @@ def test_call_without_model_invokes_selector_and_builds_payload(configured, mock
     assert response.model == "google/gemini-flash-1.5"
 
 
-def test_exec_with_tools_raises_unsupported(configured):
-    with pytest.raises(UnsupportedCapability):
-        OpenRouterProvider().exec("hi", tools=frozenset({"Read"}))
+def test_exec_with_tools_runs_openai_tool_loop(configured, tmp_path):
+    (tmp_path / "note.txt").write_text("tool loop works", encoding="utf-8")
+    requests: list[dict] = []
+    responses = [
+        {
+            "model": "openai/gpt-5.5",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_read",
+                                "type": "function",
+                                "function": {
+                                    "name": "Read",
+                                    "arguments": json.dumps({"path": "note.txt"}),
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+        },
+        {
+            "model": "openai/gpt-5.5",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "The file says: tool loop works",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 7},
+        },
+    ]
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=responses[len(requests) - 1])
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        response = OpenRouterProvider().exec(
+            "Read note.txt and summarize it.",
+            model="openai/gpt-5.5",
+            tools=frozenset({"Read"}),
+            sandbox="read-only",
+            cwd=str(tmp_path),
+        )
+
+    assert response.text == "The file says: tool loop works"
+    assert response.model == "openai/gpt-5.5"
+    assert response.usage["input_tokens"] == 30
+    assert response.usage["output_tokens"] == 9
+    assert response.usage["tool_iterations"] == 2
+    assert requests[0]["tools"][0]["function"]["name"] == "Read"
+    assert requests[1]["messages"][1]["tool_calls"][0]["id"] == "call_read"
+    assert requests[1]["messages"][2] == {
+        "role": "tool",
+        "tool_call_id": "call_read",
+        "name": "Read",
+        "content": "tool loop works",
+    }
+
+
+def test_exec_with_tools_requires_non_none_sandbox(configured):
+    with pytest.raises(UnsupportedCapability, match="requires at least sandbox"):
+        OpenRouterProvider().exec("hi", tools=frozenset({"Read"}), sandbox="none")
+
+
+def test_exec_with_tools_rejects_model_and_models_together(configured):
+    with pytest.raises(UnsupportedCapability, match="both `model` and `models`"):
+        OpenRouterProvider().exec(
+            "hi",
+            model="openai/gpt-5.5",
+            models=("x/y",),
+            tools=frozenset({"Read"}),
+            sandbox="read-only",
+        )

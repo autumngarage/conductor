@@ -7,6 +7,7 @@ import respx
 from click.testing import CliRunner
 
 import conductor.providers.openrouter_catalog as openrouter_catalog
+from conductor import agent_wiring as aw
 from conductor.cli import main
 from conductor.providers.kimi import KIMI_DEFAULT_MODEL
 from conductor.providers.openrouter import (
@@ -42,6 +43,23 @@ def test_call_unknown_provider_shows_usage_error():
     result = CliRunner().invoke(main, ["call", "--with", "noprovider", "--task", "hi"])
     assert result.exit_code != 0
     assert "unknown provider" in result.output.lower() or "noprovider" in result.output
+
+
+def test_cli_warns_once_for_stale_agent_wiring(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    aw.wire_agents_md(version="0.1.0")
+
+    first = CliRunner().invoke(main, ["list"])
+    second = CliRunner().invoke(main, ["list"])
+
+    assert first.exit_code == 0, first.output
+    assert "agent instructions are out of date" in first.stderr
+    assert "conductor init --yes" in first.stderr
+    assert second.exit_code == 0, second.output
+    assert "agent instructions are out of date" not in second.stderr
 
 
 def test_call_missing_task_and_no_stdin_errors():

@@ -22,6 +22,7 @@ used.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -42,6 +43,28 @@ _SENTINEL_BLOCK_RE = re.compile(
     r"(?:\n?)" + re.escape("<!-- conductor:begin v") + r"[^>]*-->\n"
     r".*?\n" + re.escape(SENTINEL_END) + r"\n?",
     flags=re.DOTALL,
+)
+
+_PROJECT_MARKERS = frozenset(
+    {
+        ".git",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "GEMINI.md",
+        "pyproject.toml",
+        "package.json",
+        "Cargo.toml",
+        "go.mod",
+        "Gemfile",
+    }
+)
+_REPO_SCOPED_KINDS = frozenset(
+    {
+        "agents-md-import",
+        "gemini-md-import",
+        "claude-md-repo-import",
+        "cursor-rule",
+    }
 )
 
 
@@ -250,6 +273,100 @@ def read_managed_version(path: Path) -> str | None:
 
 def is_managed_file(path: Path) -> bool:
     return read_managed_version(path) is not None
+
+
+def project_root_for_wiring_notice(cwd: Path | None = None) -> Path | None:
+    """Return the nearest project root worth checking for agent wiring.
+
+    This intentionally uses marker files instead of recursively scanning the
+    machine. The startup notice is advisory and must stay cheap.
+    """
+    start = (cwd or Path.cwd()).resolve()
+    candidates = (start, *start.parents)
+    for candidate in candidates:
+        if any((candidate / marker).exists() for marker in _PROJECT_MARKERS):
+            return candidate
+    return None
+
+
+def agent_wiring_notice(
+    *,
+    cwd: Path | None = None,
+    current_version: str,
+    include_missing: bool = False,
+) -> tuple[str, str] | None:
+    """Return a one-time notice key/message if repo wiring needs refresh.
+
+    ``include_missing`` is meant for interactive shells. Non-interactive
+    callers get stale managed-block warnings, but not missing-block warnings,
+    because a repo may deliberately not use agent instruction files.
+    """
+    root = project_root_for_wiring_notice(cwd)
+    if root is None:
+        return None
+
+    detection = detect(cwd=root)
+    stale: list[str] = []
+    for artifact in detection.managed:
+        if artifact.kind not in _REPO_SCOPED_KINDS:
+            continue
+        if artifact.version and artifact.version != current_version:
+            try:
+                display = artifact.path.relative_to(root)
+            except ValueError:
+                display = artifact.path
+            stale.append(f"{display} has conductor v{artifact.version}")
+
+    agents_current = any(
+        artifact.kind == "agents-md-import"
+        and artifact.version == current_version
+        for artifact in detection.managed
+    )
+    agents_missing = not agents_current
+
+    if stale:
+        reason = "stale"
+        detail = "; ".join(stale)
+    elif include_missing and agents_missing:
+        reason = "missing"
+        detail = "AGENTS.md has no current conductor delegation block"
+    else:
+        return None
+
+    key = _notice_key(root=root, current_version=current_version, reason=reason)
+    message = (
+        "[conductor] This repo's Conductor agent instructions are "
+        f"{'out of date' if reason == 'stale' else 'missing'}.\n"
+        f"[conductor] {detail}.\n"
+        "[conductor] Refresh them with: conductor init --yes"
+    )
+    return key, message
+
+
+def should_emit_agent_wiring_notice(key: str) -> bool:
+    """Return True once per notice key, persisting the seen marker best-effort."""
+    path = _notice_seen_path(key)
+    try:
+        if path.exists():
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("seen\n", encoding="utf-8")
+    except OSError:
+        # Broken cache must not break a conductor invocation. If the marker
+        # cannot be written, emit the notice for this process.
+        return True
+    return True
+
+
+def _notice_key(*, root: Path, current_version: str, reason: str) -> str:
+    raw = f"{root.resolve()}\0{current_version}\0{reason}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _notice_seen_path(key: str) -> Path:
+    from conductor.offline_mode import _cache_dir
+
+    return _cache_dir() / "agent-wiring-notices" / f"{key}.seen"
 
 
 def write_managed_markdown(path: Path, body: str, *, version: str) -> None:

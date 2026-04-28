@@ -6,7 +6,7 @@ This document is the durable contract for downstream tools that invoke Conductor
 
 ## Stability contract
 
-`conductor call` and `conductor review` flag surfaces and their shared **`--json` output schema** follow semver. Within a major version:
+`conductor ask`, `conductor call`, and `conductor review` flag surfaces and their shared **`--json` output schema** follow semver. Within a major version:
 
 - Documented flags don't change meaning or get removed.
 - Documented JSON fields don't get renamed or change types.
@@ -21,6 +21,9 @@ Regression tests cover the high-risk pieces of this surface, including JSON auto
 # Auto-routed by tag preference
 conductor call --auto --tags <tag1,tag2> [options]
 
+# Semantic intent routing
+conductor ask --kind <research|code|review|council> --effort <level> [options]
+
 # Explicit provider
 conductor call --with <provider> [options]
 
@@ -32,9 +35,30 @@ conductor review --auto --base <branch-or-ref> [options]
 conductor review --with <provider> --base <branch-or-ref> [options]
 ```
 
-Usually, exactly one of `--auto` or `--with` is required. `--auto` runs the router using `--tags`, `--prefer`, and `--exclude` to pick a configured provider; `--with` bypasses the router for direct provider use. `--offline` is the exception: it may be used without `--auto` or `--with`, sets the sticky offline flag, and rewrites the call to `--with ollama`. Passing `--offline --with <non-ollama>` is an error. `--no-offline` clears the sticky flag, then normal `--auto` / `--with` rules apply.
+Use `conductor ask` when the caller knows the semantic kind but does not want to reason about providers. It applies Conductor's deterministic `kind × effort` matrix, then delegates to `call`, `exec`, `review`, or council fan-out internally. Provider/model/tag/tool overrides intentionally stay on the lower-level `call`, `exec`, and `review` commands.
+
+Usually, exactly one of `--auto` or `--with` is required for `call`, `exec`, and `review`. `--auto` runs the router using `--tags`, `--prefer`, and `--exclude` to pick a configured provider; `--with` bypasses the router for direct provider use. `--offline` is the exception: it may be used without `--auto` or `--with`, sets the sticky offline flag, and rewrites the call to `--with ollama`. Passing `--offline --with <non-ollama>` is an error. `--no-offline` clears the sticky flag, then normal `--auto` / `--with` rules apply.
 
 Use `conductor review` for read-only code review. It only routes to providers with native review entrypoints: Codex `codex review`, Claude Code `/review`, and Gemini CLI `/code-review` when the Code Review extension is installed. Use `conductor exec` for engineering or auto-fix tasks that may edit files.
+
+## Semantic matrix
+
+`conductor ask` ships with deterministic defaults. A row's stack is ordered: Conductor tries the first configured provider path and falls back through the row only when the normal retry/fallback path says it is safe. OpenRouter rows use Conductor's OpenRouter selector and OpenRouter's auto routing instead of hard-coding a model for every semantic case.
+
+| Kind | Effort | Mode | Default stack |
+|---|---|---|---|
+| `research` | `minimal`, `low` | `call` | `openrouter` auto → `ollama` |
+| `research` | `medium` | `call` | `openrouter` auto with thinking bias → `ollama` |
+| `research` | `high`, `max` | `call` | `openrouter` auto with strong-reasoning bias → `ollama` |
+| `code` | `minimal`, `low` | `call` | `openrouter` auto with coding/cheap bias → `ollama` |
+| `code` | `medium` | `call` | `openrouter` auto with coding/thinking bias → `ollama` |
+| `code` | `high`, `max` | `exec` | `codex` → `claude` → `openrouter` → `ollama`, with `Read,Grep,Glob,Edit,Write,Bash` and `workspace-write` |
+| `review` | all levels | `review` | `codex` → `claude` → `gemini`, native review only |
+| `council` | `minimal`, `low` | `council` | OpenRouter fan-out: `~google/gemini-flash-latest`, `~openai/gpt-mini-latest`; synthesize with the same stack |
+| `council` | `medium` | `council` | OpenRouter fan-out: `~google/gemini-pro-latest`, `~moonshotai/kimi-latest`, `deepseek/deepseek-v4-pro`; synthesize with `~google/gemini-pro-latest` → `~openai/gpt-latest` |
+| `council` | `high`, `max` | `council` | OpenRouter fan-out: `~google/gemini-pro-latest`, `~anthropic/claude-sonnet-latest`, `~openai/gpt-latest`, `deepseek/deepseek-v4-pro`, `qwen/qwen3.6-max-preview`; synthesize with `~openai/gpt-latest` → `~anthropic/claude-sonnet-latest` |
+
+`council` is intentionally OpenRouter-only. It runs independent member calls through OpenRouter, then sends those outputs to an OpenRouter synthesis model. `--offline` is rejected for council because it violates that invariant.
 
 ## Input
 
@@ -69,6 +93,8 @@ The canonical reference is `conductor call --help`. The contract-level commitmen
 | `--resume <session_id>` | string | stable | Resume claude/codex/gemini session |
 | `--offline` / `--no-offline` | bool | stable | Force/clear local-only routing |
 | `--profile <name>` | string | stable | Apply named profile defaults |
+
+`conductor ask --help` is the canonical reference for the semantic API. Its stable flags are: --kind, --effort, --cwd, --timeout, --max-stall-seconds, --base, --commit, --uncommitted, --title, --brief, --brief-file, --task, --task-file, --log-file, --json, --verbose-route, --silent-route, --offline, --no-offline, --preflight, --no-preflight, and --allow-short-brief.
 
 ## Output (`--json`)
 
@@ -181,6 +207,18 @@ Sentinel maps the JSON response into its `ChatResponse` dataclass: `text` → `r
 ### Sentinel — agentic code (Coder role)
 
 The Coder role should use `conductor exec`, not `conductor call`. `exec` is the agentic subcommand for multi-turn work with tool access, preflight checks, sandbox settings, stall detection, and session logs. Its consumer contract is separate from this `conductor call` contract; use `conductor exec --help` for the current flag surface until that contract is documented.
+
+### Generic semantic delegation
+
+Agents that do not need provider-level control should prefer `ask`:
+
+```bash
+conductor ask --kind research --effort medium --brief-file /tmp/brief.md --json
+conductor ask --kind code --effort high --brief-file /tmp/brief.md --json
+conductor ask --kind council --effort medium --brief-file /tmp/brief.md --json
+```
+
+For merge review, Touchstone should continue to use `conductor review` or `conductor ask --kind review`; both must trigger native review mode, not generic code chat.
 
 ## Versioning policy
 
