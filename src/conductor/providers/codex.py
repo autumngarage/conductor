@@ -228,17 +228,19 @@ class CodexProvider:
         codex_effort_flag = (
             _EFFORT_TO_CODEX_FLAG.get(effort) if isinstance(effort, str) else None
         )
+        review_prompt = self._build_review_prompt(
+            task,
+            base=base,
+            commit=commit,
+            uncommitted=uncommitted,
+            title=title,
+        )
         args = [self._cli, "review"]
         if codex_effort_flag:
             args.extend(["-c", f"model_reasoning_effort={codex_effort_flag}"])
-        if uncommitted:
-            args.append("--uncommitted")
-        if base:
-            args.extend(["--base", base])
-        if commit:
-            args.extend(["--commit", commit])
-        if title:
-            args.extend(["--title", title])
+        # `codex review` rejects target flags when a prompt is supplied.
+        # Touchstone always needs a strict sentinel/rubric prompt, so encode
+        # the target in the prompt instead of forwarding --base/--commit.
         args.append("-")
 
         timeout = self._timeout_sec if timeout_sec is None else timeout_sec
@@ -246,7 +248,7 @@ class CodexProvider:
         try:
             result = subprocess.run(
                 args,
-                input=task,
+                input=review_prompt,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -294,6 +296,28 @@ class CodexProvider:
                 },
             },
         )
+
+    @staticmethod
+    def _build_review_prompt(
+        task: str,
+        *,
+        base: str | None,
+        commit: str | None,
+        uncommitted: bool,
+        title: str | None,
+    ) -> str:
+        target_lines: list[str] = []
+        if base:
+            target_lines.append(f"- Review changes against base branch/ref: {base}")
+        if commit:
+            target_lines.append(f"- Review commit: {commit}")
+        if uncommitted:
+            target_lines.append("- Include staged, unstaged, and untracked changes.")
+        if title:
+            target_lines.append(f"- Review title: {title}")
+        if not target_lines:
+            return task
+        return "Review target:\n" + "\n".join(target_lines) + "\n\n" + task
 
     def _parse_ndjson(
         self, stdout: str
