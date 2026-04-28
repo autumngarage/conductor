@@ -91,6 +91,7 @@ def _isolated_consumer_contract_env(monkeypatch, tmp_path):
 
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path / "conductor-home"))
     monkeypatch.setenv(
         "CONDUCTOR_PROVIDERS_FILE",
         str(tmp_path / "config" / "providers.toml"),
