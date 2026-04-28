@@ -1422,16 +1422,20 @@ def exec_cmd(
         print_caller_banner(decision.provider, silent=silent_route or as_json)
         _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
         if preflight:
-            ok, reason = _run_exec_preflight(provider)
+            # `provider` may arrive as a Provider object (real `pick()` return)
+            # or as a string (test fixtures, and any caller passing the name).
+            # Resolve once via the helper so downstream `.name` access is safe.
+            provider_obj = _provider_for_preflight(provider)
+            ok, reason = provider_obj.health_probe()
             if not ok:
                 if session_log is not None:
-                    session_log.bind_provider(provider.name)
+                    session_log.bind_provider(provider_obj.name)
                     session_log.emit(
                         "provider_failed",
-                        {"provider": provider.name, "error": reason or "preflight failed"},
+                        {"provider": provider_obj.name, "error": reason or "preflight failed"},
                     )
                     session_log.mark_finished()
-                _echo_preflight_failure(provider, reason)
+                _echo_preflight_failure(provider_obj, reason)
                 sys.exit(2)
 
         try:
