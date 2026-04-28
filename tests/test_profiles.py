@@ -80,7 +80,17 @@ def test_exec_profile_applies_builtin_sandbox(mocker):
 
     result = CliRunner().invoke(
         main,
-        ["exec", "--auto", "--profile", "coding", "--tools", "Read", "--task", "hi"],
+        [
+            "exec",
+            "--auto",
+            "--profile",
+            "coding",
+            "--tools",
+            "Read",
+            "--no-preflight",
+            "--task",
+            "hi",
+        ],
     )
 
     assert result.exit_code == 0, result.output
@@ -110,7 +120,17 @@ def test_user_profile_overrides_builtin(mocker, monkeypatch, tmp_path):
 
     result = CliRunner().invoke(
         main,
-        ["exec", "--auto", "--profile", "coding", "--tools", "Read", "--task", "hi"],
+        [
+            "exec",
+            "--auto",
+            "--profile",
+            "coding",
+            "--tools",
+            "Read",
+            "--no-preflight",
+            "--task",
+            "hi",
+        ],
     )
 
     assert result.exit_code == 0, result.output
@@ -157,6 +177,7 @@ def test_explicit_flags_override_profile_defaults(mocker):
             "workspace-write",
             "--tools",
             "Read",
+            "--no-preflight",
             "--task",
             "hi",
         ],
@@ -197,6 +218,7 @@ def test_profile_env_cli_precedence(mocker, monkeypatch):
             "coding,tool-use",
             "--tools",
             "Read",
+            "--no-preflight",
             "--task",
             "hi",
         ],
