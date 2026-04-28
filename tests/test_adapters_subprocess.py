@@ -770,12 +770,13 @@ def test_codex_review_uses_native_review_command(mocker):
     assert args[0:2] == ["codex", "review"]
     assert "-c" in args
     assert args[args.index("-c") + 1] == "model_reasoning_effort=medium"
-    assert "--base" in args
-    assert args[args.index("--base") + 1] == "origin/main"
-    assert "--title" in args
-    assert args[args.index("--title") + 1] == "PR review"
+    assert "--base" not in args
+    assert "--title" not in args
     assert args[-1] == "-"
-    assert captured.call_args.kwargs["input"] == "Use AGENTS.md rubric."
+    prompt = captured.call_args.kwargs["input"]
+    assert "Review changes against base branch/ref: origin/main" in prompt
+    assert "Review title: PR review" in prompt
+    assert "Use AGENTS.md rubric." in prompt
     assert response.provider == "codex"
     assert response.model == "codex-review"
     assert response.text == "LGTM"
