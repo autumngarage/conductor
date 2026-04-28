@@ -110,7 +110,7 @@ class _FakeScheduledPipe:
 class _FakePopen:
     def __init__(self, *, stdout_lines, stderr_lines=None, returncode: int = 0) -> None:
         self.args = None
-        self.returncode = None
+        self.returncode: int | None = None
         self._configured_returncode = returncode
         self.stdout = _FakeScheduledPipe(stdout_lines, on_eof=self._finish)
         self.stderr = _FakeScheduledPipe(stderr_lines or [])

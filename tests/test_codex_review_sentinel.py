@@ -15,8 +15,21 @@ def test_codex_review_sentinel_shell_regression() -> None:
 def test_codex_review_wrapper_accepts_footer_after_sentinel(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
+    # Strip inherited GIT_* and PRE_COMMIT_* env vars — when this test runs
+    # inside a `git push` context (e.g., the pre-push hook via pre-commit),
+    # git exports GIT_DIR / GIT_WORK_TREE pointing at the outer repo, and
+    # pre-commit exports PRE_COMMIT_REMOTE_BRANCH naming the branch being
+    # pushed. `scripts/codex-review.sh` reads PRE_COMMIT_REMOTE_BRANCH to
+    # decide whether the push targets the default branch — without
+    # stripping it, the script sees the outer feature-branch name, takes
+    # the "not on main, skip" path, and the "ALL CLEAR" assertion fails.
+    sanitized_env = {
+        k: v
+        for k, v in os.environ.items()
+        if not (k.startswith("GIT_") or k.startswith("PRE_COMMIT_"))
+    }
     env = {
-        **os.environ,
+        **sanitized_env,
         "GIT_AUTHOR_NAME": "t",
         "GIT_AUTHOR_EMAIL": "t@t",
         "GIT_COMMITTER_NAME": "t",
