@@ -393,6 +393,151 @@ def test_claude_exec_stall_watchdog_kills_silent_provider_and_logs_error(
     assert error_event["data"]["last_event"] == "provider_started"
 
 
+def test_claude_exec_first_output_watchdog_is_separate_from_mid_task_stall(
+    mocker,
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    fake = _FakePopen(stdout_schedule=[], hang_after_stdout=True)
+    mocker.patch(
+        "conductor.providers.claude.subprocess.Popen",
+        side_effect=lambda args, **kwargs: fake,
+    )
+    session_log = SessionLog(path=tmp_path / "claude-first-output-stall.ndjson")
+
+    with pytest.raises(ProviderStalledError) as exc:
+        ClaudeProvider(first_output_timeout_sec=0.05).exec(
+            "hi",
+            timeout_sec=1,
+            max_stall_sec=30,
+            session_log=session_log,
+        )
+
+    assert fake.terminated is True
+    assert "produced no output within 0.05s after start" in str(exc.value)
+    events = [
+        json.loads(line)
+        for line in session_log.log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    diagnostic = next(
+        event
+        for event in events
+        if event["event"] == "provider_diagnostic"
+        and event["data"]["check"] == "claude_exec_watchdogs"
+    )
+    assert diagnostic["data"]["first_output_timeout_sec"] == 0.05
+    assert diagnostic["data"]["max_stall_sec"] == 30
+    error_event = next(event for event in events if event["event"] == "error")
+    assert error_event["data"]["reason"] == "no_initial_provider_output_within_0.05s"
+    assert error_event["data"]["phase"] == "first_output"
+    assert error_event["data"]["last_event"] == "provider_started"
+
+
+def test_claude_exec_first_output_watchdog_respects_stall_watchdog_disable(
+    mocker,
+):
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    fake = _FakePopen(stdout_schedule=[], hang_after_stdout=True)
+    mocker.patch(
+        "conductor.providers.claude.subprocess.Popen",
+        side_effect=lambda args, **kwargs: fake,
+    )
+
+    with pytest.raises(ProviderError) as exc:
+        ClaudeProvider(first_output_timeout_sec=0.01).exec(
+            "hi",
+            timeout_sec=0.05,
+            max_stall_sec=None,
+        )
+
+    assert not isinstance(exc.value, ProviderStalledError)
+    assert "timed out" in str(exc.value)
+    assert fake.terminated is True
+
+
+def test_claude_exec_sets_pwd_to_configured_cwd_for_project_settings(
+    mocker,
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("PWD", "/not/the/project")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    repo = tmp_path / "repo"
+    settings_dir = repo / ".claude"
+    settings_dir.mkdir(parents=True)
+    (settings_dir / "settings.json").write_text(
+        json.dumps({"permissions": {"deny": ["Bash(rm:*)"]}}),
+        encoding="utf-8",
+    )
+    (settings_dir / "settings.local.json").write_text(
+        json.dumps({"permissions": {"allow": ["Bash(git status:*)"]}}),
+        encoding="utf-8",
+    )
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    fake = _FakePopen(stdout_schedule=[(0, CLAUDE_JSON)])
+    captured: dict[str, object] = {}
+
+    def factory(args, **kwargs):
+        fake.args = args
+        captured.update(kwargs)
+        return fake
+
+    mocker.patch("conductor.providers.claude.subprocess.Popen", side_effect=factory)
+    session_log = SessionLog(path=tmp_path / "claude-settings.ndjson")
+
+    response = ClaudeProvider(first_output_timeout_sec=1).exec(
+        "hi",
+        sandbox="workspace-write",
+        cwd=str(repo),
+        session_log=session_log,
+    )
+
+    assert response.text == "hello from claude"
+    assert "--setting-sources" in fake.args
+    assert fake.args[fake.args.index("--setting-sources") + 1] == "user,project,local"
+    assert captured["cwd"] == str(repo.resolve())
+    assert captured["env"]["PWD"] == str(repo.resolve())
+    events = [
+        json.loads(line)
+        for line in session_log.log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    settings_event = next(
+        event
+        for event in events
+        if event["event"] == "provider_diagnostic"
+        and event["data"]["check"] == "claude_project_settings"
+    )
+    assert settings_event["data"]["settings_json_exists"] is True
+    assert settings_event["data"]["settings_local_exists"] is True
+    assert settings_event["data"]["permissions_configured"] is True
+    assert settings_event["data"]["permission_sources"] == [
+        "settings.json",
+        "settings.local.json",
+    ]
+    assert settings_event["data"]["permission_keys"] == ["allow", "deny"]
+    assert settings_event["data"]["permission_mode"] == "acceptEdits"
+
+
+def test_claude_exec_rejects_invalid_project_settings_before_launch(
+    mocker,
+    tmp_path,
+):
+    repo = tmp_path / "repo"
+    settings_dir = repo / ".claude"
+    settings_dir.mkdir(parents=True)
+    (settings_dir / "settings.local.json").write_text("{not json", encoding="utf-8")
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    popen = mocker.patch("conductor.providers.claude.subprocess.Popen")
+
+    with pytest.raises(ProviderConfigError) as exc:
+        ClaudeProvider().exec("hi", sandbox="workspace-write", cwd=str(repo))
+
+    assert "invalid Claude project settings JSON" in str(exc.value)
+    assert popen.call_count == 0
+
+
 # ---------------------------------------------------------------------------
 # Codex
 # ---------------------------------------------------------------------------

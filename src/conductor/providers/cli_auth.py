@@ -185,6 +185,7 @@ def run_subprocess_with_live_stderr(
     env: dict[str, str] | None,
     timeout: float | None,
     max_stall_sec: float | None = None,
+    first_output_timeout_sec: float | None = None,
     provider_name: str | None = None,
     session_log: SessionLog | None = None,
     tracker: AuthPromptTracker,
@@ -226,6 +227,7 @@ def run_subprocess_with_live_stderr(
     stderr_thread.start()
 
     last_output = start
+    saw_output = False
     provider_label = provider_name or str(args[0])
     while True:
         now = time.monotonic()
@@ -241,7 +243,42 @@ def run_subprocess_with_live_stderr(
                 stderr="".join(parts["stderr"]),
             )
 
-        if max_stall_sec is not None and now - last_output > max_stall_sec:
+        if (
+            first_output_timeout_sec is not None
+            and not saw_output
+            and stream_q.empty()
+            and now - start > first_output_timeout_sec
+        ):
+            _terminate_process(process)
+            stdout_thread.join(timeout=1)
+            stderr_thread.join(timeout=1)
+            _drain_stream_queue(stream_q, parts, tracker)
+            elapsed = time.monotonic() - start
+            reason = (
+                "no_initial_provider_output_within_"
+                f"{_format_stall_seconds(first_output_timeout_sec)}s"
+            )
+            if session_log is not None:
+                session_log.emit(
+                    "error",
+                    {
+                        "provider": provider_label,
+                        "reason": reason,
+                        "phase": "first_output",
+                        "last_event": "provider_started",
+                        "silent_sec": round(elapsed, 1),
+                    },
+                )
+            raise ProviderStalledError(
+                f"{provider_label} CLI produced no output within "
+                f"{_format_stall_seconds(first_output_timeout_sec)}s after start"
+            )
+
+        if (
+            max_stall_sec is not None
+            and stream_q.empty()
+            and now - last_output > max_stall_sec
+        ):
             _terminate_process(process)
             stdout_thread.join(timeout=1)
             stderr_thread.join(timeout=1)
@@ -284,6 +321,7 @@ def run_subprocess_with_live_stderr(
             continue
 
         parts[stream_name].append(item)
+        saw_output = True
         last_output = time.monotonic()
         if stream_name == "stderr":
             tracker.observe_text(item, source="stderr")
