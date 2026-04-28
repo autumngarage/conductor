@@ -75,12 +75,12 @@ When `--json` is set, stdout receives a single JSON object on completion. Schema
   "model": "string — model id used",
   "duration_ms": "integer — total wall time",
   "usage": {
-    "input_tokens": "integer",
-    "output_tokens": "integer",
+    "input_tokens": "integer | null",
+    "output_tokens": "integer | null",
     "cached_tokens": "integer | null",
     "thinking_tokens": "integer | null",
-    "effort": "string — minimal | low | medium | high | max",
-    "thinking_budget": "integer — token budget for thinking"
+    "effort": "string | null — minimal | low | medium | high | max",
+    "thinking_budget": "integer | null — token budget for thinking"
   },
   "cost_usd": "number — best-effort cost estimate; null if unknown",
   "session_id": "string | null — for --resume on supporting providers",
@@ -89,6 +89,8 @@ When `--json` is set, stdout receives a single JSON object on completion. Schema
   }
 }
 ```
+
+`usage` is best effort. Providers may report `null` when upstream usage data is unavailable, and consumers should tolerate additive usage keys.
 
 ### Auto-routing additions
 
