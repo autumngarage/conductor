@@ -62,6 +62,23 @@ def test_cli_warns_once_for_stale_agent_wiring(monkeypatch, tmp_path):
     assert "agent instructions are out of date" not in second.stderr
 
 
+def test_cli_does_not_warn_for_fresh_agent_wiring(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setattr("conductor.cli.__version__", "0.8.1+2.gabc123")
+    aw.wire_agents_md(version="0.8.1")
+    aw.wire_gemini_md(version="0.8.1")
+    aw.wire_claude_md_repo(version="0.8.1")
+    aw.wire_cursor(version="0.8.1")
+
+    result = CliRunner().invoke(main, ["list"])
+
+    assert result.exit_code == 0, result.output
+    assert "agent instructions are out of date" not in result.stderr
+
+
 def test_call_missing_task_and_no_stdin_errors():
     # CliRunner attaches an empty pipe as stdin (isatty=False), so we hit the
     # empty-brief branch rather than the no-brief-no-stdin branch. Both signal

@@ -79,6 +79,28 @@ def _sentinel_begin(version: str) -> str:
     return f"<!-- conductor:begin v{version} -->"
 
 
+def _normalize_generated_text(text: str) -> str:
+    """Strip line-end whitespace from conductor-generated artifacts."""
+    return "\n".join(line.rstrip(" \t") for line in text.splitlines()) + "\n"
+
+
+def _frontmatter_line(key: str, value: str) -> str:
+    if value == "":
+        return f'{key}: ""'
+    return f"{key}: {value}"
+
+
+def _canonical_wiring_version(version: str) -> str:
+    value = version.strip()
+    if re.match(r"^v\d", value):
+        value = value[1:]
+    return value.split("+", 1)[0]
+
+
+def _wiring_versions_match(left: str, right: str) -> bool:
+    return _canonical_wiring_version(left) == _canonical_wiring_version(right)
+
+
 # --------------------------------------------------------------------------- #
 # Paths — ~/.conductor/ and ~/.claude/ with test-time overrides.
 # --------------------------------------------------------------------------- #
@@ -306,11 +328,14 @@ def agent_wiring_notice(
         return None
 
     detection = detect(cwd=root)
+    current_version_key = _canonical_wiring_version(current_version)
     stale: list[str] = []
     for artifact in detection.managed:
         if artifact.kind not in _REPO_SCOPED_KINDS:
             continue
-        if artifact.version and artifact.version != current_version:
+        if artifact.version and not _wiring_versions_match(
+            artifact.version, current_version
+        ):
             try:
                 display = artifact.path.relative_to(root)
             except ValueError:
@@ -319,7 +344,8 @@ def agent_wiring_notice(
 
     agents_current = any(
         artifact.kind == "agents-md-import"
-        and artifact.version == current_version
+        and artifact.version
+        and _wiring_versions_match(artifact.version, current_version)
         for artifact in detection.managed
     )
     agents_missing = not agents_current
@@ -333,7 +359,7 @@ def agent_wiring_notice(
     else:
         return None
 
-    key = _notice_key(root=root, current_version=current_version, reason=reason)
+    key = _notice_key(root=root, current_version=current_version_key, reason=reason)
     message = (
         "[conductor] This repo's Conductor agent instructions are "
         f"{'out of date' if reason == 'stale' else 'missing'}.\n"
@@ -380,7 +406,7 @@ def write_managed_markdown(path: Path, body: str, *, version: str) -> None:
         raise UserOwnedFileError(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     header = _managed_comment(version) + "\n"
-    path.write_text(header + body, encoding="utf-8")
+    path.write_text(_normalize_generated_text(header + body), encoding="utf-8")
 
 
 def write_managed_frontmatter(
@@ -402,12 +428,15 @@ def write_managed_frontmatter(
     for key, value in frontmatter.items():
         if key == "managed-by":
             continue
-        lines.append(f"{key}: {value}")
+        lines.append(_frontmatter_line(key, value))
     # managed-by last: the user sees name/description/etc. first when they
     # open the file; our marker sits at the bottom of the frontmatter.
     lines.append(f"managed-by: conductor v{version}")
     lines.append("---")
-    path.write_text("\n".join(lines) + "\n\n" + body, encoding="utf-8")
+    path.write_text(
+        _normalize_generated_text("\n".join(lines) + "\n\n" + body),
+        encoding="utf-8",
+    )
 
 
 class UserOwnedFileError(Exception):
@@ -462,9 +491,10 @@ def inject_sentinel_block(path: Path, content: str, *, version: str) -> None:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    clean_content = _normalize_generated_text(content).rstrip("\n")
     block = (
         f"{_sentinel_begin(version)}\n"
-        f"{content.rstrip()}\n"
+        f"{clean_content}\n"
         f"{SENTINEL_END}\n"
     )
 
