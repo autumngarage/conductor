@@ -13,7 +13,7 @@ This document is the durable contract for downstream tools that invoke Conductor
 - Additive changes are always allowed: new flags, new fields. Consumers must ignore unknown JSON fields.
 - The `raw` field of the JSON output is provider-specific and **explicitly not stable** — it passes through whatever the underlying provider CLI emitted. Consumers that read `raw` accept upstream churn.
 
-A regression test in this repo asserts the documented flag surface and output schema; it fails CI on accidental drift. That test is the executable form of this document.
+Regression tests cover the high-risk pieces of this surface, including JSON auto-route output and the current error-code buckets. When this contract grows, add tests for the new stable field or flag in the same PR.
 
 ## Invocation forms
 
@@ -29,13 +29,13 @@ Exactly one of `--auto` or `--with` is required. `--auto` runs the router using 
 
 ## Input
 
-The task prompt comes from one of three sources, in this resolution order:
+The task prompt, usually a delegation brief, comes from one of these sources:
 
-1. `--task "..."` — string flag. Avoid for long briefs (visible in `ps aux`).
-2. `--task-file <path>` — read from a UTF-8 file. Use `-` to read stdin explicitly.
-3. **Stdin** — when neither flag is set, conductor reads stdin until EOF.
+1. `--brief "..."` / `--task "..."` — string flag. Avoid for long briefs (visible in `ps aux`).
+2. `--brief-file <path>` / `--task-file <path>` — read from a UTF-8 file. Use `-` to read stdin explicitly.
+3. **Stdin** — when no input flag is set, conductor reads stdin until EOF.
 
-Long prompts: prefer `--task-file` or stdin to keep the brief out of process listings.
+`--brief` and `--brief-file` are the preferred spellings for delegation. `--task` and `--task-file` remain compatibility aliases. Long prompts: prefer `--brief-file` or stdin to keep the brief out of process listings.
 
 ## Flags
 
@@ -49,8 +49,10 @@ The canonical reference is `conductor call --help`. The contract-level commitmen
 | `--prefer <mode>` | string | stable | One of: best, cheapest, fastest, balanced. Default: balanced |
 | `--effort <level>` | string \| int | stable | One of: minimal, low, medium, high, max. Or integer token budget. Default: medium |
 | `--exclude <csv>` | string | stable | Providers to skip in `--auto` |
-| `--task <text>` | string | stable | Inline prompt |
-| `--task-file <path>` | string | stable | File path, `-` for stdin |
+| `--brief <text>` | string | stable | Inline delegation brief / prompt |
+| `--brief-file <path>` | string | stable | File path, `-` for stdin |
+| `--task <text>` | string | stable | Compatibility alias for `--brief` |
+| `--task-file <path>` | string | stable | Compatibility alias for `--brief-file` |
 | `--model <model>` | string | stable | Override provider default model |
 | `--json` | bool | stable | Emit full `CallResponse` as JSON |
 | `--verbose-route` | bool | stable | Print routing decision to stderr |
@@ -87,16 +89,39 @@ When `--json` is set, stdout receives a single JSON object on completion. Schema
 
 ### Auto-routing additions
 
-When `--auto` is used, the JSON adds a `routing` field summarizing the decision:
+When `--auto` is used, the JSON adds a `route` field with the same `RouteDecision` shape emitted by `conductor route --json`:
 
 ```json
 {
   "...": "...",
-  "routing": {
-    "selected": "claude",
-    "candidates": ["claude", "codex", "kimi"],
-    "tags_requested": ["code-review", "tool-use"],
-    "preference": "balanced"
+  "route": {
+    "provider": "claude",
+    "prefer": "balanced",
+    "effort": "medium",
+    "thinking_budget": 8000,
+    "tier": "frontier",
+    "task_tags": ["code-review", "tool-use"],
+    "matched_tags": ["code-review"],
+    "tools_requested": [],
+    "sandbox": "none",
+    "ranked": [
+      {
+        "name": "claude",
+        "tier": "frontier",
+        "tier_rank": 0,
+        "matched_tags": ["code-review"],
+        "tag_score": 1,
+        "cost_score": 0.045,
+        "latency_ms": 7000,
+        "health_penalty": 0.0,
+        "combined_score": 1.0,
+        "unconfigured_reason": null
+      }
+    ],
+    "candidates_skipped": [],
+    "tag_default_applied": {},
+    "tag_default_considered": [],
+    "unconfigured_shadow": []
   }
 }
 ```
@@ -105,22 +130,17 @@ Use `--verbose-route` to also get the full ranking table on stderr.
 
 ### Error responses
 
-On error, exit code is non-zero (see below) and stderr carries a one-line diagnostic. With `--json`, a partial response object may still be emitted to stdout containing `usage` and `cost_usd` for any provider work that completed before the error — consumers that track cost across retries should always parse stdout when present.
+On error, exit code is non-zero (see below) and stderr carries a one-line diagnostic. With `--json`, stdout is not guaranteed to contain a response object on failure; consumers should parse stdout only when present and keep stderr in their debug logs.
 
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
 | `0` | Success. JSON emitted (with `--json`); text emitted (without). |
-| `2` | CLI usage error (missing flag, invalid flag combination). |
-| `3` | Provider not configured / not reachable (e.g. `ollama` with no daemon). |
-| `4` | Authentication failed. |
-| `5` | Provider returned an HTTP error (4xx, 5xx). |
-| `6` | Tool-use loop hit iteration cap or context budget. |
-| `7` | Timeout (configured via `--timeout-sec` or `subprocess.run(timeout=...)`). |
-| `1` | Unclassified error. Read stderr. |
+| `2` | Usage, routing, configuration, or capability error. Examples: missing `--auto`/`--with`, invalid flag combination, no configured provider for the requested route, provider not configured, unsupported capability. |
+| `1` | Provider/runtime failure or unclassified error. Examples: provider HTTP error, provider CLI failure, timeout surfaced by a provider, unexpected runtime exception. Read stderr. |
 
-Consumers should handle 0 (success) and treat 3–7 as actionable categories; 1 is the catch-all to log and surface.
+Consumers should handle `0` as success and treat every non-zero code as failure. `2` is usually actionable by changing flags, configuration, or routing inputs. `1` is the retry/log/surface bucket. More granular non-zero codes may be added in a future minor release; consumers must not assume the only possible failures are `1` and `2`.
 
 ## Examples
 
@@ -130,7 +150,7 @@ Pre-push gate calls Conductor for the codex review:
 
 ```bash
 conductor call --auto --tags code-review --effort medium \
-  --task-file /tmp/diff.txt --json --silent-route
+  --brief-file /tmp/diff.txt --json --silent-route
 ```
 
 Touchstone parses `text` for the review verdict, `cost_usd` for accounting, `provider`/`model` for the route-log entry.
@@ -141,7 +161,7 @@ Sentinel's roles (Monitor, Researcher, Planner, Reviewer) shell out for non-agen
 
 ```bash
 conductor call --with claude --model sonnet --effort medium \
-  --task-file /tmp/system-prompt.txt --json
+  --brief-file /tmp/system-prompt.txt --json
 ```
 
 Sentinel maps the JSON response into its `ChatResponse` dataclass: `text` → `response`, `usage`/`cost_usd` → budget tracking, `session_id` → recorded for `--resume` if the role wants multi-turn continuity, `raw.stderr` if present → debug log.
@@ -174,4 +194,4 @@ Consumers pin a major version in their own dependency declarations (brew formula
 
 ---
 
-*This contract is the executable surface. Tests in this repo assert the flag set and JSON schema; CHANGELOG records each major-bump migration.*
+*This contract is the executable surface. Tests in this repo should pin every stable field or flag that downstream consumers depend on; CHANGELOG records each major-bump migration.*
