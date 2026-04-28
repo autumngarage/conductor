@@ -33,7 +33,7 @@ from conductor.providers import (
     OllamaProvider,
     OpenRouterProvider,
 )
-from conductor.router import reset_health
+from conductor.router import RouteDecision, reset_health
 
 
 @pytest.fixture(autouse=True)
@@ -556,6 +556,50 @@ def test_exec_cli_preflight_blocks_exec_and_surfaces_fix_hint(mocker):
     assert not exec_mock.called
     assert "[conductor] preflight failed for codex: network is unreachable" in result.stderr
     assert "[conductor] try: brew install codex && codex login" in result.stderr
+
+
+def test_exec_auto_preflight_failure_does_not_attribute_error_on_str_provider(mocker):
+    """Regression: auto-mode `pick()` may return the provider name as a string
+    (test fixtures, and some legacy callers); when preflight fails the cli used
+    to call `provider.name` on that string and AttributeError. This test pins
+    the failure mode by mocking `pick` to return ("codex", decision) and
+    health_probe to fail — the buggy code raised AttributeError; the fixed
+    code emits the standard preflight-failure message and exits 2.
+    """
+    _stub_all_configured(mocker, {"codex"})
+    mocker.patch.object(
+        CodexProvider,
+        "health_probe",
+        return_value=(False, "network is unreachable"),
+    )
+    fake_decision = RouteDecision(
+        provider="codex",
+        prefer="best",
+        effort="medium",
+        thinking_budget=8000,
+        tier="frontier",
+        task_tags=("coding",),
+        matched_tags=("coding",),
+        tools_requested=("Read",),
+        sandbox="workspace-write",
+        ranked=(),
+        candidates_skipped=(),
+        tag_default_applied={},
+    )
+    mocker.patch("conductor.cli.pick", return_value=("codex", fake_decision))
+    exec_mock = mocker.patch.object(
+        CodexProvider, "exec", return_value=_fake_response("codex")
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--auto", "--tags", "coding", "--tools", "Read", "--task", "do it"],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert not exec_mock.called
+    assert "AttributeError" not in result.output
+    assert "[conductor] preflight failed for codex: network is unreachable" in result.stderr
 
 
 def test_exec_cli_no_preflight_skips_probe(mocker):
