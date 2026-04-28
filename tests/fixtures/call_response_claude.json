@@ -1,0 +1,21 @@
+{
+  "text": "hi",
+  "provider": "claude",
+  "model": "sonnet",
+  "duration_ms": 2016,
+  "usage": {
+    "input_tokens": 3,
+    "output_tokens": 4,
+    "cached_tokens": 11631,
+    "thinking_tokens": null,
+    "effort": "medium",
+    "thinking_budget": 8000
+  },
+  "cost_usd": 0.0776283,
+  "session_id": "dc97d0f5-aeb9-479a-b646-123a2e8d97a2",
+  "raw": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false
+  }
+}
