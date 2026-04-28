@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -85,6 +86,9 @@ PROFILE_PRECEDENCE_TEXT = (
 )
 DEFAULT_EXEC_MAX_STALL_SEC = 360
 MIN_EXEC_BRIEF_CHARS = 300
+GIT_RECOVERY_COMMAND_TIMEOUT_SEC = 2.0
+GIT_RECOVERY_MAX_COMMITS = 5
+GIT_RECOVERY_MAX_STATUS_PATHS = 8
 
 
 @dataclass(frozen=True)
@@ -776,6 +780,107 @@ def _collect_session_auth_prompts(session_log: SessionLog | None) -> list[dict] 
         seen.add(key)
         prompts.append(data)
     return prompts or None
+
+
+def _git_stdout(cwd: str, args: list[str], *, errors: list[str]) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=GIT_RECOVERY_COMMAND_TIMEOUT_SEC,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        errors.append(f"`git {' '.join(args)}` failed: {e}")
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def _git_stall_recovery_lines(cwd: str | None) -> list[str]:
+    if not cwd:
+        return []
+
+    errors: list[str] = []
+    root = _git_stdout(cwd, ["rev-parse", "--show-toplevel"], errors=errors)
+    if not root:
+        if errors:
+            return [f"git recovery unavailable: {errors[0]}"]
+        return []
+
+    lines = [f"repo: {root}"]
+
+    branch = _git_stdout(cwd, ["branch", "--show-current"], errors=errors)
+    if not branch:
+        short_head = _git_stdout(cwd, ["rev-parse", "--short", "HEAD"], errors=errors)
+        branch = f"detached at {short_head}" if short_head else "unknown"
+    lines.append(f"branch: {branch}")
+
+    upstream = _git_stdout(
+        cwd,
+        ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        errors=errors,
+    )
+    if upstream:
+        lines.append(f"upstream: {upstream}")
+        commits = _git_stdout(
+            cwd,
+            ["log", "--oneline", f"{upstream}..HEAD", "--"],
+            errors=errors,
+        )
+        commit_lines = commits.splitlines() if commits else []
+        if commit_lines:
+            first = commit_lines[0]
+            suffix = "" if len(commit_lines) == 1 else f"; latest: {first}"
+            lines.append(f"unpushed commits: {len(commit_lines)}{suffix}")
+        else:
+            lines.append("unpushed commits: none")
+    else:
+        lines.append("upstream: none configured")
+        commits = _git_stdout(
+            cwd,
+            ["log", "--oneline", f"-{GIT_RECOVERY_MAX_COMMITS}", "--"],
+            errors=errors,
+        )
+        if commits:
+            first = commits.splitlines()[0]
+            lines.append(f"recent local commit: {first}")
+
+    status = _git_stdout(cwd, ["status", "--porcelain"], errors=errors)
+    if status:
+        changed = status.splitlines()
+        lines.append(f"working tree: {len(changed)} changed path(s)")
+        for entry in changed[:GIT_RECOVERY_MAX_STATUS_PATHS]:
+            lines.append(f"changed: {entry}")
+        if len(changed) > GIT_RECOVERY_MAX_STATUS_PATHS:
+            hidden = len(changed) - GIT_RECOVERY_MAX_STATUS_PATHS
+            lines.append(f"changed: ... {hidden} more")
+    elif status == "":
+        lines.append("working tree: clean")
+
+    open_pr_script = Path(root) / "scripts" / "open-pr.sh"
+    if open_pr_script.exists():
+        lines.append(
+            "hint: inspect the diff, then run `bash scripts/open-pr.sh --auto-merge` "
+            "if the branch is ready"
+        )
+    else:
+        lines.append("hint: inspect with `git status`, then resume or finish the branch")
+    return lines
+
+
+def _maybe_echo_stall_recovery_hint(err: ProviderError, *, cwd: str | None) -> None:
+    if not isinstance(err, ProviderStalledError):
+        return
+    lines = _git_stall_recovery_lines(cwd)
+    if not lines:
+        return
+    click.echo("", err=True)
+    click.echo("Recoverable git state:", err=True)
+    for line in lines:
+        click.echo(f"  - {line}", err=True)
 
 
 def _format_route_log_line(decision: RouteDecision) -> str:
@@ -1575,6 +1680,7 @@ def exec_cmd(
             if session_log is not None:
                 session_log.mark_finished()
             click.echo(f"conductor: {e}", err=True)
+            _maybe_echo_stall_recovery_hint(e, cwd=cwd)
             sys.exit(1)
     else:
         if prefer is not None and provider_id != "openrouter":
@@ -1658,6 +1764,7 @@ def exec_cmd(
             session_log.emit("provider_failed", {"provider": provider_id, "error": str(e)})
             session_log.mark_finished()
             click.echo(f"conductor: {e}", err=True)
+            _maybe_echo_stall_recovery_hint(e, cwd=cwd)
             _maybe_echo_explicit_network_hint(provider_id, e)
             sys.exit(1)
         session_log.set_session_id(response.session_id)

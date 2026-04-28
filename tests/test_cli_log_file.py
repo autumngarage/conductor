@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from typing import TYPE_CHECKING
 
 from click.testing import CliRunner
@@ -252,6 +253,49 @@ def test_exec_provider_stall_records_terminal_session_metadata(
     meta = json.loads(meta_paths[0].read_text(encoding="utf-8"))
     assert meta["status"] != "running"
     assert meta["finished_at"] is not None
+
+
+def test_exec_provider_stall_prints_git_recovery_hint(
+    mocker,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True)
+    (repo / "notes.txt").write_text("partial work\n", encoding="utf-8")
+
+    mocker.patch.object(ClaudeProvider, "health_probe", return_value=(True, None))
+
+    def _fake_exec(self, task, model=None, **kwargs):
+        raise ProviderStalledError("claude CLI stalled after 1s with no output")
+
+    mocker.patch.object(ClaudeProvider, "exec", _fake_exec)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "claude",
+            "--max-stall-seconds",
+            "1",
+            "--task",
+            "review the diff",
+            "--cwd",
+            str(repo),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "conductor: claude CLI stalled after 1s with no output" in result.stderr
+    assert "Recoverable git state:" in result.stderr
+    assert f"repo: {repo}" in result.stderr
+    assert "branch: main" in result.stderr
+    assert "upstream: none configured" in result.stderr
+    assert "working tree: 1 changed path(s)" in result.stderr
+    assert "changed: ?? notes.txt" in result.stderr
 
 
 def test_sessions_tail_without_active_session_prints_message(
