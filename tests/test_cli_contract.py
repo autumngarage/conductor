@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -109,6 +110,7 @@ ROUTE_REQUIRED_FIELDS: frozenset[str] = frozenset(
 )
 
 _FIXTURE_DIR = Path(__file__).parent / "fixtures"
+CONDUCTOR_CLI = [sys.executable, "-m", "conductor.cli"]
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +155,7 @@ def _conductor_configured() -> bool:
     """Return True if at least one provider is configured, used to gate live tests."""
     try:
         result = subprocess.run(
-            ["conductor", "list", "--json"],
+            [*CONDUCTOR_CLI, "list", "--json"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -181,7 +183,7 @@ class TestFlagSurface:
 
     def test_call_has_all_documented_stable_flags(self) -> None:
         result = subprocess.run(
-            ["conductor", "call", "--help"],
+            [*CONDUCTOR_CLI, "call", "--help"],
             capture_output=True,
             text=True,
         )
@@ -194,7 +196,7 @@ class TestFlagSurface:
 
     def test_exec_has_all_documented_stable_flags(self) -> None:
         result = subprocess.run(
-            ["conductor", "exec", "--help"],
+            [*CONDUCTOR_CLI, "exec", "--help"],
             capture_output=True,
             text=True,
         )
@@ -252,7 +254,7 @@ def test_live_call_matches_documented_schema() -> None:
 
     result = subprocess.run(
         [
-            "conductor",
+            *CONDUCTOR_CLI,
             "call",
             "--with",
             "claude",
