@@ -51,6 +51,7 @@ class ClaudeProvider:
     name = "claude"
     tags = ["strong-reasoning", "long-context", "tool-use", "code-review"]
     default_model = CLAUDE_DEFAULT_MODEL
+    supports_native_review = True
 
     # Capability declarations (see interface.py)
     quality_tier = "frontier"
@@ -225,6 +226,147 @@ class ClaudeProvider:
                 f"{(result.stderr or result.stdout).strip()[:200]}"
             )
         return True, None
+
+    def review_configured(self) -> tuple[bool, str | None]:
+        return self.configured()
+
+    def review(
+        self,
+        task: str,
+        *,
+        effort: str | int = "medium",
+        cwd: str | None = None,
+        timeout_sec: int | None = None,
+        max_stall_sec: int | None = None,
+        base: str | None = None,
+        commit: str | None = None,
+        uncommitted: bool = False,
+        title: str | None = None,
+    ) -> CallResponse:
+        """Run Claude Code's native review slash command in read-only mode."""
+        ok, reason = self._check_cli_path()
+        if not ok:
+            raise ProviderConfigError(reason or "claude not configured")
+
+        model = self.default_model
+        thinking_budget = resolve_effort_tokens(effort, self.effort_to_thinking)
+        review_prompt = self._build_review_prompt(
+            task,
+            base=base,
+            commit=commit,
+            uncommitted=uncommitted,
+            title=title,
+        )
+        args = [
+            self._cli,
+            "-p",
+            review_prompt,
+            "--output-format",
+            "json",
+            "--model",
+            model,
+            "--permission-mode",
+            "plan",
+        ]
+        if cwd is not None:
+            args.extend(["--setting-sources", CLAUDE_SETTING_SOURCES])
+        env_overrides = {"MAX_THINKING_TOKENS": str(thinking_budget)} if thinking_budget else {}
+        timeout = self._timeout_sec if timeout_sec is None else timeout_sec
+        start = time.monotonic()
+        tracker = AuthPromptTracker(self.name)
+        try:
+            effective_cwd = self._effective_cwd(cwd)
+            proc_env = self._build_proc_env(env_overrides, effective_cwd=effective_cwd)
+            result = run_subprocess_with_live_stderr(
+                args=args,
+                cwd=str(effective_cwd) if effective_cwd is not None else None,
+                env=proc_env,
+                timeout=timeout,
+                max_stall_sec=max_stall_sec,
+                provider_name=self.name,
+                session_log=None,
+                tracker=tracker,
+                popen_factory=subprocess.Popen,
+            )
+        except subprocess.TimeoutExpired as e:
+            elapsed = time.monotonic() - start
+            raise ProviderError(
+                f"claude review timed out after {elapsed:.0f}s"
+            ) from e
+        duration_ms = result.duration_ms
+
+        if result.returncode != 0:
+            raise ProviderHTTPError(
+                f"claude review exited {result.returncode}: "
+                f"{(result.stderr or result.stdout).strip()[:500]}"
+            )
+
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            raise ProviderHTTPError(
+                f"claude review stdout was not JSON: {result.stdout[:500]!r}"
+            ) from e
+
+        if data.get("is_error"):
+            raise ProviderHTTPError(
+                f"claude review returned is_error=true: "
+                f"{data.get('result', '<no detail>')}"
+            )
+
+        usage = data.get("usage") or {}
+        return CallResponse(
+            text=data.get("result", ""),
+            provider=self.name,
+            model=model,
+            duration_ms=data.get("duration_ms") or duration_ms,
+            usage={
+                "input_tokens": usage.get("input_tokens"),
+                "output_tokens": usage.get("output_tokens"),
+                "cached_tokens": usage.get("cache_read_input_tokens"),
+                "thinking_tokens": usage.get("thinking_tokens"),
+                "effort": effort if isinstance(effort, str) else None,
+                "thinking_budget": thinking_budget,
+            },
+            cost_usd=data.get("total_cost_usd"),
+            session_id=data.get("session_id"),
+            raw={
+                **data,
+                "native_review_command": "claude /review",
+                "target": {
+                    "base": base,
+                    "commit": commit,
+                    "uncommitted": uncommitted,
+                    "title": title,
+                },
+            },
+            auth_prompts=tracker.prompts or None,
+        )
+
+    @staticmethod
+    def _build_review_prompt(
+        task: str,
+        *,
+        base: str | None,
+        commit: str | None,
+        uncommitted: bool,
+        title: str | None,
+    ) -> str:
+        target_lines: list[str] = []
+        if base:
+            target_lines.append(f"- Review changes against base branch: {base}")
+        if commit:
+            target_lines.append(f"- Review commit: {commit}")
+        if uncommitted:
+            target_lines.append("- Include staged, unstaged, and untracked changes.")
+        if title:
+            target_lines.append(f"- Review title: {title}")
+
+        prompt_parts = ["/review"]
+        if target_lines:
+            prompt_parts.append("Review target:\n" + "\n".join(target_lines))
+        prompt_parts.append(task)
+        return "\n\n".join(prompt_parts)
 
     def call(
         self,

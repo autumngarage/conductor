@@ -213,6 +213,44 @@ class Provider(Protocol):
         """
 
 
+@runtime_checkable
+class NativeReviewProvider(Protocol):
+    """Optional provider capability for first-class code review.
+
+    This intentionally lives outside ``Provider`` so generic chat/agent
+    providers and user-defined shell providers do not need to implement a
+    review entrypoint. Callers should check this protocol before invoking
+    review mode.
+    """
+
+    name: ClassVar[str]
+    default_model: ClassVar[str]
+    supports_native_review: ClassVar[bool]
+
+    def review_configured(self) -> tuple[bool, str | None]:
+        """Return whether the provider's native review path is available."""
+
+    def review(
+        self,
+        task: str,
+        *,
+        effort: str | int = "medium",
+        cwd: str | None = None,
+        timeout_sec: int | None = None,
+        max_stall_sec: int | None = None,
+        base: str | None = None,
+        commit: str | None = None,
+        uncommitted: bool = False,
+        title: str | None = None,
+    ) -> CallResponse:
+        """Run the provider's native code-review mode.
+
+        ``task`` is review guidance, not an engineering/editing brief.
+        Providers must use read-only review functionality here; fixes belong
+        in ``exec()``.
+        """
+
+
 # --------------------------------------------------------------------------- #
 # Helpers shared by providers.
 # --------------------------------------------------------------------------- #

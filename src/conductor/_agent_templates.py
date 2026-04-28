@@ -15,9 +15,9 @@ from __future__ import annotations
 DELEGATION_GUIDANCE = """# Conductor delegation
 
 Conductor exposes other LLMs behind a uniform CLI (`conductor call`,
-`conductor exec`). When a task is a better fit for a different model
-than the one you're running as, delegate: run conductor, read back the
-answer, present it to the user with attribution.
+`conductor review`, `conductor exec`). When a task is a better fit for a
+different model than the one you're running as, delegate: run conductor,
+read back the answer, present it to the user with attribution.
 
 ## When to delegate
 
@@ -54,6 +54,11 @@ Single-turn call:
 Let the router pick by tags:
 
     conductor call --auto --tags long-context,cheap --brief "..."
+
+Read-only code review using native provider review mode:
+
+    conductor review --auto --base origin/main \\
+        --brief-file /tmp/review-brief.md
 
 Pipe content in as the brief:
 
@@ -383,6 +388,8 @@ Quick reference:
 - `conductor call --with <provider> --brief "..."` — single-turn call.
 - `conductor call --auto --tags <tag1>,<tag2> --brief "..."` — let the
   router pick a provider based on task tags.
+- `conductor review --auto --base <ref> --brief-file /tmp/review.md` —
+  read-only code review through native review modes.
 - `conductor exec --with <provider> --tools Read,Edit,Bash \\
        --sandbox workspace-write --brief-file /tmp/conductor-brief.md` — agent loop with file
   tools, in a sandbox.
@@ -426,6 +433,8 @@ Use it when:
 - You want a cheap second opinion (`conductor call --with kimi --brief "..."`).
 - You need fresh web information (`conductor call --with gemini --brief "..."`).
 - You want to stay local / offline (`conductor call --with ollama --brief "..."`).
+- You want a true read-only code review:
+  `conductor review --auto --base origin/main --brief-file /tmp/review.md`.
 - You're not sure which provider fits — let the router pick:
   `conductor call --auto --tags <tag1>,<tag2> --brief "..."`.
 
@@ -461,7 +470,15 @@ When invoked:
    - `cheap` — user explicitly asked for a cheap run
    - `offline` — user explicitly asked for local-only
    Pick 1–3 tags; do NOT invent new ones.
-2. For normal single-turn routing, run:
+2. If the task is a read-only code review, use native review mode:
+
+       conductor review --auto --tags code-review,<tag> --base <base-ref> \\
+           --brief-file /tmp/conductor-review-brief.md --json
+
+   Use this for PR/merge review. Do not use it for auto-fix work; fixes
+   are engineering tasks and belong in `conductor exec`.
+
+3. For normal single-turn routing, run:
 
        conductor call --auto --tags <tag1>,<tag2> --prefer <mode> \\
            --brief "<prompt>" --json

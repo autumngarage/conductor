@@ -42,6 +42,7 @@ from conductor.profiles import ProfileError, ProfileSpec, get_profile, load_prof
 from conductor.providers import (
     QUALITY_TIERS,
     CallResponse,
+    NativeReviewProvider,
     OpenRouterProvider,
     ProviderConfigError,
     ProviderError,
@@ -89,6 +90,8 @@ MIN_EXEC_BRIEF_CHARS = 300
 GIT_RECOVERY_COMMAND_TIMEOUT_SEC = 2.0
 GIT_RECOVERY_MAX_COMMITS = 5
 GIT_RECOVERY_MAX_STATUS_PATHS = 8
+NATIVE_REVIEW_TAG = "code-review"
+NATIVE_REVIEW_PRIORITY = ("codex", "claude", "gemini")
 
 
 @dataclass(frozen=True)
@@ -181,6 +184,14 @@ def _parse_csv(raw: str | None) -> list[str]:
     if not raw:
         return []
     return [t.strip() for t in raw.split(",") if t.strip()]
+
+
+def _review_tags(raw: str | None) -> list[str]:
+    tags = [NATIVE_REVIEW_TAG]
+    for tag in _parse_csv(raw):
+        if tag not in tags:
+            tags.append(tag)
+    return tags
 
 
 def _resolve_layered_value(
@@ -409,6 +420,49 @@ def _provider_for_preflight(provider_or_name):
 def _run_exec_preflight(provider_or_name) -> tuple[bool, str | None]:
     provider = _provider_for_preflight(provider_or_name)
     return provider.health_probe()
+
+
+def _review_provider_or_none(provider_or_name) -> NativeReviewProvider | None:
+    provider = _provider_for_preflight(provider_or_name)
+    if isinstance(provider, NativeReviewProvider):
+        return provider
+    return None
+
+
+def _review_exclude_set(
+    user_exclude: frozenset[str],
+) -> tuple[frozenset[str], dict[str, str]]:
+    """Return router excludes needed to keep review routing native-only."""
+    excludes = set(user_exclude)
+    reasons: dict[str, str] = {}
+    for name in known_providers():
+        if name in user_exclude:
+            reasons[name] = "excluded by caller"
+            continue
+        try:
+            provider = get_provider(name)
+        except KeyError as e:
+            excludes.add(name)
+            reasons[name] = str(e)
+            continue
+        if not isinstance(provider, NativeReviewProvider):
+            excludes.add(name)
+            reasons[name] = "provider has no native code-review entrypoint"
+            continue
+        ok, reason = provider.review_configured()
+        if not ok:
+            excludes.add(name)
+            reasons[name] = reason or "native review is not configured"
+    return frozenset(excludes), reasons
+
+
+def _native_review_unavailable_message(reasons: dict[str, str]) -> str:
+    if not reasons:
+        return "no native review provider is available."
+    lines = ["no native review provider is available:"]
+    for name in sorted(reasons):
+        lines.append(f"  - {name}: {reasons[name]}")
+    return "\n".join(lines)
 
 
 def _echo_preflight_failure(provider_or_name, reason: str | None) -> None:
@@ -729,6 +783,72 @@ def _invoke_with_fallback(
 
     # Exhausted every candidate; re-raise the last error for user visibility.
     assert last_exc is not None  # at least one attempt must have happened
+    raise last_exc
+
+
+def _invoke_review_with_fallback(
+    decision: RouteDecision,
+    *,
+    task: str,
+    effort: str | int,
+    cwd: str | None,
+    timeout_sec: int | None,
+    max_stall_sec: int | None,
+    base: str | None,
+    commit: str | None,
+    uncommitted: bool,
+    title: str | None,
+    silent: bool,
+) -> tuple[CallResponse, list[str]]:
+    """Try native review providers in route order."""
+    last_exc: Exception | None = None
+    fallbacks: list[str] = []
+    candidates = list(decision.ranked)
+
+    for idx, candidate in enumerate(candidates):
+        provider = _review_provider_or_none(candidate.name)
+        if provider is None:
+            fallbacks.append(candidate.name)
+            continue
+        try:
+            response = provider.review(
+                task,
+                effort=effort,
+                cwd=cwd,
+                timeout_sec=timeout_sec,
+                max_stall_sec=max_stall_sec,
+                base=base,
+                commit=commit,
+                uncommitted=uncommitted,
+                title=title,
+            )
+            mark_outcome(candidate.name, "success")
+            return response, fallbacks
+        except ProviderConfigError as e:
+            last_exc = e
+            mark_outcome(candidate.name, "config")
+            fallbacks.append(candidate.name)
+        except UnsupportedCapability as e:
+            last_exc = e
+            fallbacks.append(candidate.name)
+        except ProviderError as e:
+            retryable, category = _is_retryable(e)
+            if category == "rate-limit":
+                mark_rate_limited(candidate.name)
+            mark_outcome(candidate.name, category)
+            last_exc = e
+            if not retryable:
+                raise
+            fallbacks.append(candidate.name)
+
+        if idx + 1 < len(candidates) and not silent:
+            click.echo(
+                f"[conductor] {candidate.name} review failed · "
+                f"falling back → {candidates[idx + 1].name}",
+                err=True,
+            )
+
+    assert last_exc is not None
     raise last_exc
 
 
@@ -1373,6 +1493,278 @@ def call(
         except ProviderError as e:
             click.echo(f"conductor: {e}", err=True)
             _maybe_echo_explicit_network_hint(provider_id, e)
+            sys.exit(1)
+
+    if auto and not as_json:
+        _emit_usage_log(response, silent=silent_route)
+    _emit_call(response, as_json=as_json, decision=decision)
+
+
+# --------------------------------------------------------------------------- #
+# review — first-class read-only code review
+# --------------------------------------------------------------------------- #
+
+
+@main.command()
+@click.option(
+    "--with",
+    "provider_id",
+    default=None,
+    help="Native review provider identifier (codex, claude, gemini).",
+)
+@click.option(
+    "--profile",
+    default=None,
+    help=(
+        "Apply defaults from a named profile before env vars and explicit flags. "
+        "Resolution order: profile defaults < CONDUCTOR_* env vars < explicit CLI flags."
+    ),
+)
+@click.option(
+    "--auto",
+    is_flag=True,
+    default=False,
+    help="Let the router pick among configured native review providers.",
+)
+@click.option(
+    "--tags",
+    default=None,
+    help=(
+        "Comma-separated review tags. code-review is always included for this "
+        "subcommand."
+    ),
+)
+@click.option(
+    "--prefer",
+    default=None,
+    help=f"Routing preference: {' | '.join(VALID_PREFER_MODES)} (default: best).",
+)
+@click.option(
+    "--effort",
+    default=None,
+    help=f"Thinking depth: {' | '.join(VALID_EFFORT_LEVELS)} or integer budget.",
+)
+@click.option(
+    "--exclude",
+    default=None,
+    help="Comma-separated providers to exclude from --auto routing.",
+)
+@click.option("--cwd", default=None, help="Repository working directory.")
+@click.option(
+    "--timeout",
+    "timeout_sec",
+    default=None,
+    type=int,
+    help="Wall-clock timeout in seconds for the native review command.",
+)
+@click.option(
+    "--max-stall-seconds",
+    "max_stall_sec",
+    default=DEFAULT_EXEC_MAX_STALL_SEC,
+    type=int,
+    help=(
+        "Kill streaming review providers if they produce no output for this "
+        "many seconds. Set 0 to disable."
+    ),
+)
+@click.option(
+    "--base",
+    default=None,
+    help="Review changes against this base branch/ref.",
+)
+@click.option(
+    "--commit",
+    default=None,
+    help="Review the changes introduced by one commit.",
+)
+@click.option(
+    "--uncommitted",
+    is_flag=True,
+    default=False,
+    help="Review staged, unstaged, and untracked changes.",
+)
+@click.option(
+    "--title",
+    default=None,
+    help="Optional review title passed to providers that support it.",
+)
+@click.option(
+    "--task",
+    default=None,
+    help="Review instructions. Reads stdin if omitted. Alias: --brief.",
+)
+@click.option(
+    "--task-file",
+    default=None,
+    help="Read review instructions from a UTF-8 file. Alias: --brief-file.",
+)
+@click.option(
+    "--brief",
+    default=None,
+    help="Review instructions. Alias for --task.",
+)
+@click.option(
+    "--brief-file",
+    default=None,
+    help="Read review instructions from a UTF-8 file. Use '-' to read stdin.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Emit the full CallResponse as JSON (with routing info when --auto).",
+)
+@click.option(
+    "--verbose-route",
+    is_flag=True,
+    default=False,
+    help="Print the full native-review routing decision to stderr.",
+)
+@click.option(
+    "--silent-route",
+    is_flag=True,
+    default=False,
+    help="Suppress route-log output and caller-attribution banner.",
+)
+def review(
+    provider_id: str | None,
+    profile: str | None,
+    auto: bool,
+    tags: str | None,
+    prefer: str | None,
+    effort: str | None,
+    exclude: str | None,
+    cwd: str | None,
+    timeout_sec: int | None,
+    max_stall_sec: int | None,
+    base: str | None,
+    commit: str | None,
+    uncommitted: bool,
+    title: str | None,
+    task: str | None,
+    task_file: str | None,
+    brief: str | None,
+    brief_file: str | None,
+    as_json: bool,
+    verbose_route: bool,
+    silent_route: bool,
+) -> None:
+    """Run a read-only code review through a provider's native review mode."""
+    profile_spec = _load_named_profile(profile)
+    provider_id = _resolve_layered_value(provider_id, env_key="CONDUCTOR_WITH")
+    tags = _resolve_layered_value(
+        tags,
+        env_key="CONDUCTOR_TAGS",
+        profile_value=profile_spec.tags if profile_spec else None,
+    )
+    prefer = _resolve_layered_value(
+        prefer,
+        env_key="CONDUCTOR_PREFER",
+        profile_value=profile_spec.prefer if profile_spec else None,
+    )
+    effort = _resolve_layered_value(
+        effort,
+        env_key="CONDUCTOR_EFFORT",
+        profile_value=profile_spec.effort if profile_spec else None,
+    )
+    exclude = _resolve_layered_value(exclude, env_key="CONDUCTOR_EXCLUDE")
+
+    if auto and provider_id:
+        raise click.UsageError("--with and --auto are mutually exclusive.")
+    if not auto and not provider_id:
+        raise click.UsageError("pass --with <id> or --auto.")
+    if provider_id and exclude and provider_id in _parse_csv(exclude):
+        raise click.UsageError(
+            f"--with {provider_id} and --exclude {exclude} contradict each other."
+        )
+    review_target_count = sum(1 for value in (base, commit, uncommitted) if value)
+    if review_target_count > 1:
+        raise click.UsageError("use only one of --base, --commit, or --uncommitted.")
+
+    brief_input = _read_task(
+        task,
+        task_file,
+        brief=brief,
+        brief_file=brief_file,
+    )
+    body = brief_input.body
+    effort_value = _parse_effort(effort)
+    max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
+    prefer_value = _validate_prefer(prefer) if prefer is not None else "best"
+
+    decision: RouteDecision | None = None
+    if auto:
+        user_exclude = frozenset(_parse_csv(exclude))
+        review_exclude, review_reasons = _review_exclude_set(user_exclude)
+        try:
+            _provider, decision = pick(
+                _review_tags(tags),
+                prefer=prefer_value,
+                effort=effort_value,
+                exclude=review_exclude,
+                priority=NATIVE_REVIEW_PRIORITY,
+                shadow=True,
+            )
+        except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
+            click.echo(f"conductor: {_native_review_unavailable_message(review_reasons)}", err=True)
+            click.echo(f"conductor: {e}", err=True)
+            sys.exit(2)
+        print_caller_banner(decision.provider, silent=silent_route or as_json)
+        _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
+        try:
+            response, _fallbacks = _invoke_review_with_fallback(
+                decision,
+                task=body,
+                effort=effort_value,
+                cwd=cwd,
+                timeout_sec=timeout_sec,
+                max_stall_sec=max_stall_sec,
+                base=base,
+                commit=commit,
+                uncommitted=uncommitted,
+                title=title,
+                silent=silent_route or as_json,
+            )
+        except ProviderConfigError as e:
+            click.echo(f"conductor: {e}", err=True)
+            sys.exit(2)
+        except ProviderError as e:
+            click.echo(f"conductor: {e}", err=True)
+            sys.exit(1)
+    else:
+        assert provider_id is not None
+        try:
+            provider = get_provider(provider_id)
+        except KeyError as e:
+            raise click.UsageError(str(e)) from e
+        review_provider = _review_provider_or_none(provider)
+        if review_provider is None:
+            raise click.UsageError(
+                f"provider {provider_id!r} does not expose native code review."
+            )
+        print_caller_banner(provider_id, silent=silent_route or as_json)
+        ok, reason = review_provider.review_configured()
+        if not ok:
+            click.echo(f"conductor: {reason or 'native review is not configured'}", err=True)
+            sys.exit(2)
+        try:
+            response = review_provider.review(
+                body,
+                effort=effort_value,
+                cwd=cwd,
+                timeout_sec=timeout_sec,
+                max_stall_sec=max_stall_sec,
+                base=base,
+                commit=commit,
+                uncommitted=uncommitted,
+                title=title,
+            )
+        except ProviderConfigError as e:
+            click.echo(f"conductor: {e}", err=True)
+            sys.exit(2)
+        except ProviderError as e:
+            click.echo(f"conductor: {e}", err=True)
             sys.exit(1)
 
     if auto and not as_json:

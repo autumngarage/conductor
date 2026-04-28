@@ -356,6 +356,74 @@ def test_call_auto_can_route_to_openrouter_and_shortlist_cheap_models(
 
 
 # ---------------------------------------------------------------------------
+# review — native provider review mode
+# ---------------------------------------------------------------------------
+
+
+def test_review_auto_routes_to_codex_native_review_by_default(mocker):
+    _stub_all_configured(mocker, {"codex", "claude"})
+    mocker.patch.object(CodexProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(ClaudeProvider, "review_configured", return_value=(True, None))
+    review_mock = mocker.patch.object(
+        CodexProvider,
+        "review",
+        return_value=_fake_response("codex", "codex-review"),
+    )
+    claude_review = mocker.patch.object(
+        ClaudeProvider,
+        "review",
+        return_value=_fake_response("claude", "sonnet"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--base",
+            "origin/main",
+            "--brief",
+            "Review this merge using the project reviewer guide.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert review_mock.called
+    assert not claude_review.called
+    assert review_mock.call_args.kwargs["base"] == "origin/main"
+    assert "→ codex" in result.stderr
+
+
+def test_review_auto_does_not_route_to_generic_code_review_tag_provider(mocker):
+    _stub_all_configured(mocker, {"kimi", "deepseek-reasoner", "claude"})
+    mocker.patch.object(ClaudeProvider, "review_configured", return_value=(True, None))
+    review_mock = mocker.patch.object(
+        ClaudeProvider,
+        "review",
+        return_value=_fake_response("claude", "sonnet"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["review", "--auto", "--brief", "Review the PR."],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert review_mock.called
+    assert "→ claude" in result.stderr
+
+
+def test_review_with_provider_without_native_review_errors():
+    result = CliRunner().invoke(
+        main,
+        ["review", "--with", "kimi", "--brief", "Review the PR."],
+    )
+
+    assert result.exit_code == 2
+    assert "does not expose native code review" in result.output
+
+
+# ---------------------------------------------------------------------------
 # exec — new subcommand
 # ---------------------------------------------------------------------------
 

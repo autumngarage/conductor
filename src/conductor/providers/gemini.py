@@ -59,6 +59,7 @@ class GeminiProvider:
     name = "gemini"
     tags = ["long-context", "web-search", "thinking", "cheap", "code-review", "tool-use"]
     default_model = GEMINI_DEFAULT_MODEL
+    supports_native_review = True
 
     # Capability declarations (see interface.py)
     quality_tier = "strong"
@@ -215,6 +216,185 @@ class GeminiProvider:
                 f"{(result.stderr or result.stdout).strip()[:200]}"
             )
         return True, None
+
+    def review_configured(self) -> tuple[bool, str | None]:
+        ok, reason = self.configured()
+        if not ok:
+            return False, reason
+        try:
+            result = subprocess.run(
+                [self._cli, "extensions", "list", "-o", "json"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            return False, f"could not inspect Gemini CLI extensions: {e}"
+        if result.returncode != 0:
+            return False, (
+                f"`{self._cli} extensions list -o json` exited {result.returncode}: "
+                f"{(result.stderr or result.stdout).strip()[:200]}"
+            )
+        if "code-review" not in result.stdout:
+            return False, (
+                "Gemini native review requires the Gemini CLI Code Review "
+                "extension. Install it with "
+                "`gemini extensions install "
+                "https://github.com/gemini-cli-extensions/code-review`."
+            )
+        return True, None
+
+    def review(
+        self,
+        task: str,
+        *,
+        effort: str | int = "medium",
+        cwd: str | None = None,
+        timeout_sec: int | None = None,
+        max_stall_sec: int | None = None,
+        base: str | None = None,
+        commit: str | None = None,
+        uncommitted: bool = False,
+        title: str | None = None,
+    ) -> CallResponse:
+        """Run Gemini CLI's code-review extension when installed."""
+        ok, reason = self.review_configured()
+        if not ok:
+            raise ProviderConfigError(reason or "gemini native review not configured")
+
+        model = self.default_model
+        thinking_budget = resolve_effort_tokens(effort, self.effort_to_thinking)
+        prompt = self._build_review_prompt(
+            task,
+            base=base,
+            commit=commit,
+            uncommitted=uncommitted,
+            title=title,
+        )
+        args = [
+            self._cli,
+            "-p",
+            prompt,
+            "-o",
+            "json",
+            "--approval-mode",
+            "plan",
+        ]
+        if model and model != "auto":
+            args.extend(["-m", model])
+        env_overrides: dict[str, str] = {}
+        if thinking_budget:
+            env_overrides["GEMINI_THINKING_BUDGET"] = str(thinking_budget)
+        proc_env = {**os.environ, **env_overrides} if env_overrides else None
+        timeout = self._timeout_sec if timeout_sec is None else timeout_sec
+        start = time.monotonic()
+        tracker = AuthPromptTracker(self.name)
+        try:
+            result = run_subprocess_with_live_stderr(
+                args=args,
+                cwd=cwd,
+                env=proc_env,
+                timeout=timeout,
+                max_stall_sec=max_stall_sec,
+                provider_name=self.name,
+                session_log=None,
+                tracker=tracker,
+                popen_factory=subprocess.Popen,
+            )
+        except subprocess.TimeoutExpired as e:
+            elapsed = time.monotonic() - start
+            raise ProviderError(
+                f"gemini review timed out after {elapsed:.0f}s"
+            ) from e
+        duration_ms = result.duration_ms
+
+        if result.returncode != 0:
+            raise ProviderHTTPError(
+                f"gemini review exited {result.returncode}: "
+                f"{(result.stderr or result.stdout).strip()[:500]}"
+            )
+
+        stdout = result.stdout.strip()
+        try:
+            data = json.loads(stdout)
+        except json.JSONDecodeError:
+            if not stdout:
+                raise ProviderHTTPError("gemini review produced empty stdout") from None
+            return CallResponse(
+                text=stdout,
+                provider=self.name,
+                model=model,
+                duration_ms=duration_ms,
+                usage={
+                    "input_tokens": None,
+                    "output_tokens": None,
+                    "cached_tokens": None,
+                    "thinking_tokens": None,
+                    "effort": effort if isinstance(effort, str) else None,
+                    "thinking_budget": thinking_budget,
+                },
+                raw={"stdout": stdout, "native_review_command": "gemini /code-review"},
+                auth_prompts=tracker.prompts or None,
+            )
+
+        input_tokens, output_tokens = self._sum_usage(data)
+        session_id = (
+            data.get("session_id")
+            or data.get("conversation_id")
+            or data.get("conversationId")
+            or data.get("chat_id")
+            or data.get("chatId")
+        )
+        return CallResponse(
+            text=data.get("response", ""),
+            provider=self.name,
+            model=model,
+            duration_ms=duration_ms,
+            usage={
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cached_tokens": None,
+                "thinking_tokens": None,
+                "effort": effort if isinstance(effort, str) else None,
+                "thinking_budget": thinking_budget,
+            },
+            session_id=session_id,
+            raw={
+                **data,
+                "native_review_command": "gemini /code-review",
+                "target": {
+                    "base": base,
+                    "commit": commit,
+                    "uncommitted": uncommitted,
+                    "title": title,
+                },
+            },
+            auth_prompts=tracker.prompts or None,
+        )
+
+    @staticmethod
+    def _build_review_prompt(
+        task: str,
+        *,
+        base: str | None,
+        commit: str | None,
+        uncommitted: bool,
+        title: str | None,
+    ) -> str:
+        target_lines: list[str] = []
+        if base:
+            target_lines.append(f"- Review changes against base branch: {base}")
+        if commit:
+            target_lines.append(f"- Review commit: {commit}")
+        if uncommitted:
+            target_lines.append("- Include staged, unstaged, and untracked changes.")
+        if title:
+            target_lines.append(f"- Review title: {title}")
+        prompt_parts = ["/code-review"]
+        if target_lines:
+            prompt_parts.append("Review target:\n" + "\n".join(target_lines))
+        prompt_parts.append(task)
+        return "\n\n".join(prompt_parts)
 
     def call(
         self,

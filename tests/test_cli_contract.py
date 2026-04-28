@@ -81,6 +81,33 @@ DOCUMENTED_EXEC_FLAGS: frozenset[str] = frozenset(
     }
 )
 
+# Documented stable flag surface for `conductor review`.
+DOCUMENTED_REVIEW_FLAGS: frozenset[str] = frozenset(
+    {
+        "--with",
+        "--auto",
+        "--tags",
+        "--prefer",
+        "--effort",
+        "--exclude",
+        "--brief",
+        "--brief-file",
+        "--task",
+        "--task-file",
+        "--json",
+        "--verbose-route",
+        "--silent-route",
+        "--profile",
+        "--cwd",
+        "--timeout",
+        "--max-stall-seconds",
+        "--base",
+        "--commit",
+        "--uncommitted",
+        "--title",
+    }
+)
+
 CALL_RESPONSE_REQUIRED_FIELDS: frozenset[str] = frozenset(
     {"text", "provider", "model", "duration_ms", "usage", "cost_usd", "session_id", "raw"}
 )
@@ -205,6 +232,19 @@ class TestFlagSurface:
         missing = {f for f in DOCUMENTED_EXEC_FLAGS if f not in help_text}
         assert not missing, (
             f"Documented flags missing from 'conductor exec --help': {sorted(missing)}"
+        )
+
+    def test_review_has_all_documented_stable_flags(self) -> None:
+        result = subprocess.run(
+            [*CONDUCTOR_CLI, "review", "--help"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, f"conductor review --help failed: {result.stderr}"
+        help_text = result.stdout
+        missing = {f for f in DOCUMENTED_REVIEW_FLAGS if f not in help_text}
+        assert not missing, (
+            f"Documented flags missing from 'conductor review --help': {sorted(missing)}"
         )
 
 

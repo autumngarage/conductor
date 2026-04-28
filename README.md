@@ -70,6 +70,9 @@ conductor call --with kimi --model moonshotai/kimi-k2 --brief "..."
 
 # Get the full response as JSON (for scripting)
 conductor call --with kimi --brief "ping" --json
+
+# Read-only code review uses native review entrypoints when available
+conductor review --auto --base origin/main --brief-file /tmp/review.md
 ```
 
 For delegation from Claude, Codex, or another agent, prefer
@@ -86,6 +89,7 @@ Shipped:
 - Built-in providers: `kimi` (OpenRouter-backed HTTP preset), `openrouter`, `deepseek-chat`, `deepseek-reasoner`, `claude`, `codex`, `gemini`, and `ollama`.
 - `conductor call --with <id> --brief "..."` — manual mode for any provider.
 - `conductor call --auto [--tags a,b,c] --brief "..."` — rule-based router picks the best configured provider for the task's tags.
+- `conductor review --auto --base <ref> --brief-file <path>` — read-only code review routed only to native review providers (`codex review`, Claude `/review`, Gemini `/code-review` extension).
 - `conductor list [--json]` — shows every provider with ready/not-ready status, default model, and capability tags.
 - `conductor smoke <id>` / `conductor smoke --all [--json]` — proves a provider's auth + endpoint work (cheapest round-trip that exercises the full path).
 - `conductor doctor [--json]` — diagnostic report: which providers are configured, which env vars are set, what's in the macOS Keychain.
