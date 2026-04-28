@@ -2,11 +2,11 @@
 
 This document is the durable contract for downstream tools that invoke Conductor via subprocess. It exists because Conductor is the LLM-routing layer for the autumn-garage quartet: tools compose by file contract, not Python import (Doctrine 0003 / 0004), and the CLI surface is the contract.
 
-**Audience:** Authors of tools that shell out to `conductor call` — Touchstone (reviewer cascade), Sentinel (per-role LLM calls), or any future agent that wants capability-aware routing without bundling the providers itself.
+**Audience:** Authors of tools that shell out to Conductor — Touchstone (reviewer cascade), Sentinel (per-role LLM calls), or any future agent that wants capability-aware routing without bundling the providers itself.
 
 ## Stability contract
 
-`conductor call`'s **flag surface** and **`--json` output schema** follow semver. Within a major version:
+`conductor call` and `conductor review` flag surfaces and their shared **`--json` output schema** follow semver. Within a major version:
 
 - Documented flags don't change meaning or get removed.
 - Documented JSON fields don't get renamed or change types.
@@ -26,9 +26,15 @@ conductor call --with <provider> [options]
 
 # Force the local provider
 conductor call --offline [options]
+
+# Native code-review mode
+conductor review --auto --base <branch-or-ref> [options]
+conductor review --with <provider> --base <branch-or-ref> [options]
 ```
 
 Usually, exactly one of `--auto` or `--with` is required. `--auto` runs the router using `--tags`, `--prefer`, and `--exclude` to pick a configured provider; `--with` bypasses the router for direct provider use. `--offline` is the exception: it may be used without `--auto` or `--with`, sets the sticky offline flag, and rewrites the call to `--with ollama`. Passing `--offline --with <non-ollama>` is an error. `--no-offline` clears the sticky flag, then normal `--auto` / `--with` rules apply.
+
+Use `conductor review` for read-only code review. It only routes to providers with native review entrypoints: Codex `codex review`, Claude Code `/review`, and Gemini CLI `/code-review` when the Code Review extension is installed. Use `conductor exec` for engineering or auto-fix tasks that may edit files.
 
 ## Input
 
@@ -151,14 +157,15 @@ Consumers should handle `0` as success and treat every non-zero code as failure.
 
 ### Touchstone — code review
 
-Pre-push gate calls Conductor for the codex review:
+Merge and pre-push review-only gates call Conductor's native review intent:
 
 ```bash
-conductor call --auto --tags code-review --effort medium \
-  --brief-file /tmp/diff.txt --json --silent-route
+conductor review --auto --tags code-review --effort medium \
+  --base origin/main --brief-file /tmp/review-prompt.txt \
+  --json --silent-route
 ```
 
-Touchstone parses `text` for the review verdict, `cost_usd` for accounting, `provider`/`model` for the route-log entry.
+Touchstone parses `text` for the review verdict, `cost_usd` for accounting, `provider`/`model` for the route-log entry. Auto-fix modes remain `conductor exec` because they are engineering/editing workflows, not pure review.
 
 ### Sentinel — per-role chat
 

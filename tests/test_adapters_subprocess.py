@@ -258,6 +258,39 @@ def test_claude_call_returns_normalized_response(mocker):
     assert response.session_id == "abc"
 
 
+def test_claude_review_uses_native_review_slash_command_read_only(mocker):
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    fake = _FakePopen(stdout_schedule=[(0, CLAUDE_JSON)])
+
+    def factory(args, **kwargs):
+        fake.args = args
+        return fake
+
+    mocker.patch(
+        "conductor.providers.claude.subprocess.Popen",
+        side_effect=factory,
+    )
+
+    response = ClaudeProvider().review(
+        "Focus on regressions.",
+        base="origin/main",
+        effort="high",
+        cwd="/tmp/repo",
+        timeout_sec=30,
+    )
+
+    assert fake.args is not None
+    assert fake.args[0:2] == ["claude", "-p"]
+    prompt = fake.args[2]
+    assert prompt.startswith("/review")
+    assert "Review changes against base branch: origin/main" in prompt
+    assert "Focus on regressions." in prompt
+    assert "--permission-mode" in fake.args
+    assert fake.args[fake.args.index("--permission-mode") + 1] == "plan"
+    assert response.provider == "claude"
+    assert response.text == "hello from claude"
+
+
 def test_claude_call_passes_resume_session_id_as_resume_flag(mocker):
     mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
     captured = mocker.patch(
@@ -717,6 +750,35 @@ def test_codex_call_parses_ndjson_and_usage(mocker):
     assert response.usage["input_tokens"] == 5
     assert response.usage["output_tokens"] == 2
     assert response.session_id == "sess-codex-1"
+
+
+def test_codex_review_uses_native_review_command(mocker):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    captured = mocker.patch(
+        "conductor.providers.codex.subprocess.run",
+        return_value=_fake_completed(stdout="LGTM\n"),
+    )
+
+    response = CodexProvider().review(
+        "Use AGENTS.md rubric.",
+        effort="medium",
+        base="origin/main",
+        title="PR review",
+    )
+
+    args = captured.call_args.args[0]
+    assert args[0:2] == ["codex", "review"]
+    assert "-c" in args
+    assert args[args.index("-c") + 1] == "model_reasoning_effort=medium"
+    assert "--base" in args
+    assert args[args.index("--base") + 1] == "origin/main"
+    assert "--title" in args
+    assert args[args.index("--title") + 1] == "PR review"
+    assert args[-1] == "-"
+    assert captured.call_args.kwargs["input"] == "Use AGENTS.md rubric."
+    assert response.provider == "codex"
+    assert response.model == "codex-review"
+    assert response.text == "LGTM"
 
 
 def test_codex_call_reads_output_backstop_when_ndjson_loses_agent_message(
@@ -1442,6 +1504,21 @@ def test_gemini_configured_when_only_google_application_credentials_set(
     assert ok is True and reason is None
 
 
+def test_gemini_review_configured_requires_code_review_extension(mocker, monkeypatch):
+    mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
+    _strip_gemini_auth_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    mocker.patch(
+        "conductor.providers.gemini.subprocess.run",
+        return_value=_fake_completed(stdout="[]"),
+    )
+
+    ok, reason = GeminiProvider().review_configured()
+
+    assert ok is False
+    assert "Code Review extension" in reason
+
+
 def test_gemini_call_parses_json_and_usage(mocker):
     mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
     mocker.patch(
@@ -1456,6 +1533,39 @@ def test_gemini_call_parses_json_and_usage(mocker):
     assert response.usage["input_tokens"] == 12
     assert response.usage["output_tokens"] == 4
     assert response.session_id == "xyz"
+
+
+def test_gemini_review_uses_code_review_extension_command(mocker, monkeypatch):
+    mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
+    _strip_gemini_auth_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    mocker.patch(
+        "conductor.providers.gemini.subprocess.run",
+        return_value=_fake_completed(stdout='[{"name":"code-review"}]'),
+    )
+    fake = _FakePopen(stdout_schedule=[(0, GEMINI_JSON)])
+
+    def factory(args, **kwargs):
+        fake.args = args
+        return fake
+
+    mocker.patch(
+        "conductor.providers.gemini.subprocess.Popen",
+        side_effect=factory,
+    )
+
+    response = GeminiProvider().review("Use the reviewer guide.", base="origin/main")
+
+    assert fake.args is not None
+    assert fake.args[0:2] == ["gemini", "-p"]
+    prompt = fake.args[2]
+    assert prompt.startswith("/code-review")
+    assert "Review changes against base branch: origin/main" in prompt
+    assert "Use the reviewer guide." in prompt
+    assert "--approval-mode" in fake.args
+    assert fake.args[fake.args.index("--approval-mode") + 1] == "plan"
+    assert response.provider == "gemini"
+    assert response.text == "hello from gemini"
 
 
 def test_gemini_call_with_resume_passes_resume_flag(mocker):

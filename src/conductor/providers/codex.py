@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from conductor.session_log import SessionLog
 
 CODEX_DEFAULT_MODEL = "gpt-5.4"
+CODEX_REVIEW_MODEL = "codex-review"
 CODEX_REQUEST_TIMEOUT_SEC = 180.0
 
 # Sentinel distinguishing "caller didn't specify a timeout" from "caller
@@ -81,6 +82,7 @@ class CodexProvider:
     name = "codex"
     tags = ["strong-reasoning", "code-review", "tool-use"]
     default_model = CODEX_DEFAULT_MODEL
+    supports_native_review = True
 
     # Capability declarations (see interface.py)
     quality_tier = "frontier"
@@ -199,6 +201,99 @@ class CodexProvider:
                 f"{(result.stderr or result.stdout).strip()[:200]}"
             )
         return True, None
+
+    def review_configured(self) -> tuple[bool, str | None]:
+        return self.configured()
+
+    def review(
+        self,
+        task: str,
+        *,
+        effort: str | int = "medium",
+        cwd: str | None = None,
+        timeout_sec: int | None = None,
+        max_stall_sec: int | None = None,
+        base: str | None = None,
+        commit: str | None = None,
+        uncommitted: bool = False,
+        title: str | None = None,
+    ) -> CallResponse:
+        """Run Codex's native code-review command."""
+        del max_stall_sec  # `codex review` is a single subprocess, not streamed.
+        ok, reason = self._check_cli_path()
+        if not ok:
+            raise ProviderConfigError(reason or "codex not configured")
+
+        thinking_budget = resolve_effort_tokens(effort, self.effort_to_thinking)
+        codex_effort_flag = (
+            _EFFORT_TO_CODEX_FLAG.get(effort) if isinstance(effort, str) else None
+        )
+        args = [self._cli, "review"]
+        if codex_effort_flag:
+            args.extend(["-c", f"model_reasoning_effort={codex_effort_flag}"])
+        if uncommitted:
+            args.append("--uncommitted")
+        if base:
+            args.extend(["--base", base])
+        if commit:
+            args.extend(["--commit", commit])
+        if title:
+            args.extend(["--title", title])
+        args.append("-")
+
+        timeout = self._timeout_sec if timeout_sec is None else timeout_sec
+        start = time.monotonic()
+        try:
+            result = subprocess.run(
+                args,
+                input=task,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=cwd,
+            )
+        except subprocess.TimeoutExpired as e:
+            elapsed = time.monotonic() - start
+            raise ProviderError(
+                f"codex review timed out after {elapsed:.0f}s"
+            ) from e
+        duration_ms = int((time.monotonic() - start) * 1000)
+
+        if result.returncode != 0:
+            raise ProviderHTTPError(
+                f"codex review exited {result.returncode}: "
+                f"{(result.stderr or result.stdout).strip()[:500]}"
+            )
+        content = result.stdout.strip()
+        if not content:
+            raise ProviderHTTPError(
+                f"codex review produced empty stdout: {result.stderr[:500]!r}"
+            )
+
+        return CallResponse(
+            text=content,
+            provider=self.name,
+            model=CODEX_REVIEW_MODEL,
+            duration_ms=duration_ms,
+            usage={
+                "input_tokens": None,
+                "output_tokens": None,
+                "cached_tokens": None,
+                "thinking_tokens": None,
+                "effort": effort if isinstance(effort, str) else None,
+                "thinking_budget": thinking_budget,
+            },
+            raw={
+                "command": "codex review",
+                "stderr": result.stderr,
+                "target": {
+                    "base": base,
+                    "commit": commit,
+                    "uncommitted": uncommitted,
+                    "title": title,
+                },
+            },
+        )
 
     def _parse_ndjson(
         self, stdout: str

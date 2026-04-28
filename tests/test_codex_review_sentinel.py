@@ -69,16 +69,18 @@ def test_codex_review_wrapper_accepts_footer_after_sentinel(tmp_path: Path) -> N
 
     fakes = tmp_path / "fakes"
     fakes.mkdir()
+    conductor_args = tmp_path / "conductor-args.txt"
     conductor = fakes / "conductor"
     conductor.write_text(
         textwrap.dedent(
             """\
             #!/usr/bin/env bash
+            printf '%s\\n' "$*" >> "${FAKE_CONDUCTOR_ARGS:?}"
             case "$1" in
               doctor)
                 printf '{"configured": true}\\n'
                 ;;
-              exec)
+              review|exec)
                 cat >/dev/null
                 printf 'LGTM\\nCODEX_REVIEW_CLEAN\\n---\\nreview complete\\n'
                 ;;
@@ -103,6 +105,7 @@ def test_codex_review_wrapper_accepts_footer_after_sentinel(tmp_path: Path) -> N
             "CODEX_REVIEW_MODE": "review-only",
             "CODEX_REVIEW_DISABLE_CACHE": "1",
             "CODEX_REVIEW_TIMEOUT": "5",
+            "FAKE_CONDUCTOR_ARGS": str(conductor_args),
             "NO_COLOR": "1",
         },
         capture_output=True,
@@ -113,3 +116,6 @@ def test_codex_review_wrapper_accepts_footer_after_sentinel(tmp_path: Path) -> N
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ALL CLEAR" in result.stdout
     assert "malformed sentinel" not in result.stdout
+    conductor_invocations = conductor_args.read_text(encoding="utf-8").splitlines()
+    assert any(line.startswith("review ") for line in conductor_invocations)
+    assert not any(line.startswith("exec ") for line in conductor_invocations)

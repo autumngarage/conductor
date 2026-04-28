@@ -985,13 +985,15 @@ reviewer_conductor_exec() {
   local tools sandbox
   case "$REVIEW_MODE" in
     diff-only)
-      # Single-turn call — the diff is already embedded in the prompt.
-      subcommand="call"
+      # Read-only review intent. The diff is embedded in the prompt, and
+      # Conductor should still use provider-native review when available.
+      subcommand="review"
       ;;
     review-only)
-      subcommand="exec"
-      tools="Read,Grep,Glob,Bash"
-      sandbox="read-only"
+      # Merge review is pure review, not engineering. Route through
+      # `conductor review` so Codex/Claude/Gemini can use their dedicated
+      # review entrypoints instead of generic agent execution.
+      subcommand="review"
       ;;
     no-tests)
       subcommand="exec"
@@ -1017,6 +1019,13 @@ reviewer_conductor_exec() {
     # The legacy wall-clock --timeout caused PR #57's review to die at 300s on
     # a real, still-progressing 837-line review. Stall semantics tolerate long
     # thinking pauses but still catch wedged processes.
+    args+=(--max-stall-seconds "$REVIEW_MAX_STALL_SEC")
+  fi
+
+  if [ "$subcommand" = "review" ]; then
+    [ -n "${BASE:-}" ] && args+=(--base "$BASE")
+    args+=(--cwd "$REPO_ROOT")
+    args+=(--timeout "$REVIEW_TIMEOUT")
     args+=(--max-stall-seconds "$REVIEW_MAX_STALL_SEC")
   fi
 
