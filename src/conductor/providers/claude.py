@@ -35,12 +35,18 @@ from conductor.providers.interface import (
 if TYPE_CHECKING:
     from conductor.session_log import SessionLog
 
+_ORIGINAL_POPEN = subprocess.Popen
+
 CLAUDE_DEFAULT_MODEL = "sonnet"
 CLAUDE_REQUEST_TIMEOUT_SEC = 180.0
 CLAUDE_AUTH_PROBE_TIMEOUT_SEC = 15.0
 CLAUDE_FIRST_OUTPUT_TIMEOUT_SEC = 45.0
 CLAUDE_SETTING_SOURCES = "user,project,local"
 CLAUDE_CLI_ENV = "CONDUCTOR_CLAUDE_CLI"
+CLAUDE_LINKED_WORKTREE_ERROR = (
+    "claude provider cannot guarantee cwd isolation for mutating exec sessions "
+    "inside a linked git worktree"
+)
 
 # Sentinel: "caller didn't specify a timeout" vs "caller explicitly passed
 # None". The constructor default applies only in the first case.
@@ -506,6 +512,11 @@ class ClaudeProvider:
                 sandbox_permission_mode=permission_mode,
                 session_log=session_log,
             )
+            self._reject_mutating_linked_worktree(
+                effective_cwd=effective_cwd,
+                permission_mode=permission_mode,
+                session_log=session_log,
+            )
             if live_auth_capture:
                 result = run_subprocess_with_live_stderr(
                     args=args,
@@ -596,6 +607,126 @@ class ClaudeProvider:
         if effective_cwd is not None:
             proc_env["PWD"] = str(effective_cwd)
         return proc_env
+
+    def _reject_mutating_linked_worktree(
+        self,
+        *,
+        effective_cwd: Path | None,
+        permission_mode: str | None,
+        session_log: SessionLog | None,
+        ) -> None:
+        if effective_cwd is None or permission_mode == "plan":
+            return
+
+        git_paths = self._git_worktree_paths(effective_cwd, session_log=session_log)
+        if git_paths is None:
+            return
+        git_dir, git_common_dir = git_paths
+        if git_dir == git_common_dir:
+            return
+
+        detail = {
+            "provider": self.name,
+            "check": "claude_linked_worktree_cwd",
+            "cwd": str(effective_cwd),
+            "git_dir": str(git_dir),
+            "git_common_dir": str(git_common_dir),
+            "permission_mode": permission_mode,
+            "allowed": False,
+        }
+        if session_log is not None:
+            session_log.emit("provider_diagnostic", detail)
+        raise ProviderConfigError(
+            f"{CLAUDE_LINKED_WORKTREE_ERROR}: cwd={effective_cwd}, "
+            f"git_dir={git_dir}, git_common_dir={git_common_dir}. "
+            "Use `--sandbox read-only`, run Claude against the primary checkout, "
+            "or route mutating worktree-isolated tasks to `--with codex`."
+        )
+
+    def _git_worktree_paths(
+        self,
+        cwd: Path,
+        *,
+        session_log: SessionLog | None,
+    ) -> tuple[Path, Path] | None:
+        process: subprocess.Popen[str] | None = None
+        try:
+            process = _ORIGINAL_POPEN(
+                [
+                    "git",
+                    "-C",
+                    str(cwd),
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--git-dir",
+                    "--git-common-dir",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired as e:
+            if process is not None:
+                process.kill()
+                process.communicate()
+            if session_log is not None:
+                session_log.emit(
+                    "provider_diagnostic",
+                    {
+                        "provider": self.name,
+                        "check": "claude_linked_worktree_cwd",
+                        "cwd": str(cwd),
+                        "allowed": True,
+                        "reason": f"git probe timed out: {e}",
+                    },
+                )
+            return None
+        except OSError as e:
+            if session_log is not None:
+                session_log.emit(
+                    "provider_diagnostic",
+                    {
+                        "provider": self.name,
+                        "check": "claude_linked_worktree_cwd",
+                        "cwd": str(cwd),
+                        "allowed": True,
+                        "reason": f"git probe failed: {e}",
+                    },
+                )
+            return None
+
+        if process.returncode != 0:
+            if session_log is not None:
+                session_log.emit(
+                    "provider_diagnostic",
+                    {
+                        "provider": self.name,
+                        "check": "claude_linked_worktree_cwd",
+                        "cwd": str(cwd),
+                        "allowed": True,
+                        "reason": "cwd is not inside a git worktree",
+                        "stderr": stderr.strip()[:500],
+                    },
+                )
+            return None
+
+        lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+        if len(lines) < 2:
+            if session_log is not None:
+                session_log.emit(
+                    "provider_diagnostic",
+                    {
+                        "provider": self.name,
+                        "check": "claude_linked_worktree_cwd",
+                        "cwd": str(cwd),
+                        "allowed": True,
+                        "reason": "git probe returned incomplete worktree paths",
+                        "stdout": stdout.strip()[:500],
+                    },
+                )
+            return None
+        return Path(lines[0]).resolve(strict=False), Path(lines[1]).resolve(strict=False)
 
     def _effective_first_output_timeout(
         self,

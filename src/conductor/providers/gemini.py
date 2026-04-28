@@ -38,6 +38,23 @@ if TYPE_CHECKING:
 
 GEMINI_DEFAULT_MODEL = "gemini-2.5-pro"
 GEMINI_REQUEST_TIMEOUT_SEC = 180.0
+GEMINI_INLINE_RESPONSE_INSTRUCTION = """
+
+Conductor call output contract:
+- Return the complete answer directly in your final response.
+- Do not save the answer to disk.
+- Do not use write_file, replace, or any file-writing tool for the answer.
+- If the answer is long, still return it inline.
+"""
+GEMINI_WRITE_FILE_TOOL_NAMES = frozenset({"write_file", "Write"})
+GEMINI_SAVED_RESPONSE_MARKERS = (
+    "has been saved",
+    "saved to",
+    "saved in",
+    "written to",
+    "wrote the",
+    "output file",
+)
 
 # Sentinel: "caller didn't specify a timeout" vs "caller explicitly passed
 # None". The constructor default applies only in the first case.
@@ -405,11 +422,12 @@ class GeminiProvider:
         resume_session_id: str | None = None,
     ) -> CallResponse:
         return self._run(
-            task,
+            self._inline_response_task(task),
             model=model,
             effort=effort,
             approval_mode="plan",
             resume_session_id=resume_session_id,
+            require_inline_response=True,
         )
 
     def exec(
@@ -458,6 +476,7 @@ class GeminiProvider:
         max_stall_sec: int | None = None,
         resume_session_id: str | None = None,
         live_auth_capture: bool = False,
+        require_inline_response: bool = False,
         session_log: SessionLog | None = None,
     ) -> CallResponse:
         # Cheap PATH check on the hot path; auth state surfaces as a CLI
@@ -576,8 +595,16 @@ class GeminiProvider:
             or data.get("chat_id")
             or data.get("chatId")
         )
+        response_text = data.get("response", "")
+        if require_inline_response and self._externalized_response(data, response_text):
+            raise ProviderHTTPError(
+                "gemini used a file-writing tool instead of returning the answer "
+                "inline. Conductor call requires inline output; use "
+                "`conductor exec --with gemini` for file-writing tasks or retry "
+                "with a prompt that can be answered directly."
+            )
         return CallResponse(
-            text=data.get("response", ""),
+            text=response_text,
             provider=self.name,
             model=model,
             duration_ms=duration_ms,
@@ -593,6 +620,17 @@ class GeminiProvider:
             raw=data,
             auth_prompts=tracker.prompts or None,
         )
+
+    @staticmethod
+    def _inline_response_task(task: str) -> str:
+        return f"{task.rstrip()}{GEMINI_INLINE_RESPONSE_INSTRUCTION}"
+
+    @staticmethod
+    def _externalized_response(data: dict, response_text: str) -> bool:
+        if not _gemini_used_write_file(data):
+            return False
+        lowered = response_text.lower()
+        return any(marker in lowered for marker in GEMINI_SAVED_RESPONSE_MARKERS)
 
     @staticmethod
     def _sum_usage(data: dict) -> tuple[int | None, int | None]:
@@ -611,3 +649,19 @@ class GeminiProvider:
         if not saw_any:
             return None, None
         return total_input, total_output
+
+
+def _gemini_used_write_file(data: dict) -> bool:
+    stats = data.get("stats") or {}
+    tools = stats.get("tools") or {}
+    by_name = tools.get("byName") or tools.get("by_name") or {}
+    if not isinstance(by_name, dict):
+        return False
+    for name in GEMINI_WRITE_FILE_TOOL_NAMES:
+        entry = by_name.get(name)
+        if not isinstance(entry, dict):
+            continue
+        count = entry.get("count") or entry.get("success") or 0
+        if isinstance(count, int) and count > 0:
+            return True
+    return False

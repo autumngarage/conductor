@@ -45,6 +45,35 @@ def _fake_completed(stdout: str = "", stderr: str = "", returncode: int = 0):
     )
 
 
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    for key in list(env):
+        if key.startswith("GIT_"):
+            env.pop(key)
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _repo_with_linked_worktree(tmp_path: Path) -> tuple[Path, Path]:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test User")
+    (repo / "README.md").write_text("hello\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-m", "initial")
+    worktree = tmp_path / "repo-linked"
+    _git(repo, "worktree", "add", "-b", "feature/linked", str(worktree), "HEAD")
+    return repo, worktree
+
+
 # ---------------------------------------------------------------------------
 # Claude
 # ---------------------------------------------------------------------------
@@ -569,6 +598,66 @@ def test_claude_exec_rejects_invalid_project_settings_before_launch(
 
     assert "invalid Claude project settings JSON" in str(exc.value)
     assert popen.call_count == 0
+
+
+def test_claude_exec_rejects_mutating_linked_worktree_cwd_before_launch(
+    mocker,
+    tmp_path,
+):
+    _repo, worktree = _repo_with_linked_worktree(tmp_path)
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    runner = mocker.patch("conductor.providers.claude.run_subprocess_with_live_stderr")
+    session_log = SessionLog(path=tmp_path / "claude-linked-worktree.ndjson")
+
+    with pytest.raises(ProviderConfigError) as exc:
+        ClaudeProvider().exec(
+            "hi",
+            sandbox="workspace-write",
+            cwd=str(worktree),
+            session_log=session_log,
+        )
+
+    assert "linked git worktree" in str(exc.value)
+    assert "route mutating worktree-isolated tasks to `--with codex`" in str(exc.value)
+    assert runner.call_count == 0
+    events = [
+        json.loads(line)
+        for line in session_log.log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    diagnostic = next(
+        event
+        for event in events
+        if event["event"] == "provider_diagnostic"
+        and event["data"]["check"] == "claude_linked_worktree_cwd"
+    )
+    assert diagnostic["data"]["allowed"] is False
+    assert diagnostic["data"]["cwd"] == str(worktree.resolve())
+
+
+def test_claude_exec_allows_read_only_linked_worktree_cwd(
+    mocker,
+    tmp_path,
+):
+    _repo, worktree = _repo_with_linked_worktree(tmp_path)
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    fake = _FakePopen(stdout_schedule=[(0, CLAUDE_JSON)])
+    captured: dict[str, object] = {}
+
+    def factory(args, **kwargs):
+        fake.args = args
+        captured.update(kwargs)
+        return fake
+
+    mocker.patch("conductor.providers.claude.subprocess.Popen", side_effect=factory)
+
+    response = ClaudeProvider(first_output_timeout_sec=1).exec(
+        "hi",
+        sandbox="read-only",
+        cwd=str(worktree),
+    )
+
+    assert response.text == "hello from claude"
+    assert captured["cwd"] == str(worktree.resolve())
 
 
 # ---------------------------------------------------------------------------
@@ -1448,6 +1537,18 @@ GEMINI_JSON = """{
     }
 }"""
 
+GEMINI_SAVED_JSON = """{
+    "response": "My analysis is complete and has been saved. I'm ready for your next instruction.",
+    "session_id": "saved-xyz",
+    "stats": {
+        "tools": {
+            "byName": {
+                "write_file": {"count": 1, "success": 1}
+            }
+        }
+    }
+}"""
+
 
 def test_gemini_configured_when_cli_present_and_env_authed(mocker, monkeypatch):
     mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
@@ -1560,6 +1661,52 @@ def test_gemini_call_parses_json_and_usage(mocker):
     assert response.usage["input_tokens"] == 12
     assert response.usage["output_tokens"] == 4
     assert response.session_id == "xyz"
+
+
+def test_gemini_call_appends_inline_response_contract(mocker):
+    mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
+    run_mock = mocker.patch(
+        "conductor.providers.gemini.subprocess.run",
+        return_value=_fake_completed(stdout=GEMINI_JSON),
+    )
+
+    GeminiProvider().call("hi")
+
+    args = run_mock.call_args.args[0]
+    prompt = args[args.index("-p") + 1]
+    assert "Conductor call output contract" in prompt
+    assert "Return the complete answer directly" in prompt
+    assert "Do not save the answer to disk" in prompt
+    assert "write_file" in prompt
+
+
+def test_gemini_call_rejects_saved_write_file_placeholder(mocker):
+    mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
+    mocker.patch(
+        "conductor.providers.gemini.subprocess.run",
+        return_value=_fake_completed(stdout=GEMINI_SAVED_JSON),
+    )
+
+    with pytest.raises(ProviderHTTPError) as exc:
+        GeminiProvider().call("answer inline")
+
+    assert "file-writing tool" in str(exc.value)
+    assert "inline output" in str(exc.value)
+
+
+def test_gemini_exec_allows_saved_write_file_response(mocker):
+    mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
+    fake = _FakePopen(stdout_schedule=[(0, GEMINI_SAVED_JSON)])
+
+    def factory(args, **kwargs):
+        fake.args = args
+        return fake
+
+    mocker.patch("conductor.providers.gemini.subprocess.Popen", side_effect=factory)
+
+    response = GeminiProvider().exec("write a file", sandbox="workspace-write")
+
+    assert "has been saved" in response.text
 
 
 def test_gemini_review_uses_code_review_extension_command(mocker, monkeypatch):
