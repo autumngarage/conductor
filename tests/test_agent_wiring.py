@@ -12,6 +12,15 @@ import pytest
 from conductor import agent_wiring as aw
 
 
+def _assert_no_trailing_whitespace(path):
+    bad_lines = [
+        idx
+        for idx, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if line != line.rstrip(" \t")
+    ]
+    assert bad_lines == []
+
+
 @pytest.fixture(autouse=True)
 def _isolated_homes(tmp_path, monkeypatch):
     """Point every path helper at tmp_path; chdir so repo-scoped checks
@@ -141,6 +150,13 @@ def test_write_managed_frontmatter_embeds_version(tmp_path):
     assert "You are a test." in text
     assert aw.is_managed_file(path)
     assert aw.read_managed_version(path) == "2.0.0"
+
+
+def test_write_managed_frontmatter_quotes_empty_values(tmp_path):
+    path = tmp_path / "agent.md"
+    aw.write_managed_frontmatter(path, {"globs": ""}, "body", version="2.0.0")
+    assert "globs: \"\"" in path.read_text(encoding="utf-8")
+    _assert_no_trailing_whitespace(path)
 
 
 def test_write_managed_frontmatter_refuses_user_owned(tmp_path):
@@ -462,6 +478,24 @@ def test_agent_wiring_notice_reports_stale_repo_block():
     assert "conductor init --yes" in message
 
 
+def test_agent_wiring_notice_omits_fresh_repo_wiring():
+    aw.wire_agents_md(version="0.8.1")
+    aw.wire_gemini_md(version="0.8.1")
+    aw.wire_claude_md_repo(version="0.8.1")
+    aw.wire_cursor(version="0.8.1")
+
+    assert aw.agent_wiring_notice(current_version="0.8.1") is None
+
+
+def test_agent_wiring_notice_treats_local_build_metadata_as_current():
+    aw.wire_agents_md(version="0.8.1")
+    aw.wire_gemini_md(version="0.8.1")
+    aw.wire_claude_md_repo(version="0.8.1")
+    aw.wire_cursor(version="0.8.1")
+
+    assert aw.agent_wiring_notice(current_version="0.8.1+2.gabc123") is None
+
+
 def test_agent_wiring_notice_reports_missing_when_requested():
     from pathlib import Path
 
@@ -639,6 +673,25 @@ def test_wire_cursor_writes_managed_rule_file():
     assert "managed-by: conductor v0.4.2" in text
     assert "Conductor delegation" in text
     assert aw.is_managed_file(path)
+
+
+def test_generated_agent_wiring_outputs_have_no_trailing_whitespace():
+    report = aw.wire_claude_code("0.8.1", patch_claude_md=True)
+    aw.wire_agents_md(version="0.8.1")
+    aw.wire_gemini_md(version="0.8.1")
+    aw.wire_claude_md_repo(version="0.8.1")
+    cursor = aw.wire_cursor(version="0.8.1").path
+
+    paths = [
+        *report.written,
+        aw.claude_home() / "CLAUDE.md",
+        cursor,
+        aw.detect().agents_md,
+        aw.detect().gemini_md,
+        aw.detect().claude_md_repo,
+    ]
+    for path in paths:
+        _assert_no_trailing_whitespace(path)
 
 
 def test_wire_cursor_creates_nested_dirs():

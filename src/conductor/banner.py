@@ -96,16 +96,10 @@ def print_banner(
 
 
 def conductor_version() -> str | None:
-    """Return the installed conductor version, or None if unknown.
+    """Return the resolved conductor version for banner display."""
+    from conductor import __version__
 
-    ``hatch-vcs`` writes ``_version.py`` at build time. Tests and editable
-    installs may not have it, so we fail soft.
-    """
-    try:
-        from conductor._version import __version__
-        return str(__version__)
-    except Exception:
-        return None
+    return str(__version__) if __version__ else None
 
 
 SUBTITLE_INIT = "pick an LLM, give it a job"
