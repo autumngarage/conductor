@@ -141,15 +141,29 @@ def test_claude_configured_false_when_auth_probe_exits_nonzero(mocker):
     assert "upgrade" in reason.lower()
 
 
-def test_claude_configured_false_when_auth_probe_times_out(mocker):
+def test_claude_configured_true_when_auth_probe_times_out_but_cli_health_passes(mocker):
     mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
     mocker.patch(
         "conductor.providers.claude.subprocess.run",
-        side_effect=subprocess.TimeoutExpired(cmd="claude", timeout=5),
+        side_effect=[
+            subprocess.TimeoutExpired(cmd="claude", timeout=15),
+            _fake_completed(stdout="2.1.121 (Claude Code)"),
+        ],
+    )
+    ok, reason = ClaudeProvider().configured()
+    assert ok is True and reason is None
+
+
+def test_claude_configured_false_when_auth_and_health_probes_time_out(mocker):
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    mocker.patch(
+        "conductor.providers.claude.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd="claude", timeout=15),
     )
     ok, reason = ClaudeProvider().configured()
     assert ok is False
     assert "could not verify" in reason
+    assert "--version" in reason
 
 
 def test_claude_configured_false_when_auth_probe_returns_non_json(mocker):

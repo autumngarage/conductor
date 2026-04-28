@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
 CLAUDE_DEFAULT_MODEL = "sonnet"
 CLAUDE_REQUEST_TIMEOUT_SEC = 180.0
+CLAUDE_AUTH_PROBE_TIMEOUT_SEC = 15.0
 CLAUDE_CLI_ENV = "CONDUCTOR_CLAUDE_CLI"
 
 # Sentinel: "caller didn't specify a timeout" vs "caller explicitly passed
@@ -82,9 +83,11 @@ class ClaudeProvider:
         *,
         cli_command: str | None = None,
         timeout_sec: float = CLAUDE_REQUEST_TIMEOUT_SEC,
+        auth_probe_timeout_sec: float = CLAUDE_AUTH_PROBE_TIMEOUT_SEC,
     ) -> None:
         self._cli = cli_command or os.environ.get(CLAUDE_CLI_ENV) or "claude"
         self._timeout_sec = timeout_sec
+        self._auth_probe_timeout_sec = auth_probe_timeout_sec
 
     def _check_cli_path(self) -> tuple[bool, str | None]:
         """Cheap PATH-only check (no subprocess). Used by call()/exec()
@@ -126,9 +129,22 @@ class ClaudeProvider:
                 [self._cli, "auth", "status", "--json"],
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=self._auth_probe_timeout_sec,
             )
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        except subprocess.TimeoutExpired as e:
+            health_ok, health_reason = self.health_probe(
+                timeout_sec=self._auth_probe_timeout_sec
+            )
+            if health_ok:
+                return True, None
+            return False, (
+                f"could not verify `{self._cli}` auth status: {e}. "
+                f"Fallback `{self._cli} --version` probe also failed: "
+                f"{health_reason or 'unknown failure'}. "
+                "Update the CLI (`brew upgrade claude`) and re-run, "
+                "or set `ANTHROPIC_API_KEY` for non-interactive use."
+            )
+        except (FileNotFoundError, OSError) as e:
             return False, (
                 f"could not verify `{self._cli}` auth status: {e}. "
                 "Update the CLI (`brew upgrade claude`) and re-run, "
