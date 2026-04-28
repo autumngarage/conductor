@@ -13,7 +13,7 @@ This document is the durable contract for downstream tools that invoke Conductor
 - Additive changes are always allowed: new flags, new fields. Consumers must ignore unknown JSON fields.
 - The `raw` field of the JSON output is provider-specific and **explicitly not stable** — it passes through whatever the underlying provider CLI emitted. Consumers that read `raw` accept upstream churn.
 
-Regression tests cover the high-risk pieces of this surface, including JSON auto-route output and the current error-code buckets. When this contract grows, add tests for the new stable field or flag in the same PR.
+Regression tests cover the high-risk pieces of this surface, including JSON auto-route output and the current error-code buckets. `tests/test_consumer_contract.py` is the executable guardrail for this document; when this contract grows, add tests for the new stable field or flag in the same PR.
 
 ## Invocation forms
 
