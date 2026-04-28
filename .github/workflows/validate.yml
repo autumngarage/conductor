@@ -43,18 +43,15 @@ jobs:
           pre-commit run --all-files --hook-stage pre-commit --show-diff-on-failure
 
       - name: Run touchstone validate
+        # Touchstone is the project validation source of truth. For this
+        # Python profile it runs Ruff, mypy, and pytest, so keep those checks
+        # centralized instead of duplicating them as separate CI steps.
         run: bash scripts/touchstone-run.sh validate
-
-      - name: Ruff lint
-        run: uv run ruff check src/ tests/
-
-      - name: Pytest (mocked)
-        run: uv run pytest -v
 
   live-smoke:
     # Only runs on manual dispatch with the checkbox enabled — live calls cost
     # real tokens and the Kimi endpoint is quota-constrained. Mocked tests in
-    # the `validate` job above cover every adapter path on every push/PR.
+    # Touchstone's validate pass cover every adapter path on every push/PR.
     if: github.event_name == 'workflow_dispatch' && inputs.run_live_smoke == true
     runs-on: ubuntu-latest
     needs: validate
