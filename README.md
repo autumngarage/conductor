@@ -60,31 +60,38 @@ pip install git+https://github.com/autumngarage/conductor
 export OPENROUTER_API_KEY=sk-or-v1-...
 
 # Manual mode: pick a specific provider
-conductor call --with kimi --task "What is 2+2?"
+conductor call --with kimi --brief "What is 2+2?"
 
-# Pipe content as the task
-cat README.md | conductor call --with kimi --task "Summarize this in one sentence."
+# Pipe content as the brief
+cat README.md | conductor call --with kimi --brief "Summarize this in one sentence."
 
 # Override the default model (default: moonshotai/kimi-k2.6)
-conductor call --with kimi --model moonshotai/kimi-k2 --task "..."
+conductor call --with kimi --model moonshotai/kimi-k2 --brief "..."
 
 # Get the full response as JSON (for scripting)
-conductor call --with kimi --task "ping" --json
+conductor call --with kimi --brief "ping" --json
 ```
+
+For delegation from Claude, Codex, or another agent, prefer
+`--brief-file PATH` and include the goal, context, scope, constraints,
+expected output, and validation. Conductor only sees the brief you pass
+plus any files the delegated provider can inspect; it does not inherit
+the caller's conversation context. Existing `--task` / `--task-file`
+flags remain supported as compatibility aliases.
 
 ## v0.1 scope
 
 Shipped:
 
 - Built-in providers: `kimi` (OpenRouter-backed HTTP preset), `openrouter`, `deepseek-chat`, `deepseek-reasoner`, `claude`, `codex`, `gemini`, and `ollama`.
-- `conductor call --with <id> --task "..."` — manual mode for any provider.
-- `conductor call --auto [--tags a,b,c] --task "..."` — rule-based router picks the best configured provider for the task's tags.
+- `conductor call --with <id> --brief "..."` — manual mode for any provider.
+- `conductor call --auto [--tags a,b,c] --brief "..."` — rule-based router picks the best configured provider for the task's tags.
 - `conductor list [--json]` — shows every provider with ready/not-ready status, default model, and capability tags.
 - `conductor smoke <id>` / `conductor smoke --all [--json]` — proves a provider's auth + endpoint work (cheapest round-trip that exercises the full path).
 - `conductor doctor [--json]` — diagnostic report: which providers are configured, which env vars are set, what's in the macOS Keychain.
 - `conductor init [-y]` — interactive first-run wizard (TTY-detected, `--yes` for non-TTY). For providers needing credentials (`openrouter`, plus OpenRouter-backed `kimi` / `deepseek-*`), prompts, recommends macOS Keychain or Linux `secret-tool` when available, keeps 1Password available via `op read`, runs a setup verification smoke test, and prints the manual env-var fallback when no encrypted store is available.
 - Credentials resolver (`conductor.credentials`): env var first, then `key_command`, then macOS Keychain under service `conductor`.
-- Offline-mode fallback: on a real connectivity failure (DNS, TCP reset, unreachable host) during `--auto` routing, Conductor prompts once to switch to the local `ollama` provider and remembers that choice for a short window. `conductor call --offline --task "..."` is the non-interactive form — useful on a plane, in CI, or any time you want to force local. Clear the sticky flag with `--no-offline`.
+- Offline-mode fallback: on a real connectivity failure (DNS, TCP reset, unreachable host) during `--auto` routing, Conductor prompts once to switch to the local `ollama` provider and remembers that choice for a short window. `conductor call --offline --brief "..."` is the non-interactive form — useful on a plane, in CI, or any time you want to force local. Clear the sticky flag with `--no-offline`.
 
 Deferred (see `autumn-garage/.cortex/plans/conductor-bootstrap.md`):
 

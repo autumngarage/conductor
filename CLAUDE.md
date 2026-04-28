@@ -84,8 +84,13 @@ Primary channel is the Homebrew tap `autumngarage/homebrew-conductor` (install: 
 
 Conductor exposes two modes:
 
-- **Manual:** `conductor call --with <provider> --task "..."` — caller picks the provider explicitly.
-- **Auto:** `conductor call --auto --task "..." --tags <a,b,c>` — Conductor's router picks based on task tags + provider capability tags.
+- **Manual:** `conductor call --with <provider> --brief "..."` — caller picks the provider explicitly.
+- **Auto:** `conductor call --auto --brief "..." --tags <a,b,c>` — Conductor's router picks based on task tags + provider capability tags.
+
+For agent delegation, prefer `--brief-file` and include enough context for
+the receiving model to work without this conversation: goal, context, scope,
+constraints, expected output, and validation. `--task` / `--task-file`
+remain supported for compatibility, but `--brief` is the clearer contract.
 
 Both modes return the same `CallResponse` shape on stdout (text or JSON via `--json`). Consumers (Sentinel, Touchstone) shell out and read stdout; they never import Conductor as a library. This preserves Sentinel's "no Python coupling between trio tools" invariant and lets Conductor release on its own cadence.
 

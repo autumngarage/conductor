@@ -41,26 +41,32 @@ answer, present it to the user with attribution.
 
 ## How to delegate
 
+Conductor does **not** inherit your conversation context. Before every
+delegation, write a complete brief that includes the goal, relevant
+context, scope, constraints, expected output, and validation. For
+multi-turn `exec` work, prefer `--brief-file` so the handoff is durable
+and not squeezed through shell quoting.
+
 Single-turn call:
 
-    conductor call --with <provider> --task "..."
+    conductor call --with <provider> --brief "..."
 
 Let the router pick by tags:
 
-    conductor call --auto --tags long-context,cheap --task "..."
+    conductor call --auto --tags long-context,cheap --brief "..."
 
-Pipe content in as the task:
+Pipe content in as the brief:
 
-    cat long-file.md | conductor call --with kimi --task "Summarize."
+    cat long-file.md | conductor call --with kimi --brief "Summarize."
 
 Multi-turn agent session with tools (inside a sandbox):
 
     conductor exec --with <provider> --tools Read,Grep,Edit \\
-        --sandbox workspace-write --task "..."
+        --sandbox workspace-write --brief-file /tmp/conductor-brief.md
 
 Get JSON for scripting / piping into other tools:
 
-    conductor call --with kimi --task "..." --json
+    conductor call --with kimi --brief "..." --json
 
 ## Providers at a glance
 
@@ -107,23 +113,23 @@ $ARGUMENTS
 
 The first token is the target — a provider name (`kimi`, `claude`,
 `codex`, `gemini`, `ollama`) or the literal `auto` to let conductor's
-router pick. Everything after the first token is the task.
+router pick. Everything after the first token is the brief.
 
-Run the task through conductor using the Bash tool:
+Run the brief through conductor using the Bash tool:
 
 - If the first token is a provider name:
 
-      conductor call --with <provider> --task "<the rest>"
+      conductor call --with <provider> --brief "<the rest>"
 
 - If the first token is `auto`:
 
-      conductor call --auto --task "<the rest>"
+      conductor call --auto --brief "<the rest>"
 
 - If the task clearly needs file tools (editing, grep, long-running
-  agent work), prefer:
+  agent work), write a structured brief file first and prefer:
 
       conductor exec --with <provider> --tools Read,Grep,Edit \\
-          --sandbox workspace-write --task "<the rest>"
+          --sandbox workspace-write --brief-file /tmp/conductor-brief.md
 
 Capture the provider's response. Present it to the user with a brief
 "(from <provider>)" attribution. If conductor returns an error, show
@@ -144,17 +150,20 @@ answer — NOT to answer them yourself.
 
 When invoked:
 
-1. Take the user's task as given.
+1. Build a complete brief. Include the goal, relevant context, source
+   files or pasted content, expected output, and any constraints. Do not
+   assume Kimi can see your current conversation unless you put that
+   context in the brief.
 2. If the task references files, read them (use the Bash tool) and include
    the relevant contents in the prompt you pass to Kimi. Kimi supports
    1M-token contexts; you rarely need to truncate.
 3. Run:
 
-       conductor call --with kimi --task "<prompt>" --json
+       conductor call --with kimi --brief "<prompt>" --json
 
    Pipe content via stdin if the prompt is large:
 
-       cat <file> | conductor call --with kimi --task "Summarize." --json
+       cat <file> | conductor call --with kimi --brief "Summarize." --json
 
    For long-context work that also needs deeper reasoning, add
    `--effort high` or `--effort max`. For pure summarization or
@@ -200,10 +209,11 @@ should go through you.
 When invoked:
 
 1. Craft a prompt that explicitly asks Gemini to use web search and cite
-   its sources inline.
+   its sources inline. Include any conversation context Gemini needs;
+   conductor does not pass it implicitly.
 2. Run:
 
-       conductor call --with gemini --task "<prompt>" --json
+       conductor call --with gemini --brief "<prompt>" --json
 
 3. Parse the JSON, extract the `text` field, and return it verbatim
    prefixed with "From Gemini:". Preserve any URLs or citations Gemini
@@ -247,14 +257,15 @@ loop rather than answering single-shot.
 
 When invoked:
 
-1. Describe the task precisely — Codex will run its own loop and you
-   are giving it the initial prompt, not mid-conversation context.
+1. Write a structured brief file — Codex will run its own loop and you
+   are giving it the initial prompt, not mid-conversation context. Include:
+   Goal, Context, Scope, Constraints, Expected Output, and Validation.
 2. Run (always include the watchdog flags for unattended runs):
 
        conductor exec --with codex --tools Read,Grep,Glob,Edit,Write,Bash \\
            --sandbox workspace-write \\
            --max-stall-seconds 600 --timeout 1800 \\
-           --task "<prompt>" --json
+           --brief-file /tmp/conductor-brief.md --json
 
    `--max-stall-seconds 600` kills the run if codex produces no output
    for 10 minutes (the documented silent-hang failure mode — see
@@ -312,17 +323,19 @@ When invoked:
    than a hosted flagship. If the user's task clearly needs frontier
    reasoning and is NOT privacy-sensitive, say so and ask the parent
    to route elsewhere.
-2. Run with conductor's explicit offline flag:
+2. Build a complete brief. Include all sensitive context directly in the
+   brief because conductor does not inherit your conversation context.
+3. Run with conductor's explicit offline flag:
 
-       conductor call --offline --task "<prompt>" --json
+       conductor call --offline --brief "<prompt>" --json
 
    This forces the local Ollama provider and records conductor's
    short-lived offline preference. If the parent explicitly does not want
    that sticky offline preference, use the explicit provider path instead:
 
-       conductor call --with ollama --task "<prompt>" --json
+       conductor call --with ollama --brief "<prompt>" --json
 
-3. Parse the JSON, extract `text`, and return it prefixed with
+4. Parse the JSON, extract `text`, and return it prefixed with
    "From Ollama (local):".
 
 Verification reflex: If you diagnose a conductor-config-level cause for an
@@ -364,13 +377,17 @@ You can shell out to it instead of trying to do everything yourself.
 
 Quick reference:
 
-- `conductor call --with <provider> --task "..."` — single-turn call.
-- `conductor call --auto --tags <tag1>,<tag2> --task "..."` — let the
+- `conductor call --with <provider> --brief "..."` — single-turn call.
+- `conductor call --auto --tags <tag1>,<tag2> --brief "..."` — let the
   router pick a provider based on task tags.
 - `conductor exec --with <provider> --tools Read,Edit,Bash \\
-       --sandbox workspace-write --task "..."` — agent loop with file
+       --sandbox workspace-write --brief-file /tmp/conductor-brief.md` — agent loop with file
   tools, in a sandbox.
 - `conductor list` — show configured providers and their tags.
+
+Conductor does not inherit your conversation context. For delegation,
+write a complete brief with goal, context, scope, constraints, expected
+output, and validation; use `--brief-file` for nontrivial `exec` tasks.
 
 Providers commonly worth delegating to:
 
@@ -403,16 +420,20 @@ available — a CLI that dispatches work to other LLMs (Kimi, Gemini,
 Claude, Codex, Ollama) under a uniform interface.
 
 Use it when:
-- You want a cheap second opinion (`conductor call --with kimi --task "…"`).
-- You need fresh web information (`conductor call --with gemini --task "…"`).
-- You want to stay local / offline (`conductor call --with ollama --task "…"`).
+- You want a cheap second opinion (`conductor call --with kimi --brief "..."`).
+- You need fresh web information (`conductor call --with gemini --brief "..."`).
+- You want to stay local / offline (`conductor call --with ollama --brief "..."`).
 - You're not sure which provider fits — let the router pick:
-  `conductor call --auto --tags <tag1>,<tag2> --task "…"`.
+  `conductor call --auto --tags <tag1>,<tag2> --brief "..."`.
+
+Conductor does not inherit your conversation context. Write a complete
+brief before delegating; for `exec`, prefer `--brief-file` with goal,
+context, scope, constraints, expected output, and validation.
 
 For longer running tool-using sessions:
 
     conductor exec --with <provider> --tools Read,Edit,Bash \\
-        --sandbox workspace-write --task "…"
+        --sandbox workspace-write --brief-file /tmp/conductor-brief.md
 
 Discover configured providers: `conductor list`.
 
@@ -440,7 +461,7 @@ When invoked:
 2. For normal single-turn routing, run:
 
        conductor call --auto --tags <tag1>,<tag2> --prefer <mode> \\
-           --task "<prompt>" --json
+           --brief "<prompt>" --json
 
    For the prefer axis:
    - Default: `--prefer balanced` (what conductor does by default).
@@ -456,7 +477,7 @@ When invoked:
 
        conductor exec --auto --tags tool-use,<tag> \\
            --tools Read,Grep,Glob,Edit,Write,Bash \\
-           --sandbox <mode> --task "<prompt>" --json
+           --sandbox <mode> --brief-file /tmp/conductor-brief.md --json
 
    Sandbox modes are: `read-only` for inspection, `workspace-write` for
    edits in the workspace, `strict` for the strongest isolation supported

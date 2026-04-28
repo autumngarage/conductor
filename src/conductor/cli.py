@@ -1,9 +1,9 @@
 """Conductor CLI — call, exec, list, smoke, doctor, init, route, config.
 
 v0.2 surface (call/exec):
-  conductor call --with <id> [--effort max] --task "..."
-  conductor call --auto [--tags a,b] [--prefer best] [--effort max] --task "..."
-  conductor exec --auto [--tools Read,Grep,Edit] [--sandbox read-only] --task "..."
+  conductor call --with <id> [--effort max] --brief "..."
+  conductor call --auto [--tags a,b] [--prefer best] [--effort max] --brief "..."
+  conductor exec --auto [--tools Read,Grep,Edit] [--sandbox read-only] --brief-file PATH
 
 v0.1 surface (unchanged):
   conductor list [--json]
@@ -22,7 +22,7 @@ import json
 import os
 import sys
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import click
@@ -84,6 +84,13 @@ PROFILE_PRECEDENCE_TEXT = (
     "Resolution order: profile defaults < CONDUCTOR_* env vars < explicit CLI flags."
 )
 DEFAULT_EXEC_MAX_STALL_SEC = 360
+MIN_EXEC_BRIEF_CHARS = 300
+
+
+@dataclass(frozen=True)
+class BriefInput:
+    body: str
+    source: str
 
 
 # --------------------------------------------------------------------------- #
@@ -91,36 +98,79 @@ DEFAULT_EXEC_MAX_STALL_SEC = 360
 # --------------------------------------------------------------------------- #
 
 
-def _read_task(task: str | None, task_file: str | None) -> str:
-    if task is not None and task_file is not None:
+def _read_task(
+    task: str | None,
+    task_file: str | None,
+    *,
+    brief: str | None = None,
+    brief_file: str | None = None,
+) -> BriefInput:
+    explicit_sources = [
+        (name, value)
+        for name, value in (
+            ("--task", task),
+            ("--brief", brief),
+            ("--task-file", task_file),
+            ("--brief-file", brief_file),
+        )
+        if value is not None
+    ]
+    if len(explicit_sources) > 1:
+        got = ", ".join(name for name, _value in explicit_sources)
         raise click.UsageError(
-            "task source is ambiguous. Use exactly one of --task, --task-file, or stdin; "
-            "got --task, --task-file."
+            "brief source is ambiguous. Use exactly one of --brief, --brief-file, "
+            f"--task, --task-file, or stdin; got {got}."
         )
 
-    if task is not None:
+    source = "stdin"
+    if brief is not None:
+        body = brief
+        source = "--brief"
+    elif task is not None:
         body = task
-    elif task_file is not None:
-        if task_file == "-":
+        source = "--task"
+    elif brief_file is not None or task_file is not None:
+        file_source = brief_file if brief_file is not None else task_file
+        source = "--brief-file" if brief_file is not None else "--task-file"
+        assert file_source is not None
+        if file_source == "-":
             body = sys.stdin.read()
         else:
             try:
-                body = Path(task_file).read_text(encoding="utf-8")
+                body = Path(file_source).read_text(encoding="utf-8")
             except OSError as e:
                 raise click.UsageError(
-                    f"could not read --task-file {task_file!r}: {e.strerror or e}"
+                    f"could not read {source} {file_source!r}: {e.strerror or e}"
                 ) from e
     elif not sys.stdin.isatty():
         body = sys.stdin.read()
     else:
         raise click.UsageError(
-            "no task provided. Pass --task '...', --task-file PATH, or pipe content on stdin."
+            "no brief provided. Pass --brief '...', --brief-file PATH, "
+            "--task '...', --task-file PATH, or pipe content on stdin."
         )
 
     body = body.strip()
     if not body:
-        raise click.UsageError("task is empty after stripping whitespace.")
-    return body
+        raise click.UsageError("brief is empty after stripping whitespace.")
+    return BriefInput(body=body, source=source)
+
+
+def _warn_if_short_exec_brief(
+    brief_input: BriefInput,
+    *,
+    allow_short_brief: bool,
+) -> None:
+    if allow_short_brief or len(brief_input.body) >= MIN_EXEC_BRIEF_CHARS:
+        return
+    click.echo(
+        "[conductor] brief is short "
+        f"({len(brief_input.body)} chars). Delegated exec only sees this brief "
+        "plus files it can inspect; for Claude/Codex handoffs, prefer "
+        "--brief-file with goal, context, scope, constraints, expected output, "
+        "and validation. Pass --allow-short-brief to silence this warning.",
+        err=True,
+    )
 
 
 def _parse_csv(raw: str | None) -> list[str]:
@@ -373,7 +423,7 @@ def _echo_offline_hint(failed_name: str, *, silent: bool) -> None:
     click.echo(
         f"[conductor] {failed_name} is unreachable and no local fallback "
         "is available for automatic switching. If you are offline, run "
-        "`conductor call --with ollama --task '...'` (or pass --offline).",
+        "`conductor call --with ollama --brief '...'` (or pass --offline).",
         err=True,
     )
 
@@ -393,8 +443,8 @@ def _maybe_echo_explicit_network_hint(provider_id: str, err: Exception) -> None:
         return
     click.echo(
         f"[conductor] {provider_id} looks unreachable (network error). "
-        "If you are offline: `conductor call --offline --task '...'` "
-        "or `conductor call --with ollama --task '...'`.",
+        "If you are offline: `conductor call --offline --brief '...'` "
+        "or `conductor call --with ollama --brief '...'`.",
         err=True,
     )
 
@@ -1021,13 +1071,24 @@ def main() -> None:
     "--task",
     default=None,
     help="The task / prompt. Reads stdin if omitted.\n"
-    "For long briefs, prefer --task-file or stdin to keep the prompt\n"
+    "For delegation, prefer --brief or --brief-file.\n"
+    "For long briefs, prefer --brief-file or stdin to keep the prompt\n"
     "out of `ps aux`.",
 )
 @click.option(
     "--task-file",
     default=None,
-    help="Read the task / prompt from a UTF-8 file. Use '-' to read stdin.",
+    help="Read the task / prompt from a UTF-8 file. Alias: --brief-file.",
+)
+@click.option(
+    "--brief",
+    default=None,
+    help="Delegation brief / prompt. Alias for --task with clearer intent.",
+)
+@click.option(
+    "--brief-file",
+    default=None,
+    help="Read the delegation brief from a UTF-8 file. Use '-' to read stdin.",
 )
 @click.option(
     "--model",
@@ -1077,6 +1138,8 @@ def call(
     exclude: str | None,
     task: str | None,
     task_file: str | None,
+    brief: str | None,
+    brief_file: str | None,
     model: str | None,
     as_json: bool,
     verbose_route: bool,
@@ -1122,7 +1185,13 @@ def call(
             f"--with {provider_id} and --exclude {exclude} contradict each other."
         )
 
-    body = _read_task(task, task_file)
+    brief_input = _read_task(
+        task,
+        task_file,
+        brief=brief,
+        brief_file=brief_file,
+    )
+    body = brief_input.body
     effort_value = _parse_effort(effort)
 
     decision: RouteDecision | None = None
@@ -1290,13 +1359,24 @@ def call(
     "--task",
     default=None,
     help="The task / prompt. Reads stdin if omitted.\n"
-    "For long briefs, prefer --task-file or stdin to keep the prompt\n"
+    "For delegation, prefer --brief or --brief-file.\n"
+    "For long briefs, prefer --brief-file or stdin to keep the prompt\n"
     "out of `ps aux`.",
 )
 @click.option(
     "--task-file",
     default=None,
-    help="Read the task / prompt from a UTF-8 file. Use '-' to read stdin.",
+    help="Read the task / prompt from a UTF-8 file. Alias: --brief-file.",
+)
+@click.option(
+    "--brief",
+    default=None,
+    help="Delegation brief / prompt. Alias for --task with clearer intent.",
+)
+@click.option(
+    "--brief-file",
+    default=None,
+    help="Read the delegation brief from a UTF-8 file. Use '-' to read stdin.",
 )
 @click.option("--model", default=None, help="Override the provider's default model.")
 @click.option(
@@ -1335,6 +1415,15 @@ def call(
     default=True,
     help="Run a provider health probe before forwarding the task.",
 )
+@click.option(
+    "--allow-short-brief",
+    is_flag=True,
+    default=False,
+    help=(
+        "Suppress the short-brief warning for exec delegation. Use when the "
+        "brief is intentionally tiny or all context is supplied through files."
+    ),
+)
 def exec_cmd(
     provider_id: str | None,
     profile: str | None,
@@ -1350,6 +1439,8 @@ def exec_cmd(
     max_stall_sec: int | None,
     task: str | None,
     task_file: str | None,
+    brief: str | None,
+    brief_file: str | None,
     model: str | None,
     log_file: str | None,
     as_json: bool,
@@ -1358,6 +1449,7 @@ def exec_cmd(
     resume_session_id: str | None,
     offline: bool | None,
     preflight: bool,
+    allow_short_brief: bool,
 ) -> None:
     """Run a task as an agent session with tool access (exec mode)."""
     profile_spec = _load_named_profile(profile)
@@ -1395,7 +1487,17 @@ def exec_cmd(
             "--resume requires --with <provider> (sessions are provider-specific)."
         )
 
-    body = _read_task(task, task_file)
+    brief_input = _read_task(
+        task,
+        task_file,
+        brief=brief,
+        brief_file=brief_file,
+    )
+    _warn_if_short_exec_brief(
+        brief_input,
+        allow_short_brief=allow_short_brief,
+    )
+    body = brief_input.body
     tools_set = _validate_tools(tools)
     sandbox_value = _validate_sandbox(sandbox)
     effort_value = _parse_effort(effort)
@@ -2820,7 +2922,7 @@ def providers_add(
     click.echo(f"    file:    {path}")
     click.echo("")
     click.echo(f"Try it: conductor smoke {name}")
-    click.echo(f"Use it: conductor call --with {name} --task 'hello'")
+    click.echo(f"Use it: conductor call --with {name} --brief 'hello'")
 
 
 @providers.command("remove")

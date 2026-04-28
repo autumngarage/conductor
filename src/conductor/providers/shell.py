@@ -157,7 +157,7 @@ class ShellProvider:
     def smoke(self) -> tuple[bool, str | None]:
         # Cheapest possible — just confirm the binary exists. A real
         # round-trip would cost tokens / time; the user can use
-        # `conductor call --with <name> --task "ping"` for that.
+        # `conductor call --with <name> --brief "ping"` for that.
         return self.configured()
 
     def health_probe(self, *, timeout_sec: float = 30.0) -> tuple[bool, str | None]:

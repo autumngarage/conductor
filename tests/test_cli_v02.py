@@ -421,6 +421,53 @@ def test_exec_task_file_dash_reads_stdin(mocker):
     assert exec_mock.call_args.args[0] == "do the thing from stdin"
 
 
+def test_exec_brief_file_reads_file(mocker, tmp_path):
+    _stub_all_configured(mocker, {"codex"})
+    brief = tmp_path / "brief.md"
+    brief.write_text(
+        "# Goal\nRun the delegated change.\n\n# Context\nUse the repository files.",
+        encoding="utf-8",
+    )
+    exec_mock = mocker.patch.object(
+        CodexProvider, "exec", return_value=_fake_response("codex")
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--with", "codex", "--brief-file", str(brief)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert exec_mock.call_args.args[0].startswith("# Goal")
+
+
+def test_exec_short_brief_warns_by_default(mocker):
+    _stub_all_configured(mocker, {"codex"})
+    mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--with", "codex", "--brief", "do it"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "brief is short" in result.stderr
+    assert "--brief-file" in result.stderr
+
+
+def test_exec_allow_short_brief_suppresses_warning(mocker):
+    _stub_all_configured(mocker, {"codex"})
+    mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--with", "codex", "--brief", "do it", "--allow-short-brief"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "brief is short" not in result.stderr
+
+
 def test_exec_rejects_task_and_task_file_together(mocker):
     _stub_all_configured(mocker, {"codex"})
 
@@ -430,7 +477,21 @@ def test_exec_rejects_task_and_task_file_together(mocker):
     )
 
     assert result.exit_code == 2
-    assert "exactly one of --task, --task-file, or stdin" in result.output
+    assert "exactly one of --brief, --brief-file, --task, --task-file, or stdin" in (
+        result.output
+    )
+
+
+def test_exec_rejects_task_and_brief_together(mocker):
+    _stub_all_configured(mocker, {"codex"})
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--with", "codex", "--task", "hi", "--brief", "better brief"],
+    )
+
+    assert result.exit_code == 2
+    assert "got --task, --brief" in result.output
 
 
 def test_exec_missing_task_file_errors(mocker, tmp_path):
