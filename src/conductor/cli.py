@@ -45,6 +45,7 @@ from conductor.providers import (
     ProviderConfigError,
     ProviderError,
     ProviderHTTPError,
+    ProviderStalledError,
     UnsupportedCapability,
     get_provider,
     known_providers,
@@ -298,12 +299,14 @@ def _is_retryable(err: Exception) -> tuple[bool, str]:
     mode prompt can fire on the real thing (DNS/TCP failure) rather than
     on a slow-but-reachable upstream.
     """
+    if isinstance(err, ProviderStalledError):
+        return True, "timeout"
     msg = str(err).lower()
     if "429" in msg or "rate limit" in msg or "ratelimit" in msg:
         return True, "rate-limit"
     if any(sig in msg for sig in _NETWORK_ERROR_SIGNALS):
         return True, "network"
-    if "timed out" in msg or "timeout" in msg:
+    if "timed out" in msg or "timeout" in msg or "stalled" in msg:
         return True, "timeout"
     # HTTP 5xx — check for " 5" preceded by "http" or a similar prefix so
     # we don't match arbitrary "5" digits. Cheap heuristic; acceptable.

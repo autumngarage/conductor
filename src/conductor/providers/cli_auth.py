@@ -12,6 +12,8 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from conductor.providers.interface import ProviderStalledError
+
 if TYPE_CHECKING:
     from conductor.session_log import SessionLog
 
@@ -38,6 +40,12 @@ class CapturedProcessResult:
     stdout: str
     stderr: str
     duration_ms: int
+
+
+def _format_stall_seconds(value: float) -> str:
+    if float(value).is_integer():
+        return str(int(value))
+    return f"{value:g}"
 
 
 def _extract_url(text: str) -> str | None:
@@ -176,6 +184,9 @@ def run_subprocess_with_live_stderr(
     cwd: str | None,
     env: dict[str, str] | None,
     timeout: float | None,
+    max_stall_sec: float | None = None,
+    provider_name: str | None = None,
+    session_log: SessionLog | None = None,
     tracker: AuthPromptTracker,
     popen_factory,
 ) -> CapturedProcessResult:
@@ -214,6 +225,8 @@ def run_subprocess_with_live_stderr(
     stdout_thread.start()
     stderr_thread.start()
 
+    last_output = start
+    provider_label = provider_name or str(args[0])
     while True:
         now = time.monotonic()
         if timeout is not None and now - start > timeout:
@@ -226,6 +239,35 @@ def run_subprocess_with_live_stderr(
                 timeout=timeout,
                 output="".join(parts["stdout"]),
                 stderr="".join(parts["stderr"]),
+            )
+
+        if max_stall_sec is not None and now - last_output > max_stall_sec:
+            _terminate_process(process)
+            stdout_thread.join(timeout=1)
+            stderr_thread.join(timeout=1)
+            _drain_stream_queue(stream_q, parts, tracker)
+            elapsed = time.monotonic() - last_output
+            last_event = (
+                "provider_output"
+                if parts["stdout"] or parts["stderr"]
+                else "provider_started"
+            )
+            reason = (
+                "no_provider_response_within_"
+                f"{_format_stall_seconds(max_stall_sec)}s"
+            )
+            if session_log is not None:
+                session_log.emit(
+                    "error",
+                    {
+                        "provider": provider_label,
+                        "reason": reason,
+                        "last_event": last_event,
+                        "silent_sec": round(elapsed, 1),
+                    },
+                )
+            raise ProviderStalledError(
+                f"{provider_label} CLI stalled after {elapsed:.0f}s with no output"
             )
 
         try:
@@ -242,6 +284,7 @@ def run_subprocess_with_live_stderr(
             continue
 
         parts[stream_name].append(item)
+        last_output = time.monotonic()
         if stream_name == "stderr":
             tracker.observe_text(item, source="stderr")
 

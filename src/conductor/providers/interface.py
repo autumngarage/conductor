@@ -203,8 +203,9 @@ class Provider(Protocol):
         """Multi-turn agent session with tool access.
 
         ``resume_session_id`` semantics match ``call()``.
-        ``max_stall_sec`` is an optional no-output watchdog; providers that
-        do not implement it accept and ignore the value for API parity.
+        ``max_stall_sec`` is an optional no-output watchdog. CLI-backed
+        providers should honor it; providers without a streaming subprocess
+        may accept and ignore the value for API parity.
 
         Raises UnsupportedCapability if the provider cannot drive the
         requested tools or sandbox, or cannot resume sessions when one
