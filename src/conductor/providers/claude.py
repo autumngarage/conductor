@@ -16,6 +16,7 @@ import os
 import shutil
 import subprocess
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from conductor.providers.cli_auth import (
@@ -37,6 +38,8 @@ if TYPE_CHECKING:
 CLAUDE_DEFAULT_MODEL = "sonnet"
 CLAUDE_REQUEST_TIMEOUT_SEC = 180.0
 CLAUDE_AUTH_PROBE_TIMEOUT_SEC = 15.0
+CLAUDE_FIRST_OUTPUT_TIMEOUT_SEC = 45.0
+CLAUDE_SETTING_SOURCES = "user,project,local"
 CLAUDE_CLI_ENV = "CONDUCTOR_CLAUDE_CLI"
 
 # Sentinel: "caller didn't specify a timeout" vs "caller explicitly passed
@@ -84,10 +87,12 @@ class ClaudeProvider:
         cli_command: str | None = None,
         timeout_sec: float = CLAUDE_REQUEST_TIMEOUT_SEC,
         auth_probe_timeout_sec: float = CLAUDE_AUTH_PROBE_TIMEOUT_SEC,
+        first_output_timeout_sec: float | None = CLAUDE_FIRST_OUTPUT_TIMEOUT_SEC,
     ) -> None:
         self._cli = cli_command or os.environ.get(CLAUDE_CLI_ENV) or "claude"
         self._timeout_sec = timeout_sec
         self._auth_probe_timeout_sec = auth_probe_timeout_sec
+        self._first_output_timeout_sec = first_output_timeout_sec
 
     def _check_cli_path(self) -> tuple[bool, str | None]:
         """Cheap PATH-only check (no subprocess). Used by call()/exec()
@@ -317,6 +322,11 @@ class ClaudeProvider:
             args.extend(["--allowedTools", allowed_tools])
         if permission_mode is not None:
             args.extend(["--permission-mode", permission_mode])
+        if cwd is not None:
+            # Make project/local settings resolution explicit for headless
+            # nested Claude Code runs. The child still receives cwd/PWD below;
+            # this flag tells the CLI to include repo-scoped settings sources.
+            args.extend(["--setting-sources", CLAUDE_SETTING_SOURCES])
         if resume_session_id:
             # Claude Code resumes a prior session via UUID. The previous
             # CallResponse.session_id is the canonical handle; the new
@@ -334,15 +344,34 @@ class ClaudeProvider:
         start = time.monotonic()
         tracker = AuthPromptTracker(self.name, session_log=session_log)
         try:
-            import os as _os
-            proc_env = {**_os.environ, **env_overrides} if env_overrides else None
+            effective_cwd = self._effective_cwd(cwd)
+            proc_env = self._build_proc_env(env_overrides, effective_cwd=effective_cwd)
+            first_output_timeout_sec = self._effective_first_output_timeout(
+                max_stall_sec
+            )
+            if session_log is not None:
+                session_log.emit(
+                    "provider_diagnostic",
+                    {
+                        "provider": self.name,
+                        "check": "claude_exec_watchdogs",
+                        "first_output_timeout_sec": first_output_timeout_sec,
+                        "max_stall_sec": max_stall_sec,
+                    },
+                )
+            self._emit_project_settings_diagnostic(
+                effective_cwd=effective_cwd,
+                sandbox_permission_mode=permission_mode,
+                session_log=session_log,
+            )
             if live_auth_capture:
                 result = run_subprocess_with_live_stderr(
                     args=args,
-                    cwd=cwd,
+                    cwd=str(effective_cwd) if effective_cwd is not None else None,
                     env=proc_env,
                     timeout=timeout,
                     max_stall_sec=max_stall_sec,
+                    first_output_timeout_sec=first_output_timeout_sec,
                     provider_name=self.name,
                     session_log=session_log,
                     tracker=tracker,
@@ -354,7 +383,7 @@ class ClaudeProvider:
                     capture_output=True,
                     text=True,
                     timeout=timeout,
-                    cwd=cwd,
+                    cwd=str(effective_cwd) if effective_cwd is not None else None,
                     env=proc_env,
                 )
                 result = CapturedProcessResult(
@@ -407,3 +436,88 @@ class ClaudeProvider:
             raw=data,
             auth_prompts=tracker.prompts or None,
         )
+
+    def _effective_cwd(self, cwd: str | None) -> Path | None:
+        if cwd is None:
+            return None
+        return Path(cwd).expanduser().resolve(strict=False)
+
+    def _build_proc_env(
+        self,
+        env_overrides: dict[str, str],
+        *,
+        effective_cwd: Path | None,
+    ) -> dict[str, str] | None:
+        if not env_overrides and effective_cwd is None:
+            return None
+        proc_env = {**os.environ, **env_overrides}
+        if effective_cwd is not None:
+            proc_env["PWD"] = str(effective_cwd)
+        return proc_env
+
+    def _effective_first_output_timeout(
+        self,
+        max_stall_sec: int | None,
+    ) -> float | None:
+        if (
+            max_stall_sec is None
+            or max_stall_sec <= 0
+            or self._first_output_timeout_sec is None
+            or self._first_output_timeout_sec <= 0
+        ):
+            return None
+        if self._first_output_timeout_sec >= max_stall_sec:
+            return None
+        return self._first_output_timeout_sec
+
+    def _emit_project_settings_diagnostic(
+        self,
+        *,
+        effective_cwd: Path | None,
+        sandbox_permission_mode: str | None,
+        session_log: SessionLog | None,
+    ) -> None:
+        if effective_cwd is None or sandbox_permission_mode != "acceptEdits":
+            return
+        settings_json_path = effective_cwd / ".claude" / "settings.json"
+        settings_path = effective_cwd / ".claude" / "settings.local.json"
+        data = {
+            "provider": self.name,
+            "check": "claude_project_settings",
+            "cwd": str(effective_cwd),
+            "settings_json_path": str(settings_json_path),
+            "settings_path": str(settings_path),
+            "settings_json_exists": settings_json_path.exists(),
+            "settings_local_exists": settings_path.exists(),
+            "permission_mode": sandbox_permission_mode,
+        }
+        permission_keys: set[str] = set()
+        permission_sources: list[str] = []
+        for path in (settings_json_path, settings_path):
+            if not path.exists():
+                continue
+            raw = self._read_project_settings(path)
+            permissions = raw.get("permissions")
+            if isinstance(permissions, dict):
+                permission_sources.append(path.name)
+                permission_keys.update(str(key) for key in permissions)
+        data["permissions_configured"] = bool(permission_sources)
+        if permission_sources:
+            data["permission_sources"] = permission_sources
+            data["permission_keys"] = sorted(permission_keys)
+        if session_log is not None:
+            session_log.emit("provider_diagnostic", data)
+
+    def _read_project_settings(self, path: Path) -> dict:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            raise ProviderConfigError(
+                f"invalid Claude project settings JSON at {path}: "
+                f"{e.msg} (line {e.lineno}, column {e.colno})"
+            ) from e
+        if not isinstance(raw, dict):
+            raise ProviderConfigError(
+                f"Claude project settings at {path} must be a JSON object"
+            )
+        return raw
