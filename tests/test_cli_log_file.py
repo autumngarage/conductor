@@ -16,6 +16,7 @@ from conductor.providers import (
     KimiProvider,
     OllamaProvider,
     OpenRouterProvider,
+    ProviderStalledError,
 )
 from conductor.router import reset_health
 from conductor.session_log import SessionLog
@@ -198,6 +199,59 @@ def test_sessions_list_and_tail_use_cached_metadata(
     assert tail_result.exit_code == 0, tail_result.output
     tailed = [json.loads(line) for line in tail_result.output.splitlines()]
     assert tailed[0]["event"] == "provider_started"
+
+
+def test_exec_provider_stall_records_terminal_session_metadata(
+    mocker,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    mocker.patch.object(ClaudeProvider, "health_probe", return_value=(True, None))
+
+    def _fake_exec(self, task, model=None, **kwargs):
+        session_log = kwargs["session_log"]
+        session_log.emit(
+            "error",
+            {
+                "provider": "claude",
+                "reason": "no_provider_response_within_1s",
+                "last_event": "provider_started",
+            },
+        )
+        raise ProviderStalledError("claude CLI stalled after 1s with no output")
+
+    mocker.patch.object(ClaudeProvider, "exec", _fake_exec)
+    log_path = tmp_path / "session.ndjson"
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "claude",
+            "--max-stall-seconds",
+            "1",
+            "--task",
+            "review the diff",
+            "--log-file",
+            str(log_path),
+        ],
+    )
+
+    assert result.exit_code == 1
+    events = _read_events(log_path)
+    kinds = [event["event"] for event in events]
+    assert "provider_started" in kinds
+    assert "error" in kinds
+    assert "provider_failed" in kinds
+
+    sessions_root = tmp_path / "conductor" / "sessions"
+    meta_paths = list(sessions_root.glob("*.meta.json"))
+    assert len(meta_paths) == 1
+    meta = json.loads(meta_paths[0].read_text(encoding="utf-8"))
+    assert meta["status"] != "running"
+    assert meta["finished_at"] is not None
 
 
 def test_sessions_tail_without_active_session_prints_message(

@@ -246,7 +246,6 @@ class GeminiProvider:
         resume_session_id: str | None = None,
         session_log: SessionLog | None = None,
     ) -> CallResponse:
-        # accepted for API parity; only codex implements stall-watchdog today
         # Gemini's --approval-mode: "plan" (read-only) vs "yolo" (all writes
         # auto-approved). No finer granularity; tools set is advisory.
         approval_mode = {
@@ -261,6 +260,7 @@ class GeminiProvider:
             approval_mode=approval_mode,
             cwd=cwd,
             timeout_sec_override=timeout_sec,
+            max_stall_sec=max_stall_sec,
             resume_session_id=resume_session_id,
             live_auth_capture=True,
             session_log=session_log,
@@ -275,6 +275,7 @@ class GeminiProvider:
         approval_mode: str,
         cwd: str | None = None,
         timeout_sec_override: float | None | object = _USE_DEFAULT,
+        max_stall_sec: int | None = None,
         resume_session_id: str | None = None,
         live_auth_capture: bool = False,
         session_log: SessionLog | None = None,
@@ -326,6 +327,9 @@ class GeminiProvider:
                     cwd=cwd,
                     env=proc_env,
                     timeout=timeout,
+                    max_stall_sec=max_stall_sec,
+                    provider_name=self.name,
+                    session_log=session_log,
                     tracker=tracker,
                     popen_factory=subprocess.Popen,
                 )

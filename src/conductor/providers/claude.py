@@ -236,7 +236,6 @@ class ClaudeProvider:
         resume_session_id: str | None = None,
         session_log: SessionLog | None = None,
     ) -> CallResponse:
-        # accepted for API parity; only codex implements stall-watchdog today
         # Claude's `--allowedTools` is fine-grained; passing an empty set
         # is effectively "no tools permitted" (single-turn).
         allowed = ",".join(sorted(tools)) if tools else None
@@ -257,6 +256,7 @@ class ClaudeProvider:
             permission_mode=permission_mode,
             cwd=cwd,
             timeout_sec_override=timeout_sec,
+            max_stall_sec=max_stall_sec,
             resume_session_id=resume_session_id,
             live_auth_capture=True,
             session_log=session_log,
@@ -272,6 +272,7 @@ class ClaudeProvider:
         permission_mode: str | None,
         cwd: str | None = None,
         timeout_sec_override: float | None | object = _USE_DEFAULT,
+        max_stall_sec: int | None = None,
         resume_session_id: str | None = None,
         live_auth_capture: bool = False,
         session_log: SessionLog | None = None,
@@ -325,6 +326,9 @@ class ClaudeProvider:
                     cwd=cwd,
                     env=proc_env,
                     timeout=timeout,
+                    max_stall_sec=max_stall_sec,
+                    provider_name=self.name,
+                    session_log=session_log,
                     tracker=tracker,
                     popen_factory=subprocess.Popen,
                 )

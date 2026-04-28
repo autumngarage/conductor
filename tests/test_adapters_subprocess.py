@@ -7,6 +7,7 @@ All three call external CLIs. We stub ``subprocess.run`` and
 from __future__ import annotations
 
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -344,6 +345,38 @@ def test_claude_exec_surfaces_auth_prompt_and_records_notice(mocker, capsys):
     err = capsys.readouterr().err
     assert "[conductor] auth required for claude" in err
     assert "https://claude.ai/oauth/authorize" in err
+
+
+def test_claude_exec_stall_watchdog_kills_silent_provider_and_logs_error(
+    mocker,
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    fake = _FakePopen(stdout_schedule=[], hang_after_stdout=True)
+    mocker.patch(
+        "conductor.providers.claude.subprocess.Popen",
+        side_effect=lambda args, **kwargs: fake,
+    )
+    session_log = SessionLog(path=tmp_path / "claude-stall.ndjson")
+
+    with pytest.raises(ProviderStalledError) as exc:
+        ClaudeProvider().exec(
+            "hi",
+            max_stall_sec=0.05,
+            session_log=session_log,
+        )
+
+    assert fake.terminated is True
+    assert "claude CLI stalled" in str(exc.value)
+    events = [
+        json.loads(line)
+        for line in session_log.log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    error_event = next(event for event in events if event["event"] == "error")
+    assert error_event["data"]["reason"] == "no_provider_response_within_0.05s"
+    assert error_event["data"]["last_event"] == "provider_started"
 
 
 # ---------------------------------------------------------------------------
@@ -1341,6 +1374,21 @@ def test_gemini_exec_surfaces_auth_prompt_and_records_notice(mocker, capsys):
     err = capsys.readouterr().err
     assert "[conductor] auth required for gemini" in err
     assert "https://accounts.google.com/o/oauth2/auth" in err
+
+
+def test_gemini_exec_stall_watchdog_kills_silent_provider(mocker):
+    mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
+    fake = _FakePopen(stdout_schedule=[], hang_after_stdout=True)
+    mocker.patch(
+        "conductor.providers.gemini.subprocess.Popen",
+        side_effect=lambda args, **kwargs: fake,
+    )
+
+    with pytest.raises(ProviderStalledError) as exc:
+        GeminiProvider().exec("hi", max_stall_sec=0.05)
+
+    assert fake.terminated is True
+    assert "gemini CLI stalled" in str(exc.value)
 
 
 # ---------------------------------------------------------------------------
