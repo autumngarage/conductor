@@ -46,11 +46,11 @@ def test_call_unknown_provider_shows_usage_error():
 
 def test_call_missing_task_and_no_stdin_errors():
     # CliRunner attaches an empty pipe as stdin (isatty=False), so we hit the
-    # empty-task branch rather than the no-task-no-stdin branch. Both signal
+    # empty-brief branch rather than the no-brief-no-stdin branch. Both signal
     # the same user error: nothing to send.
     result = CliRunner().invoke(main, ["call", "--with", "kimi"])
     assert result.exit_code != 0
-    assert "task" in result.output.lower() and "empty" in result.output.lower()
+    assert "brief" in result.output.lower() and "empty" in result.output.lower()
 
 
 def test_call_task_file_reads_file(monkeypatch, tmp_path):
@@ -77,6 +77,37 @@ def test_call_task_file_reads_file(monkeypatch, tmp_path):
     assert result.exit_code == 0, result.output
     assert "hello back" in result.output
     assert route.calls.last.request.content.decode("utf-8").count("brief from file") == 1
+
+
+def test_call_brief_file_reads_file(monkeypatch, tmp_path):
+    monkeypatch.setenv(OPENROUTER_API_KEY_ENV, "or-test-key")
+    _stub_kimi_catalog(monkeypatch)
+    brief = tmp_path / "brief.md"
+    brief.write_text("delegation brief from file\n", encoding="utf-8")
+
+    with respx.mock() as router:
+        route = router.post(_OPENROUTER_CHAT_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "model": KIMI_DEFAULT_MODEL,
+                    "choices": [{"message": {"content": "hello back"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 2},
+                },
+            )
+        )
+        result = CliRunner().invoke(
+            main, ["call", "--with", "kimi", "--brief-file", str(brief)]
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "hello back" in result.output
+    assert (
+        route.calls.last.request.content.decode("utf-8").count(
+            "delegation brief from file"
+        )
+        == 1
+    )
 
 
 def test_call_kimi_happy_path(monkeypatch):
