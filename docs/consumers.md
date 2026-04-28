@@ -96,7 +96,7 @@ When `--auto` is used, the JSON adds a `route` field with the same `RouteDecisio
   "...": "...",
   "route": {
     "provider": "claude",
-    "prefer": "balanced",
+    "prefer": "best",
     "effort": "medium",
     "thinking_budget": 8000,
     "tier": "frontier",
@@ -108,13 +108,13 @@ When `--auto` is used, the JSON adds a `route` field with the same `RouteDecisio
       {
         "name": "claude",
         "tier": "frontier",
-        "tier_rank": 0,
+        "tier_rank": 4,
         "matched_tags": ["code-review"],
         "tag_score": 1,
         "cost_score": 0.045,
         "latency_ms": 7000,
         "health_penalty": 0.0,
-        "combined_score": 1.0,
+        "combined_score": 4001.0,
         "unconfigured_reason": null
       }
     ],
@@ -126,7 +126,7 @@ When `--auto` is used, the JSON adds a `route` field with the same `RouteDecisio
 }
 ```
 
-Use `--verbose-route` to also get the full ranking table on stderr.
+For human diagnostics without `--json`, use `--verbose-route` to print the full ranking table on stderr. In `--json` mode, route logging is suppressed so stdout stays machine-parseable; read the `route` field instead.
 
 ### Error responses
 
@@ -168,7 +168,7 @@ Sentinel maps the JSON response into its `ChatResponse` dataclass: `text` → `r
 
 ### Sentinel — agentic code (Coder role)
 
-The Coder role uses an exec mode (separate subcommand surface; see `conductor call --help` for the agentic loop flags as they evolve). Currently the same `conductor call` with provider-specific flags routed through; the contract is being firmed up under autumngarage/conductor#93 follow-ups.
+The Coder role should use `conductor exec`, not `conductor call`. `exec` is the agentic subcommand for multi-turn work with tool access, preflight checks, sandbox settings, stall detection, and session logs. Its consumer contract is separate from this `conductor call` contract; use `conductor exec --help` for the current flag surface until that contract is documented.
 
 ## Versioning policy
 
