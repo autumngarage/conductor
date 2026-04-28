@@ -1,0 +1,50 @@
+---
+description: Use when delegating or routing tasks to a different LLM via the conductor CLI — e.g., cheap second opinions, long-context reads, web search, or offline runs.
+globs: ""
+alwaysApply: false
+managed-by: conductor v0.8.2
+---
+
+# Conductor delegation
+
+This project has [conductor](https://github.com/autumngarage/conductor)
+available — a CLI that dispatches work to other LLMs (Kimi, Gemini,
+Claude, Codex, Ollama) under a uniform interface.
+
+Use it when:
+- Quick factual/background ask:
+  `conductor ask --kind research --effort minimal --brief-file /tmp/brief.md`.
+- Deeper synthesis/research:
+  `conductor ask --kind research --effort medium --brief-file /tmp/brief.md`.
+- Code explanation or small coding judgment:
+  `conductor ask --kind code --effort low --brief-file /tmp/brief.md`.
+- Repo-changing implementation/debugging:
+  `conductor ask --kind code --effort high --brief-file /tmp/brief.md`.
+- Merge/PR/diff review:
+  `conductor ask --kind review --base <ref> --brief-file /tmp/review.md`.
+- You want multiple model perspectives:
+  `conductor ask --kind council --effort medium --brief-file /tmp/brief.md`.
+- You want a cheap second opinion (`conductor call --with kimi --brief "..."`).
+- You need fresh web information (`conductor call --with gemini --brief "..."`).
+- You want to stay local / offline (`conductor call --with ollama --brief "..."`).
+- You want a true read-only code review:
+  `conductor review --auto --base origin/main --brief-file /tmp/review.md`.
+- You're not sure which provider fits — let the router pick:
+  `conductor call --auto --tags <tag1>,<tag2> --brief "..."`.
+
+Conductor does not inherit your conversation context. Write a complete
+brief before delegating; for `exec`, prefer `--brief-file` with goal,
+context, scope, constraints, expected output, and validation.
+Default to `conductor ask`; use provider-specific `call` / `exec` only
+when the user explicitly asks for a provider or the semantic API does not
+fit.
+
+For longer running tool-using sessions:
+
+    conductor exec --with <provider> --tools Read,Edit,Bash \
+        --sandbox workspace-write --brief-file /tmp/conductor-brief.md
+
+Discover configured providers: `conductor list`.
+
+Full delegation guidance (when to delegate, when not to, error handling):
+`~/.conductor/delegation-guidance.md`
