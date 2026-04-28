@@ -46,7 +46,7 @@ jobs:
         # Touchstone is the project validation source of truth. For this
         # Python profile it runs Ruff, mypy, and pytest, so keep those checks
         # centralized instead of duplicating them as separate CI steps.
-        run: bash scripts/touchstone-run.sh validate
+        run: uv run bash scripts/touchstone-run.sh validate
 
   live-smoke:
     # Only runs on manual dispatch with the checkbox enabled — live calls cost
