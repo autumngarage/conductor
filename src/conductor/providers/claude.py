@@ -18,7 +18,11 @@ import subprocess
 import time
 from typing import TYPE_CHECKING
 
-from conductor.providers.cli_auth import AuthPromptTracker, run_subprocess_with_live_stderr
+from conductor.providers.cli_auth import (
+    AuthPromptTracker,
+    CapturedProcessResult,
+    run_subprocess_with_live_stderr,
+)
 from conductor.providers.interface import (
     CallResponse,
     ProviderConfigError,
@@ -325,7 +329,7 @@ class ClaudeProvider:
                     popen_factory=subprocess.Popen,
                 )
             else:
-                result = subprocess.run(
+                completed = subprocess.run(
                     args,
                     capture_output=True,
                     text=True,
@@ -333,16 +337,18 @@ class ClaudeProvider:
                     cwd=cwd,
                     env=proc_env,
                 )
+                result = CapturedProcessResult(
+                    returncode=completed.returncode,
+                    stdout=completed.stdout,
+                    stderr=completed.stderr,
+                    duration_ms=int((time.monotonic() - start) * 1000),
+                )
         except subprocess.TimeoutExpired as e:
             elapsed = time.monotonic() - start
             raise ProviderError(
                 f"claude CLI timed out after {elapsed:.0f}s"
             ) from e
-        duration_ms = (
-            result.duration_ms
-            if live_auth_capture
-            else int((time.monotonic() - start) * 1000)
-        )
+        duration_ms = result.duration_ms
 
         if result.returncode != 0:
             raise ProviderHTTPError(
