@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json as _json
+
 import httpx
 import pytest
 import respx
@@ -15,6 +17,7 @@ from conductor.providers.ollama import (
     OLLAMA_BASE_URL_ENV,
     OLLAMA_DEFAULT_BASE_URL,
     OLLAMA_DEFAULT_MODEL,
+    OLLAMA_MODEL_ENV,
     OllamaProvider,
 )
 
@@ -25,6 +28,7 @@ TAGS_URL = f"{OLLAMA_DEFAULT_BASE_URL}/api/tags"
 @pytest.fixture(autouse=True)
 def _no_base_url_override(monkeypatch):
     monkeypatch.delenv(OLLAMA_BASE_URL_ENV, raising=False)
+    monkeypatch.delenv(OLLAMA_MODEL_ENV, raising=False)
 
 
 def test_configured_true_when_server_healthy():
@@ -83,6 +87,32 @@ def test_default_model_available_false_when_no_models_pulled():
         ok, reason = OllamaProvider().default_model_available()
     assert ok is False
     assert f"ollama pull {OLLAMA_DEFAULT_MODEL}" in reason
+
+
+def test_resolved_default_model_honors_env_override(monkeypatch):
+    monkeypatch.setenv(OLLAMA_MODEL_ENV, "qwen2.5-coder:14b")
+
+    assert OllamaProvider().resolved_default_model() == "qwen2.5-coder:14b"
+
+
+def test_resolved_default_model_ignores_blank_env(monkeypatch):
+    monkeypatch.setenv(OLLAMA_MODEL_ENV, "  ")
+
+    assert OllamaProvider().resolved_default_model() == OLLAMA_DEFAULT_MODEL
+
+
+def test_default_model_available_uses_env_override(monkeypatch):
+    monkeypatch.setenv(OLLAMA_MODEL_ENV, "qwen2.5-coder:14b")
+
+    with respx.mock() as router:
+        router.get(TAGS_URL).mock(
+            return_value=httpx.Response(
+                200, json={"models": [{"name": "qwen2.5-coder:14b"}]}
+            )
+        )
+        ok, reason = OllamaProvider().default_model_available()
+
+    assert ok is True and reason is None
 
 
 def test_configured_honors_env_override(monkeypatch):
@@ -154,6 +184,135 @@ def test_call_returns_normalized_response():
     assert response.duration_ms == 1500
 
 
+def test_call_uses_env_default_model_when_model_omitted(monkeypatch):
+    monkeypatch.setenv(OLLAMA_MODEL_ENV, "qwen2.5-coder:14b")
+    body = {
+        "model": "qwen2.5-coder:14b",
+        "message": {"role": "assistant", "content": "hello from local qwen"},
+    }
+    with respx.mock() as router:
+        route = router.post(CHAT_URL).mock(
+            return_value=httpx.Response(200, json=body)
+        )
+        response = OllamaProvider().call("hi")
+
+    payload = _json.loads(route.calls.last.request.read())
+    assert payload["model"] == "qwen2.5-coder:14b"
+    assert response.model == "qwen2.5-coder:14b"
+
+
+def test_call_explicit_model_beats_env_default(monkeypatch):
+    monkeypatch.setenv(OLLAMA_MODEL_ENV, "qwen2.5-coder:14b")
+    body = {
+        "model": "llama3.1:8b",
+        "message": {"role": "assistant", "content": "hello from llama"},
+    }
+    with respx.mock() as router:
+        route = router.post(CHAT_URL).mock(
+            return_value=httpx.Response(200, json=body)
+        )
+        response = OllamaProvider().call("hi", model="llama3.1:8b")
+
+    payload = _json.loads(route.calls.last.request.read())
+    assert payload["model"] == "llama3.1:8b"
+    assert response.model == "llama3.1:8b"
+
+
+def test_call_falls_back_to_installed_chat_model_when_default_missing():
+    body = {
+        "model": "qwen2.5-coder:14b",
+        "message": {"role": "assistant", "content": "hello from fallback"},
+    }
+    with respx.mock() as router:
+        route = router.post(CHAT_URL).mock(
+            side_effect=[
+                httpx.Response(
+                    404,
+                    text=f'model "{OLLAMA_DEFAULT_MODEL}" not found, try pulling it',
+                ),
+                httpx.Response(200, json=body),
+            ]
+        )
+        tags = router.get(TAGS_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "models": [
+                        {"name": "llama3.1:8b"},
+                        {"name": "qwen2.5-coder:14b"},
+                    ]
+                },
+            )
+        )
+        response = OllamaProvider().call("hi")
+
+    assert tags.called
+    assert route.call_count == 2
+    assert _json.loads(route.calls[0].request.read())["model"] == OLLAMA_DEFAULT_MODEL
+    assert (
+        _json.loads(route.calls[1].request.read())["model"]
+        == "qwen2.5-coder:14b"
+    )
+    assert response.text == "hello from fallback"
+    assert response.model == "qwen2.5-coder:14b"
+
+
+def test_call_explicit_missing_model_does_not_auto_replace():
+    with respx.mock(assert_all_called=False) as router:
+        route = router.post(CHAT_URL).mock(
+            return_value=httpx.Response(
+                404, text='model "missing:latest" does not exist'
+            )
+        )
+        tags = router.get(TAGS_URL).mock(
+            return_value=httpx.Response(
+                200, json={"models": [{"name": "qwen2.5-coder:14b"}]}
+            )
+        )
+        with pytest.raises(ProviderHTTPError) as exc:
+            OllamaProvider().call("hi", model="missing:latest")
+
+    assert "missing:latest" in str(exc.value)
+    assert route.call_count == 1
+    assert tags.called is False
+
+
+def test_call_does_not_fall_back_to_embedding_only_model():
+    with respx.mock() as router:
+        route = router.post(CHAT_URL).mock(
+            return_value=httpx.Response(
+                404,
+                text=f'model "{OLLAMA_DEFAULT_MODEL}" not installed, run pull',
+            )
+        )
+        router.get(TAGS_URL).mock(
+            return_value=httpx.Response(
+                200, json={"models": [{"name": "nomic-embed-text:latest"}]}
+            )
+        )
+        with pytest.raises(ProviderHTTPError) as exc:
+            OllamaProvider().call("hi")
+
+    assert OLLAMA_DEFAULT_MODEL in str(exc.value)
+    assert route.call_count == 1
+
+
+def test_call_surfaces_invalid_tags_json_during_model_fallback():
+    with respx.mock() as router:
+        router.post(CHAT_URL).mock(
+            return_value=httpx.Response(
+                404,
+                text=f'model "{OLLAMA_DEFAULT_MODEL}" not installed, run pull',
+            )
+        )
+        router.get(TAGS_URL).mock(return_value=httpx.Response(200, text="not json"))
+
+        with pytest.raises(ProviderHTTPError) as exc:
+            OllamaProvider().call("hi")
+
+    assert "fallback model" in str(exc.value)
+
+
 def test_call_raises_on_unreachable_endpoint():
     with respx.mock() as router:
         router.post(CHAT_URL).mock(side_effect=httpx.ConnectError("refused"))
@@ -211,9 +370,6 @@ def test_call_session_id_is_none_for_ollama():
 # --------------------------------------------------------------------------- #
 # exec() — tool-use loop (v0.3.1 / Slice B)
 # --------------------------------------------------------------------------- #
-
-
-import json as _json  # noqa: E402 — grouped near the exec tests
 
 
 def _ollama_terminal(content: str) -> dict:
@@ -313,6 +469,52 @@ def test_exec_runs_single_tool_call_then_answers(tmp_path):
     roles = [m["role"] for m in payload["messages"]]
     assert roles == ["user", "assistant", "tool"]
     assert payload["messages"][2]["content"] == "the answer is 42"
+
+
+def test_exec_keeps_installed_fallback_model_after_tool_retry(tmp_path):
+    (tmp_path / "note.txt").write_text("fallback model persisted")
+    tool_turn = _ollama_tool_turn("Read", {"path": "note.txt"}, call_id="c1")
+    tool_turn["model"] = "llama3.1:8b"
+    final = _ollama_terminal("The fallback model saw the file.")
+    final["model"] = "llama3.1:8b"
+
+    with respx.mock() as router:
+        route = router.post(CHAT_URL).mock(
+            side_effect=[
+                httpx.Response(
+                    404,
+                    text=f'model "{OLLAMA_DEFAULT_MODEL}" not found, try pulling it',
+                ),
+                httpx.Response(200, json=tool_turn),
+                httpx.Response(200, json=final),
+            ]
+        )
+        router.get(TAGS_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "models": [
+                        {"name": "qwen2.5-coder:14b"},
+                        {"name": "llama3.1:8b"},
+                    ]
+                },
+            )
+        )
+        resp = OllamaProvider().exec(
+            "read note.txt",
+            tools=frozenset({"Read"}),
+            sandbox="read-only",
+            cwd=str(tmp_path),
+        )
+
+    payloads = [_json.loads(call.request.read()) for call in route.calls]
+    assert [payload["model"] for payload in payloads] == [
+        OLLAMA_DEFAULT_MODEL,
+        "llama3.1:8b",
+        "llama3.1:8b",
+    ]
+    assert resp.text == "The fallback model saw the file."
+    assert resp.model == "llama3.1:8b"
 
 
 def test_exec_handles_ollama_string_args(tmp_path):

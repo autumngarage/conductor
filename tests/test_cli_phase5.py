@@ -24,6 +24,8 @@ def _isolated_agent_homes(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_HOME", str(tmp_path / ".claude"))
     monkeypatch.chdir(repo_dir)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("CONDUCTOR_OLLAMA_MODEL", raising=False)
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
     monkeypatch.delenv("CLOUDFLARE_API_TOKEN", raising=False)
     monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
@@ -314,6 +316,8 @@ def test_doctor_json_shape(mocker, monkeypatch):
     assert cred_map["OPENROUTER_API_KEY"]["source"] == "env"
     assert cred_map["OLLAMA_BASE_URL"]["in_env"] is False
     assert cred_map["OLLAMA_BASE_URL"]["source"] is None
+    assert cred_map["CONDUCTOR_OLLAMA_MODEL"]["in_env"] is False
+    assert cred_map["CONDUCTOR_OLLAMA_MODEL"]["source"] is None
     # Every credential row carries the new fields.
     for row in payload["credentials"]:
         assert "has_key_command" in row

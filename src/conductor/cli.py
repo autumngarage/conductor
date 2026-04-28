@@ -490,7 +490,7 @@ def _maybe_switch_to_ollama(
     if not _stderr_is_tty():
         return None
 
-    default_model = getattr(ollama, "default_model", "local")
+    default_model = _provider_default_model(ollama)
     click.echo("", err=True)
     click.echo(
         f"⚠ {failed} is unreachable — you appear to be offline.",
@@ -1974,7 +1974,7 @@ def _provider_rows() -> list[dict]:
                 "fix_command": (
                     None if ok else getattr(provider, "fix_command", None)
                 ),
-                "default_model": provider.default_model,
+                "default_model": _provider_default_model(provider),
                 "tags": list(provider.tags),
                 "tier": provider.quality_tier,
                 "muted": name in muted,
@@ -2099,6 +2099,7 @@ def smoke(provider_id: str | None, run_all: bool, as_json: bool) -> None:
 
 _DIAGNOSTIC_ENV_VARS = (
     "OLLAMA_BASE_URL",
+    "CONDUCTOR_OLLAMA_MODEL",
     "OPENROUTER_API_KEY",
 )
 
@@ -2115,6 +2116,13 @@ def _credential_fingerprint(value: str) -> str:
     if len(value) <= 4:
         return value
     return f"{value[:-4]}...{value[-4:]}"
+
+
+def _provider_default_model(provider: object) -> str:
+    resolver = getattr(provider, "resolved_default_model", None)
+    if callable(resolver):
+        return str(resolver())
+    return str(getattr(provider, "default_model", ""))
 
 
 def _active_credential_row(provider: object, *, configured: bool) -> dict | None:
@@ -2203,7 +2211,7 @@ def _diagnostic_payload() -> dict:
                 "fix_command": (
                     None if ok else getattr(provider, "fix_command", None)
                 ),
-                "default_model": provider.default_model,
+                "default_model": _provider_default_model(provider),
                 "tags": list(provider.tags),
                 "quality_tier": provider.quality_tier,
                 "supports_effort": provider.supports_effort,

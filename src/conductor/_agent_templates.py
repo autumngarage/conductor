@@ -317,12 +317,14 @@ offline.
 
 When invoked:
 
-1. Confirm the task is actually a fit for local inference. Ollama's
-   default model (qwen3.6:35b-a3b as of conductor v0.3.3) is a capable
-   MoE coder, but complex frontier-tier reasoning will still be worse
-   than a hosted flagship. If the user's task clearly needs frontier
-   reasoning and is NOT privacy-sensitive, say so and ask the parent
-   to route elsewhere.
+1. Confirm the task is actually a fit for local inference. Ollama uses
+   the user's `CONDUCTOR_OLLAMA_MODEL` when set, otherwise conductor's
+   baked-in default (qwen3.6:35b-a3b as of conductor v0.3.3). If that
+   implicit local model is missing, conductor queries Ollama's installed
+   models and retries once with a suitable non-embedding chat model.
+   Complex frontier-tier reasoning will still be worse than a hosted
+   flagship. If the user's task clearly needs frontier reasoning and is
+   NOT privacy-sensitive, say so and ask the parent to route elsewhere.
 2. Build a complete brief. Include all sensitive context directly in the
    brief because conductor does not inherit your conversation context.
 3. Run with conductor's explicit offline flag:
@@ -349,7 +351,8 @@ cannot verify the cause" rather than naming a cause you haven't confirmed.
 If conductor errors:
 - Connection refused / daemon not running → tell the user to
   `ollama serve` in another terminal (or start the service).
-- Model not pulled → report which model, suggest `ollama pull <model>`.
+- Model not pulled and no installed fallback was usable → report which
+  model, suggest `ollama pull <model>` or setting `CONDUCTOR_OLLAMA_MODEL`.
 - Timeouts → local hardware may be slow; suggest a smaller model.
 
 Never silently route a privacy-sensitive task to a hosted provider if

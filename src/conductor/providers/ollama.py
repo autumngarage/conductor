@@ -2,7 +2,9 @@
 
 Defaults to ``http://localhost:11434`` (Ollama's standard port). Override via
 the ``OLLAMA_BASE_URL`` env var for remote Ollama servers, LM Studio
-installations, or any other OpenAI/Ollama-compatible local server.
+installations, or any other OpenAI/Ollama-compatible local server. The model
+defaults to ``CONDUCTOR_OLLAMA_MODEL`` when set, otherwise the baked-in
+``OLLAMA_DEFAULT_MODEL``.
 
 No auth (local-only by design). This is the second HTTP-shape adapter
 (alongside ``kimi``); the other three (claude, codex, gemini) shell out
@@ -36,6 +38,7 @@ from conductor.tools import (
 
 OLLAMA_BASE_URL_ENV = "OLLAMA_BASE_URL"
 OLLAMA_DEFAULT_BASE_URL = "http://localhost:11434"
+OLLAMA_MODEL_ENV = "CONDUCTOR_OLLAMA_MODEL"
 # Default bumped 2026-04-24 from qwen2.5-coder:14b to qwen3.6:35b-a3b after
 # dogfood: qwen2.5-coder emits tool calls as markdown-JSON inside content
 # rather than as structured tool_calls (silent-fail for exec() with tools),
@@ -51,6 +54,42 @@ OLLAMA_TIMEOUT_ENV = "CONDUCTOR_OLLAMA_TIMEOUT_SEC"
 OLLAMA_REQUEST_TIMEOUT_SEC = 600.0
 OLLAMA_MAX_TOOL_ITERATIONS = 10
 OLLAMA_CONTEXT_SAFETY_MARGIN = 0.1
+OLLAMA_MODEL_SELECTION_PATTERNS: tuple[str, ...] = (
+    # Prefer local models that are known to be useful for Conductor's usual
+    # offline delegation workload: coding, review, and tool-capable reasoning.
+    "qwen3.6",
+    "qwen3.5",
+    "qwen3",
+    "qwen2.5-coder",
+    "deepseek-coder",
+    "codestral",
+    "coder",
+    "code",
+    "llama3.2",
+    "llama3.1",
+    "llama3",
+)
+OLLAMA_TOOL_MODEL_SELECTION_PATTERNS: tuple[str, ...] = (
+    # qwen2.5-coder is useful for plain chat but has emitted markdown JSON
+    # instead of structured tool_calls in dogfood, so tool-mode prefers known
+    # chat models before falling back to it.
+    "qwen3.6",
+    "qwen3.5",
+    "qwen3",
+    "llama3.2",
+    "llama3.1",
+    "llama3",
+    "deepseek-coder",
+    "codestral",
+    "coder",
+    "code",
+    "qwen2.5-coder",
+)
+OLLAMA_EMBEDDING_MODEL_PATTERNS: tuple[str, ...] = (
+    "embed",
+    "bge-",
+    "e5-",
+)
 
 
 def _find_stealth_tool_call(content: str, tool_names: frozenset[str]) -> str | None:
@@ -124,6 +163,36 @@ def _resolve_default_timeout() -> float:
     return OLLAMA_REQUEST_TIMEOUT_SEC
 
 
+def _clean_model_name(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    model = raw.strip()
+    return model or None
+
+
+def _model_preference_index(name: str, *, tools: bool) -> int:
+    normalized = name.lower()
+    patterns = (
+        OLLAMA_TOOL_MODEL_SELECTION_PATTERNS
+        if tools
+        else OLLAMA_MODEL_SELECTION_PATTERNS
+    )
+    for index, pattern in enumerate(patterns):
+        if pattern in normalized:
+            return index
+    return len(patterns)
+
+
+def _is_missing_model_response(resp: httpx.Response) -> bool:
+    if resp.status_code not in {400, 404}:
+        return False
+    text = resp.text.lower()
+    return "model" in text and any(
+        fragment in text
+        for fragment in ("not found", "not installed", "pull", "does not exist")
+    )
+
+
 class OllamaProvider:
     name = "ollama"
     tags = ["cheap", "local", "offline", "code-review"]
@@ -173,6 +242,92 @@ class OllamaProvider:
             or OLLAMA_DEFAULT_BASE_URL
         ).rstrip("/")
 
+    def resolved_default_model(self) -> str:
+        """Return the host-local default model Conductor will send to Ollama."""
+        return _clean_model_name(os.environ.get(OLLAMA_MODEL_ENV)) or self.default_model
+
+    def _installed_model_names(self, client: httpx.Client) -> list[str]:
+        resp = client.get(f"{self._base_url()}/api/tags")
+        if resp.status_code != 200:
+            return []
+        try:
+            data = resp.json()
+        except ValueError as e:
+            raise ProviderHTTPError(
+                "Ollama /api/tags response was not JSON while selecting "
+                f"a fallback model: {e}"
+            ) from e
+        if not isinstance(data, dict):
+            return []
+        names: list[str] = []
+        for entry in data.get("models") or []:
+            if not isinstance(entry, dict):
+                continue
+            name = _clean_model_name(entry.get("name") or entry.get("model"))
+            if name:
+                names.append(name)
+        return names
+
+    def _select_installed_model(
+        self,
+        names: list[str],
+        *,
+        tools: bool,
+        attempted: str,
+    ) -> str | None:
+        candidates = [name for name in names if name != attempted]
+        candidates = [
+            name
+            for name in candidates
+            if not any(
+                pattern in name.lower()
+                for pattern in OLLAMA_EMBEDDING_MODEL_PATTERNS
+            )
+        ]
+        if not candidates:
+            return None
+
+        def key(item: tuple[int, str]) -> tuple[int, int]:
+            index, name = item
+            return (-_model_preference_index(name, tools=tools), -index)
+
+        return max(enumerate(candidates), key=key)[1]
+
+    def _post_chat_with_model_fallback(
+        self,
+        client: httpx.Client,
+        url: str,
+        payload: dict,
+        *,
+        explicit_model: bool,
+        tools: bool,
+    ) -> httpx.Response:
+        """POST /api/chat, retrying once with an installed local model.
+
+        The fallback is deliberately narrow: only implicit defaults are
+        substitutable, and only when Ollama says the requested model is
+        missing. An explicit --model is an exact user request and should fail
+        loudly rather than being silently replaced.
+        """
+        resp = client.post(url, json=payload)
+        if (
+            resp.status_code == 200
+            or explicit_model
+            or not _is_missing_model_response(resp)
+        ):
+            return resp
+
+        selected = self._select_installed_model(
+            self._installed_model_names(client),
+            tools=tools,
+            attempted=str(payload.get("model") or ""),
+        )
+        if selected is None:
+            return resp
+
+        payload["model"] = selected
+        return client.post(url, json=payload)
+
     def configured(self) -> tuple[bool, str | None]:
         # "Configured" here means the server responds. Ollama has no auth,
         # so there's nothing to check for credentials — the liveness of the
@@ -184,7 +339,7 @@ class OllamaProvider:
             return False, (
                 f"cannot reach Ollama at {self._base_url()}: {e}. "
                 "Install with `brew install ollama`, run `ollama serve`, "
-                f"and `ollama pull {self.default_model}`."
+                f"and `ollama pull {self.resolved_default_model()}`."
             )
         if resp.status_code != 200:
             return False, (
@@ -207,7 +362,7 @@ class OllamaProvider:
             return False, (
                 f"cannot reach Ollama at {self._base_url()}: {e}. "
                 "Install with `brew install ollama`, run `ollama serve`, "
-                f"and `ollama pull {self.default_model}`."
+                f"and `ollama pull {self.resolved_default_model()}`."
             )
         if resp.status_code != 200:
             return False, (
@@ -235,15 +390,24 @@ class OllamaProvider:
             data = resp.json()
         except ValueError as e:
             return False, f"/api/tags response was not JSON: {e}"
-        installed = {m.get("name") for m in data.get("models") or []}
-        if self.default_model in installed:
+        default_model = self.resolved_default_model()
+        installed = {
+            m.get("name") or m.get("model") for m in data.get("models") or []
+        }
+        if default_model in installed:
             return True, None
         pulled = sorted(n for n in installed if n)
-        hint = f"pull with `ollama pull {self.default_model}`"
+        hint = f"pull with `ollama pull {default_model}`"
+        if _clean_model_name(os.environ.get(OLLAMA_MODEL_ENV)):
+            hint += f", change {OLLAMA_MODEL_ENV}, or pass --model"
         if pulled:
             hint += f"; locally installed: {', '.join(pulled)}"
+            hint += (
+                "; calls without --model will retry once with a suitable "
+                "installed local model"
+            )
         return False, (
-            f"default model '{self.default_model}' is not pulled on this daemon. {hint}."
+            f"default model '{default_model}' is not pulled on this daemon. {hint}."
         )
 
     def call(
@@ -261,7 +425,8 @@ class OllamaProvider:
             )
         # Effort is a silent no-op here — base ollama models don't expose a
         # thinking dial. Tag noted in usage for observability.
-        model = model or self.default_model
+        explicit_model = model is not None
+        model = model or self.resolved_default_model()
         url = f"{self._base_url()}/api/chat"
         payload = {
             "model": model,
@@ -272,7 +437,14 @@ class OllamaProvider:
         start = time.monotonic()
         try:
             with httpx.Client(timeout=self._timeout_sec) as client:
-                resp = client.post(url, json=payload)
+                resp = self._post_chat_with_model_fallback(
+                    client,
+                    url,
+                    payload,
+                    explicit_model=explicit_model,
+                    tools=False,
+                )
+                model = str(payload.get("model") or model)
         except httpx.HTTPError as e:
             raise ProviderConfigError(
                 f"cannot reach Ollama at {self._base_url()}: {e}"
@@ -365,7 +537,8 @@ class OllamaProvider:
         executor = ToolExecutor(cwd=workdir, sandbox=sandbox)
         tool_specs = build_tool_specs(tools)
 
-        model = model or self.default_model
+        explicit_model = model is not None
+        model = model or self.resolved_default_model()
         url = f"{self._base_url()}/api/chat"
 
         messages: list[dict] = [{"role": "user", "content": task}]
@@ -393,7 +566,14 @@ class OllamaProvider:
 
             try:
                 with httpx.Client(timeout=self._timeout_sec) as client:
-                    resp = client.post(url, json=payload)
+                    resp = self._post_chat_with_model_fallback(
+                        client,
+                        url,
+                        payload,
+                        explicit_model=explicit_model,
+                        tools=bool(tools),
+                    )
+                    model = str(payload.get("model") or model)
             except httpx.HTTPError as e:
                 raise ProviderConfigError(
                     f"cannot reach Ollama at {self._base_url()}: {e}"
