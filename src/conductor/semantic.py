@@ -16,6 +16,7 @@ SemanticMode = Literal["call", "exec", "review", "council"]
 EffortBucket = Literal["minimal", "low", "medium", "high", "max"]
 
 SEMANTIC_KINDS: tuple[str, ...] = ("research", "code", "review", "council")
+EFFORT_BUCKETS: tuple[EffortBucket, ...] = ("minimal", "low", "medium", "high", "max")
 
 EFFORT_TOKEN_BUCKETS: tuple[tuple[int, EffortBucket], ...] = (
     (0, "minimal"),
@@ -206,7 +207,7 @@ _REVIEW: dict[EffortBucket, SemanticPlan] = {
             SemanticCandidate("gemini"),
         ),
     )
-    for bucket in ("minimal", "low", "medium", "high", "max")
+    for bucket in EFFORT_BUCKETS
 }
 
 
@@ -292,7 +293,7 @@ DEFAULT_SEMANTIC_MATRIX: dict[SemanticKind, dict[EffortBucket, SemanticPlan]] = 
 def effort_bucket(effort: str | int) -> EffortBucket:
     """Map symbolic or token-budget effort onto the policy matrix."""
     if isinstance(effort, str):
-        if effort not in {"minimal", "low", "medium", "high", "max"}:
+        if effort not in EFFORT_BUCKETS:
             raise ValueError(f"unknown effort bucket {effort!r}")
         return effort  # type: ignore[return-value]
 
