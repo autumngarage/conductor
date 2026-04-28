@@ -514,7 +514,7 @@ class CodexProvider:
         codex_sandbox = {
             "read-only": "read-only",
             "workspace-write": "workspace-write",
-            "none": "read-only",
+            "none": "danger-full-access",
         }.get(sandbox, "read-only")
         return self._run(
             task,

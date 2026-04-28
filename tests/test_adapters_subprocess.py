@@ -897,6 +897,32 @@ def test_codex_exec_default_timeout_is_unbounded(mocker):
     assert fake.terminated is False
 
 
+@pytest.mark.parametrize(
+    ("conductor_sandbox", "codex_sandbox"),
+    [
+        ("read-only", "read-only"),
+        ("workspace-write", "workspace-write"),
+        ("none", "danger-full-access"),
+    ],
+)
+def test_codex_exec_translates_sandbox_modes(
+    mocker,
+    conductor_sandbox,
+    codex_sandbox,
+):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    fake = _FakePopen(
+        stdout_schedule=[(0, line) for line in CODEX_NDJSON.splitlines(keepends=True)]
+    )
+    _patch_codex_popen(mocker, fake)
+
+    CodexProvider().exec("hi", sandbox=conductor_sandbox)
+
+    assert fake.args is not None
+    assert "--sandbox" in fake.args
+    assert fake.args[fake.args.index("--sandbox") + 1] == codex_sandbox
+
+
 def test_codex_exec_explicit_timeout_is_honored(mocker):
     """Caller-supplied --timeout still works — sentinel pattern must not
     swallow an explicitly-passed integer."""
