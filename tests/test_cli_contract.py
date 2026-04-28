@@ -223,6 +223,24 @@ def _conductor_configured() -> bool:
         return False
 
 
+def _provider_quota_exhausted(stderr: str) -> bool:
+    """Return True when a live provider call failed only because quota is exhausted."""
+    payload_start = stderr.find("{")
+    if payload_start >= 0:
+        try:
+            payload = json.loads(stderr[payload_start:])
+        except json.JSONDecodeError:
+            payload = {}
+        if payload.get("api_error_status") == 429:
+            message = str(payload.get("result", "")).lower()
+            return any(marker in message for marker in ("limit", "quota", "rate"))
+
+    message = stderr.lower()
+    return "429" in message and any(
+        marker in message for marker in ("limit", "quota", "rate")
+    )
+
+
 # ---------------------------------------------------------------------------
 # Flag-surface assertions (no LLM call)
 # ---------------------------------------------------------------------------
@@ -318,6 +336,15 @@ class TestJsonSchema:
         )
 
 
+def test_provider_quota_exhausted_detects_claude_429() -> None:
+    stderr = (
+        'conductor: claude exited 1: {"api_error_status":429,'
+        '"result":"You have hit your limit"}'
+    )
+
+    assert _provider_quota_exhausted(stderr)
+
+
 # ---------------------------------------------------------------------------
 # Live integration test (skipped without provider auth)
 # ---------------------------------------------------------------------------
@@ -348,6 +375,8 @@ def test_live_call_matches_documented_schema() -> None:
         text=True,
         timeout=60,
     )
+    if result.returncode != 0 and _provider_quota_exhausted(result.stderr):
+        pytest.skip("provider quota exhausted")
     assert result.returncode == 0, f"conductor call failed:\n{result.stderr}"
     response = json.loads(result.stdout)
 
