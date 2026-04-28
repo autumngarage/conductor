@@ -133,7 +133,7 @@ For human diagnostics without `--json`, use `--verbose-route` to print the full 
 
 ### Error responses
 
-On error, exit code is non-zero (see below) and stderr carries a one-line diagnostic. With `--json`, stdout is not guaranteed to contain a response object on failure; consumers should parse stdout only when present and keep stderr in their debug logs.
+On error, exit code is non-zero (see below) and stderr carries a diagnostic suitable for logs. Usage errors come from Click and may include multi-line `Usage` / `Try` / `Error` output. With `--json`, stdout is not guaranteed to contain a response object on failure; consumers should parse stdout only when present and keep stderr in their debug logs.
 
 ## Exit codes
 
