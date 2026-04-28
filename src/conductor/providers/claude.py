@@ -12,6 +12,7 @@ that touch credentials directly.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
 
 CLAUDE_DEFAULT_MODEL = "sonnet"
 CLAUDE_REQUEST_TIMEOUT_SEC = 180.0
+CLAUDE_CLI_ENV = "CONDUCTOR_CLAUDE_CLI"
 
 # Sentinel: "caller didn't specify a timeout" vs "caller explicitly passed
 # None". The constructor default applies only in the first case.
@@ -74,10 +76,10 @@ class ClaudeProvider:
     def __init__(
         self,
         *,
-        cli_command: str = "claude",
+        cli_command: str | None = None,
         timeout_sec: float = CLAUDE_REQUEST_TIMEOUT_SEC,
     ) -> None:
-        self._cli = cli_command
+        self._cli = cli_command or os.environ.get(CLAUDE_CLI_ENV) or "claude"
         self._timeout_sec = timeout_sec
 
     def _check_cli_path(self) -> tuple[bool, str | None]:
@@ -85,9 +87,22 @@ class ClaudeProvider:
         for the defensive guard so the hot path doesn't take an auth-probe
         round-trip on every invocation."""
         if not shutil.which(self._cli):
+            configured_cli = os.environ.get(CLAUDE_CLI_ENV)
+            if configured_cli:
+                return False, (
+                    f"{CLAUDE_CLI_ENV}={configured_cli!r} does not point to an "
+                    "executable visible to this Conductor process. Set it to the "
+                    "absolute Claude CLI path, update PATH for the non-interactive "
+                    "agent environment, or install/auth with "
+                    f"`brew install claude && {self.auth_login_command}` "
+                    "(or set `ANTHROPIC_API_KEY` for non-interactive use)."
+                )
             return False, (
-                f"`{self._cli}` CLI not found on PATH. "
-                "Install with `brew install claude` and auth with "
+                f"`{self._cli}` CLI not found on PATH for this Conductor process. "
+                "If Claude works in your terminal, set "
+                f"`{CLAUDE_CLI_ENV}=/absolute/path/to/claude` or update PATH for "
+                "the non-interactive agent environment. Otherwise install with "
+                "`brew install claude` and auth with "
                 f"`{self.auth_login_command}` "
                 "(or set `ANTHROPIC_API_KEY` for non-interactive use)."
             )

@@ -6,11 +6,33 @@ import httpx
 import respx
 from click.testing import CliRunner
 
+import conductor.providers.openrouter_catalog as openrouter_catalog
 from conductor.cli import main
 from conductor.providers.kimi import KIMI_DEFAULT_MODEL
 from conductor.providers.openrouter import OPENROUTER_API_KEY_ENV
 
 _OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+
+def _stub_kimi_catalog(monkeypatch):
+    monkeypatch.setattr(
+        openrouter_catalog,
+        "load_catalog",
+        lambda: [
+            openrouter_catalog.ModelEntry(
+                id=KIMI_DEFAULT_MODEL,
+                name=KIMI_DEFAULT_MODEL,
+                created=1_700_000_000,
+                context_length=256_000,
+                pricing_prompt=0.001,
+                pricing_completion=0.002,
+                pricing_thinking=None,
+                supports_thinking=False,
+                supports_tools=False,
+                supports_vision=False,
+            )
+        ],
+    )
 
 
 def _stub_only_kimi_configured(mocker):
@@ -52,6 +74,7 @@ def test_call_requires_with_or_auto(mocker):
 def test_call_auto_picks_configured_provider(monkeypatch, mocker):
     _stub_only_kimi_configured(mocker)
     monkeypatch.setenv(OPENROUTER_API_KEY_ENV, "or-test-key")
+    _stub_kimi_catalog(monkeypatch)
 
     with respx.mock() as router:
         router.post(_OPENROUTER_CHAT_URL).mock(
@@ -75,6 +98,7 @@ def test_call_auto_picks_configured_provider(monkeypatch, mocker):
 def test_call_auto_json_includes_route_decision(monkeypatch, mocker):
     _stub_only_kimi_configured(mocker)
     monkeypatch.setenv(OPENROUTER_API_KEY_ENV, "or-test-key")
+    _stub_kimi_catalog(monkeypatch)
 
     with respx.mock() as router:
         router.post(_OPENROUTER_CHAT_URL).mock(
@@ -159,6 +183,7 @@ def test_call_auto_emits_shadow_hint_when_unconfigured_outranks(monkeypatch, moc
     mocker.patch.object(OllamaProvider, "configured", lambda self: (False, "nope"))
     mocker.patch.object(OpenRouterProvider, "configured", lambda self: (False, "nope"))
     monkeypatch.setenv(OPENROUTER_API_KEY_ENV, "or-test-key")
+    _stub_kimi_catalog(monkeypatch)
 
     with respx.mock() as router:
         router.post(_OPENROUTER_CHAT_URL).mock(
@@ -312,6 +337,7 @@ def test_call_auto_silent_route_suppresses_shadow_hint(monkeypatch, mocker):
     mocker.patch.object(OllamaProvider, "configured", lambda self: (False, "nope"))
     mocker.patch.object(OpenRouterProvider, "configured", lambda self: (False, "nope"))
     monkeypatch.setenv(OPENROUTER_API_KEY_ENV, "or-test-key")
+    _stub_kimi_catalog(monkeypatch)
 
     with respx.mock() as router:
         router.post(_OPENROUTER_CHAT_URL).mock(
