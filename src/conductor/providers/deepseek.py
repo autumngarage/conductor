@@ -7,10 +7,26 @@ now share OpenRouter's credential + transport layer.
 
 from __future__ import annotations
 
+import conductor.providers.openrouter_catalog as openrouter_catalog
 from conductor.providers.openrouter import OpenRouterProvider
 
 DEEPSEEK_CHAT_MODEL = "deepseek/deepseek-chat"
 DEEPSEEK_REASONER_MODEL = "deepseek/deepseek-r1"
+
+
+def _is_deepseek_chat_model(model: openrouter_catalog.ModelEntry) -> bool:
+    model_id = model.id
+    if not model_id.startswith("deepseek/deepseek-"):
+        return False
+    if model_id.startswith("deepseek/deepseek-r"):
+        return False
+    if "reasoner" in model_id:
+        return False
+    return model_id == DEEPSEEK_CHAT_MODEL or "-chat" in model_id or "-v" in model_id
+
+
+def _is_deepseek_reasoner_model(model: openrouter_catalog.ModelEntry) -> bool:
+    return model.id.startswith("deepseek/deepseek-r")
 
 
 class DeepSeekChatProvider(OpenRouterProvider):
@@ -33,11 +49,18 @@ class DeepSeekChatProvider(OpenRouterProvider):
     def _reasoning_payload(self, effort: str | int) -> dict[str, str] | None:
         return None
 
-    def call(self, task: str, model: str | None = None, **kwargs):
-        return super().call(task, model=model or self.default_model, **kwargs)
+    def _catalog_model(self) -> str:
+        return openrouter_catalog.newest_matching_model_id(
+            _is_deepseek_chat_model,
+            fallback_model=self.default_model,
+            label=self.name,
+        )
 
-    def exec(self, task: str, model: str | None = None, **kwargs):
-        return super().exec(task, model=model or self.default_model, **kwargs)
+    def _preset_model(self) -> str | None:
+        return self._catalog_model()
+
+    def _smoke_model(self) -> str:
+        return self._catalog_model()
 
 
 class DeepSeekReasonerProvider(OpenRouterProvider):
@@ -63,8 +86,15 @@ class DeepSeekReasonerProvider(OpenRouterProvider):
     typical_p50_ms = 12_000
     max_context_tokens = 64_000
 
-    def call(self, task: str, model: str | None = None, **kwargs):
-        return super().call(task, model=model or self.default_model, **kwargs)
+    def _catalog_model(self) -> str:
+        return openrouter_catalog.newest_matching_model_id(
+            _is_deepseek_reasoner_model,
+            fallback_model=self.default_model,
+            label=self.name,
+        )
 
-    def exec(self, task: str, model: str | None = None, **kwargs):
-        return super().exec(task, model=model or self.default_model, **kwargs)
+    def _preset_model(self) -> str | None:
+        return self._catalog_model()
+
+    def _smoke_model(self) -> str:
+        return self._catalog_model()

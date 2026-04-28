@@ -14,11 +14,14 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
 from conductor.providers.interface import ProviderHTTPError
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 OPENROUTER_CATALOG_TIMEOUT_SEC = 30.0
@@ -133,6 +136,38 @@ def load_catalog_snapshot(force_refresh: bool = False) -> CatalogSnapshot:
             file=sys.stderr,
         )
         return cached
+
+
+def newest_matching_model_id(
+    predicate: Callable[[ModelEntry], bool],
+    *,
+    fallback_model: str,
+    label: str,
+) -> str:
+    """Return the newest catalog model matching ``predicate``.
+
+    Shim providers use this to keep stable Conductor provider IDs while letting
+    OpenRouter model slugs drift. The pinned ``fallback_model`` is only used
+    when the catalog cannot be loaded or no matching model exists.
+    """
+    try:
+        models = load_catalog()
+    except ProviderHTTPError as e:
+        print(
+            f"[conductor] {label}: OpenRouter catalog unavailable; "
+            f"using pinned fallback {fallback_model}: {e}",
+            file=sys.stderr,
+        )
+        return fallback_model
+    matches = [model for model in models if predicate(model)]
+    if not matches:
+        print(
+            f"[conductor] {label}: no matching model found in OpenRouter catalog; "
+            f"using pinned fallback {fallback_model}",
+            file=sys.stderr,
+        )
+        return fallback_model
+    return sorted(matches, key=lambda model: (-model.created, model.id))[0].id
 
 
 def _read_cached_catalog_for_load() -> CatalogSnapshot | None:

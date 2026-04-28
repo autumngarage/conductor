@@ -109,6 +109,12 @@ class OpenRouterProvider:
     def _reasoning_payload(self, effort: str | int) -> dict[str, str] | None:
         return _reasoning_payload(effort)
 
+    def _preset_model(self) -> str | None:
+        return None
+
+    def _smoke_model(self) -> str:
+        return self.default_model
+
     def configured(self) -> tuple[bool, str | None]:
         if self._api_key or credentials.get(OPENROUTER_API_KEY_ENV):
             return True, None
@@ -121,7 +127,7 @@ class OpenRouterProvider:
         try:
             response = self._post_chat(
                 {
-                    "model": self.default_model,
+                    "model": self._smoke_model(),
                     "messages": [{"role": "user", "content": "ping"}],
                     "max_tokens": 1,
                 }
@@ -202,7 +208,14 @@ class OpenRouterProvider:
             "messages": [{"role": "user", "content": task}],
         }
         selected_model = model
-        if selected_model is None:
+        preset_model = self._preset_model() if selected_model is None else None
+        if preset_model is not None:
+            selected_model = preset_model
+            payload["model"] = selected_model
+            reasoning = self._reasoning_payload(effort)
+            if reasoning is not None:
+                payload["reasoning"] = reasoning
+        elif selected_model is None:
             selector_payload = select_model_for_task(
                 task_tags=task_tags,
                 prefer=prefer,

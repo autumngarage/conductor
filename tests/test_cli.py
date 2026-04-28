@@ -6,6 +6,7 @@ import httpx
 import respx
 from click.testing import CliRunner
 
+import conductor.providers.openrouter_catalog as openrouter_catalog
 from conductor.cli import main
 from conductor.providers.kimi import KIMI_DEFAULT_MODEL
 from conductor.providers.openrouter import (
@@ -14,6 +15,27 @@ from conductor.providers.openrouter import (
 )
 
 _OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+
+def _stub_kimi_catalog(monkeypatch):
+    monkeypatch.setattr(
+        openrouter_catalog,
+        "load_catalog",
+        lambda: [
+            openrouter_catalog.ModelEntry(
+                id=KIMI_DEFAULT_MODEL,
+                name=KIMI_DEFAULT_MODEL,
+                created=1_700_000_000,
+                context_length=256_000,
+                pricing_prompt=0.001,
+                pricing_completion=0.002,
+                pricing_thinking=None,
+                supports_thinking=False,
+                supports_tools=False,
+                supports_vision=False,
+            )
+        ],
+    )
 
 
 def test_call_unknown_provider_shows_usage_error():
@@ -33,6 +55,7 @@ def test_call_missing_task_and_no_stdin_errors():
 
 def test_call_task_file_reads_file(monkeypatch, tmp_path):
     monkeypatch.setenv(OPENROUTER_API_KEY_ENV, "or-test-key")
+    _stub_kimi_catalog(monkeypatch)
     brief = tmp_path / "brief.md"
     brief.write_text("brief from file\n", encoding="utf-8")
 
@@ -58,6 +81,7 @@ def test_call_task_file_reads_file(monkeypatch, tmp_path):
 
 def test_call_kimi_happy_path(monkeypatch):
     monkeypatch.setenv(OPENROUTER_API_KEY_ENV, "or-test-key")
+    _stub_kimi_catalog(monkeypatch)
     with respx.mock() as router:
         router.post(_OPENROUTER_CHAT_URL).mock(
             return_value=httpx.Response(
@@ -115,6 +139,7 @@ def test_call_kimi_missing_openrouter_key_exits_2(monkeypatch, mocker):
 
 def test_call_json_output(monkeypatch):
     monkeypatch.setenv(OPENROUTER_API_KEY_ENV, "or-test-key")
+    _stub_kimi_catalog(monkeypatch)
     # The caller banner is silenced under --json (matches existing route-log
     # silencing), so stdout stays clean for json.loads().
     with respx.mock() as router:
@@ -145,6 +170,7 @@ def test_call_emits_caller_banner_when_claude_detected(monkeypatch):
     monkeypatch.setenv(OPENROUTER_API_KEY_ENV, "or-test-key")
     monkeypatch.setenv("CLAUDECODE", "1")
     monkeypatch.setenv("NO_COLOR", "1")  # plain ASCII for stable assertion
+    _stub_kimi_catalog(monkeypatch)
 
     with respx.mock() as router:
         router.post(_OPENROUTER_CHAT_URL).mock(
@@ -172,6 +198,7 @@ def test_call_silent_route_suppresses_caller_banner(monkeypatch):
     """--silent-route silences the caller banner (and the route log)."""
     monkeypatch.setenv(OPENROUTER_API_KEY_ENV, "or-test-key")
     monkeypatch.setenv("CLAUDECODE", "1")
+    _stub_kimi_catalog(monkeypatch)
 
     with respx.mock() as router:
         router.post(_OPENROUTER_CHAT_URL).mock(

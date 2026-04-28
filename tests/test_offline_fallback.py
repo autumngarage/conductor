@@ -23,6 +23,7 @@ import pytest
 import respx
 from click.testing import CliRunner
 
+import conductor.providers.openrouter_catalog as openrouter_catalog
 from conductor import offline_mode
 from conductor.cli import _is_retryable, main
 from conductor.providers.interface import ProviderHTTPError
@@ -55,6 +56,24 @@ def _isolate_offline_cache(tmp_path, monkeypatch):
 def _kimi_configured(monkeypatch):
     """Populate the env so KimiProvider.configured() returns True."""
     monkeypatch.setenv(OPENROUTER_API_KEY_ENV, "or-test-key")
+    monkeypatch.setattr(
+        openrouter_catalog,
+        "load_catalog",
+        lambda: [
+            openrouter_catalog.ModelEntry(
+                id=KIMI_DEFAULT_MODEL,
+                name=KIMI_DEFAULT_MODEL,
+                created=1_700_000_000,
+                context_length=256_000,
+                pricing_prompt=0.001,
+                pricing_completion=0.002,
+                pricing_thinking=None,
+                supports_thinking=False,
+                supports_tools=False,
+                supports_vision=False,
+            )
+        ],
+    )
 
 
 def _stub_other_providers_unconfigured(mocker, *, include_ollama: bool = False):

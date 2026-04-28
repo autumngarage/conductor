@@ -1,7 +1,9 @@
-# Required repository secrets for this subprocess-adapter smoke:
+# Optional repository secrets for this subprocess-adapter smoke:
 # - ${{ secrets.ANTHROPIC_API_KEY }} for the `claude` CLI.
 # - ${{ secrets.OPENAI_API_KEY }} for the `codex` CLI.
 # - ${{ secrets.GEMINI_API_KEY }} for the `gemini` CLI.
+# If any are missing, the workflow skips live smoke rather than failing and
+# filing an issue. Forks and fresh repos often lack these secrets by design.
 # Cloudflare secrets are intentionally not referenced here: this workflow does
 # not exercise the Kimi/Cloudflare adapter, which is covered by validate.yml.
 name: nightly-smoke
@@ -65,15 +67,22 @@ jobs:
         run: |
           set +e
           {
-            missing=0
+            missing=()
             for name in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY; do
               if [ -z "${!name}" ]; then
-                echo "::error::$name secret is required for live subprocess smoke"
-                missing=1
+                echo "::notice::$name secret is not configured; skipping live subprocess smoke"
+                missing+=("$name")
               fi
             done
-            if [ "$missing" -ne 0 ]; then
-              exit 1
+            if [ "${#missing[@]}" -ne 0 ]; then
+              {
+                echo "Live subprocess smoke skipped because required repository secrets are not configured:"
+                printf -- "- %s\n" "${missing[@]}"
+                echo
+                echo "Add these repository secrets, then re-run nightly-smoke manually or wait for the next schedule."
+              } >> "$GITHUB_STEP_SUMMARY"
+              touch live-smoke-skipped.txt
+              exit 0
             fi
 
             uv run pytest -k live tests/test_adapters_subprocess.py
@@ -114,12 +123,27 @@ jobs:
               --description "Nightly conductor live smoke failure" \
               --color B60205
           fi
-          gh issue create \
-            --title "Live subprocess smoke failed: $(date -u +%Y-%m-%d)" \
-            --label live-smoke-failure \
-            --body-file live-smoke-issue.md
+          existing_issue="$(
+            gh issue list \
+              --state open \
+              --label live-smoke-failure \
+              --json number \
+              --jq '.[0].number // empty'
+          )"
+          if [ -n "$existing_issue" ]; then
+            gh issue comment "$existing_issue" --body-file live-smoke-issue.md
+          else
+            gh issue create \
+              --title "Live subprocess smoke failed: $(date -u +%Y-%m-%d)" \
+              --label live-smoke-failure \
+              --body-file live-smoke-issue.md
+          fi
 
       - name: Log heartbeat
         if: success()
         run: |
-          echo "Live subprocess smoke passed at $(date -u --iso-8601=seconds)." >> "$GITHUB_STEP_SUMMARY"
+          if [ -f live-smoke-skipped.txt ]; then
+            echo "Live subprocess smoke skipped at $(date -u --iso-8601=seconds)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Live subprocess smoke passed at $(date -u --iso-8601=seconds)." >> "$GITHUB_STEP_SUMMARY"
+          fi

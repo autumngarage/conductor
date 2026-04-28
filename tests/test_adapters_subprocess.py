@@ -72,9 +72,43 @@ def test_claude_configured_false_when_cli_missing(mocker):
     ok, reason = ClaudeProvider().configured()
     assert ok is False
     assert "not found on PATH" in reason
+    assert "CONDUCTOR_CLAUDE_CLI" in reason
+    assert "non-interactive agent environment" in reason
     # Reason names the actionable login command + env-var fallback.
     assert "claude auth login" in reason
     assert "ANTHROPIC_API_KEY" in reason
+
+
+def test_claude_uses_configured_cli_env_for_path_and_auth_probe(mocker, monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_CLAUDE_CLI", "/opt/claude/bin/claude")
+    mocker.patch(
+        "conductor.providers.claude.shutil.which",
+        side_effect=lambda cmd: cmd if cmd == "/opt/claude/bin/claude" else None,
+    )
+    run = mocker.patch(
+        "conductor.providers.claude.subprocess.run",
+        return_value=_fake_completed(stdout='{"loggedIn": true}'),
+    )
+
+    ok, reason = ClaudeProvider().configured()
+
+    assert ok is True and reason is None
+    assert run.call_args.args[0][0] == "/opt/claude/bin/claude"
+
+
+def test_claude_configured_false_when_configured_cli_env_missing(
+    mocker, monkeypatch
+):
+    monkeypatch.setenv("CONDUCTOR_CLAUDE_CLI", "/missing/claude")
+    mocker.patch("conductor.providers.claude.shutil.which", return_value=None)
+
+    ok, reason = ClaudeProvider().configured()
+
+    assert ok is False
+    assert "CONDUCTOR_CLAUDE_CLI" in reason
+    assert "/missing/claude" in reason
+    assert "does not point to an executable" in reason
+    assert "non-interactive agent environment" in reason
 
 
 def test_claude_configured_false_when_not_authed(mocker):

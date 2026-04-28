@@ -4,8 +4,8 @@ Pick an LLM, give it a job. Manual or auto routing across providers.
 
 **Status:** shipping. Current tap release is v0.3.3 — built-in providers for `kimi`, `openrouter`, `deepseek-chat`, `deepseek-reasoner`, `claude`, `codex`, `gemini`, and `ollama`, manual + auto routing, single-turn `call` + multi-turn `exec` with tools and sandboxes, and the first slice of agent-wiring (`conductor init --wire-agents` for Claude Code — delegation guidance, slash command, `kimi-long-context` / `gemini-web-search` subagents, `--unwire`). Further slices on main not yet tagged: repo-scoped `AGENTS.md` with three more subagents (codex / ollama / conductor-auto), plus `GEMINI.md`, repo `CLAUDE.md`, and Cursor-rule patching — use the dev-install path below until the next tap bump.
 
-DeepSeek note: `deepseek-chat` and `deepseek-reasoner` now use OpenRouter credentials. Set `OPENROUTER_API_KEY`; `DEEPSEEK_API_KEY` is deprecated.
-Kimi note: `kimi` now routes through OpenRouter. Set `OPENROUTER_API_KEY`; legacy `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` are no longer used.
+DeepSeek note: `deepseek-chat` and `deepseek-reasoner` now use OpenRouter credentials. Set `OPENROUTER_API_KEY`; `DEEPSEEK_API_KEY` is deprecated. Conductor resolves the newest matching DeepSeek slug from the OpenRouter catalog and falls back to the pinned default if the catalog is unavailable.
+Kimi note: `kimi` now routes through OpenRouter. Set `OPENROUTER_API_KEY`; legacy `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` are no longer used. Conductor resolves the newest matching Kimi slug from the OpenRouter catalog and falls back to the pinned default if the catalog is unavailable.
 
 Conductor is the fourth peer in the [Autumn Garage](https://github.com/autumngarage/autumn-garage) tool family alongside [Touchstone](https://github.com/autumngarage/touchstone), [Cortex](https://github.com/autumngarage/cortex), and [Sentinel](https://github.com/autumngarage/sentinel). It owns the LLM provider adapters and the user-facing "pick an LLM, give it a job" surface so that Sentinel and Touchstone don't each have to.
 
@@ -37,6 +37,7 @@ Conductor's runtime resolution order stays `env -> key_command -> keychain`. The
 - Linux: if `secret-tool` is available, default to `libsecret` via `secret-tool store` plus a generated `key_command` lookup. That keeps the secret encrypted at rest without changing the runtime resolution order. If `secret-tool` is unavailable, the wizard falls back to an environment-variable export and tells you that path is not encrypted at rest.
 - 1Password: available when the `op` CLI is on `PATH`. The wizard stores an `op read op://...` command in `~/.config/conductor/credentials.toml`; the secret itself never lands on disk. For zero-friction reads, set `1Password -> Settings -> Security -> Auto-Lock` to `Never`.
 - CI: use environment variables from your runner or secret store, e.g. GitHub Actions repository or environment secrets mapped to `OPENROUTER_API_KEY`.
+- Live subprocess smoke in GitHub Actions needs `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `GEMINI_API_KEY`; the nightly workflow skips when they are absent.
 
 ### Alternatives
 
