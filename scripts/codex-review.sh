@@ -55,6 +55,7 @@
 #   TOUCHSTONE_CONDUCTOR_EFFORT       — minimal|low|medium|high|max (default: medium)
 #   TOUCHSTONE_CONDUCTOR_TAGS         — comma-separated tag hints (default: code-review)
 #   TOUCHSTONE_CONDUCTOR_EXCLUDE      — comma-separated providers to skip
+#   CONDUCTOR_BIN                     — conductor executable to invoke (default: conductor)
 #   CODEX_REVIEW_SUPPRESS_LEGACY_WARNINGS — silence one-time migration hints
 #   CODEX_REVIEW_ENABLED              — true/false override for the [review].enabled setting
 #   CODEX_REVIEW_MODE                 — review-only|fix|diff-only|no-tests (default: fix)
@@ -139,6 +140,7 @@ TOUCHSTONE_LOCAL_REVIEWER_COMMAND="${TOUCHSTONE_LOCAL_REVIEWER_COMMAND:-}"
 TOUCHSTONE_LOCAL_REVIEWER_AUTH_COMMAND="${TOUCHSTONE_LOCAL_REVIEWER_AUTH_COMMAND:-}"
 # 2.0 conductor knobs — filled from [review.conductor] during TOML parse;
 # env vars (TOUCHSTONE_CONDUCTOR_*) override just before invocation.
+CONDUCTOR_BIN="${CONDUCTOR_BIN:-conductor}"
 CONDUCTOR_WITH=""
 CONDUCTOR_PREFER=""
 CONDUCTOR_EFFORT=""
@@ -950,15 +952,19 @@ ASSIST_EOF
 # and lets the router pick.
 
 reviewer_conductor_available() {
-  command -v conductor >/dev/null 2>&1
+  command -v "$CONDUCTOR_BIN" >/dev/null 2>&1
 }
 
 reviewer_conductor_auth_ok() {
   # Delegate to `conductor doctor --json` — cheap check, makes no upstream
   # calls, confirms at least one provider is configured.
   local doctor_json
-  doctor_json=$(conductor doctor --json 2>/dev/null) || return 1
+  doctor_json=$("$CONDUCTOR_BIN" doctor --json 2>/dev/null) || return 1
   echo "$doctor_json" | grep -q '"configured"[[:space:]]*:[[:space:]]*true'
+}
+
+reviewer_conductor_supports_review() {
+  "$CONDUCTOR_BIN" review --help >/dev/null 2>&1
 }
 
 reviewer_conductor_exec() {
@@ -987,13 +993,23 @@ reviewer_conductor_exec() {
     diff-only)
       # Read-only review intent. The diff is embedded in the prompt, and
       # Conductor should still use provider-native review when available.
-      subcommand="review"
+      if reviewer_conductor_supports_review; then
+        subcommand="review"
+      else
+        subcommand="call"
+      fi
       ;;
     review-only)
       # Merge review is pure review, not engineering. Route through
       # `conductor review` so Codex/Claude/Gemini can use their dedicated
       # review entrypoints instead of generic agent execution.
-      subcommand="review"
+      if reviewer_conductor_supports_review; then
+        subcommand="review"
+      else
+        subcommand="exec"
+        tools="Read,Grep,Glob,Bash"
+        sandbox="read-only"
+      fi
       ;;
     no-tests)
       subcommand="exec"
@@ -1033,7 +1049,7 @@ reviewer_conductor_exec() {
   # matches Conductor's established stdin-fallback path.
   CODEX_REVIEW_IN_PROGRESS=1 \
     printf '%s' "$prompt" \
-    | conductor "$subcommand" "${args[@]}"
+    | "$CONDUCTOR_BIN" "$subcommand" "${args[@]}"
 }
 
 # --------------------------------------------------------------------------
@@ -1800,7 +1816,7 @@ run_peer_review() {
   # wrapper when the primary timed out; peer call runs synchronously and
   # relies on conductor's own per-provider timeout (currently 300s default).
   peer_output="$(printf '%s' "$peer_prompt" \
-    | conductor call --auto \
+    | "$CONDUCTOR_BIN" call --auto \
         --exclude "$primary_provider" \
         --tags code-review \
         --effort medium \
