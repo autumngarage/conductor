@@ -8,10 +8,12 @@ actual subprocess surface, not to implementation internals.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
 
+import pytest
 from click.testing import CliRunner
 
 from conductor import offline_mode
@@ -78,6 +80,38 @@ RANKED_CANDIDATE_REQUIRED_KEYS = {
     "combined_score",
     "unconfigured_reason",
 }
+
+
+@pytest.fixture(autouse=True)
+def _isolated_consumer_contract_env(monkeypatch, tmp_path):
+    """Keep consumer-contract tests independent of user-local Conductor state."""
+    for key in list(os.environ):
+        if key.startswith("CONDUCTOR_"):
+            monkeypatch.delenv(key, raising=False)
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv(
+        "CONDUCTOR_PROVIDERS_FILE",
+        str(tmp_path / "config" / "providers.toml"),
+    )
+    monkeypatch.setenv(
+        "CONDUCTOR_PROFILES_FILE",
+        str(tmp_path / "config" / "profiles.toml"),
+    )
+    monkeypatch.setenv(
+        "CONDUCTOR_ROUTER_DEFAULTS_FILE",
+        str(tmp_path / "config" / "router-home.toml"),
+    )
+    monkeypatch.setenv(
+        "CONDUCTOR_REPO_ROUTER_DEFAULTS_FILE",
+        str(tmp_path / "config" / "router-repo.toml"),
+    )
+    offline_mode.clear()
+    reset_health()
+    yield
+    offline_mode.clear()
+    reset_health()
 
 
 def _stub_configured(mocker, configured_names: set[str]) -> None:
@@ -169,10 +203,7 @@ def _documented_call_flags() -> set[str]:
     return set(re.findall(r"`(--[a-z-]+)", docs[start:end]))
 
 
-def test_call_json_auto_route_is_the_consumer_contract(mocker, monkeypatch, tmp_path):
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-    offline_mode.clear()
-    reset_health()
+def test_call_json_auto_route_is_the_consumer_contract(mocker):
     _stub_configured(mocker, {"claude"})
     mocker.patch.object(
         ClaudeProvider,
@@ -207,10 +238,7 @@ def test_call_json_auto_route_is_the_consumer_contract(mocker, monkeypatch, tmp_
     assert result.stderr == ""
 
 
-def test_route_json_uses_the_same_route_contract(mocker, monkeypatch, tmp_path):
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-    offline_mode.clear()
-    reset_health()
+def test_route_json_uses_the_same_route_contract(mocker):
     _stub_configured(mocker, {"claude", "ollama"})
 
     result = CliRunner().invoke(
@@ -223,11 +251,8 @@ def test_route_json_uses_the_same_route_contract(mocker, monkeypatch, tmp_path):
 
 
 def test_offline_call_is_a_documented_invocation_without_auto_or_with(
-    mocker, monkeypatch, tmp_path
+    mocker,
 ):
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-    offline_mode.clear()
-    reset_health()
     _stub_configured(mocker, set())
     call_mock = mocker.patch.object(
         OllamaProvider,
@@ -249,11 +274,7 @@ def test_offline_call_is_a_documented_invocation_without_auto_or_with(
     assert offline_mode.is_active() is True
 
 
-def test_json_usage_errors_remain_click_diagnostics(monkeypatch, tmp_path):
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-    offline_mode.clear()
-    reset_health()
-
+def test_json_usage_errors_remain_click_diagnostics():
     result = CliRunner().invoke(main, ["call", "--json", "--brief", "missing route"])
 
     assert result.exit_code == 2
