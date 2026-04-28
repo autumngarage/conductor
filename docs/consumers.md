@@ -23,9 +23,12 @@ conductor call --auto --tags <tag1,tag2> [options]
 
 # Explicit provider
 conductor call --with <provider> [options]
+
+# Force the local provider
+conductor call --offline [options]
 ```
 
-Exactly one of `--auto` or `--with` is required. `--auto` runs the router using `--tags`, `--prefer`, and `--exclude` to pick a configured provider; `--with` bypasses the router for direct provider use.
+Usually, exactly one of `--auto` or `--with` is required. `--auto` runs the router using `--tags`, `--prefer`, and `--exclude` to pick a configured provider; `--with` bypasses the router for direct provider use. `--offline` is the exception: it may be used without `--auto` or `--with`, sets the sticky offline flag, and rewrites the call to `--with ollama`. Passing `--offline --with <non-ollama>` is an error. `--no-offline` clears the sticky flag, then normal `--auto` / `--with` rules apply.
 
 ## Input
 
@@ -176,7 +179,7 @@ The Coder role should use `conductor exec`, not `conductor call`. `exec` is the 
 - **Minor** version bump: additive flags, additive JSON fields, new tags, new providers.
 - **Patch** version bump: bug fixes, internal refactors, no consumer-visible change.
 
-Consumers pin a major version in their own dependency declarations (brew formula `depends_on "autumngarage/tools/conductor"` resolves to current major; semver constraint expressed in formula version pin if needed).
+Consumers pin a major version in their own dependency declarations (brew formula `depends_on "autumngarage/conductor/conductor"` resolves to current major; semver constraint expressed in formula version pin if needed).
 
 ## Provider-specific gotchas
 
