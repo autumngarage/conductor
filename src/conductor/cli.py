@@ -854,6 +854,7 @@ def _invoke_review_with_fallback(
     """Try native review providers in route order."""
     last_exc: Exception | None = None
     fallbacks: list[str] = []
+    failures: list[tuple[str, str]] = []
     candidates = list(decision.ranked)
 
     for idx, candidate in enumerate(candidates):
@@ -879,9 +880,11 @@ def _invoke_review_with_fallback(
             last_exc = e
             mark_outcome(candidate.name, "config")
             fallbacks.append(candidate.name)
+            failures.append((candidate.name, str(e)))
         except UnsupportedCapability as e:
             last_exc = e
             fallbacks.append(candidate.name)
+            failures.append((candidate.name, str(e)))
         except ProviderError as e:
             retryable, category = _is_retryable(e)
             if category == "rate-limit":
@@ -891,6 +894,7 @@ def _invoke_review_with_fallback(
             if not retryable:
                 raise
             fallbacks.append(candidate.name)
+            failures.append((candidate.name, str(e)))
 
         if idx + 1 < len(candidates) and not silent:
             click.echo(
@@ -900,6 +904,12 @@ def _invoke_review_with_fallback(
             )
 
     assert last_exc is not None
+    if failures:
+        details = "; ".join(
+            f"{name}: {message or type(last_exc).__name__}"
+            for name, message in failures
+        )
+        raise ProviderError(f"native review failed for all providers: {details}") from last_exc
     raise last_exc
 
 

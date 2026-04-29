@@ -607,6 +607,39 @@ def test_review_auto_does_not_route_to_generic_code_review_tag_provider(mocker):
     assert "→ claude" in result.stderr
 
 
+def test_review_auto_exhausted_fallback_names_stalled_codex_and_claude(mocker):
+    from conductor.providers.interface import ProviderError, ProviderStalledError
+
+    _stub_all_configured(mocker, {"codex", "claude"})
+    mocker.patch.object(CodexProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(ClaudeProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(
+        CodexProvider,
+        "review",
+        side_effect=ProviderStalledError("codex review stalled after 0.05s"),
+    )
+    mocker.patch.object(
+        ClaudeProvider,
+        "review",
+        side_effect=ProviderError("claude review timed out after 1s"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--brief",
+            "Review this merge using the project reviewer guide.",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "native review failed for all providers" in result.stderr
+    assert "codex review stalled after 0.05s" in result.stderr
+    assert "claude review timed out after 1s" in result.stderr
+
+
 def test_review_with_provider_without_native_review_errors():
     result = CliRunner().invoke(
         main,

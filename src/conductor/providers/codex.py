@@ -220,7 +220,6 @@ class CodexProvider:
         title: str | None = None,
     ) -> CallResponse:
         """Run Codex's native code-review command."""
-        del max_stall_sec  # `codex review` is a single subprocess, not streamed.
         ok, reason = self._check_cli_path()
         if not ok:
             raise ProviderConfigError(reason or "codex not configured")
@@ -245,6 +244,11 @@ class CodexProvider:
         args.append("-")
 
         timeout = self._timeout_sec if timeout_sec is None else timeout_sec
+        effective_timeout = timeout
+        watchdog_timeout = False
+        if max_stall_sec is not None and (timeout is None or max_stall_sec < timeout):
+            effective_timeout = max_stall_sec
+            watchdog_timeout = True
         start = time.monotonic()
         try:
             result = subprocess.run(
@@ -252,11 +256,15 @@ class CodexProvider:
                 input=review_prompt,
                 capture_output=True,
                 text=True,
-                timeout=timeout,
+                timeout=effective_timeout,
                 cwd=cwd,
             )
         except subprocess.TimeoutExpired as e:
             elapsed = time.monotonic() - start
+            if watchdog_timeout:
+                raise ProviderStalledError(
+                    f"codex review stalled after {max_stall_sec:g}s with no stdout"
+                ) from e
             raise ProviderError(
                 f"codex review timed out after {elapsed:.0f}s"
             ) from e
