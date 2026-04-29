@@ -640,6 +640,32 @@ def test_review_auto_exhausted_fallback_names_stalled_codex_and_claude(mocker):
     assert "claude review timed out after 1s" in result.stderr
 
 
+def test_review_with_gemini_emits_plain_text_without_json_envelope(mocker):
+    _stub_all_configured(mocker, {"gemini"})
+    mocker.patch.object(GeminiProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(
+        GeminiProvider,
+        "review",
+        return_value=CallResponse(
+            text="Plain review\nCODEX_REVIEW_CLEAN",
+            provider="gemini",
+            model="gemini-2.5-pro",
+            duration_ms=10,
+            usage={},
+            raw={"response": "{\"response\": \"Plain review\\nCODEX_REVIEW_CLEAN\"}"},
+        ),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["review", "--with", "gemini", "--brief", "End with CODEX_REVIEW_CLEAN."],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "Plain review\nCODEX_REVIEW_CLEAN\n"
+    assert not result.stdout.lstrip().startswith("{")
+
+
 def test_review_with_provider_without_native_review_errors():
     result = CliRunner().invoke(
         main,
