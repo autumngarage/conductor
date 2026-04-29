@@ -919,6 +919,24 @@ def test_codex_review_repairs_missing_requested_sentinel(mocker, capsys):
     )
 
 
+def test_codex_review_stall_watchdog_fails_fast(mocker):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    captured_timeout: float | None = None
+
+    def fake_run(args, **kwargs):
+        nonlocal captured_timeout
+        captured_timeout = kwargs["timeout"]
+        raise subprocess.TimeoutExpired(cmd=args, timeout=kwargs["timeout"])
+
+    mocker.patch("conductor.providers.codex.subprocess.run", side_effect=fake_run)
+
+    with pytest.raises(ProviderStalledError) as exc:
+        CodexProvider().review("Review this.", timeout_sec=60, max_stall_sec=0.05)
+
+    assert captured_timeout == 0.05
+    assert "codex review stalled after 0.05s" in str(exc.value)
+
+
 def test_codex_call_reads_output_backstop_when_ndjson_loses_agent_message(
     mocker, monkeypatch, tmp_path
 ):
