@@ -1838,6 +1838,48 @@ def test_gemini_review_repairs_missing_requested_sentinel(
     )
 
 
+def test_gemini_review_extracts_inner_json_response_and_preserves_sentinel(
+    mocker,
+    monkeypatch,
+    capsys,
+):
+    mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
+    _strip_gemini_auth_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    mocker.patch(
+        "conductor.providers.gemini.subprocess.run",
+        return_value=_fake_completed(stdout='[{"name":"code-review"}]'),
+    )
+    outer = {
+        "response": json.dumps(
+            {
+                "response": (
+                    "The submitted code follows the requested contract.\n"
+                    "CODEX_REVIEW_CLEAN"
+                )
+            }
+        ),
+        "stats": {},
+    }
+    fake = _FakePopen(stdout_schedule=[(0, json.dumps(outer))])
+    mocker.patch(
+        "conductor.providers.gemini.subprocess.Popen",
+        side_effect=lambda args, **kwargs: fake,
+    )
+
+    response = GeminiProvider().review(
+        "End with CODEX_REVIEW_CLEAN or CODEX_REVIEW_BLOCKED."
+    )
+
+    assert response.text == (
+        "The submitted code follows the requested contract.\nCODEX_REVIEW_CLEAN"
+    )
+    assert response.text.lstrip()[0] != "{"
+    assert "[conductor] gemini review repaired JSON response envelope" in (
+        capsys.readouterr().err
+    )
+
+
 def test_gemini_call_with_resume_passes_resume_flag(mocker):
     mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
     captured = mocker.patch(

@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -71,6 +72,26 @@ GEMINI_AUTH_ENV_VARS = (
 # Default OAuth credentials file written by the CLI's first-run browser
 # flow. Override per-instance via the constructor for tests.
 GEMINI_DEFAULT_OAUTH_CREDS_PATH = Path.home() / ".gemini" / "oauth_creds.json"
+
+
+def _extract_review_response_text(response: object) -> str:
+    if not isinstance(response, str):
+        return ""
+    stripped = response.strip()
+    if not stripped:
+        return response
+    try:
+        inner = json.loads(stripped)
+    except json.JSONDecodeError:
+        return response
+    if isinstance(inner, dict) and isinstance(inner.get("response"), str):
+        print(
+            "[conductor] gemini review repaired JSON response envelope; "
+            "extracting inner response text",
+            file=sys.stderr,
+        )
+        return inner["response"]
+    return response
 
 
 class GeminiProvider:
@@ -338,8 +359,13 @@ class GeminiProvider:
         except json.JSONDecodeError:
             if not stdout:
                 raise ProviderHTTPError("gemini review produced empty stdout") from None
-            return CallResponse(
+            content = ensure_requested_review_sentinel(
+                provider_name=self.name,
+                prompt=prompt,
                 text=stdout,
+            )
+            return CallResponse(
+                text=content,
                 provider=self.name,
                 model=model,
                 duration_ms=duration_ms,
@@ -355,10 +381,11 @@ class GeminiProvider:
                 auth_prompts=tracker.prompts or None,
             )
 
+        content = _extract_review_response_text(data.get("response", ""))
         content = ensure_requested_review_sentinel(
             provider_name=self.name,
             prompt=prompt,
-            text=data.get("response", ""),
+            text=content,
         )
         input_tokens, output_tokens = self._sum_usage(data)
         session_id = (
