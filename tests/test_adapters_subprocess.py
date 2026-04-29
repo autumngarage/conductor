@@ -320,6 +320,35 @@ def test_claude_review_uses_native_review_slash_command_read_only(mocker):
     assert response.text == "hello from claude"
 
 
+def test_claude_review_repairs_missing_requested_sentinel(mocker, capsys):
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    fake = _FakePopen(
+        stdout_schedule=[
+            (
+                0,
+                json.dumps(
+                    {
+                        "result": "I found risky behavior but omitted the marker.",
+                        "usage": {},
+                    }
+                ),
+            )
+        ]
+    )
+    mocker.patch(
+        "conductor.providers.claude.subprocess.Popen",
+        side_effect=lambda args, **kwargs: fake,
+    )
+
+    response = ClaudeProvider().review("End with CODEX_REVIEW_CLEAN or BLOCKED.")
+
+    assert response.text.endswith("\nCODEX_REVIEW_BLOCKED")
+    assert "CODEX_REVIEW_CLEAN" not in response.text
+    assert "[conductor] claude review repaired missing Touchstone sentinel" in (
+        capsys.readouterr().err
+    )
+
+
 def test_claude_call_passes_resume_session_id_as_resume_flag(mocker):
     mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
     captured = mocker.patch(
@@ -869,6 +898,25 @@ def test_codex_review_uses_native_review_command(mocker):
     assert response.provider == "codex"
     assert response.model == "codex-review"
     assert response.text == "LGTM"
+
+
+def test_codex_review_repairs_missing_requested_sentinel(mocker, capsys):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    mocker.patch(
+        "conductor.providers.codex.subprocess.run",
+        return_value=_fake_completed(stdout="The changes need operator review.\n"),
+    )
+
+    response = CodexProvider().review(
+        "Return a final standalone CODEX_REVIEW_CLEAN or CODEX_REVIEW_BLOCKED line.",
+    )
+
+    assert response.text == (
+        "The changes need operator review.\nCODEX_REVIEW_BLOCKED"
+    )
+    assert "[conductor] codex review repaired missing Touchstone sentinel" in (
+        capsys.readouterr().err
+    )
 
 
 def test_codex_call_reads_output_backstop_when_ndjson_loses_agent_message(
@@ -1740,6 +1788,36 @@ def test_gemini_review_uses_code_review_extension_command(mocker, monkeypatch):
     assert fake.args[fake.args.index("--approval-mode") + 1] == "plan"
     assert response.provider == "gemini"
     assert response.text == "hello from gemini"
+
+
+def test_gemini_review_repairs_missing_requested_sentinel(
+    mocker,
+    monkeypatch,
+    capsys,
+):
+    mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
+    _strip_gemini_auth_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    mocker.patch(
+        "conductor.providers.gemini.subprocess.run",
+        return_value=_fake_completed(stdout='[{"name":"code-review"}]'),
+    )
+    fake = _FakePopen(
+        stdout_schedule=[
+            (0, json.dumps({"response": "Plain review without the marker."}))
+        ]
+    )
+    mocker.patch(
+        "conductor.providers.gemini.subprocess.Popen",
+        side_effect=lambda args, **kwargs: fake,
+    )
+
+    response = GeminiProvider().review("End with CODEX_REVIEW_CLEAN or BLOCKED.")
+
+    assert response.text == "Plain review without the marker.\nCODEX_REVIEW_BLOCKED"
+    assert "[conductor] gemini review repaired missing Touchstone sentinel" in (
+        capsys.readouterr().err
+    )
 
 
 def test_gemini_call_with_resume_passes_resume_flag(mocker):

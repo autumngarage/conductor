@@ -32,6 +32,7 @@ from conductor.providers.interface import (
     ProviderHTTPError,
     resolve_effort_tokens,
 )
+from conductor.providers.review_contract import ensure_requested_review_sentinel
 
 if TYPE_CHECKING:
     from conductor.session_log import SessionLog
@@ -354,6 +355,11 @@ class GeminiProvider:
                 auth_prompts=tracker.prompts or None,
             )
 
+        content = ensure_requested_review_sentinel(
+            provider_name=self.name,
+            prompt=prompt,
+            text=data.get("response", ""),
+        )
         input_tokens, output_tokens = self._sum_usage(data)
         session_id = (
             data.get("session_id")
@@ -363,7 +369,7 @@ class GeminiProvider:
             or data.get("chatId")
         )
         return CallResponse(
-            text=data.get("response", ""),
+            text=content,
             provider=self.name,
             model=model,
             duration_ms=duration_ms,
