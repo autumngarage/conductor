@@ -31,6 +31,7 @@ from conductor.providers.interface import (
     ProviderHTTPError,
     resolve_effort_tokens,
 )
+from conductor.providers.review_contract import ensure_requested_review_sentinel
 
 if TYPE_CHECKING:
     from conductor.session_log import SessionLog
@@ -321,8 +322,13 @@ class ClaudeProvider:
             )
 
         usage = data.get("usage") or {}
-        return CallResponse(
+        content = ensure_requested_review_sentinel(
+            provider_name=self.name,
+            prompt=review_prompt,
             text=data.get("result", ""),
+        )
+        return CallResponse(
+            text=content,
             provider=self.name,
             model=model,
             duration_ms=data.get("duration_ms") or duration_ms,
