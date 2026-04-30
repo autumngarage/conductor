@@ -158,7 +158,7 @@ The old `--sandbox` flag is still parseable for compatibility, but it is depreca
 
 Because the child has the same ambient authority as the parent, prompts should still be explicit about ownership: whether the child may edit files, run tests, use network, or perform git operations. For PR workflows in this repo, the parent agent still owns commit, push, and PR creation unless the user explicitly delegates those steps.
 
-<!-- conductor:begin v0.8.2 -->
+<!-- conductor:begin v0.8.3 -->
 ## Conductor delegation
 
 This project has [conductor](https://github.com/autumngarage/conductor)
