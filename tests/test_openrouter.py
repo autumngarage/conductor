@@ -264,12 +264,6 @@ def test_call_without_model_invokes_selector_and_builds_payload(configured, mock
         "conductor.providers.openrouter.select_model_for_task",
         return_value={
             "model": OPENROUTER_DEFAULT_MODEL,
-            "plugins": [
-                {
-                    "id": "auto-router",
-                    "allowed_models": ["google/gemini-flash-1.5", "openai/gpt-5.2"],
-                }
-            ],
             "reasoning": {"effort": "medium"},
         },
     )
@@ -303,15 +297,47 @@ def test_call_without_model_invokes_selector_and_builds_payload(configured, mock
     assert captured["payload"] == {
         "model": OPENROUTER_DEFAULT_MODEL,
         "messages": [{"role": "user", "content": "hi"}],
-        "plugins": [
-            {
-                "id": "auto-router",
-                "allowed_models": ["google/gemini-flash-1.5", "openai/gpt-5.2"],
-            }
-        ],
         "reasoning": {"effort": "medium"},
     }
     assert response.model == "google/gemini-flash-1.5"
+
+
+def test_auto_router_restriction_404_gets_actionable_local_error(configured, mocker):
+    mocker.patch(
+        "conductor.providers.openrouter.select_model_for_task",
+        return_value={
+            "model": OPENROUTER_DEFAULT_MODEL,
+            "plugins": [
+                {
+                    "id": "auto-router",
+                    "allowed_models": ["qwen/qwen3.6-flash"],
+                }
+            ],
+            "reasoning": {"effort": "medium"},
+        },
+    )
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(
+            return_value=httpx.Response(
+                404,
+                json={
+                    "error": {
+                        "message": "No models match your request and model restrictions",
+                        "code": 404,
+                    }
+                },
+            )
+        )
+        with pytest.raises(ProviderError) as excinfo:
+            OpenRouterProvider().call("hi")
+
+    message = str(excinfo.value)
+    assert "OpenRouter provider failed locally after upstream HTTP 404" in message
+    assert "request restrictions/models tried" in message
+    assert "qwen/qwen3.6-flash" in message
+    assert "do not derive plugins[].allowed_models from `GET /models`" in message
+    assert "conductor call --with openrouter --model <model-id>" in message
 
 
 def test_call_fails_locally_when_validated_shortlist_is_empty(configured, mocker):
@@ -345,7 +371,7 @@ def test_call_fails_locally_when_validated_shortlist_is_empty(configured, mocker
             OpenRouterProvider().call(
                 "hi",
                 task_tags=["long-context", "thinking"],
-                prefer="balanced",
+                prefer="cheapest",
             )
 
     message = str(excinfo.value)

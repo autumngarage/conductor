@@ -298,7 +298,7 @@ def test_call_verbose_route_prints_full_ranking(mocker):
     assert "ollama" in result.stderr
 
 
-def test_call_auto_can_route_to_openrouter_and_shortlist_cheap_models(
+def test_call_auto_can_route_to_openrouter_without_catalog_restrictions(
     mocker, monkeypatch
 ):
     import conductor.providers.openrouter_catalog as openrouter_catalog
@@ -357,7 +357,7 @@ def test_call_auto_can_route_to_openrouter_and_shortlist_cheap_models(
     assert result.exit_code == 0, result.stderr
     assert "→ openrouter" in result.stderr
     assert captured["payload"]["model"] == "openrouter/auto"
-    assert captured["payload"]["plugins"][0]["allowed_models"][0] == "cheap/newest"
+    assert "plugins" not in captured["payload"]
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +466,46 @@ def test_ask_code_high_falls_back_to_openrouter_exec_before_ollama(mocker):
         "openrouter",
         "ollama",
     ]
+
+
+def test_ask_code_medium_falls_through_from_openrouter_404_to_ollama(mocker):
+    from conductor.providers.interface import ProviderHTTPError
+
+    _stub_all_configured(mocker, {"openrouter", "ollama"})
+    mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        side_effect=ProviderHTTPError(
+            "OpenRouter provider failed locally after upstream HTTP 404. "
+            "request restrictions/models tried: ['openrouter/auto', 'qwen/qwen3.6-flash']"
+        ),
+    )
+    ollama_call = mocker.patch.object(
+        OllamaProvider,
+        "call",
+        return_value=_fake_response("ollama", "llama3.2"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "code",
+            "--effort",
+            "medium",
+            "--allow-short-brief",
+            "--brief",
+            "Explain the small code change.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert ollama_call.called
+    assert "openrouter failed (provider-error)" in result.stderr
+    assert "falling through to ollama" in result.stderr
+    assert "falling back" in result.stderr
+    assert "→ ollama" in result.stderr
 
 
 def test_ask_review_uses_native_review_route(mocker):

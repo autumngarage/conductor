@@ -364,10 +364,10 @@ def _is_retryable(err: Exception) -> tuple[bool, str]:
     """Classify an error as retryable-with-fallback or fatal.
 
     Returns (retryable, category) — category is "rate-limit" | "5xx" |
-    "timeout" | "network" | "other" for health-tracking and fallback-UX
-    routing purposes. "network" is separate from "timeout" so the offline-
-    mode prompt can fire on the real thing (DNS/TCP failure) rather than
-    on a slow-but-reachable upstream.
+    "timeout" | "network" | "provider-error" | "other" for health-tracking
+    and fallback-UX routing purposes. "network" is separate from "timeout"
+    so the offline-mode prompt can fire on the real thing (DNS/TCP failure)
+    rather than on a slow-but-reachable upstream.
     """
     if isinstance(err, ProviderStalledError):
         return True, "timeout"
@@ -380,9 +380,11 @@ def _is_retryable(err: Exception) -> tuple[bool, str]:
         return True, "timeout"
     # HTTP 5xx — check for " 5" preceded by "http" or a similar prefix so
     # we don't match arbitrary "5" digits. Cheap heuristic; acceptable.
-    signals = ("http 5", "returned http 5", "exited 5", "overloaded", "upstream")
+    signals = ("http 5", "returned http 5", "exited 5", "overloaded")
     if any(sig in msg for sig in signals):
         return True, "5xx"
+    if isinstance(err, ProviderHTTPError):
+        return True, "provider-error"
     return False, "other"
 
 
@@ -843,7 +845,7 @@ def _invoke_with_fallback(
                 if not silent:
                     click.echo(
                         f"[conductor] {candidate.name} failed ({category}) · "
-                        f"falling back → {next_name}",
+                        f"falling through to {next_name} (falling back → {next_name})",
                         err=True,
                     )
             idx += 1
