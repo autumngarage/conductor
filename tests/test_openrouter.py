@@ -8,10 +8,12 @@ import httpx
 import pytest
 import respx
 
+import conductor.providers.openrouter_catalog as openrouter_catalog
 from conductor.providers.deepseek import DeepSeekChatProvider, DeepSeekReasonerProvider
 from conductor.providers.interface import (
     CallResponse,
     ProviderConfigError,
+    ProviderError,
     UnsupportedCapability,
 )
 from conductor.providers.kimi import KimiProvider
@@ -106,7 +108,10 @@ def test_smoke_returns_true_on_well_formed_response(configured):
         "choices": [{"message": {"content": "pong"}}],
         "usage": {},
     }
-    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+    with respx.mock(
+        base_url="https://openrouter.ai/api/v1",
+        assert_all_called=False,
+    ) as router:
         router.post("/chat/completions").mock(
             return_value=httpx.Response(200, json=body)
         )
@@ -203,7 +208,10 @@ def test_call_sends_reasoning_effort_and_openrouter_headers(configured):
             },
         )
 
-    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+    with respx.mock(
+        base_url="https://openrouter.ai/api/v1",
+        assert_all_called=False,
+    ) as router:
         router.post("/chat/completions").mock(side_effect=_record)
         OpenRouterProvider().call("hi", model="anthropic/claude-sonnet-4", effort="max")
 
@@ -304,6 +312,48 @@ def test_call_without_model_invokes_selector_and_builds_payload(configured, mock
         "reasoning": {"effort": "medium"},
     }
     assert response.model == "google/gemini-flash-1.5"
+
+
+def test_call_fails_locally_when_validated_shortlist_is_empty(configured, mocker):
+    alias_only_catalog = [
+        openrouter_catalog.ModelEntry(
+            id="~anthropic/claude-haiku-latest",
+            name="Anthropic Claude Haiku Latest",
+            created=500,
+            context_length=200_000,
+            pricing_prompt=0.001,
+            pricing_completion=0.005,
+            pricing_thinking=0.001,
+            supports_thinking=True,
+            supports_tools=True,
+            supports_vision=True,
+        )
+    ]
+    mocker.patch(
+        "conductor.providers.openrouter_catalog.load_catalog",
+        return_value=alias_only_catalog,
+    )
+
+    with respx.mock(
+        base_url="https://openrouter.ai/api/v1",
+        assert_all_called=False,
+    ) as router:
+        chat_route = router.post("/chat/completions").mock(
+            return_value=httpx.Response(500, text="should not be called")
+        )
+        with pytest.raises(ProviderError) as excinfo:
+            OpenRouterProvider().call(
+                "hi",
+                task_tags=["long-context", "thinking"],
+                prefer="balanced",
+            )
+
+    message = str(excinfo.value)
+    assert "found no sendable models after catalog validation" in message
+    assert "tags filtered to empty: ['long-context', 'thinking']" in message
+    assert "configured provider: openrouter" in message
+    assert "dropped invalid aliases/stale slugs" in message
+    assert chat_route.call_count == 0
 
 
 def test_exec_with_tools_runs_openai_tool_loop(configured, tmp_path):

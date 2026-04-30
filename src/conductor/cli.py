@@ -52,6 +52,7 @@ from conductor.providers import (
     get_provider,
     known_providers,
 )
+from conductor.providers.review_contract import build_review_task_prompt
 from conductor.router import (
     VALID_PREFER_MODES,
     InvalidRouterRequest,
@@ -97,7 +98,7 @@ GIT_RECOVERY_COMMAND_TIMEOUT_SEC = 2.0
 GIT_RECOVERY_MAX_COMMITS = 5
 GIT_RECOVERY_MAX_STATUS_PATHS = 8
 NATIVE_REVIEW_TAG = "code-review"
-NATIVE_REVIEW_PRIORITY = ("codex", "claude", "gemini")
+DEFAULT_REVIEW_MAX_FALLBACKS = 3
 DEFAULT_COUNCIL_ROUNDS = 1
 
 
@@ -388,6 +389,23 @@ def _is_retryable(err: Exception) -> tuple[bool, str]:
     return False, "other"
 
 
+def _review_failure_mode(err: Exception) -> str:
+    if isinstance(err, ProviderStalledError):
+        return "stall"
+    _retryable, category = _is_retryable(err)
+    return category
+
+
+def _format_tried_providers(tried: list[tuple[str, str]]) -> str:
+    return ", ".join(f"{name} ({mode})" for name, mode in tried)
+
+
+def _validate_max_fallbacks(raw: int) -> int:
+    if raw < 1:
+        raise click.UsageError(f"--max-fallbacks must be >= 1, got {raw}")
+    return raw
+
+
 def _ollama_index(candidates: list) -> int | None:
     """Return the index of ollama in ``candidates`` (or None if absent)."""
     for i, c in enumerate(candidates):
@@ -439,7 +457,7 @@ def _review_provider_or_none(provider_or_name) -> NativeReviewProvider | None:
 def _review_exclude_set(
     user_exclude: frozenset[str],
 ) -> tuple[frozenset[str], dict[str, str]]:
-    """Return router excludes needed to keep review routing native-only."""
+    """Return router excludes needed to keep review routing code-review-only."""
     excludes = set(user_exclude)
     reasons: dict[str, str] = {}
     for name in known_providers():
@@ -452,21 +470,23 @@ def _review_exclude_set(
             excludes.add(name)
             reasons[name] = str(e)
             continue
-        if not isinstance(provider, NativeReviewProvider):
+        if NATIVE_REVIEW_TAG not in provider.tags:
             excludes.add(name)
-            reasons[name] = "provider has no native code-review entrypoint"
+            reasons[name] = "provider is not tagged code-review"
             continue
-        ok, reason = provider.review_configured()
+        ok, reason = provider.review_configured() if isinstance(
+            provider, NativeReviewProvider
+        ) else provider.configured()
         if not ok:
             excludes.add(name)
-            reasons[name] = reason or "native review is not configured"
+            reasons[name] = reason or "code-review provider is not configured"
     return frozenset(excludes), reasons
 
 
 def _native_review_unavailable_message(reasons: dict[str, str]) -> str:
     if not reasons:
-        return "no native review provider is available."
-    lines = ["no native review provider is available:"]
+        return "no code-review provider is available."
+    lines = ["no code-review provider is available:"]
     for name in sorted(reasons):
         lines.append(f"  - {name}: {reasons[name]}")
     return "\n".join(lines)
@@ -850,41 +870,72 @@ def _invoke_review_with_fallback(
     uncommitted: bool,
     title: str | None,
     silent: bool,
+    max_fallbacks: int = DEFAULT_REVIEW_MAX_FALLBACKS,
 ) -> tuple[CallResponse, list[str]]:
-    """Try native review providers in route order."""
+    """Try code-review providers in route order."""
     last_exc: Exception | None = None
     fallbacks: list[str] = []
-    failures: list[tuple[str, str]] = []
-    candidates = list(decision.ranked)
+    tried: list[tuple[str, str]] = []
+    candidates = list(decision.ranked[:max_fallbacks])
 
     for idx, candidate in enumerate(candidates):
-        provider = _review_provider_or_none(candidate.name)
-        if provider is None:
-            fallbacks.append(candidate.name)
-            continue
+        provider = get_provider(candidate.name)
         try:
-            response = provider.review(
-                task,
-                effort=effort,
-                cwd=cwd,
-                timeout_sec=timeout_sec,
-                max_stall_sec=max_stall_sec,
-                base=base,
-                commit=commit,
-                uncommitted=uncommitted,
-                title=title,
-            )
+            if isinstance(provider, NativeReviewProvider):
+                response = provider.review(
+                    task,
+                    effort=effort,
+                    cwd=cwd,
+                    timeout_sec=timeout_sec,
+                    max_stall_sec=max_stall_sec,
+                    base=base,
+                    commit=commit,
+                    uncommitted=uncommitted,
+                    title=title,
+                )
+            elif isinstance(provider, OpenRouterProvider):
+                response = provider.call(
+                    build_review_task_prompt(
+                        task,
+                        base=base,
+                        commit=commit,
+                        uncommitted=uncommitted,
+                        title=title,
+                    ),
+                    effort=effort,
+                    task_tags=list(decision.task_tags),
+                    prefer=decision.prefer,
+                    log_selection=not silent,
+                )
+            else:
+                response = provider.call(
+                    build_review_task_prompt(
+                        task,
+                        base=base,
+                        commit=commit,
+                        uncommitted=uncommitted,
+                        title=title,
+                    ),
+                    effort=effort,
+                )
             mark_outcome(candidate.name, "success")
+            tried.append((candidate.name, "success"))
+            if not silent and len(tried) > 1:
+                click.echo(
+                    f"[conductor] review tried providers: "
+                    f"{_format_tried_providers(tried)}",
+                    err=True,
+                )
             return response, fallbacks
         except ProviderConfigError as e:
             last_exc = e
             mark_outcome(candidate.name, "config")
             fallbacks.append(candidate.name)
-            failures.append((candidate.name, str(e)))
+            tried.append((candidate.name, "config"))
         except UnsupportedCapability as e:
             last_exc = e
             fallbacks.append(candidate.name)
-            failures.append((candidate.name, str(e)))
+            tried.append((candidate.name, "unsupported"))
         except ProviderError as e:
             retryable, category = _is_retryable(e)
             if category == "rate-limit":
@@ -894,22 +945,26 @@ def _invoke_review_with_fallback(
             if not retryable:
                 raise
             fallbacks.append(candidate.name)
-            failures.append((candidate.name, str(e)))
+            tried.append((candidate.name, _review_failure_mode(e)))
 
         if idx + 1 < len(candidates) and not silent:
             click.echo(
-                f"[conductor] {candidate.name} review failed · "
+                f"[conductor] {candidate.name} review failed ({tried[-1][1]}) · "
                 f"falling back → {candidates[idx + 1].name}",
                 err=True,
             )
 
     assert last_exc is not None
-    if failures:
-        details = "; ".join(
-            f"{name}: {message or type(last_exc).__name__}"
-            for name, message in failures
+    if tried:
+        trail = _format_tried_providers(tried)
+        hint = (
+            "increase --max-fallbacks, exclude failing providers, or run "
+            "`conductor list` to check configured code-review providers"
         )
-        raise ProviderError(f"native review failed for all providers: {details}") from last_exc
+        raise ProviderError(
+            "code review failed for all tried providers: "
+            f"{trail}. Next step: {hint}."
+        ) from last_exc
     raise last_exc
 
 
@@ -1600,7 +1655,7 @@ def ask(
 
     if plan.mode == "review":
         review_exclude, review_reasons = _review_exclude_set(
-            _semantic_candidate_exclude_set(plan, frozenset())
+            frozenset()
         )
         try:
             _provider, decision = pick(
@@ -1608,7 +1663,6 @@ def ask(
                 prefer=plan.prefer,
                 effort=effort_value,
                 exclude=review_exclude,
-                priority=_semantic_priority(plan) or NATIVE_REVIEW_PRIORITY,
                 shadow=True,
             )
         except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
@@ -2059,6 +2113,15 @@ def call(
     ),
 )
 @click.option(
+    "--max-fallbacks",
+    default=DEFAULT_REVIEW_MAX_FALLBACKS,
+    type=int,
+    help=(
+        "Maximum code-review providers to try in total for --auto review "
+        f"(default: {DEFAULT_REVIEW_MAX_FALLBACKS})."
+    ),
+)
+@click.option(
     "--base",
     default=None,
     help="Review changes against this base branch/ref.",
@@ -2129,6 +2192,7 @@ def review(
     cwd: str | None,
     timeout_sec: int | None,
     max_stall_sec: int | None,
+    max_fallbacks: int,
     base: str | None,
     commit: str | None,
     uncommitted: bool,
@@ -2182,6 +2246,7 @@ def review(
     body = brief_input.body
     effort_value = _parse_effort(effort)
     max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
+    max_fallbacks = _validate_max_fallbacks(max_fallbacks)
     prefer_value = _validate_prefer(prefer) if prefer is not None else "best"
 
     decision: RouteDecision | None = None
@@ -2194,7 +2259,6 @@ def review(
                 prefer=prefer_value,
                 effort=effort_value,
                 exclude=review_exclude,
-                priority=NATIVE_REVIEW_PRIORITY,
                 shadow=True,
             )
         except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
@@ -2216,6 +2280,7 @@ def review(
                 uncommitted=uncommitted,
                 title=title,
                 silent=silent_route or as_json,
+                max_fallbacks=max_fallbacks,
             )
         except ProviderConfigError as e:
             click.echo(f"conductor: {e}", err=True)

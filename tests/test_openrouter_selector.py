@@ -113,6 +113,31 @@ def test_prefer_best_returns_auto_with_shortlist(mocker, fixture_catalog):
     assert shortlist[0] == "recent/general"
 
 
+def test_selector_drops_tilde_aliases_from_auto_shortlist(mocker, fixture_catalog):
+    alias = openrouter_catalog.ModelEntry(
+        id="~anthropic/claude-haiku-latest",
+        name="Anthropic Claude Haiku Latest",
+        created=500,
+        context_length=200_000,
+        pricing_prompt=0.001,
+        pricing_completion=0.005,
+        pricing_thinking=0.001,
+        supports_thinking=True,
+        supports_tools=True,
+        supports_vision=True,
+    )
+    mocker.patch(
+        "conductor.providers.openrouter_catalog.load_catalog",
+        return_value=[alias, *fixture_catalog],
+    )
+
+    payload = select_model_for_task([], "best", "medium")
+
+    shortlist = payload["plugins"][0]["allowed_models"]
+    assert "~anthropic/claude-haiku-latest" not in shortlist
+    assert all(not model.startswith("~") for model in shortlist)
+
+
 @pytest.mark.parametrize(
     ("tags", "expected"),
     [
@@ -156,5 +181,5 @@ def test_empty_filtered_result_raises_clear_error(mocker, fixture_catalog):
         return_value=fixture_catalog,
     )
 
-    with pytest.raises(ProviderError, match="found no models matching"):
+    with pytest.raises(ProviderError, match="tags filtered to empty"):
         select_model_for_task(["vision", "thinking"], "cheapest", "medium")

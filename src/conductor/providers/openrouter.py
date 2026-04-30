@@ -556,8 +556,14 @@ def select_model_for_task(
 
     task_tag_set = set(task_tags or [])
     exclude_set = set(exclude or ())
+    catalog = openrouter_catalog.load_catalog(
+        force_refresh=True,
+        allow_stale_on_error=False,
+    )
+    catalog_ids = {entry.id for entry in catalog}
     candidates = []
-    for entry in openrouter_catalog.load_catalog():
+    dropped = []
+    for entry in catalog:
         if entry.id in exclude_set:
             continue
         if {"strong-reasoning", "thinking"} & task_tag_set and not entry.supports_thinking:
@@ -568,13 +574,19 @@ def select_model_for_task(
             continue
         if "long-context" in task_tag_set and entry.context_length < 100_000:
             continue
+        if not _is_sendable_openrouter_model_id(entry.id, catalog_ids):
+            dropped.append(entry.id)
+            continue
         candidates.append(entry)
 
     if not candidates:
         raise ProviderError(
-            "OpenRouter selector found no models matching "
-            f"tags={sorted(task_tag_set)} exclude={sorted(exclude_set)}. "
-            "Run `conductor models refresh` or choose `--model` explicitly."
+            _empty_selector_message(
+                task_tags=task_tag_set,
+                exclude=exclude_set,
+                catalog=catalog,
+                dropped=dropped,
+            )
         )
 
     ranked = sorted(candidates, key=_catalog_cost_sort_key)
@@ -602,6 +614,50 @@ def _catalog_recency_sort_key(
     entry: openrouter_catalog.ModelEntry,
 ) -> tuple[int, float, str]:
     return (-entry.created, entry.total_price_per_1k, entry.id)
+
+
+def _is_sendable_openrouter_model_id(model_id: str, catalog_ids: set[str]) -> bool:
+    """Return whether ``model_id`` is valid for OpenRouter request restrictions.
+
+    OpenRouter exposes ``~provider/family-latest`` pages as moving aliases. Those
+    aliases are useful policy labels, but they have caused 404s when sent inside
+    the auto-router ``allowed_models`` restriction list. The selector therefore
+    only sends concrete catalog IDs, and a request-time catalog refresh drops
+    slugs that no longer exist.
+    """
+    return model_id in catalog_ids and not model_id.startswith("~")
+
+
+def _empty_selector_message(
+    *,
+    task_tags: set[str],
+    exclude: set[str],
+    catalog: list[openrouter_catalog.ModelEntry],
+    dropped: list[str],
+) -> str:
+    catalog_ids = {model.id for model in catalog}
+    sendable_examples = [
+        entry.id
+        for entry in catalog
+        if _is_sendable_openrouter_model_id(entry.id, catalog_ids)
+    ][:8]
+    parts = [
+        "OpenRouter selector found no sendable models after catalog validation.",
+        f"tags filtered to empty: {sorted(task_tags)}",
+        f"excluded models: {sorted(exclude)}",
+        "configured provider: openrouter",
+        f"catalog models available: {len(catalog)}",
+    ]
+    if sendable_examples:
+        parts.append(f"available model examples: {sendable_examples}")
+    if dropped:
+        parts.append(f"dropped invalid aliases/stale slugs: {sorted(dropped)[:8]}")
+    parts.append(
+        "Broaden the request by removing tags such as --tags thinking,long-context, "
+        "run `conductor models refresh`, or choose a concrete `--model` from "
+        "`conductor models list`."
+    )
+    return " ".join(parts)
 
 
 def _reasoning_payload(effort: str | int) -> dict[str, str] | None:
