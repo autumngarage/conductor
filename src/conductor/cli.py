@@ -1512,10 +1512,32 @@ def _model_capabilities(model: openrouter_catalog.ModelEntry) -> str:
     return ",".join(caps) or "-"
 
 
+def _advisory_emission_allowed() -> bool:
+    """Return True when interactive coaching messages may be emitted on stderr.
+
+    The agent-wiring freshness notice is human-coaching, not a hard error.
+    Programmatic consumers (CliRunner tests, `conductor call --json | jq`,
+    Touchstone, scripts piping to other tools) must not see it on stderr —
+    parsing pipelines that capture both streams will choke, and the JSON
+    consumer contract guarantees strict stderr silence on success.
+
+    Suppress in two cases:
+    - stderr is not a TTY → caller is programmatic / piped / non-interactive.
+    - `--json` is in argv → caller is the JSON consumer contract, even when
+      they kept stderr attached to a terminal (the contract is silence on
+      success, not silence-when-redirected).
+    """
+    if not bool(getattr(sys.stderr, "isatty", lambda: False)()):
+        return False
+    return "--json" not in sys.argv
+
+
 def _maybe_emit_agent_wiring_notice(ctx: click.Context) -> None:
     if ctx.invoked_subcommand in {None, "init"}:
         return
     if os.environ.get("CONDUCTOR_AGENT_WIRING_NOTICE") == "0":
+        return
+    if not _advisory_emission_allowed():
         return
 
     try:
@@ -1524,10 +1546,9 @@ def _maybe_emit_agent_wiring_notice(ctx: click.Context) -> None:
             should_emit_agent_wiring_notice,
         )
 
-        include_missing = bool(getattr(sys.stderr, "isatty", lambda: False)())
         notice = agent_wiring_notice(
             current_version=__version__,
-            include_missing=include_missing,
+            include_missing=True,
         )
         if notice is None:
             return
