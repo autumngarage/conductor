@@ -2,7 +2,10 @@
 
 The catalog is derived state. We persist it only as a time-bounded cache so
 selection can run without hard-coded model slugs and without an HTTP round-trip
- on every call. `conductor models refresh` is the explicit rebuild path.
+on every call. `conductor models refresh` is the explicit rebuild path. The
+OpenRouter auto-selector requires a live refresh before building request
+restrictions; stale cache fallback is reserved for listing and compatibility
+shims where a stale model is better than losing the whole command.
 """
 
 from __future__ import annotations
@@ -114,11 +117,22 @@ def read_cached_catalog() -> CatalogSnapshot | None:
     return CatalogSnapshot(fetched_at=fetched_at, models=models)
 
 
-def load_catalog(force_refresh: bool = False) -> list[ModelEntry]:
-    return load_catalog_snapshot(force_refresh=force_refresh).models
+def load_catalog(
+    force_refresh: bool = False,
+    *,
+    allow_stale_on_error: bool = True,
+) -> list[ModelEntry]:
+    return load_catalog_snapshot(
+        force_refresh=force_refresh,
+        allow_stale_on_error=allow_stale_on_error,
+    ).models
 
 
-def load_catalog_snapshot(force_refresh: bool = False) -> CatalogSnapshot:
+def load_catalog_snapshot(
+    force_refresh: bool = False,
+    *,
+    allow_stale_on_error: bool = True,
+) -> CatalogSnapshot:
     cached = _read_cached_catalog_for_load()
     if cached is not None and not force_refresh and _is_fresh(cached):
         return cached
@@ -128,7 +142,7 @@ def load_catalog_snapshot(force_refresh: bool = False) -> CatalogSnapshot:
         _write_cache(fresh)
         return fresh
     except ProviderHTTPError as e:
-        if cached is None:
+        if cached is None or not allow_stale_on_error:
             raise
         print(
             "[conductor] OpenRouter catalog refresh failed; "

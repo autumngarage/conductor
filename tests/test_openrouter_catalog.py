@@ -136,6 +136,19 @@ def test_load_catalog_falls_back_to_stale_cache_on_network_error(
     assert "using stale cache" in capsys.readouterr().err
 
 
+def test_load_catalog_can_require_fresh_catalog_on_network_error(catalog_cache):
+    stale_at = int(time.time()) - (48 * 3600)
+    _write_snapshot(catalog_cache, fetched_at=stale_at)
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.get("/models").mock(side_effect=httpx.ConnectError("network down"))
+        with pytest.raises(
+            ProviderHTTPError,
+            match="network error refreshing OpenRouter catalog",
+        ):
+            openrouter_catalog.load_catalog_snapshot(allow_stale_on_error=False)
+
+
 def test_load_catalog_raises_without_cache_on_network_error(catalog_cache):
     with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
         router.get("/models").mock(side_effect=httpx.ConnectError("network down"))
