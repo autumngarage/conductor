@@ -20,6 +20,7 @@ import queue
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -45,6 +46,7 @@ if TYPE_CHECKING:
 CODEX_DEFAULT_MODEL = "gpt-5.4"
 CODEX_REVIEW_MODEL = "codex-review"
 CODEX_REQUEST_TIMEOUT_SEC = 180.0
+CODEX_STARTUP_PROBE_TIMEOUT_SEC = 8.0
 
 # Sentinel distinguishing "caller didn't specify a timeout" from "caller
 # explicitly asked for no timeout (None)". The constructor default applies
@@ -115,9 +117,11 @@ class CodexProvider:
         *,
         cli_command: str = "codex",
         timeout_sec: float = CODEX_REQUEST_TIMEOUT_SEC,
+        startup_probe_timeout_sec: float = CODEX_STARTUP_PROBE_TIMEOUT_SEC,
     ) -> None:
         self._cli = cli_command
         self._timeout_sec = timeout_sec
+        self._startup_probe_timeout_sec = startup_probe_timeout_sec
 
     def _check_cli_path(self) -> tuple[bool, str | None]:
         """Cheap PATH-only check (no subprocess) for the call/exec hot path."""
@@ -155,11 +159,73 @@ class CodexProvider:
             "for non-interactive use."
         )
 
+    @staticmethod
+    def _timeout_output(e: subprocess.TimeoutExpired) -> str:
+        stdout = e.stdout or e.output or ""
+        stderr = e.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+        return (stderr or stdout).strip()
+
+    def _startup_probe(self) -> tuple[bool, str | None]:
+        """Run the same codex exec startup path used by call().
+
+        PATH and auth probes can pass while codex wedges before it emits any
+        NDJSON, notably in the CLI's models-manager startup. This bounded
+        probe keeps `conductor list` aligned with the path users actually run.
+        """
+        with tempfile.TemporaryDirectory(prefix="conductor-codex-probe-") as tmpdir:
+            output_path = Path(tmpdir) / "output.json"
+            args = [
+                self._cli,
+                "exec",
+                "-",
+                "--json",
+                "-o",
+                str(output_path),
+                "--ephemeral",
+                "--sandbox",
+                "read-only",
+                "-c",
+                "model_reasoning_effort=minimal",
+            ]
+            try:
+                result = subprocess.run(
+                    args,
+                    input="Reply with OK.",
+                    capture_output=True,
+                    text=True,
+                    timeout=self._startup_probe_timeout_sec,
+                )
+            except subprocess.TimeoutExpired as e:
+                detail = self._timeout_output(e)
+                reason = (
+                    f"`{self._cli} exec` startup probe timed out after "
+                    f"{self._startup_probe_timeout_sec:.0f}s"
+                )
+                if detail:
+                    reason = f"{reason}: {detail[:200]}"
+                return False, reason
+            except (FileNotFoundError, OSError) as e:
+                return False, f"could not run `{self._cli} exec` startup probe: {e}"
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            return False, (
+                f"`{self._cli} exec` startup probe exited {result.returncode}: "
+                f"{detail[:200]}"
+            )
+        return True, None
+
     def configured(self) -> tuple[bool, str | None]:
         ok, reason = self._check_cli_path()
         if not ok:
             return False, reason
-        return self._auth_probe()
+        ok, reason = self._auth_probe()
+        if not ok:
+            return False, reason
+        return self._startup_probe()
 
     def smoke(self) -> tuple[bool, str | None]:
         ok, reason = self.configured()

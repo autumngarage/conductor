@@ -859,6 +859,42 @@ def test_codex_configured_false_when_auth_probe_times_out(mocker):
     assert "could not verify" in reason
 
 
+def test_codex_configured_false_when_exec_startup_probe_times_out(mocker):
+    """Regression for #125: PATH + auth are not enough readiness.
+
+    `conductor list` renders provider.configured(); codex must only report
+    ready when the real `codex exec` startup path also completes inside a
+    bounded timeout.
+    """
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+
+    def run(args, **kwargs):
+        if args == ["codex", "login", "status"]:
+            return _fake_completed(stdout="Logged in using ChatGPT")
+        if args[:3] == ["codex", "exec", "-"]:
+            raise subprocess.TimeoutExpired(
+                cmd=args,
+                timeout=kwargs["timeout"],
+                stderr=(
+                    "codex_models_manager: failed to refresh available models: "
+                    "timeout waiting for child process to exit"
+                ),
+            )
+        raise AssertionError(f"unexpected command: {args!r}")
+
+    captured = mocker.patch("conductor.providers.codex.subprocess.run", side_effect=run)
+
+    ok, reason = CodexProvider(startup_probe_timeout_sec=8).configured()
+
+    assert ok is False
+    assert "`codex exec` startup probe timed out after 8s" in reason
+    assert "codex_models_manager" in reason
+    startup_call = captured.call_args_list[1]
+    assert startup_call.args[0][:3] == ["codex", "exec", "-"]
+    assert startup_call.kwargs["timeout"] == 8
+    assert startup_call.kwargs["input"] == "Reply with OK."
+
+
 def test_codex_call_parses_ndjson_and_usage(mocker):
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
     mocker.patch(
