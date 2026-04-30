@@ -1052,6 +1052,44 @@ def test_exec_cli_max_stall_seconds_zero_disables_watchdog(mocker):
     assert exec_mock.call_args.kwargs["max_stall_sec"] is None
 
 
+def test_exec_cli_start_timeout_flag_propagates_to_claude(mocker):
+    _stub_all_configured(mocker, {"claude"})
+    exec_mock = mocker.patch.object(
+        ClaudeProvider, "exec", return_value=_fake_response("claude")
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "claude",
+            "--start-timeout",
+            "240",
+            "--task",
+            "do it",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert exec_mock.call_args.kwargs["start_timeout_sec"] == 240
+
+
+def test_exec_cli_start_timeout_zero_disables_watchdog(mocker):
+    _stub_all_configured(mocker, {"claude"})
+    exec_mock = mocker.patch.object(
+        ClaudeProvider, "exec", return_value=_fake_response("claude")
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--with", "claude", "--start-timeout", "0", "--task", "do it"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert exec_mock.call_args.kwargs["start_timeout_sec"] is None
+
+
 def test_exec_cli_preflight_blocks_exec_and_surfaces_fix_hint(mocker):
     _stub_all_configured(mocker, {"codex"})
     mocker.patch.object(

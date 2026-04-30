@@ -41,7 +41,8 @@ _ORIGINAL_POPEN = subprocess.Popen
 CLAUDE_DEFAULT_MODEL = "sonnet"
 CLAUDE_REQUEST_TIMEOUT_SEC = 180.0
 CLAUDE_AUTH_PROBE_TIMEOUT_SEC = 15.0
-CLAUDE_FIRST_OUTPUT_TIMEOUT_SEC = 45.0
+CLAUDE_CALL_FIRST_OUTPUT_TIMEOUT_SEC = 60.0
+CLAUDE_EXEC_FIRST_OUTPUT_TIMEOUT_SEC = 300.0
 CLAUDE_SETTING_SOURCES = "user,project,local"
 CLAUDE_CLI_ENV = "CONDUCTOR_CLAUDE_CLI"
 CLAUDE_LINKED_WORKTREE_ERROR = (
@@ -94,12 +95,23 @@ class ClaudeProvider:
         cli_command: str | None = None,
         timeout_sec: float = CLAUDE_REQUEST_TIMEOUT_SEC,
         auth_probe_timeout_sec: float = CLAUDE_AUTH_PROBE_TIMEOUT_SEC,
-        first_output_timeout_sec: float | None = CLAUDE_FIRST_OUTPUT_TIMEOUT_SEC,
+        call_first_output_timeout_sec: float | None = (
+            CLAUDE_CALL_FIRST_OUTPUT_TIMEOUT_SEC
+        ),
+        exec_first_output_timeout_sec: float | None = (
+            CLAUDE_EXEC_FIRST_OUTPUT_TIMEOUT_SEC
+        ),
+        first_output_timeout_sec: float | None = None,
     ) -> None:
         self._cli = cli_command or os.environ.get(CLAUDE_CLI_ENV) or "claude"
         self._timeout_sec = timeout_sec
         self._auth_probe_timeout_sec = auth_probe_timeout_sec
-        self._first_output_timeout_sec = first_output_timeout_sec
+        self._call_first_output_timeout_sec = call_first_output_timeout_sec
+        self._exec_first_output_timeout_sec = (
+            first_output_timeout_sec
+            if first_output_timeout_sec is not None
+            else exec_first_output_timeout_sec
+        )
 
     def _check_cli_path(self) -> tuple[bool, str | None]:
         """Cheap PATH-only check (no subprocess). Used by call()/exec()
@@ -407,6 +419,7 @@ class ClaudeProvider:
         cwd: str | None = None,
         timeout_sec: int | None = None,
         max_stall_sec: int | None = None,
+        start_timeout_sec: float | None = None,
         resume_session_id: str | None = None,
         session_log: SessionLog | None = None,
     ) -> CallResponse:
@@ -422,6 +435,7 @@ class ClaudeProvider:
             cwd=cwd,
             timeout_sec_override=timeout_sec,
             max_stall_sec=max_stall_sec,
+            start_timeout_sec=start_timeout_sec,
             resume_session_id=resume_session_id,
             live_auth_capture=True,
             session_log=session_log,
@@ -438,6 +452,7 @@ class ClaudeProvider:
         cwd: str | None = None,
         timeout_sec_override: float | None | object = _USE_DEFAULT,
         max_stall_sec: int | None = None,
+        start_timeout_sec: float | None = None,
         resume_session_id: str | None = None,
         live_auth_capture: bool = False,
         session_log: SessionLog | None = None,
@@ -491,7 +506,7 @@ class ClaudeProvider:
             effective_cwd = self._effective_cwd(cwd)
             proc_env = self._build_proc_env(env_overrides, effective_cwd=effective_cwd)
             first_output_timeout_sec = self._effective_first_output_timeout(
-                max_stall_sec
+                start_timeout_sec
             )
             if session_log is not None:
                 session_log.emit(
@@ -726,18 +741,16 @@ class ClaudeProvider:
 
     def _effective_first_output_timeout(
         self,
-        max_stall_sec: int | None,
+        start_timeout_sec: float | None,
     ) -> float | None:
-        if (
-            max_stall_sec is None
-            or max_stall_sec <= 0
-            or self._first_output_timeout_sec is None
-            or self._first_output_timeout_sec <= 0
-        ):
+        configured = (
+            self._exec_first_output_timeout_sec
+            if start_timeout_sec is None
+            else start_timeout_sec
+        )
+        if configured is None or configured <= 0:
             return None
-        if self._first_output_timeout_sec >= max_stall_sec:
-            return None
-        return self._first_output_timeout_sec
+        return configured
 
     def _emit_project_settings_diagnostic(
         self,

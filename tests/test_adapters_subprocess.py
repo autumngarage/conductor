@@ -15,8 +15,14 @@ import threading
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
-from conductor.providers.claude import ClaudeProvider
+from conductor.cli import main
+from conductor.providers.claude import (
+    CLAUDE_CALL_FIRST_OUTPUT_TIMEOUT_SEC,
+    CLAUDE_EXEC_FIRST_OUTPUT_TIMEOUT_SEC,
+    ClaudeProvider,
+)
 from conductor.providers.codex import CodexProvider
 from conductor.providers.gemini import GEMINI_AUTH_ENV_VARS, GeminiProvider
 from conductor.providers.interface import (
@@ -25,6 +31,7 @@ from conductor.providers.interface import (
     ProviderError,
     ProviderHTTPError,
     ProviderStalledError,
+    ProviderStartupStalledError,
 )
 from conductor.session_log import SessionLog
 
@@ -526,7 +533,149 @@ def test_claude_exec_first_output_watchdog_is_separate_from_mid_task_stall(
     assert error_event["data"]["last_event"] == "provider_started"
 
 
-def test_claude_exec_first_output_watchdog_respects_stall_watchdog_disable(
+def test_claude_startup_timeout_defaults_split_call_and_exec():
+    provider = ClaudeProvider()
+
+    assert CLAUDE_CALL_FIRST_OUTPUT_TIMEOUT_SEC == 60.0
+    assert CLAUDE_EXEC_FIRST_OUTPUT_TIMEOUT_SEC == 300.0
+    assert provider._call_first_output_timeout_sec == 60.0
+    assert provider._exec_first_output_timeout_sec == 300.0
+    assert provider._effective_first_output_timeout(None) == 300.0
+
+
+def test_claude_exec_start_timeout_allows_slow_first_byte(
+    mocker,
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    fake = _FakePopen(stdout_schedule=[(0.06, CLAUDE_JSON)])
+    mocker.patch(
+        "conductor.providers.claude.subprocess.Popen",
+        side_effect=lambda args, **kwargs: fake,
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "claude",
+            "--no-preflight",
+            "--start-timeout",
+            "0.24",
+            "--task",
+            "hi",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "hello from claude" in result.output
+    assert fake.terminated is False
+
+
+def test_claude_exec_start_timeout_fails_nonzero_with_error_shape(
+    mocker,
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    fake = _FakePopen(stdout_schedule=[(0.06, CLAUDE_JSON)])
+    mocker.patch(
+        "conductor.providers.claude.subprocess.Popen",
+        side_effect=lambda args, **kwargs: fake,
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "claude",
+            "--no-preflight",
+            "--start-timeout",
+            "0.03",
+            "--task",
+            "hi",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert fake.terminated is True
+    payload = json.loads(result.stdout)
+    assert payload == {
+        "error": "provider_startup_stalled",
+        "provider": "claude",
+        "timeout_sec": 0.03,
+        "phase": "startup",
+        "message": (
+            "claude CLI startup stalled: produced no output within "
+            "0.03s after start"
+        ),
+    }
+
+
+def test_claude_exec_zero_bytes_ever_fails_as_startup_stall(mocker):
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    fake = _FakePopen(stdout_schedule=[], hang_after_stdout=True)
+    mocker.patch(
+        "conductor.providers.claude.subprocess.Popen",
+        side_effect=lambda args, **kwargs: fake,
+    )
+
+    with pytest.raises(ProviderStartupStalledError) as exc:
+        ClaudeProvider().exec(
+            "hi",
+            timeout_sec=1,
+            start_timeout_sec=0.03,
+            max_stall_sec=30,
+        )
+
+    assert fake.terminated is True
+    assert exc.value.error_response["error"] == "provider_startup_stalled"
+    assert exc.value.error_response["provider"] == "claude"
+    assert exc.value.error_response["timeout_sec"] == 0.03
+    assert exc.value.error_response["phase"] == "startup"
+
+
+def test_claude_exec_start_timeout_zero_disables_startup_watchdog(
+    mocker,
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    fake = _FakePopen(stdout_schedule=[(0.06, CLAUDE_JSON)])
+    mocker.patch(
+        "conductor.providers.claude.subprocess.Popen",
+        side_effect=lambda args, **kwargs: fake,
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "claude",
+            "--no-preflight",
+            "--start-timeout",
+            "0",
+            "--timeout",
+            "1",
+            "--task",
+            "hi",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "hello from claude" in result.output
+    assert fake.terminated is False
+
+
+def test_claude_exec_startup_watchdog_runs_when_mid_task_stall_disabled(
     mocker,
 ):
     mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
@@ -536,15 +685,14 @@ def test_claude_exec_first_output_watchdog_respects_stall_watchdog_disable(
         side_effect=lambda args, **kwargs: fake,
     )
 
-    with pytest.raises(ProviderError) as exc:
+    with pytest.raises(ProviderStartupStalledError) as exc:
         ClaudeProvider(first_output_timeout_sec=0.01).exec(
             "hi",
-            timeout_sec=0.05,
+            timeout_sec=1,
             max_stall_sec=None,
         )
 
-    assert not isinstance(exc.value, ProviderStalledError)
-    assert "timed out" in str(exc.value)
+    assert exc.value.error_response["error"] == "provider_startup_stalled"
     assert fake.terminated is True
 
 

@@ -296,6 +296,16 @@ def _normalize_max_stall_sec(raw: int | None) -> int | None:
     return raw
 
 
+def _normalize_start_timeout_sec(raw: float | None) -> float | None:
+    if raw is None:
+        return None
+    if raw < 0:
+        raise click.UsageError(f"--start-timeout must be >= 0, got {raw:g}.")
+    if raw == 0:
+        return None
+    return raw
+
+
 def _apply_offline_flag(
     *, offline: bool | None, provider_id: str | None, auto: bool
 ) -> tuple[str | None, bool]:
@@ -662,6 +672,7 @@ def _invoke_with_fallback(
     cwd: str | None,
     timeout_sec: int | None,
     max_stall_sec: int | None,
+    start_timeout_sec: float | None,
     silent: bool,
     resume_session_id: str | None = None,
     session_log: SessionLog | None = None,
@@ -749,17 +760,22 @@ def _invoke_with_fallback(
                         session_log=session_log,
                     )
                 else:
+                    exec_kwargs = {
+                        "model": model,
+                        "effort": effort,
+                        "tools": tools,
+                        "sandbox": sandbox,
+                        "cwd": cwd,
+                        "timeout_sec": timeout_sec,
+                        "max_stall_sec": max_stall_sec,
+                        "resume_session_id": resume_session_id,
+                        "session_log": session_log,
+                    }
+                    if candidate.name == "claude":
+                        exec_kwargs["start_timeout_sec"] = start_timeout_sec
                     response = provider.exec(
                         task,
-                        model=model,
-                        effort=effort,
-                        tools=tools,
-                        sandbox=sandbox,
-                        cwd=cwd,
-                        timeout_sec=timeout_sec,
-                        max_stall_sec=max_stall_sec,
-                        resume_session_id=resume_session_id,
-                        session_log=session_log,
+                        **exec_kwargs,
                     )
             else:
                 if isinstance(provider, OpenRouterProvider):
@@ -1115,6 +1131,14 @@ def _emit_call(
         click.echo(json.dumps(payload, default=str, indent=2))
     else:
         click.echo(response.text)
+
+
+def _emit_provider_error(err: ProviderError, *, as_json: bool) -> None:
+    payload = getattr(err, "error_response", None)
+    if as_json and isinstance(payload, dict):
+        click.echo(json.dumps(payload, default=str, indent=2))
+        return
+    click.echo(f"conductor: {err}", err=True)
 
 
 def _collect_session_auth_prompts(session_log: SessionLog | None) -> list[dict] | None:
@@ -1758,11 +1782,12 @@ def ask(
             tools=tools_set,
             sandbox=sandbox_value,
             cwd=cwd,
-            timeout_sec=timeout_sec,
-            max_stall_sec=max_stall_sec,
-            silent=silent_route or as_json,
-            session_log=session_log,
-            models_by_provider=models_by_provider,
+                timeout_sec=timeout_sec,
+                max_stall_sec=max_stall_sec,
+                start_timeout_sec=None,
+                silent=silent_route or as_json,
+                session_log=session_log,
+                models_by_provider=models_by_provider,
         )
     except UnsupportedCapability as e:
         if session_log is not None:
@@ -2002,6 +2027,7 @@ def call(
                 cwd=None,
                 timeout_sec=None,
                 max_stall_sec=None,
+                start_timeout_sec=None,
                 silent=silent_route or as_json,
             )
         except ProviderConfigError as e:
@@ -2419,6 +2445,17 @@ def review(
     ),
 )
 @click.option(
+    "--start-timeout",
+    "start_timeout_sec",
+    default=None,
+    type=float,
+    help=(
+        "Startup watchdog in seconds for providers that may cold-load before "
+        "their first byte. Set 0 to disable. After first output, "
+        "--max-stall-seconds is the only stall watchdog."
+    ),
+)
+@click.option(
     "--task",
     default=None,
     help="The task / prompt. Reads stdin if omitted.\n"
@@ -2500,6 +2537,7 @@ def exec_cmd(
     cwd: str | None,
     timeout_sec: int | None,
     max_stall_sec: int | None,
+    start_timeout_sec: float | None,
     task: str | None,
     task_file: str | None,
     brief: str | None,
@@ -2565,6 +2603,7 @@ def exec_cmd(
     sandbox_value = _validate_sandbox(sandbox, warn=sandbox is not None)
     effort_value = _parse_effort(effort)
     max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
+    start_timeout_sec = _normalize_start_timeout_sec(start_timeout_sec)
 
     decision: RouteDecision | None = None
     session_log: SessionLog | None = None
@@ -2618,6 +2657,7 @@ def exec_cmd(
                 cwd=cwd,
                 timeout_sec=timeout_sec,
                 max_stall_sec=max_stall_sec,
+                start_timeout_sec=start_timeout_sec,
                 silent=silent_route or as_json,
                 resume_session_id=resume_session_id,
                 session_log=session_log,
@@ -2637,7 +2677,7 @@ def exec_cmd(
         except ProviderError as e:
             if session_log is not None:
                 session_log.mark_finished()
-            click.echo(f"conductor: {e}", err=True)
+            _emit_provider_error(e, as_json=as_json)
             _maybe_echo_stall_recovery_hint(e, cwd=cwd)
             sys.exit(1)
     else:
@@ -2696,17 +2736,22 @@ def exec_cmd(
                     session_log=session_log,
                 )
             else:
+                exec_kwargs = {
+                    "model": model,
+                    "effort": effort_value,
+                    "tools": tools_set,
+                    "sandbox": sandbox_value,
+                    "cwd": cwd,
+                    "timeout_sec": timeout_sec,
+                    "max_stall_sec": max_stall_sec,
+                    "resume_session_id": resume_session_id,
+                    "session_log": session_log,
+                }
+                if provider_id == "claude":
+                    exec_kwargs["start_timeout_sec"] = start_timeout_sec
                 response = provider.exec(
                     body,
-                    model=model,
-                    effort=effort_value,
-                    tools=tools_set,
-                    sandbox=sandbox_value,
-                    cwd=cwd,
-                    timeout_sec=timeout_sec,
-                    max_stall_sec=max_stall_sec,
-                    resume_session_id=resume_session_id,
-                    session_log=session_log,
+                    **exec_kwargs,
                 )
         except UnsupportedCapability as e:
             session_log.emit("provider_failed", {"provider": provider_id, "error": str(e)})
@@ -2721,7 +2766,7 @@ def exec_cmd(
         except ProviderError as e:
             session_log.emit("provider_failed", {"provider": provider_id, "error": str(e)})
             session_log.mark_finished()
-            click.echo(f"conductor: {e}", err=True)
+            _emit_provider_error(e, as_json=as_json)
             _maybe_echo_stall_recovery_hint(e, cwd=cwd)
             _maybe_echo_explicit_network_hint(provider_id, e)
             sys.exit(1)

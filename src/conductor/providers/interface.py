@@ -78,6 +78,31 @@ class ProviderStalledError(ProviderError):
     a stall means the subprocess is alive but not making progress."""
 
 
+class ProviderStartupStalledError(ProviderStalledError):
+    """Raised when a CLI provider produces no initial output after launch."""
+
+    def __init__(self, *, provider: str, timeout_sec: float) -> None:
+        self.provider = provider
+        self.timeout_sec = timeout_sec
+        self.phase = "startup"
+        formatted_timeout = (
+            str(int(timeout_sec))
+            if float(timeout_sec).is_integer()
+            else f"{timeout_sec:g}"
+        )
+        self.error_response = {
+            "error": "provider_startup_stalled",
+            "provider": provider,
+            "timeout_sec": timeout_sec,
+            "phase": self.phase,
+            "message": (
+                f"{provider} CLI startup stalled: produced no output within "
+                f"{formatted_timeout}s after start"
+            ),
+        }
+        super().__init__(self.error_response["message"])
+
+
 class UnsupportedCapability(ProviderError):  # noqa: N818  — public API name; renaming to -Error breaks callers
     """Raised when a provider cannot satisfy the requested capability —
     e.g., tool-use requested but the provider only supports single-turn

@@ -206,7 +206,7 @@ Sentinel maps the JSON response into its `ChatResponse` dataclass: `text` → `r
 
 ### Sentinel — agentic code (Coder role)
 
-The Coder role should use `conductor exec`, not `conductor call`. `exec` is the agentic subcommand for multi-turn work with tool access, preflight checks, stall detection, and session logs. Its consumer contract is separate from this `conductor call` contract; use `conductor exec --help` for the current flag surface until that contract is documented.
+The Coder role should use `conductor exec`, not `conductor call`. `exec` is the agentic subcommand for multi-turn work with tool access, preflight checks, startup timeout control (`--start-timeout`), stall detection, and session logs. Its consumer contract is separate from this `conductor call` contract; use `conductor exec --help` for the current flag surface until that contract is documented.
 
 ### Generic semantic delegation
 
