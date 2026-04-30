@@ -56,6 +56,7 @@ from conductor.providers import (
 from conductor.providers.review_contract import (
     ReviewContextError,
     build_review_task_prompt,
+    ensure_requested_review_sentinel,
 )
 from conductor.router import (
     VALID_PREFER_MODES,
@@ -950,6 +951,13 @@ def _invoke_review_with_fallback(
                     ),
                     effort=effort,
                 )
+            repaired_text = ensure_requested_review_sentinel(
+                provider_name=response.provider,
+                prompt=task,
+                text=response.text,
+            )
+            if repaired_text != response.text:
+                response = replace(response, text=repaired_text)
             mark_outcome(candidate.name, "success")
             tried.append((candidate.name, "success"))
             if not silent and len(tried) > 1:

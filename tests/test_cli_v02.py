@@ -753,6 +753,108 @@ def test_review_auto_generic_fallback_prompt_includes_diff(mocker, tmp_path):
     assert "+fallback diff marker" in prompt
 
 
+def test_review_auto_generic_fallback_repairs_requested_sentinel(mocker, tmp_path):
+    from conductor.providers.interface import ProviderStalledError
+
+    # Regression for issue #137's weak point: before the CLI-level guard, a
+    # call()-based review fallback returned this prose unchanged and the hook
+    # later failed closed with malformed-sentinel.
+    repo = _make_diff_repo(tmp_path)
+    _stub_all_configured(mocker, {"codex", "claude", "openrouter"})
+    mocker.patch.object(CodexProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(ClaudeProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(
+        ClaudeProvider,
+        "review",
+        side_effect=ProviderStalledError("claude review stalled"),
+    )
+    mocker.patch.object(
+        CodexProvider,
+        "review",
+        side_effect=ProviderStalledError("codex review stalled"),
+    )
+    mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=CallResponse(
+            text=(
+                "The changes consistently route through the requested path. "
+                "I did not find a blocking correctness issue."
+            ),
+            provider="openrouter",
+            model="test-model",
+            duration_ms=10,
+            usage={},
+            raw={},
+        ),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--max-fallbacks",
+            "3",
+            "--cwd",
+            str(repo),
+            "--base",
+            "HEAD~1",
+            "--brief",
+            (
+                "The LAST line of your output must be exactly one of these "
+                "three sentinels: CODEX_REVIEW_CLEAN, CODEX_REVIEW_FIXED, "
+                "or CODEX_REVIEW_BLOCKED."
+            ),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    lines = result.stdout.strip().splitlines()
+    assert lines[-1] == "CODEX_REVIEW_BLOCKED"
+    assert sum(1 for line in lines if line.startswith("CODEX_REVIEW_")) == 1
+    assert "review repaired missing Touchstone sentinel" in result.stderr
+
+
+def test_review_auto_codex_subprocess_repairs_requested_sentinel(mocker):
+    # Exercises the same conductor review --auto -> codex subprocess path used
+    # by scripts/codex-review.sh when codex is the selected native reviewer.
+    _stub_all_configured(mocker, {"codex"})
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    mocker.patch(
+        "conductor.providers.codex.subprocess.run",
+        return_value=subprocess.CompletedProcess(
+            args=["codex", "review"],
+            returncode=0,
+            stdout=(
+                "The changes consistently route through the requested path. "
+                "I did not find a blocking correctness issue.\n"
+            ),
+            stderr="",
+        ),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--silent-route",
+            "--brief",
+            (
+                "The LAST line of your output must be exactly one of these "
+                "three sentinels: CODEX_REVIEW_CLEAN, CODEX_REVIEW_FIXED, "
+                "or CODEX_REVIEW_BLOCKED."
+            ),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    lines = result.stdout.strip().splitlines()
+    assert lines[-1] == "CODEX_REVIEW_BLOCKED"
+    assert sum(1 for line in lines if line.startswith("CODEX_REVIEW_")) == 1
+
+
 def test_review_with_gemini_emits_plain_text_without_json_envelope(mocker):
     _stub_all_configured(mocker, {"gemini"})
     mocker.patch.object(GeminiProvider, "review_configured", return_value=(True, None))
