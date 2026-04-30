@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -849,11 +850,13 @@ class _FakeScheduledPipe:
         hang_after_schedule: bool,
         terminated: threading.Event,
         on_eof,
+        raise_after_schedule: BaseException | None = None,
     ) -> None:
         self._schedule = schedule
         self._hang_after_schedule = hang_after_schedule
         self._terminated = terminated
         self._on_eof = on_eof
+        self._raise_after_schedule = raise_after_schedule
         self._idx = 0
 
     def readline(self) -> str:
@@ -863,6 +866,8 @@ class _FakeScheduledPipe:
             if self._terminated.wait(delay):
                 return ""
             return line
+        if self._raise_after_schedule is not None:
+            raise self._raise_after_schedule
         if self._hang_after_schedule:
             self._terminated.wait()
         if self._on_eof is not None:
@@ -883,6 +888,8 @@ class _FakePopen:
         stderr_schedule: list[tuple[float, str]] | None = None,
         hang_after_stdout: bool = False,
         returncode: int = 0,
+        stdout_reader_error: BaseException | None = None,
+        stderr_reader_error: BaseException | None = None,
     ) -> None:
         self.args: list[str] | None = None
         self.env: dict[str, str] | None = None
@@ -897,12 +904,14 @@ class _FakePopen:
             hang_after_schedule=hang_after_stdout,
             terminated=self._terminated_event,
             on_eof=self._finish_success,
+            raise_after_schedule=stdout_reader_error,
         )
         self.stderr = _FakeScheduledPipe(
             stderr_schedule or [],
             hang_after_schedule=False,
             terminated=self._terminated_event,
             on_eof=None,
+            raise_after_schedule=stderr_reader_error,
         )
         # codex now reads the prompt from stdin (`codex exec -`); mock a
         # writable pipe so the provider's write+close path doesn't blow up.
@@ -1437,6 +1446,87 @@ def test_codex_exec_stall_watchdog_ignores_wrapper_heartbeats(mocker, capsys):
     assert "codex CLI stalled" in msg
     assert "timed out" not in msg
     assert fake.terminated is True
+
+
+def test_codex_exec_stall_watchdog_kills_silent_provider_at_deadline(mocker):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    fake = _FakePopen(stdout_schedule=[], hang_after_stdout=True)
+    _patch_codex_popen(mocker, fake)
+
+    started = time.monotonic()
+    with pytest.raises(ProviderStalledError) as exc:
+        CodexProvider().exec("hi", max_stall_sec=0.05, liveness_interval_sec=0)
+    elapsed = time.monotonic() - started
+
+    assert "codex CLI stalled" in str(exc.value)
+    assert fake.terminated is True
+    assert elapsed < 0.5
+
+
+def test_codex_exec_reader_death_is_stall_failure(mocker, capsys):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    fake = _FakePopen(
+        stdout_schedule=[],
+        stdout_reader_error=RuntimeError("reader crashed"),
+    )
+    _patch_codex_popen(mocker, fake)
+
+    with pytest.raises(ProviderStalledError) as exc:
+        CodexProvider().exec("hi", max_stall_sec=5, liveness_interval_sec=0)
+
+    assert "stream reader failed" in str(exc.value)
+    assert "stdout reader failed" in capsys.readouterr().err
+    assert fake.terminated is True
+
+
+def test_codex_exec_stall_watchdog_kills_after_repeated_heartbeats(mocker, capsys):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    fake = _FakePopen(stdout_schedule=[], hang_after_stdout=True)
+    _patch_codex_popen(mocker, fake)
+
+    with pytest.raises(ProviderStalledError):
+        CodexProvider().exec("hi", max_stall_sec=0.2, liveness_interval_sec=0.03)
+
+    err = capsys.readouterr().err
+    assert err.count("[conductor] no output from codex for ") >= 3
+    assert fake.terminated is True
+
+
+def test_codex_exec_wall_timeout_survives_blocked_heartbeat_stderr(
+    mocker, monkeypatch
+):
+    class BlockingStderr:
+        def __init__(self) -> None:
+            self.write_started = threading.Event()
+
+        def write(self, _text: str) -> int:
+            self.write_started.set()
+            threading.Event().wait()
+            return 0
+
+        def flush(self) -> None:
+            return None
+
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    fake = _FakePopen(stdout_schedule=[], hang_after_stdout=True)
+    _patch_codex_popen(mocker, fake)
+    blocking_stderr = BlockingStderr()
+    monkeypatch.setattr("conductor.providers.codex.sys.stderr", blocking_stderr)
+
+    started = time.monotonic()
+    with pytest.raises(ProviderError) as exc:
+        CodexProvider().exec(
+            "hi",
+            timeout_sec=0.12,
+            max_stall_sec=None,
+            liveness_interval_sec=0.01,
+        )
+    elapsed = time.monotonic() - started
+
+    assert blocking_stderr.write_started.is_set()
+    assert "timed out" in str(exc.value)
+    assert fake.terminated is True
+    assert elapsed < 0.7
 
 
 def test_codex_exec_heartbeat_reports_tool_calls_from_session_log(
