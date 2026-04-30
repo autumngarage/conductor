@@ -18,19 +18,190 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
-# These tests pin pre-2.0 multi-reviewer cascade behavior
-# (`["codex", "claude"]`-style configs). Touchstone 2.0 replaced that
-# cascade with conductor-as-only-reviewer; conductor handles its own
-# internal fallback. The fix-mode safety assertions in this file are
-# still valuable, but each test needs to be rewritten against
-# `["conductor"]` config + fake conductor binaries instead of
-# fake codex/claude. Skipping the module until that refactor lands.
-pytestmark = pytest.mark.skip(
-    reason="pre-2.0 cascade contract; needs refactor for conductor-only routing"
+from conductor.cli import main
+from conductor.providers import (
+    CallResponse,
+    ClaudeProvider,
+    CodexProvider,
+    DeepSeekChatProvider,
+    DeepSeekReasonerProvider,
+    GeminiProvider,
+    KimiProvider,
+    OllamaProvider,
+    OpenRouterProvider,
 )
+from conductor.router import reset_health
 
 SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "codex-review.sh"
+LEGACY_SKIP_REASON = "pre-2.0 shell cascade contract; conductor routing tests cover issue #127"
+
+
+@pytest.fixture(autouse=True)
+def _clean_health(monkeypatch, tmp_path):
+    reset_health()
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    yield
+    reset_health()
+
+
+def _stub_all_configured(mocker, configured_names: set[str]) -> None:
+    classes = {
+        "kimi": KimiProvider,
+        "claude": ClaudeProvider,
+        "codex": CodexProvider,
+        "deepseek-chat": DeepSeekChatProvider,
+        "deepseek-reasoner": DeepSeekReasonerProvider,
+        "gemini": GeminiProvider,
+        "ollama": OllamaProvider,
+        "openrouter": OpenRouterProvider,
+    }
+    for name, cls in classes.items():
+        ok = name in configured_names
+        mocker.patch.object(
+            cls,
+            "configured",
+            lambda self, _ok=ok, _n=name: (_ok, None if _ok else f"{_n} not configured"),
+        )
+        if hasattr(cls, "review_configured"):
+            mocker.patch.object(
+                cls,
+                "review_configured",
+                lambda self, _ok=ok, _n=name: (
+                    _ok,
+                    None if _ok else f"{_n} review not configured",
+                ),
+            )
+
+
+def _fake_response(provider: str) -> CallResponse:
+    return CallResponse(
+        text=f"{provider} reviewed",
+        provider=provider,
+        model="test-model",
+        duration_ms=10,
+        usage={},
+        raw={},
+    )
+
+
+def test_review_chain_walks_past_codex_to_next_code_review_provider(mocker) -> None:
+    from conductor.providers.interface import ProviderStalledError
+
+    _stub_all_configured(mocker, {"claude", "codex", "openrouter"})
+    claude_review = mocker.patch.object(
+        ClaudeProvider,
+        "review",
+        side_effect=ProviderStalledError("claude review stalled"),
+    )
+    codex_review = mocker.patch.object(
+        CodexProvider,
+        "review",
+        side_effect=ProviderStalledError("codex review stalled"),
+    )
+    openrouter_call = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response("openrouter"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--max-fallbacks",
+            "3",
+            "--brief",
+            "Review this merge using the project reviewer guide.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert claude_review.called
+    assert codex_review.called
+    assert openrouter_call.called
+    assert result.stdout == "openrouter reviewed\n"
+    assert "claude review failed (stall)" in result.stderr
+    assert "codex review failed (stall)" in result.stderr
+    assert "claude (stall), codex (stall), openrouter (success)" in result.stderr
+
+
+def test_review_max_fallbacks_caps_total_attempts(mocker) -> None:
+    from conductor.providers.interface import ProviderStalledError
+
+    _stub_all_configured(mocker, {"claude", "codex", "openrouter"})
+    mocker.patch.object(
+        ClaudeProvider,
+        "review",
+        side_effect=ProviderStalledError("claude review stalled"),
+    )
+    mocker.patch.object(
+        CodexProvider,
+        "review",
+        side_effect=ProviderStalledError("codex review stalled"),
+    )
+    openrouter_call = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response("openrouter"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--max-fallbacks",
+            "2",
+            "--brief",
+            "Review this merge using the project reviewer guide.",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert not openrouter_call.called
+    assert "claude (stall), codex (stall)" in result.stderr
+    assert "openrouter" not in result.stderr
+
+
+def test_review_exhausted_error_includes_tried_provider_trail(mocker) -> None:
+    from conductor.providers.interface import ProviderHTTPError, ProviderStalledError
+
+    _stub_all_configured(mocker, {"claude", "codex", "openrouter"})
+    mocker.patch.object(
+        ClaudeProvider,
+        "review",
+        side_effect=ProviderHTTPError("Anthropic returned 429 rate limit"),
+    )
+    mocker.patch.object(
+        CodexProvider,
+        "review",
+        side_effect=ProviderStalledError("codex review stalled"),
+    )
+    mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        side_effect=ProviderHTTPError("OpenRouter returned HTTP 503"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--max-fallbacks",
+            "3",
+            "--brief",
+            "Review this merge using the project reviewer guide.",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "code review failed for all tried providers" in result.stderr
+    assert "claude (rate-limit), codex (stall), openrouter (5xx)" in result.stderr
+    assert "Next step:" in result.stderr
 
 
 def _write_executable(path: Path, body: str) -> None:
@@ -568,4 +739,23 @@ def test_stderr_tail_surfaced_on_failure(tmp_path: Path) -> None:
         "Codex stderr (rate-limit JSON) should be tailed into user output, "
         "not silenced. This is the core silent-failure bug.\n"
         f"stdout={result.stdout!r}"
+    )
+
+
+for _legacy_name in (
+    "test_usage_limit_falls_through_to_next_reviewer",
+    "test_malformed_sentinel_falls_through",
+    "test_cascade_exhausted_records_chain",
+    "test_cascade_exhausted_blocks_when_fail_closed",
+    "test_fix_mode_discards_partial_edits_before_fallthrough",
+    "test_fix_mode_aborts_on_unauthorized_commits",
+    "test_fix_mode_aborts_on_sideways_checkout",
+    "test_fix_mode_aborts_on_branch_switch_at_same_sha",
+    "test_fix_mode_aborts_on_swapped_stash",
+    "test_fix_mode_aborts_on_reviewer_stash",
+    "test_fix_mode_aborts_when_pre_review_worktree_dirty",
+    "test_stderr_tail_surfaced_on_failure",
+):
+    globals()[_legacy_name] = pytest.mark.skip(reason=LEGACY_SKIP_REASON)(
+        globals()[_legacy_name]
     )

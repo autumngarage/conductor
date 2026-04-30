@@ -554,7 +554,7 @@ def test_ask_council_rejects_offline():
 # ---------------------------------------------------------------------------
 
 
-def test_review_auto_routes_to_codex_native_review_by_default(mocker):
+def test_review_auto_routes_by_router_tag_order(mocker):
     _stub_all_configured(mocker, {"codex", "claude"})
     mocker.patch.object(CodexProvider, "review_configured", return_value=(True, None))
     mocker.patch.object(ClaudeProvider, "review_configured", return_value=(True, None))
@@ -582,10 +582,10 @@ def test_review_auto_routes_to_codex_native_review_by_default(mocker):
     )
 
     assert result.exit_code == 0, result.output
-    assert review_mock.called
-    assert not claude_review.called
-    assert review_mock.call_args.kwargs["base"] == "origin/main"
-    assert "→ codex" in result.stderr
+    assert claude_review.called
+    assert not review_mock.called
+    assert claude_review.call_args.kwargs["base"] == "origin/main"
+    assert "→ claude" in result.stderr
 
 
 def test_review_auto_does_not_route_to_generic_code_review_tag_provider(mocker):
@@ -635,9 +635,8 @@ def test_review_auto_exhausted_fallback_names_stalled_codex_and_claude(mocker):
     )
 
     assert result.exit_code == 1
-    assert "native review failed for all providers" in result.stderr
-    assert "codex review stalled after 0.05s" in result.stderr
-    assert "claude review timed out after 1s" in result.stderr
+    assert "code review failed for all tried providers" in result.stderr
+    assert "claude (timeout), codex (stall)" in result.stderr
 
 
 def test_review_with_gemini_emits_plain_text_without_json_envelope(mocker):
