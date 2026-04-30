@@ -39,7 +39,7 @@ Use `conductor ask` when the caller knows the semantic kind but does not want to
 
 Usually, exactly one of `--auto` or `--with` is required for `call`, `exec`, and `review`. `--auto` runs the router using `--tags`, `--prefer`, and `--exclude` to pick a configured provider; `--with` bypasses the router for direct provider use. `--offline` is the exception: it may be used without `--auto` or `--with`, sets the sticky offline flag, and rewrites the call to `--with ollama`. Passing `--offline --with <non-ollama>` is an error. `--no-offline` clears the sticky flag, then normal `--auto` / `--with` rules apply.
 
-Use `conductor review` for read-only code review. It only routes to providers with native review entrypoints: Codex `codex review`, Claude Code `/review`, and Gemini CLI `/code-review` when the Code Review extension is installed. Use `conductor exec` for engineering or auto-fix tasks that may edit files.
+Use `conductor review` for code review. It only routes to providers with native review entrypoints: Codex `codex review`, Claude Code `/review`, and Gemini CLI `/code-review` when the Code Review extension is installed. Use `conductor exec` for engineering or auto-fix tasks that may edit files.
 
 ## Semantic matrix
 
@@ -52,7 +52,7 @@ Use `conductor review` for read-only code review. It only routes to providers wi
 | `research` | `high`, `max` | `call` | `openrouter` auto with strong-reasoning bias → `ollama` |
 | `code` | `minimal`, `low` | `call` | `openrouter` auto with coding/cheap bias → `ollama` |
 | `code` | `medium` | `call` | `openrouter` auto with coding/thinking bias → `ollama` |
-| `code` | `high`, `max` | `exec` | `codex` → `claude` → `openrouter` → `ollama`, with `Read,Grep,Glob,Edit,Write,Bash` and `workspace-write` |
+| `code` | `high`, `max` | `exec` | `codex` -> `claude` -> `openrouter` -> `ollama`, with `Read,Grep,Glob,Edit,Write,Bash`; exec runs unsandboxed |
 | `review` | all levels | `review` | `codex` → `claude` → `gemini`, native review only |
 | `council` | `minimal`, `low` | `council` | OpenRouter fan-out: `~google/gemini-flash-latest`, `~openai/gpt-mini-latest`; synthesize with the same stack |
 | `council` | `medium` | `council` | OpenRouter fan-out: `~google/gemini-pro-latest`, `~moonshotai/kimi-latest`, `deepseek/deepseek-v4-pro`; synthesize with `~google/gemini-pro-latest` → `~openai/gpt-latest` |
@@ -206,7 +206,7 @@ Sentinel maps the JSON response into its `ChatResponse` dataclass: `text` → `r
 
 ### Sentinel — agentic code (Coder role)
 
-The Coder role should use `conductor exec`, not `conductor call`. `exec` is the agentic subcommand for multi-turn work with tool access, preflight checks, sandbox settings, stall detection, and session logs. Its consumer contract is separate from this `conductor call` contract; use `conductor exec --help` for the current flag surface until that contract is documented.
+The Coder role should use `conductor exec`, not `conductor call`. `exec` is the agentic subcommand for multi-turn work with tool access, preflight checks, startup timeout control (`--start-timeout`), stall detection, and session logs. Its consumer contract is separate from this `conductor call` contract; use `conductor exec --help` for the current flag surface until that contract is documented.
 
 ### Generic semantic delegation
 

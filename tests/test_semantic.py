@@ -48,7 +48,7 @@ def test_high_code_escalates_to_agentic_coding_stack(effort):
         "ollama",
     ]
     assert plan.tools == frozenset({"Read", "Grep", "Glob", "Edit", "Write", "Bash"})
-    assert plan.sandbox == "workspace-write"
+    assert plan.sandbox == "none"
 
 
 def test_integer_effort_maps_into_bucketed_matrix():

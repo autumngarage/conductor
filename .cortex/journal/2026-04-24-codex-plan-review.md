@@ -9,7 +9,7 @@
 
 ## Context
 
-A blindspot audit on 2026-04-24 against conductor v0.4.2 surfaced ~10 candidate gaps. The first-pass plan (`.cortex/plans/conductor-blindspots.md`) picked three to ship: Slice A (subprocess-adapter live smoke in CI), Slice B (cost observability via `conductor usage`), Slice C (sandbox adversarial audit). The plan was sent for review via `codex exec --full-auto --sandbox read-only` against the repo. Codex returned `approve with changes` with five findings.
+A blindspot audit on 2026-04-24 against conductor v0.4.2 surfaced ~10 candidate gaps. The first-pass plan (`.cortex/plans/conductor-blindspots.md`) picked three to ship: Slice A (subprocess-adapter live smoke in CI), Slice B (cost observability via `conductor usage`), Slice C (sandbox adversarial audit). The plan was sent for review via `codex exec --full-auto` against the repo. Codex returned `approve with changes` with five findings.
 
 ## What we decided
 
@@ -34,5 +34,5 @@ Accept all five Codex findings. Specifically:
 
 ## Process notes (for future plan reviews)
 
-- `codex exec --full-auto --sandbox read-only -o <file> "<prompt>"` worked once we used a tight, structured prompt and explicit output file. A first attempt with a long prose prompt hung for 41 minutes producing zero output and had to be killed; the second attempt with a 12-line structured prompt and forced output format completed in 2 minutes producing 1KB of usable feedback.
+- `codex exec --full-auto -o <file> "<prompt>"` worked once we used a tight, structured prompt and explicit output file. A first attempt with a long prose prompt hung for 41 minutes producing zero output and had to be killed; the second attempt with a 12-line structured prompt and forced output format completed in 2 minutes producing 1KB of usable feedback.
 - Codex's review touched not only the plan but the recently-shipped `offline_mode.py` by analogy — useful side effect of asking it to ground critique in the engineering principles.

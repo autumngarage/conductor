@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from click.testing import CliRunner
 
-from conductor.cli import PROFILE_PRECEDENCE_TEXT, main
+from conductor.cli import PROFILE_PRECEDENCE_TEXT, SANDBOX_DEPRECATION_WARNING, main
 from conductor.providers import CallResponse
 from conductor.router import RankedCandidate, RouteDecision
 
@@ -40,7 +40,7 @@ def _fake_decision(provider: str = "codex") -> RouteDecision:
         task_tags=("coding",),
         matched_tags=("coding",),
         tools_requested=("Read",),
-        sandbox="workspace-write",
+        sandbox="none",
         ranked=(candidate,),
         candidates_skipped=(),
         tag_default_applied={},
@@ -68,7 +68,7 @@ def test_call_profile_applies_builtin_defaults(mocker):
     assert pick_mock.call_args.kwargs["effort"] == "medium"
 
 
-def test_exec_profile_applies_builtin_sandbox(mocker):
+def test_exec_profile_uses_builtin_defaults_without_sandbox(mocker):
     pick_mock = mocker.patch(
         "conductor.cli.pick",
         return_value=("codex", _fake_decision()),
@@ -94,7 +94,8 @@ def test_exec_profile_applies_builtin_sandbox(mocker):
     )
 
     assert result.exit_code == 0, result.output
-    assert pick_mock.call_args.kwargs["sandbox"] == "workspace-write"
+    assert pick_mock.call_args.kwargs["sandbox"] == "none"
+    assert SANDBOX_DEPRECATION_WARNING not in result.stderr
 
 
 def test_user_profile_overrides_builtin(mocker, monkeypatch, tmp_path):
@@ -137,7 +138,8 @@ def test_user_profile_overrides_builtin(mocker, monkeypatch, tmp_path):
     assert pick_mock.call_args.args[0] == ["cheap"]
     assert pick_mock.call_args.kwargs["prefer"] == "balanced"
     assert pick_mock.call_args.kwargs["effort"] == "low"
-    assert pick_mock.call_args.kwargs["sandbox"] == "read-only"
+    assert pick_mock.call_args.kwargs["sandbox"] == "none"
+    assert result.stderr.count(SANDBOX_DEPRECATION_WARNING) == 1
 
 
 def test_unknown_profile_raises_usage_error():
@@ -187,7 +189,8 @@ def test_explicit_flags_override_profile_defaults(mocker):
     assert pick_mock.call_args.args[0] == ["coding", "tool-use"]
     assert pick_mock.call_args.kwargs["prefer"] == "best"
     assert pick_mock.call_args.kwargs["effort"] == "high"
-    assert pick_mock.call_args.kwargs["sandbox"] == "workspace-write"
+    assert pick_mock.call_args.kwargs["sandbox"] == "none"
+    assert result.stderr.count(SANDBOX_DEPRECATION_WARNING) == 1
 
 
 def test_profile_env_cli_precedence(mocker, monkeypatch):
@@ -228,7 +231,8 @@ def test_profile_env_cli_precedence(mocker, monkeypatch):
     assert pick_mock.call_args.args[0] == ["coding", "tool-use"]
     assert pick_mock.call_args.kwargs["prefer"] == "fastest"
     assert pick_mock.call_args.kwargs["effort"] == "high"
-    assert pick_mock.call_args.kwargs["sandbox"] == "strict"
+    assert pick_mock.call_args.kwargs["sandbox"] == "none"
+    assert result.stderr.count(SANDBOX_DEPRECATION_WARNING) == 1
 
 
 def test_profiles_list_and_show_smoke(monkeypatch, tmp_path):
@@ -253,5 +257,5 @@ def test_profiles_list_and_show_smoke(monkeypatch, tmp_path):
 
     assert show_result.exit_code == 0, show_result.output
     assert "coding" in show_result.output
-    assert "workspace-write" in show_result.output
+    assert "sandbox  = (unset)" in show_result.output
     assert PROFILE_PRECEDENCE_TEXT in show_result.output

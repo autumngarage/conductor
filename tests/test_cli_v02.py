@@ -15,13 +15,15 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import subprocess
 
 import httpx
 import pytest
 import respx
 from click.testing import CliRunner
 
-from conductor.cli import main
+from conductor.cli import SANDBOX_DEPRECATION_WARNING, main
 from conductor.providers import (
     CallResponse,
     ClaudeProvider,
@@ -88,6 +90,27 @@ def _fake_response(provider: str = "claude", model: str = "sonnet") -> CallRespo
         cost_usd=0.01,
         raw={},
     )
+
+
+def _make_diff_repo(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+    }
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, env=env, check=True)
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, env=env, check=True)
+    (repo / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, env=env, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=repo, env=env, check=True)
+    (repo / "README.md").write_text("base\nfallback diff marker\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, env=env, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "feature"], cwd=repo, env=env, check=True)
+    return repo
 
 
 class _FakeScheduledPipe:
@@ -298,7 +321,7 @@ def test_call_verbose_route_prints_full_ranking(mocker):
     assert "ollama" in result.stderr
 
 
-def test_call_auto_can_route_to_openrouter_and_shortlist_cheap_models(
+def test_call_auto_can_route_to_openrouter_without_catalog_restrictions(
     mocker, monkeypatch
 ):
     import conductor.providers.openrouter_catalog as openrouter_catalog
@@ -357,7 +380,7 @@ def test_call_auto_can_route_to_openrouter_and_shortlist_cheap_models(
     assert result.exit_code == 0, result.stderr
     assert "→ openrouter" in result.stderr
     assert captured["payload"]["model"] == "openrouter/auto"
-    assert captured["payload"]["plugins"][0]["allowed_models"][0] == "cheap/newest"
+    assert "plugins" not in captured["payload"]
 
 
 # ---------------------------------------------------------------------------
@@ -427,7 +450,7 @@ def test_ask_code_high_routes_to_codex_exec_with_default_tools(mocker):
     assert exec_mock.call_args.kwargs["tools"] == frozenset(
         {"Read", "Grep", "Glob", "Edit", "Write", "Bash"}
     )
-    assert exec_mock.call_args.kwargs["sandbox"] == "workspace-write"
+    assert exec_mock.call_args.kwargs["sandbox"] == "none"
 
 
 def test_ask_code_high_falls_back_to_openrouter_exec_before_ollama(mocker):
@@ -466,6 +489,46 @@ def test_ask_code_high_falls_back_to_openrouter_exec_before_ollama(mocker):
         "openrouter",
         "ollama",
     ]
+
+
+def test_ask_code_medium_falls_through_from_openrouter_404_to_ollama(mocker):
+    from conductor.providers.interface import ProviderHTTPError
+
+    _stub_all_configured(mocker, {"openrouter", "ollama"})
+    mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        side_effect=ProviderHTTPError(
+            "OpenRouter provider failed locally after upstream HTTP 404. "
+            "request restrictions/models tried: ['openrouter/auto', 'qwen/qwen3.6-flash']"
+        ),
+    )
+    ollama_call = mocker.patch.object(
+        OllamaProvider,
+        "call",
+        return_value=_fake_response("ollama", "llama3.2"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "code",
+            "--effort",
+            "medium",
+            "--allow-short-brief",
+            "--brief",
+            "Explain the small code change.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert ollama_call.called
+    assert "openrouter failed (provider-error)" in result.stderr
+    assert "falling through to ollama" in result.stderr
+    assert "falling back" in result.stderr
+    assert "→ ollama" in result.stderr
 
 
 def test_ask_review_uses_native_review_route(mocker):
@@ -644,6 +707,52 @@ def test_review_auto_exhausted_fallback_names_stalled_codex_and_claude(mocker):
     assert "claude (timeout), codex (stall)" in result.stderr
 
 
+def test_review_auto_generic_fallback_prompt_includes_diff(mocker, tmp_path):
+    from conductor.providers.interface import ProviderStalledError
+
+    repo = _make_diff_repo(tmp_path)
+    _stub_all_configured(mocker, {"codex", "claude", "openrouter"})
+    mocker.patch.object(CodexProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(ClaudeProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(
+        ClaudeProvider,
+        "review",
+        side_effect=ProviderStalledError("claude review stalled"),
+    )
+    mocker.patch.object(
+        CodexProvider,
+        "review",
+        side_effect=ProviderStalledError("codex review stalled"),
+    )
+    openrouter_call = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response("openrouter", "test-model"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--max-fallbacks",
+            "3",
+            "--cwd",
+            str(repo),
+            "--base",
+            "HEAD~1",
+            "--brief",
+            "Review this merge using the project reviewer guide.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    prompt = openrouter_call.call_args.args[0]
+    assert "Patch context for generic review fallback" in prompt
+    assert "diff --git a/README.md b/README.md" in prompt
+    assert "+fallback diff marker" in prompt
+
+
 def test_review_with_gemini_emits_plain_text_without_json_envelope(mocker):
     _stub_all_configured(mocker, {"gemini"})
     mocker.patch.object(GeminiProvider, "review_configured", return_value=(True, None))
@@ -703,6 +812,7 @@ def test_exec_auto_routes_to_tool_capable_provider(mocker):
 
     assert result.exit_code == 0
     assert exec_mock.called
+    assert SANDBOX_DEPRECATION_WARNING in result.stderr
     # kimi would be skipped by the tools filter (supported_tools=frozenset()).
     assert "→ claude" in result.stderr
 
@@ -720,14 +830,34 @@ def test_exec_unknown_tool_errors_with_hint():
     assert "NotARealTool" in result.output
 
 
-def test_exec_unknown_sandbox_errors_with_hint():
+@pytest.mark.parametrize("sandbox", ["workspace-write", "read-only", "strict", "none", "surprise"])
+def test_exec_sandbox_values_warn_once_and_are_ignored(mocker, sandbox):
+    _stub_all_configured(mocker, {"codex"})
+    exec_mock = mocker.patch.object(
+        CodexProvider, "exec", return_value=_fake_response("codex")
+    )
+
     result = CliRunner().invoke(
         main,
-        ["exec", "--auto", "--sandbox", "reed-only", "--task", "hi"],
+        ["exec", "--auto", "--sandbox", sandbox, "--no-preflight", "--task", "hi"],
     )
-    assert result.exit_code == 2
-    assert "--sandbox='reed-only'" in result.output
-    assert "read-only" in result.output
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr.count(SANDBOX_DEPRECATION_WARNING) == 1
+    assert exec_mock.call_args.kwargs["sandbox"] == "none"
+
+
+def test_exec_without_sandbox_does_not_warn(mocker):
+    _stub_all_configured(mocker, {"codex"})
+    mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--auto", "--no-preflight", "--task", "hi"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert SANDBOX_DEPRECATION_WARNING not in result.stderr
 
 
 def test_exec_task_file_dash_reads_stdin(mocker):
@@ -922,6 +1052,44 @@ def test_exec_cli_max_stall_seconds_zero_disables_watchdog(mocker):
     assert exec_mock.call_args.kwargs["max_stall_sec"] is None
 
 
+def test_exec_cli_start_timeout_flag_propagates_to_claude(mocker):
+    _stub_all_configured(mocker, {"claude"})
+    exec_mock = mocker.patch.object(
+        ClaudeProvider, "exec", return_value=_fake_response("claude")
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "claude",
+            "--start-timeout",
+            "240",
+            "--task",
+            "do it",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert exec_mock.call_args.kwargs["start_timeout_sec"] == 240
+
+
+def test_exec_cli_start_timeout_zero_disables_watchdog(mocker):
+    _stub_all_configured(mocker, {"claude"})
+    exec_mock = mocker.patch.object(
+        ClaudeProvider, "exec", return_value=_fake_response("claude")
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--with", "claude", "--start-timeout", "0", "--task", "do it"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert exec_mock.call_args.kwargs["start_timeout_sec"] is None
+
+
 def test_exec_cli_preflight_blocks_exec_and_surfaces_fix_hint(mocker):
     _stub_all_configured(mocker, {"codex"})
     mocker.patch.object(
@@ -967,7 +1135,7 @@ def test_exec_auto_preflight_failure_does_not_attribute_error_on_str_provider(mo
         task_tags=("coding",),
         matched_tags=("coding",),
         tools_requested=("Read",),
-        sandbox="workspace-write",
+        sandbox="none",
         ranked=(),
         candidates_skipped=(),
         tag_default_applied={},

@@ -90,7 +90,6 @@ class CodexProvider:
     # Capability declarations (see interface.py)
     quality_tier = "frontier"
     supported_tools = frozenset({"Read", "Grep", "Glob", "Edit", "Write", "Bash"})
-    supported_sandboxes = frozenset({"read-only", "workspace-write", "none"})
     supports_effort = True
     effort_to_thinking = {
         "minimal": 0,
@@ -187,7 +186,7 @@ class CodexProvider:
                 str(output_path),
                 "--ephemeral",
                 "--sandbox",
-                "read-only",
+                "danger-full-access",
                 "-c",
                 "model_reasoning_effort=minimal",
             ]
@@ -572,7 +571,7 @@ class CodexProvider:
             task,
             model=model,
             effort=effort,
-            sandbox="read-only",
+            sandbox="danger-full-access",
             resume_session_id=resume_session_id,
         )
 
@@ -591,16 +590,11 @@ class CodexProvider:
         resume_session_id: str | None = None,
         session_log: SessionLog | None = None,
     ) -> CallResponse:
-        codex_sandbox = {
-            "read-only": "read-only",
-            "workspace-write": "workspace-write",
-            "none": "danger-full-access",
-        }.get(sandbox, "read-only")
         return self._run(
             task,
             model=model,
             effort=effort,
-            sandbox=codex_sandbox,
+            sandbox="danger-full-access",
             cwd=cwd,
             timeout_sec_override=timeout_sec,
             max_stall_sec=max_stall_sec,
@@ -785,6 +779,7 @@ class CodexProvider:
             stderr=subprocess.PIPE,
             text=True,
             cwd=cwd,
+            env=os.environ.copy(),
         )
         # Pipe the prompt via stdin and close — codex exec reads until EOF.
         # If write blocks (huge prompt + slow consumer), we'd hang here, but
@@ -811,6 +806,8 @@ class CodexProvider:
                     if chunk == "":
                         break
                     stream_q.put(("stdout", chunk))
+            except Exception as e:
+                stream_q.put(("reader_error", f"stdout reader failed: {e!r}"))
             finally:
                 stream_q.put(("stdout", None))
 
@@ -823,6 +820,8 @@ class CodexProvider:
                     if chunk == "":
                         break
                     stream_q.put(("stderr", chunk))
+            except Exception as e:
+                stream_q.put(("reader_error", f"stderr reader failed: {e!r}"))
             finally:
                 stream_q.put(("stderr", None))
 
@@ -831,6 +830,22 @@ class CodexProvider:
         stdout_thread.start()
         stderr_thread.start()
 
+        done_event = threading.Event()
+        timeout_fired = threading.Event()
+
+        def kill_on_wall_timeout() -> None:
+            if timeout is None:
+                return
+            if done_event.wait(timeout):
+                return
+            timeout_fired.set()
+            self._terminate_process(process)
+
+        timeout_thread: threading.Thread | None = None
+        if timeout is not None:
+            timeout_thread = threading.Thread(target=kill_on_wall_timeout, daemon=True)
+            timeout_thread.start()
+
         stdout_done = False
         stderr_done = False
         last_output = start
@@ -838,124 +853,187 @@ class CodexProvider:
         heartbeat_log_offset = 0
         session_id_emitted = False
         stdout_event_buffer = ""
-        while True:
-            now = time.monotonic()
-            if timeout is not None and now - start > timeout:
-                self._terminate_process(process)
-                self._join_reader_threads(stdout_thread, stderr_thread)
-                self._drain_stream_queue(
-                    stream_q, stdout_parts, stderr_parts, auth_tracker
-                )
-                stdout = "".join(stdout_parts)
-                stderr = "".join(stderr_parts)
-                elapsed = time.monotonic() - start
-                raise ProviderError(
-                    self._failure_message(
-                        f"codex CLI timed out after {elapsed:.0f}s",
-                        kind="timeout",
-                        elapsed_sec=elapsed,
-                        command=args,
-                        cwd=cwd,
-                        captured_stdout=stdout,
-                        captured_stderr=stderr,
-                        prompt=task,
+        try:
+            while True:
+                now = time.monotonic()
+                if timeout_fired.is_set() or (
+                    timeout is not None and now - start > timeout
+                ):
+                    self._terminate_process(process)
+                    self._join_reader_threads(stdout_thread, stderr_thread)
+                    self._drain_stream_queue(
+                        stream_q, stdout_parts, stderr_parts, auth_tracker
                     )
-                )
-
-            if max_stall_sec is not None and now - last_output > max_stall_sec:
-                self._terminate_process(process)
-                self._join_reader_threads(stdout_thread, stderr_thread)
-                self._drain_stream_queue(
-                    stream_q, stdout_parts, stderr_parts, auth_tracker
-                )
-                stdout = "".join(stdout_parts)
-                stderr = "".join(stderr_parts)
-                elapsed = time.monotonic() - last_output
-                raise ProviderStalledError(
-                    self._failure_message(
-                        f"codex CLI stalled after {elapsed:.0f}s with no output",
-                        kind="stall",
-                        elapsed_sec=elapsed,
-                        command=args,
-                        cwd=cwd,
-                        captured_stdout=stdout,
-                        captured_stderr=stderr,
-                        prompt=task,
-                    )
-                )
-
-            if (
-                liveness_interval_sec > 0
-                and now - last_output >= liveness_interval_sec
-                and now - last_liveness >= liveness_interval_sec
-            ):
-                if session_log is not None:
-                    session_log.emit(
-                        "provider_silent",
-                        {
-                            "provider": self.name,
-                            "silent_sec": round(now - last_output, 1),
-                        },
-                    )
-                heartbeat_template: str | None = None
-                if session_log is not None:
-                    heartbeat_template, heartbeat_log_offset = (
-                        self._read_session_log_progress(
-                            session_log=session_log,
-                            offset=heartbeat_log_offset,
+                    stdout = "".join(stdout_parts)
+                    stderr = "".join(stderr_parts)
+                    elapsed = time.monotonic() - start
+                    raise ProviderError(
+                        self._failure_message(
+                            f"codex CLI timed out after {elapsed:.0f}s",
+                            kind="timeout",
+                            elapsed_sec=elapsed,
+                            command=args,
+                            cwd=cwd,
+                            captured_stdout=stdout,
+                            captured_stderr=stderr,
+                            prompt=task,
                         )
                     )
-                if heartbeat_template is None:
-                    heartbeat_template = (
-                        "[conductor] no output from codex for {silent_sec:.0f}s..."
+
+                if max_stall_sec is not None and now - last_output > max_stall_sec:
+                    self._terminate_process(process)
+                    self._join_reader_threads(stdout_thread, stderr_thread)
+                    self._drain_stream_queue(
+                        stream_q, stdout_parts, stderr_parts, auth_tracker
                     )
-                sys.stderr.write(
-                    heartbeat_template.format(silent_sec=now - last_output) + "\n"
-                )
-                sys.stderr.flush()
-                last_liveness = now
+                    stdout = "".join(stdout_parts)
+                    stderr = "".join(stderr_parts)
+                    elapsed = time.monotonic() - last_output
+                    raise ProviderStalledError(
+                        self._failure_message(
+                            f"codex CLI stalled after {elapsed:.0f}s with no output",
+                            kind="stall",
+                            elapsed_sec=elapsed,
+                            command=args,
+                            cwd=cwd,
+                            captured_stdout=stdout,
+                            captured_stderr=stderr,
+                            prompt=task,
+                        )
+                    )
 
-            try:
-                stream_name, item = stream_q.get(timeout=0.05)
-            except queue.Empty:
-                if stdout_done and stderr_done and process.poll() is not None:
-                    break
-                continue
+                if (
+                    liveness_interval_sec > 0
+                    and now - last_output >= liveness_interval_sec
+                    and now - last_liveness >= liveness_interval_sec
+                ):
+                    if session_log is not None:
+                        session_log.emit(
+                            "provider_silent",
+                            {
+                                "provider": self.name,
+                                "silent_sec": round(now - last_output, 1),
+                            },
+                        )
+                    heartbeat_template: str | None = None
+                    if session_log is not None:
+                        heartbeat_template, heartbeat_log_offset = (
+                            self._read_session_log_progress(
+                                session_log=session_log,
+                                offset=heartbeat_log_offset,
+                            )
+                        )
+                    if heartbeat_template is None:
+                        heartbeat_template = (
+                            "[conductor] no output from codex for {silent_sec:.0f}s..."
+                        )
+                    self._emit_watchdog_stderr(
+                        heartbeat_template.format(silent_sec=now - last_output) + "\n"
+                    )
+                    last_liveness = now
 
-            if item is None:
-                if stream_name == "stdout":
-                    stdout_done = True
-                else:
-                    stderr_done = True
-                if stdout_done and stderr_done and process.poll() is not None:
-                    break
-                continue
+                try:
+                    stream_name, item = stream_q.get(timeout=0.05)
+                except queue.Empty:
+                    if stdout_done and stderr_done and process.poll() is not None:
+                        break
+                    continue
 
-            if stream_name == "stderr":
-                stderr_parts.append(item)
+                if stream_name == "reader_error":
+                    self._terminate_process(process)
+                    self._join_reader_threads(stdout_thread, stderr_thread)
+                    self._drain_stream_queue(
+                        stream_q, stdout_parts, stderr_parts, auth_tracker
+                    )
+                    stdout = "".join(stdout_parts)
+                    stderr = "".join(stderr_parts)
+                    elapsed = time.monotonic() - last_output
+                    detail = item or "stream reader failed"
+                    self._emit_watchdog_stderr(f"[conductor] {detail}\n")
+                    if session_log is not None:
+                        session_log.emit(
+                            "error",
+                            {
+                                "provider": self.name,
+                                "reason": "stream_reader_failed",
+                                "detail": detail,
+                                "silent_sec": round(elapsed, 1),
+                            },
+                        )
+                    raise ProviderStalledError(
+                        self._failure_message(
+                            f"codex CLI stream reader failed after {elapsed:.0f}s",
+                            kind="stall",
+                            elapsed_sec=elapsed,
+                            command=args,
+                            cwd=cwd,
+                            captured_stdout=stdout,
+                            captured_stderr=stderr,
+                            prompt=task,
+                        )
+                    )
+
+                if item is None:
+                    if stream_name == "stdout":
+                        stdout_done = True
+                    else:
+                        stderr_done = True
+                    if stdout_done and stderr_done and process.poll() is not None:
+                        break
+                    continue
+
+                if stream_name == "stderr":
+                    stderr_parts.append(item)
+                    last_output = time.monotonic()
+                    last_liveness = last_output
+                    auth_tracker.observe_text(item, source="stderr")
+                    continue
+
+                stdout_parts.append(item)
                 last_output = time.monotonic()
                 last_liveness = last_output
-                auth_tracker.observe_text(item, source="stderr")
-                continue
+                stdout_event_buffer += item
+                while "\n" in stdout_event_buffer:
+                    line, stdout_event_buffer = stdout_event_buffer.split("\n", 1)
+                    line = f"{line}\n"
+                    auth_tracker.observe_json_line(line, source="stdout")
+                    self._emit_stream_event(line, session_log=session_log)
 
-            stdout_parts.append(item)
-            last_output = time.monotonic()
-            last_liveness = last_output
-            stdout_event_buffer += item
-            while "\n" in stdout_event_buffer:
-                line, stdout_event_buffer = stdout_event_buffer.split("\n", 1)
-                line = f"{line}\n"
-                auth_tracker.observe_json_line(line, source="stdout")
-                self._emit_stream_event(line, session_log=session_log)
+                    if not session_id_emitted:
+                        sid = self._extract_session_id_fast(line)
+                        if sid is not None:
+                            if session_log is not None:
+                                session_log.set_session_id(sid)
+                            self._emit_watchdog_stderr(
+                                f"[conductor] codex session_id={sid}\n"
+                            )
+                            session_id_emitted = True
+        finally:
+            done_event.set()
+            if timeout_thread is not None:
+                timeout_thread.join(timeout=0.1)
 
-                if not session_id_emitted:
-                    sid = self._extract_session_id_fast(line)
-                    if sid is not None:
-                        if session_log is not None:
-                            session_log.set_session_id(sid)
-                        sys.stderr.write(f"[conductor] codex session_id={sid}\n")
-                        sys.stderr.flush()
-                        session_id_emitted = True
+        if timeout_fired.is_set():
+            self._terminate_process(process)
+            self._join_reader_threads(stdout_thread, stderr_thread)
+            self._drain_stream_queue(
+                stream_q, stdout_parts, stderr_parts, auth_tracker
+            )
+            stdout = "".join(stdout_parts)
+            stderr = "".join(stderr_parts)
+            elapsed = time.monotonic() - start
+            raise ProviderError(
+                self._failure_message(
+                    f"codex CLI timed out after {elapsed:.0f}s",
+                    kind="timeout",
+                    elapsed_sec=elapsed,
+                    command=args,
+                    cwd=cwd,
+                    captured_stdout=stdout,
+                    captured_stderr=stderr,
+                    prompt=task,
+                )
+            )
 
         returncode = process.wait()
         self._join_reader_threads(stdout_thread, stderr_thread)
@@ -1016,6 +1094,17 @@ class CodexProvider:
     ) -> None:
         stdout_thread.join(timeout=1)
         stderr_thread.join(timeout=1)
+
+    def _emit_watchdog_stderr(self, text: str) -> None:
+        """Best-effort operator output that cannot stop watchdog checks."""
+
+        def write() -> None:
+            sys.stderr.write(text)
+            sys.stderr.flush()
+
+        writer = threading.Thread(target=write, daemon=True)
+        writer.start()
+        writer.join(timeout=0.2)
 
     def _drain_stream_queue(
         self,

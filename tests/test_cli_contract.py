@@ -74,6 +74,7 @@ DOCUMENTED_EXEC_FLAGS: frozenset[str] = frozenset(
         "--cwd",
         "--timeout",
         "--max-stall-seconds",
+        "--start-timeout",
         "--log-file",
         "--preflight",
         "--no-preflight",

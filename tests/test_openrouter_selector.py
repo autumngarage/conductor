@@ -98,8 +98,8 @@ def test_prefer_cheapest_returns_direct_model(mocker, fixture_catalog):
     assert payload == {"model": "cheap/thinker", "reasoning": None}
 
 
-def test_prefer_best_returns_auto_with_shortlist(mocker, fixture_catalog):
-    mocker.patch(
+def test_prefer_best_returns_unrestricted_auto_without_catalog(mocker, fixture_catalog):
+    load_catalog = mocker.patch(
         "conductor.providers.openrouter_catalog.load_catalog",
         return_value=fixture_catalog,
     )
@@ -108,12 +108,11 @@ def test_prefer_best_returns_auto_with_shortlist(mocker, fixture_catalog):
 
     assert payload["model"] == OPENROUTER_DEFAULT_MODEL
     assert payload["reasoning"] == {"effort": "medium"}
-    shortlist = payload["plugins"][0]["allowed_models"]
-    assert len(shortlist) == 6
-    assert shortlist[0] == "recent/general"
+    assert "plugins" not in payload
+    load_catalog.assert_not_called()
 
 
-def test_selector_drops_tilde_aliases_from_auto_shortlist(mocker, fixture_catalog):
+def test_selector_drops_tilde_aliases_from_direct_selection(mocker, fixture_catalog):
     alias = openrouter_catalog.ModelEntry(
         id="~anthropic/claude-haiku-latest",
         name="Anthropic Claude Haiku Latest",
@@ -131,11 +130,10 @@ def test_selector_drops_tilde_aliases_from_auto_shortlist(mocker, fixture_catalo
         return_value=[alias, *fixture_catalog],
     )
 
-    payload = select_model_for_task([], "best", "medium")
+    payload = select_model_for_task([], "cheapest", "medium")
 
-    shortlist = payload["plugins"][0]["allowed_models"]
-    assert "~anthropic/claude-haiku-latest" not in shortlist
-    assert all(not model.startswith("~") for model in shortlist)
+    assert payload["model"] != "~anthropic/claude-haiku-latest"
+    assert not str(payload["model"]).startswith("~")
 
 
 @pytest.mark.parametrize(
@@ -153,10 +151,9 @@ def test_capability_filters_reduce_candidate_set(mocker, fixture_catalog, tags, 
         return_value=fixture_catalog,
     )
 
-    payload = select_model_for_task(tags, "best", "medium")
-    shortlist = set(payload["plugins"][0]["allowed_models"])
+    payload = select_model_for_task(tags, "cheapest", "medium")
 
-    assert shortlist == expected
+    assert payload["model"] in expected
 
 
 def test_exclude_removes_named_models(mocker, fixture_catalog):

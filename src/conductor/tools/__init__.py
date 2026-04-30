@@ -2,21 +2,18 @@
 
 Shell-out providers (claude/codex/gemini) own their own tool-use: we
 hand them ``--tools Read,Grep,...`` and they execute the tools inside
-their own process, inside their own sandbox. For HTTP providers
-(openrouter, ollama, and compatible presets when enabled), Conductor has to
-drive the loop itself. That means
-registering tools with the model, executing whichever the model
-picks, feeding results back, and repeating until the model answers.
+their own process. For HTTP providers (openrouter, ollama, and compatible
+presets when enabled), Conductor has to drive the loop itself. That means
+registering tools with the model, executing whichever the model picks,
+feeding results back, and repeating until the model answers.
 
 This module owns the portable Tool set Conductor exposes. Each tool:
 
 - has a stable name (``Read``, ``Grep``, ``Glob``, ``Edit``, ``Write``,
   ``Bash``) — the same names shell-out providers accept via their
-  respective ``--tools`` / ``--allowedTools`` / sandbox flags;
+  respective ``--tools`` / ``--allowedTools`` flags;
 - declares a JSON Schema for its parameters (used as the ``tools``
-  parameter in OpenAI-compatible chat completions);
-- refuses to run when the sandbox level forbids its capability
-  (``Edit`` raises under ``read-only``, ``Bash`` raises under ``none``).
+  parameter in OpenAI-compatible chat completions).
 
 Path validation is strict and enforced by every filesystem tool: no
 absolute paths outside ``cwd``, no relative paths that ``..`` their

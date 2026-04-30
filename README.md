@@ -2,7 +2,7 @@
 
 Pick an LLM, give it a job. Manual or auto routing across providers.
 
-**Status:** shipping. Current tap release is v0.7.4 — built-in providers for `kimi`, `openrouter`, `deepseek-chat`, `deepseek-reasoner`, `claude`, `codex`, `gemini`, and `ollama`; semantic `ask`; manual + auto routing; single-turn `call`; read-only native `review`; multi-turn `exec` with tools and sandboxes; and agent-wiring for Claude Code, Codex, Gemini, Cursor, and repo instruction files.
+**Status:** shipping. Current tap release is v0.7.4 — built-in providers for `kimi`, `openrouter`, `deepseek-chat`, `deepseek-reasoner`, `claude`, `codex`, `gemini`, and `ollama`; semantic `ask`; manual + auto routing; single-turn `call`; native `review`; multi-turn unsandboxed `exec` with tools; and agent-wiring for Claude Code, Codex, Gemini, Cursor, and repo instruction files.
 
 DeepSeek note: `deepseek-chat` and `deepseek-reasoner` now use OpenRouter credentials. Set `OPENROUTER_API_KEY`; `DEEPSEEK_API_KEY` is deprecated. Conductor resolves the newest matching DeepSeek slug from the OpenRouter catalog and falls back to the pinned default if the catalog is unavailable.
 Kimi note: `kimi` now routes through OpenRouter. Set `OPENROUTER_API_KEY`; legacy `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` are no longer used. Conductor resolves the newest matching Kimi slug from the OpenRouter catalog and falls back to the pinned default if the catalog is unavailable.
@@ -95,7 +95,7 @@ Shipped:
 - `conductor ask --kind <research|code|review|council> --effort <level>` — deterministic semantic routing. Research and low/medium code favor OpenRouter auto-routing; high-effort code escalates through Codex, Claude, OpenRouter tool-use exec, then Ollama; review routes to native review; council fans out through OpenRouter and synthesizes the results.
 - `conductor call --with <id> --brief "..."` — manual mode for any provider.
 - `conductor call --auto [--tags a,b,c] --brief "..."` — rule-based router picks the best configured provider for the task's tags.
-- `conductor review --auto --base <ref> --brief-file <path>` — read-only code review routed only to native review providers (`codex review`, Claude `/review`, Gemini `/code-review` extension).
+- `conductor review --auto --base <ref> --brief-file <path>` — code review routed only to native review providers (`codex review`, Claude `/review`, Gemini `/code-review` extension).
 - `conductor list [--json]` — shows every provider with ready/not-ready status, default model, and capability tags.
 - `conductor smoke <id>` / `conductor smoke --all [--json]` — proves a provider's auth + endpoint work (cheapest round-trip that exercises the full path).
 - `conductor doctor [--json]` — diagnostic report: which providers are configured, which env vars are set, what's in the macOS Keychain.

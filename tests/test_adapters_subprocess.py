@@ -12,11 +12,18 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
-from conductor.providers.claude import ClaudeProvider
+from conductor.cli import main
+from conductor.providers.claude import (
+    CLAUDE_CALL_FIRST_OUTPUT_TIMEOUT_SEC,
+    CLAUDE_EXEC_FIRST_OUTPUT_TIMEOUT_SEC,
+    ClaudeProvider,
+)
 from conductor.providers.codex import CodexProvider
 from conductor.providers.gemini import GEMINI_AUTH_ENV_VARS, GeminiProvider
 from conductor.providers.interface import (
@@ -25,6 +32,7 @@ from conductor.providers.interface import (
     ProviderError,
     ProviderHTTPError,
     ProviderStalledError,
+    ProviderStartupStalledError,
 )
 from conductor.session_log import SessionLog
 
@@ -526,7 +534,149 @@ def test_claude_exec_first_output_watchdog_is_separate_from_mid_task_stall(
     assert error_event["data"]["last_event"] == "provider_started"
 
 
-def test_claude_exec_first_output_watchdog_respects_stall_watchdog_disable(
+def test_claude_startup_timeout_defaults_split_call_and_exec():
+    provider = ClaudeProvider()
+
+    assert CLAUDE_CALL_FIRST_OUTPUT_TIMEOUT_SEC == 60.0
+    assert CLAUDE_EXEC_FIRST_OUTPUT_TIMEOUT_SEC == 300.0
+    assert provider._call_first_output_timeout_sec == 60.0
+    assert provider._exec_first_output_timeout_sec == 300.0
+    assert provider._effective_first_output_timeout(None) == 300.0
+
+
+def test_claude_exec_start_timeout_allows_slow_first_byte(
+    mocker,
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    fake = _FakePopen(stdout_schedule=[(0.06, CLAUDE_JSON)])
+    mocker.patch(
+        "conductor.providers.claude.subprocess.Popen",
+        side_effect=lambda args, **kwargs: fake,
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "claude",
+            "--no-preflight",
+            "--start-timeout",
+            "0.24",
+            "--task",
+            "hi",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "hello from claude" in result.output
+    assert fake.terminated is False
+
+
+def test_claude_exec_start_timeout_fails_nonzero_with_error_shape(
+    mocker,
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    fake = _FakePopen(stdout_schedule=[(0.06, CLAUDE_JSON)])
+    mocker.patch(
+        "conductor.providers.claude.subprocess.Popen",
+        side_effect=lambda args, **kwargs: fake,
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "claude",
+            "--no-preflight",
+            "--start-timeout",
+            "0.03",
+            "--task",
+            "hi",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert fake.terminated is True
+    payload = json.loads(result.stdout)
+    assert payload == {
+        "error": "provider_startup_stalled",
+        "provider": "claude",
+        "timeout_sec": 0.03,
+        "phase": "startup",
+        "message": (
+            "claude CLI startup stalled: produced no output within "
+            "0.03s after start"
+        ),
+    }
+
+
+def test_claude_exec_zero_bytes_ever_fails_as_startup_stall(mocker):
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    fake = _FakePopen(stdout_schedule=[], hang_after_stdout=True)
+    mocker.patch(
+        "conductor.providers.claude.subprocess.Popen",
+        side_effect=lambda args, **kwargs: fake,
+    )
+
+    with pytest.raises(ProviderStartupStalledError) as exc:
+        ClaudeProvider().exec(
+            "hi",
+            timeout_sec=1,
+            start_timeout_sec=0.03,
+            max_stall_sec=30,
+        )
+
+    assert fake.terminated is True
+    assert exc.value.error_response["error"] == "provider_startup_stalled"
+    assert exc.value.error_response["provider"] == "claude"
+    assert exc.value.error_response["timeout_sec"] == 0.03
+    assert exc.value.error_response["phase"] == "startup"
+
+
+def test_claude_exec_start_timeout_zero_disables_startup_watchdog(
+    mocker,
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    fake = _FakePopen(stdout_schedule=[(0.06, CLAUDE_JSON)])
+    mocker.patch(
+        "conductor.providers.claude.subprocess.Popen",
+        side_effect=lambda args, **kwargs: fake,
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "claude",
+            "--no-preflight",
+            "--start-timeout",
+            "0",
+            "--timeout",
+            "1",
+            "--task",
+            "hi",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "hello from claude" in result.output
+    assert fake.terminated is False
+
+
+def test_claude_exec_startup_watchdog_runs_when_mid_task_stall_disabled(
     mocker,
 ):
     mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
@@ -536,15 +686,14 @@ def test_claude_exec_first_output_watchdog_respects_stall_watchdog_disable(
         side_effect=lambda args, **kwargs: fake,
     )
 
-    with pytest.raises(ProviderError) as exc:
+    with pytest.raises(ProviderStartupStalledError) as exc:
         ClaudeProvider(first_output_timeout_sec=0.01).exec(
             "hi",
-            timeout_sec=0.05,
+            timeout_sec=1,
             max_stall_sec=None,
         )
 
-    assert not isinstance(exc.value, ProviderStalledError)
-    assert "timed out" in str(exc.value)
+    assert exc.value.error_response["error"] == "provider_startup_stalled"
     assert fake.terminated is True
 
 
@@ -608,7 +757,7 @@ def test_claude_exec_sets_pwd_to_configured_cwd_for_project_settings(
         "settings.local.json",
     ]
     assert settings_event["data"]["permission_keys"] == ["allow", "deny"]
-    assert settings_event["data"]["permission_mode"] == "acceptEdits"
+    assert settings_event["data"]["permission_mode"] is None
 
 
 def test_claude_exec_rejects_invalid_project_settings_before_launch(
@@ -629,38 +778,30 @@ def test_claude_exec_rejects_invalid_project_settings_before_launch(
     assert popen.call_count == 0
 
 
-def test_claude_exec_rejects_mutating_linked_worktree_cwd_before_launch(
+def test_claude_exec_allows_linked_worktree_cwd(
     mocker,
     tmp_path,
 ):
     _repo, worktree = _repo_with_linked_worktree(tmp_path)
     mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
-    runner = mocker.patch("conductor.providers.claude.run_subprocess_with_live_stderr")
-    session_log = SessionLog(path=tmp_path / "claude-linked-worktree.ndjson")
+    fake = _FakePopen(stdout_schedule=[(0, CLAUDE_JSON)])
+    captured: dict[str, object] = {}
 
-    with pytest.raises(ProviderConfigError) as exc:
-        ClaudeProvider().exec(
-            "hi",
-            sandbox="workspace-write",
-            cwd=str(worktree),
-            session_log=session_log,
-        )
+    def factory(args, **kwargs):
+        fake.args = args
+        captured.update(kwargs)
+        return fake
 
-    assert "linked git worktree" in str(exc.value)
-    assert "route mutating worktree-isolated tasks to `--with codex`" in str(exc.value)
-    assert runner.call_count == 0
-    events = [
-        json.loads(line)
-        for line in session_log.log_path.read_text(encoding="utf-8").splitlines()
-    ]
-    diagnostic = next(
-        event
-        for event in events
-        if event["event"] == "provider_diagnostic"
-        and event["data"]["check"] == "claude_linked_worktree_cwd"
+    mocker.patch("conductor.providers.claude.subprocess.Popen", side_effect=factory)
+
+    response = ClaudeProvider(first_output_timeout_sec=1).exec(
+        "hi",
+        sandbox="workspace-write",
+        cwd=str(worktree),
     )
-    assert diagnostic["data"]["allowed"] is False
-    assert diagnostic["data"]["cwd"] == str(worktree.resolve())
+
+    assert response.text == "hello from claude"
+    assert captured["cwd"] == str(worktree.resolve())
 
 
 def test_claude_exec_allows_read_only_linked_worktree_cwd(
@@ -709,11 +850,13 @@ class _FakeScheduledPipe:
         hang_after_schedule: bool,
         terminated: threading.Event,
         on_eof,
+        raise_after_schedule: BaseException | None = None,
     ) -> None:
         self._schedule = schedule
         self._hang_after_schedule = hang_after_schedule
         self._terminated = terminated
         self._on_eof = on_eof
+        self._raise_after_schedule = raise_after_schedule
         self._idx = 0
 
     def readline(self) -> str:
@@ -723,6 +866,8 @@ class _FakeScheduledPipe:
             if self._terminated.wait(delay):
                 return ""
             return line
+        if self._raise_after_schedule is not None:
+            raise self._raise_after_schedule
         if self._hang_after_schedule:
             self._terminated.wait()
         if self._on_eof is not None:
@@ -743,8 +888,11 @@ class _FakePopen:
         stderr_schedule: list[tuple[float, str]] | None = None,
         hang_after_stdout: bool = False,
         returncode: int = 0,
+        stdout_reader_error: BaseException | None = None,
+        stderr_reader_error: BaseException | None = None,
     ) -> None:
         self.args: list[str] | None = None
+        self.env: dict[str, str] | None = None
         self.returncode: int | None = None
         self.terminated = False
         self.killed = False
@@ -756,12 +904,14 @@ class _FakePopen:
             hang_after_schedule=hang_after_stdout,
             terminated=self._terminated_event,
             on_eof=self._finish_success,
+            raise_after_schedule=stdout_reader_error,
         )
         self.stderr = _FakeScheduledPipe(
             stderr_schedule or [],
             hang_after_schedule=False,
             terminated=self._terminated_event,
             on_eof=None,
+            raise_after_schedule=stderr_reader_error,
         )
         # codex now reads the prompt from stdin (`codex exec -`); mock a
         # writable pipe so the provider's write+close path doesn't blow up.
@@ -796,6 +946,7 @@ class _FakePopen:
 def _patch_codex_popen(mocker, fake: _FakePopen):
     def factory(args, **kwargs):
         fake.args = args
+        fake.env = kwargs.get("env")
         return fake
 
     return mocker.patch("conductor.providers.codex.subprocess.Popen", side_effect=factory)
@@ -1093,19 +1244,8 @@ def test_codex_exec_default_timeout_is_unbounded(mocker):
     assert fake.terminated is False
 
 
-@pytest.mark.parametrize(
-    ("conductor_sandbox", "codex_sandbox"),
-    [
-        ("read-only", "read-only"),
-        ("workspace-write", "workspace-write"),
-        ("none", "danger-full-access"),
-    ],
-)
-def test_codex_exec_translates_sandbox_modes(
-    mocker,
-    conductor_sandbox,
-    codex_sandbox,
-):
+@pytest.mark.parametrize("conductor_sandbox", ["read-only", "workspace-write", "none", "strict"])
+def test_codex_exec_ignores_conductor_sandbox_modes(mocker, conductor_sandbox):
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
     fake = _FakePopen(
         stdout_schedule=[(0, line) for line in CODEX_NDJSON.splitlines(keepends=True)]
@@ -1116,7 +1256,25 @@ def test_codex_exec_translates_sandbox_modes(
 
     assert fake.args is not None
     assert "--sandbox" in fake.args
-    assert fake.args[fake.args.index("--sandbox") + 1] == codex_sandbox
+    assert fake.args[fake.args.index("--sandbox") + 1] == "danger-full-access"
+
+
+def test_codex_exec_inherits_auth_and_home_env(monkeypatch, mocker):
+    monkeypatch.setenv("GH_TOKEN", "gh-token")
+    monkeypatch.setenv("GITHUB_TOKEN", "github-token")
+    monkeypatch.setenv("HOME", "/tmp/conductor-home")
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    fake = _FakePopen(
+        stdout_schedule=[(0, line) for line in CODEX_NDJSON.splitlines(keepends=True)]
+    )
+    _patch_codex_popen(mocker, fake)
+
+    CodexProvider().exec("hi")
+
+    assert fake.env is not None
+    assert fake.env["GH_TOKEN"] == "gh-token"
+    assert fake.env["GITHUB_TOKEN"] == "github-token"
+    assert fake.env["HOME"] == "/tmp/conductor-home"
 
 
 def test_codex_exec_explicit_timeout_is_honored(mocker):
@@ -1288,6 +1446,87 @@ def test_codex_exec_stall_watchdog_ignores_wrapper_heartbeats(mocker, capsys):
     assert "codex CLI stalled" in msg
     assert "timed out" not in msg
     assert fake.terminated is True
+
+
+def test_codex_exec_stall_watchdog_kills_silent_provider_at_deadline(mocker):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    fake = _FakePopen(stdout_schedule=[], hang_after_stdout=True)
+    _patch_codex_popen(mocker, fake)
+
+    started = time.monotonic()
+    with pytest.raises(ProviderStalledError) as exc:
+        CodexProvider().exec("hi", max_stall_sec=0.05, liveness_interval_sec=0)
+    elapsed = time.monotonic() - started
+
+    assert "codex CLI stalled" in str(exc.value)
+    assert fake.terminated is True
+    assert elapsed < 0.5
+
+
+def test_codex_exec_reader_death_is_stall_failure(mocker, capsys):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    fake = _FakePopen(
+        stdout_schedule=[],
+        stdout_reader_error=RuntimeError("reader crashed"),
+    )
+    _patch_codex_popen(mocker, fake)
+
+    with pytest.raises(ProviderStalledError) as exc:
+        CodexProvider().exec("hi", max_stall_sec=5, liveness_interval_sec=0)
+
+    assert "stream reader failed" in str(exc.value)
+    assert "stdout reader failed" in capsys.readouterr().err
+    assert fake.terminated is True
+
+
+def test_codex_exec_stall_watchdog_kills_after_repeated_heartbeats(mocker, capsys):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    fake = _FakePopen(stdout_schedule=[], hang_after_stdout=True)
+    _patch_codex_popen(mocker, fake)
+
+    with pytest.raises(ProviderStalledError):
+        CodexProvider().exec("hi", max_stall_sec=0.2, liveness_interval_sec=0.03)
+
+    err = capsys.readouterr().err
+    assert err.count("[conductor] no output from codex for ") >= 3
+    assert fake.terminated is True
+
+
+def test_codex_exec_wall_timeout_survives_blocked_heartbeat_stderr(
+    mocker, monkeypatch
+):
+    class BlockingStderr:
+        def __init__(self) -> None:
+            self.write_started = threading.Event()
+
+        def write(self, _text: str) -> int:
+            self.write_started.set()
+            threading.Event().wait()
+            return 0
+
+        def flush(self) -> None:
+            return None
+
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    fake = _FakePopen(stdout_schedule=[], hang_after_stdout=True)
+    _patch_codex_popen(mocker, fake)
+    blocking_stderr = BlockingStderr()
+    monkeypatch.setattr("conductor.providers.codex.sys.stderr", blocking_stderr)
+
+    started = time.monotonic()
+    with pytest.raises(ProviderError) as exc:
+        CodexProvider().exec(
+            "hi",
+            timeout_sec=0.12,
+            max_stall_sec=None,
+            liveness_interval_sec=0.01,
+        )
+    elapsed = time.monotonic() - started
+
+    assert blocking_stderr.write_started.is_set()
+    assert "timed out" in str(exc.value)
+    assert fake.terminated is True
+    assert elapsed < 0.7
 
 
 def test_codex_exec_heartbeat_reports_tool_calls_from_session_log(
@@ -1612,7 +1851,7 @@ def test_codex_exec_writes_envelope_when_codex_emits_zero_bytes(
     # The prompt body now arrives via stdin (`codex exec -`), not argv, so
     # the envelope surfaces it as a separate `prompt` field. An operator
     # can still correlate the wedge with the request — just not by reading
-    # `command`. argv contains only the flags + sandbox + effort overrides.
+    # `command`. argv contains only the flags and effort overrides.
     assert envelope["prompt"] == "test prompt body"
     assert "-" in envelope["command"]  # stdin sentinel
     assert "test prompt body" not in envelope["command"]

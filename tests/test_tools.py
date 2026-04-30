@@ -39,7 +39,6 @@ def test_all_names_is_union():
 def test_get_tool_returns_read_tool():
     tool = get_tool("Read")
     assert tool.name == "Read"
-    assert tool.requires_sandbox() == "read-only"
     assert "path" in tool.parameters_schema["properties"]
 
 
@@ -283,48 +282,41 @@ def test_glob_tool_rejects_nondir_path(tmp_path: Path):
 
 
 # --------------------------------------------------------------------------- #
-# ToolExecutor — dispatch + sandbox
+# ToolExecutor — dispatch
 # --------------------------------------------------------------------------- #
 
 
 def test_executor_requires_existing_cwd(tmp_path: Path):
     missing = tmp_path / "nope"
     with pytest.raises(ValueError):
-        ToolExecutor(cwd=missing, sandbox="read-only")
+        ToolExecutor(cwd=missing)
 
 
 def test_executor_runs_read_tool(tmp_path: Path):
     (tmp_path / "ok.txt").write_text("yay")
-    executor = ToolExecutor(cwd=tmp_path, sandbox="read-only")
+    executor = ToolExecutor(cwd=tmp_path)
     assert executor.run("Read", {"path": "ok.txt"}) == "yay"
 
 
-def test_executor_refuses_tool_needing_higher_sandbox(tmp_path: Path):
-    executor = ToolExecutor(cwd=tmp_path, sandbox="none")
-    with pytest.raises(ToolExecutionError) as exc:
-        executor.run("Read", {"path": "whatever.txt"})
-    assert "sandbox" in str(exc.value)
-
-
 def test_executor_wraps_schema_errors(tmp_path: Path):
-    executor = ToolExecutor(cwd=tmp_path, sandbox="read-only")
+    executor = ToolExecutor(cwd=tmp_path)
     with pytest.raises(ToolExecutionError) as exc:
         executor.run("Read", {})  # missing `path`
     assert "bad parameters" in str(exc.value).lower() or "required" in str(exc.value)
 
 
 def test_executor_surfaces_unknown_tool(tmp_path: Path):
-    executor = ToolExecutor(cwd=tmp_path, sandbox="read-only")
+    executor = ToolExecutor(cwd=tmp_path)
     with pytest.raises(ToolExecutionError) as exc:
         executor.run("Mystery", {})
     assert "unknown tool" in str(exc.value).lower()
 
 
-def test_executor_workspace_write_satisfies_read_only(tmp_path: Path):
-    # read-only tools run fine under a broader sandbox.
+def test_executor_runs_write_capable_tools(tmp_path: Path):
     (tmp_path / "w.txt").write_text("hi")
-    executor = ToolExecutor(cwd=tmp_path, sandbox="workspace-write")
+    executor = ToolExecutor(cwd=tmp_path)
     assert executor.run("Read", {"path": "w.txt"}) == "hi"
+    assert "wrote" in executor.run("Write", {"path": "new.txt", "content": "ok"})
 
 
 # --------------------------------------------------------------------------- #
@@ -391,14 +383,11 @@ def test_edit_tool_rejects_same_strings(tmp_path: Path):
         )
 
 
-def test_edit_tool_requires_workspace_write(tmp_path: Path):
+def test_edit_tool_runs_through_executor(tmp_path: Path):
     (tmp_path / "a.txt").write_text("hello")
-    executor = ToolExecutor(cwd=tmp_path, sandbox="read-only")
-    with pytest.raises(ToolExecutionError) as exc:
-        executor.run(
-            "Edit", {"path": "a.txt", "old_string": "hello", "new_string": "bye"}
-        )
-    assert "sandbox" in str(exc.value)
+    executor = ToolExecutor(cwd=tmp_path)
+    executor.run("Edit", {"path": "a.txt", "old_string": "hello", "new_string": "bye"})
+    assert (tmp_path / "a.txt").read_text() == "bye"
 
 
 def test_edit_tool_rejects_escape(tmp_path: Path):
@@ -443,11 +432,10 @@ def test_write_tool_overwrites_existing(tmp_path: Path):
     assert (tmp_path / "e.txt").read_text() == "new"
 
 
-def test_write_tool_requires_workspace_write(tmp_path: Path):
-    executor = ToolExecutor(cwd=tmp_path, sandbox="read-only")
-    with pytest.raises(ToolExecutionError) as exc:
-        executor.run("Write", {"path": "x.txt", "content": "y"})
-    assert "sandbox" in str(exc.value)
+def test_write_tool_runs_through_executor(tmp_path: Path):
+    executor = ToolExecutor(cwd=tmp_path)
+    executor.run("Write", {"path": "x.txt", "content": "y"})
+    assert (tmp_path / "x.txt").read_text() == "y"
 
 
 def test_write_tool_rejects_escape(tmp_path: Path):
@@ -513,11 +501,10 @@ def test_bash_tool_rejects_bad_timeout(tmp_path: Path):
         tool.execute({"command": "true", "timeout_sec": 99999}, cwd=tmp_path)
 
 
-def test_bash_tool_requires_workspace_write(tmp_path: Path):
-    executor = ToolExecutor(cwd=tmp_path, sandbox="read-only")
-    with pytest.raises(ToolExecutionError) as exc:
-        executor.run("Bash", {"command": "true"})
-    assert "sandbox" in str(exc.value)
+def test_bash_tool_runs_through_executor(tmp_path: Path):
+    executor = ToolExecutor(cwd=tmp_path)
+    out = executor.run("Bash", {"command": "true"})
+    assert "exit=0" in out
 
 
 def test_bash_tool_truncates_huge_output(tmp_path: Path):
@@ -528,35 +515,8 @@ def test_bash_tool_truncates_huge_output(tmp_path: Path):
     assert "truncated" in out
 
 
-# --------------------------------------------------------------------------- #
-# strict sandbox (Slice C)
-# --------------------------------------------------------------------------- #
-
-
-def test_bash_tool_strict_tags_output(tmp_path: Path):
-    tool = get_tool("Bash")
-    out = tool.execute({"command": "true"}, cwd=tmp_path, sandbox="strict")
-    assert "[strict sandbox]" in out
-
-
-def test_executor_strict_satisfies_workspace_write(tmp_path: Path):
-    # Tools that require workspace-write still work under strict.
-    executor = ToolExecutor(cwd=tmp_path, sandbox="strict")
-    out = executor.run("Write", {"path": "a.txt", "content": "hi"})
-    assert "wrote" in out or "overwrote" in out
-    assert (tmp_path / "a.txt").read_text() == "hi"
-
-
-def test_executor_strict_passes_sandbox_to_bash(tmp_path: Path):
-    executor = ToolExecutor(cwd=tmp_path, sandbox="strict")
-    out = executor.run("Bash", {"command": "echo hello"})
-    assert "[strict sandbox]" in out
-    assert "hello" in out
-
-
-def test_executor_strict_still_blocks_path_escape(tmp_path: Path):
-    # Strict doesn't loosen path validation — still cwd-scoped.
-    executor = ToolExecutor(cwd=tmp_path, sandbox="strict")
+def test_executor_still_blocks_path_escape(tmp_path: Path):
+    executor = ToolExecutor(cwd=tmp_path)
     with pytest.raises(ToolExecutionError) as exc:
         executor.run("Write", {"path": "../outside.txt", "content": "x"})
     assert "escapes" in str(exc.value)

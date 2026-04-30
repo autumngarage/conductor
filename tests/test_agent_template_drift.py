@@ -21,7 +21,6 @@ EXPECTED_TEMPLATE_COVERAGE = {
     "codex-coding-agent": {
         "--with codex",
         "--tools",
-        "--sandbox",
         "--json",
         "`--resume`",
         "Bash",
@@ -32,7 +31,6 @@ EXPECTED_TEMPLATE_COVERAGE = {
         "Write",
         "codex",
         "conductor exec",
-        "workspace-write",
     },
     "ollama-offline": {
         "--offline",
@@ -49,7 +47,6 @@ EXPECTED_TEMPLATE_COVERAGE = {
         "--offline",
         "--prefer",
         "--kind",
-        "--sandbox",
         "--tags",
         "--tools",
         "--json",
@@ -75,16 +72,12 @@ EXPECTED_TEMPLATE_COVERAGE = {
         "max",
         "medium",
         "minimal",
-        "none",
         "offline",
-        "read-only",
         "research",
         "review",
-        "strict",
         "tool-use",
         "vision",
         "web-search",
-        "workspace-write",
     },
 }
 

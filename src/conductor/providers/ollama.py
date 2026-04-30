@@ -200,14 +200,9 @@ class OllamaProvider:
 
     # Capability declarations (see interface.py)
     quality_tier = "local"
-    # Tool-use landed in v0.3.1 via the HTTP tool-use loop (same shape as
-    # kimi, against Ollama's /api/chat endpoint). Subprocess sandbox
-    # (`--sandbox strict`) lands in v0.3.2.
+    # Tool-use runs through Conductor's HTTP tool-use loop.
     supported_tools: frozenset[str] = frozenset(
         {"Read", "Grep", "Glob", "Edit", "Write", "Bash"}
-    )
-    supported_sandboxes: frozenset[str] = frozenset(
-        {"none", "read-only", "workspace-write", "strict"}
     )
     supports_effort = False  # base ollama models don't expose a thinking dial
     effort_to_thinking: dict[str, int] = {}
@@ -505,16 +500,7 @@ class OllamaProvider:
                 "ollama has no session model — each /api/chat call is stateless. "
                 "To replay context, prepend the prior turns to `task`."
             )
-        if sandbox == "":
-            sandbox = "none"
-
         if not tools:
-            if sandbox != "none":
-                raise UnsupportedCapability(
-                    f"ollama.exec() sandbox={sandbox!r} is not meaningful "
-                    "without tools. Use sandbox='none' for a text-only exec, "
-                    "or pass --tools with a supported tool set."
-                )
             return self.call(task, model=model, effort=effort)
 
         unknown = tools - self.supported_tools
@@ -523,18 +509,9 @@ class OllamaProvider:
                 f"ollama does not support tools {sorted(unknown)} "
                 f"(supported: {sorted(self.supported_tools)})."
             )
-        if sandbox not in self.supported_sandboxes:
-            raise UnsupportedCapability(
-                f"ollama does not support sandbox={sandbox!r} "
-                f"(supported: {sorted(self.supported_sandboxes)})."
-            )
-        if sandbox == "none":
-            raise UnsupportedCapability(
-                "ollama.exec() with tools requires at least sandbox='read-only'."
-            )
 
         workdir = Path(cwd) if cwd else Path.cwd()
-        executor = ToolExecutor(cwd=workdir, sandbox=sandbox)
+        executor = ToolExecutor(cwd=workdir)
         tool_specs = build_tool_specs(tools)
 
         explicit_model = model is not None

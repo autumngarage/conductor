@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from conductor.providers.interface import ProviderStalledError
+from conductor.providers.interface import ProviderStalledError, ProviderStartupStalledError
 
 if TYPE_CHECKING:
     from conductor.session_log import SessionLog
@@ -270,9 +270,9 @@ def run_subprocess_with_live_stderr(
                         "silent_sec": round(elapsed, 1),
                     },
                 )
-            raise ProviderStalledError(
-                f"{provider_label} CLI produced no output within "
-                f"{_format_stall_seconds(first_output_timeout_sec)}s after start"
+            raise ProviderStartupStalledError(
+                provider=provider_label,
+                timeout_sec=first_output_timeout_sec,
             )
 
         if (

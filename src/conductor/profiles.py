@@ -10,7 +10,7 @@ File schema:
     prefer = "best"
     effort = "medium"
     tags = "coding,tool-use"
-    sandbox = "workspace-write"
+    sandbox = "legacy-value"  # deprecated and ignored
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ CONFIG_ENV = "CONDUCTOR_PROFILES_FILE"
 DEFAULT_PROFILES_PATH = Path.home() / ".config" / "conductor" / "profiles.toml"
 
 VALID_PREFER_MODES = ("best", "cheapest", "fastest", "balanced")
-VALID_SANDBOXES = ("read-only", "workspace-write", "strict", "none")
 VALID_EFFORT_LEVELS = ("minimal", "low", "medium", "high", "max")
 
 
@@ -52,7 +51,7 @@ BUILTIN_PROFILES: dict[str, ProfileSpec] = {
         # the latency/cost tax by default.
         effort="medium",
         tags="coding,tool-use",
-        sandbox="workspace-write",
+        sandbox=None,
         source="built-in",
     ),
     "review": ProfileSpec(
@@ -60,7 +59,7 @@ BUILTIN_PROFILES: dict[str, ProfileSpec] = {
         prefer="balanced",
         effort="medium",
         tags="code-review",
-        sandbox="read-only",
+        sandbox=None,
         source="built-in",
     ),
     "chat": ProfileSpec(
@@ -68,7 +67,7 @@ BUILTIN_PROFILES: dict[str, ProfileSpec] = {
         prefer="cheapest",
         effort="low",
         tags="cheap",
-        sandbox="none",
+        sandbox=None,
         source="built-in",
     ),
 }
@@ -173,12 +172,6 @@ def _profile_from_dict(name: str, raw: object, *, source_path: Path) -> ProfileS
                 f"{list(VALID_EFFORT_LEVELS)} or a non-negative integer string, got "
                 f"{effort!r}."
             )
-    if sandbox is not None and sandbox not in VALID_SANDBOXES:
-        raise ProfileError(
-            f"profile config {source_path}: `profiles.{name}.sandbox` must be one of "
-            f"{list(VALID_SANDBOXES)}, got {sandbox!r}."
-        )
-
     return ProfileSpec(
         name=name,
         prefer=prefer,

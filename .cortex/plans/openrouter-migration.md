@@ -26,7 +26,7 @@ The CLI providers (claude, codex, gemini) keep their value: they own session sta
 ┌──────────────────────────────────────────────────────────────────┐
 │  TIER 1 — CLI agentic    │  claude, codex, gemini                │
 │  (subprocess providers)  │  • Filesystem-aware exec loops        │
-│                          │  • Session state, OAuth, sandboxing   │
+│                          │  • Session state, OAuth, local auth    │
 │                          │  • One subscription per provider      │
 ├──────────────────────────────────────────────────────────────────┤
 │  TIER 2 — OpenRouter     │  openrouter (HTTP catch-all)          │
@@ -53,7 +53,7 @@ Each row maps a task tag (or combination) to the primary route and OpenRouter's 
 | Long-context analysis (large repos) | `long-context` | **gemini** (CLI, 2M ctx, native) | Fallback — `openrouter:gemini-2.5-pro` if gemini CLI unconfigured |
 | Web-grounded answers | `web-search` | **gemini** (Google Search grounding via CLI) | Alternative — `openrouter:perplexity/*` for research-shaped citations |
 | Vision / multimodal | `vision` | **claude / openrouter** (depending on cost preference) | Cost-sorted vision model when budget matters |
-| Agentic exec with filesystem | `tool-use` + sandbox | **claude / codex** (CLI, native sandbox) | Cannot serve — OpenRouter is HTTP-only |
+| Agentic exec with filesystem | `tool-use` | **claude / codex** (CLI, native agent loop) | Limited — OpenRouter can use Conductor's local tool loop |
 | Specialized small models | `math`, niche-language | **openrouter** | Only economical path |
 | Cost-bounded jobs | any + `--max-cost` | **openrouter** | Filtered shortlist by price |
 | Catch-all fallback | any | varies | Always available — one credential covers everything |

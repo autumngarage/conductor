@@ -67,9 +67,6 @@ class OpenRouterProvider:
     supported_tools: frozenset[str] = frozenset(
         {"Read", "Grep", "Glob", "Edit", "Write", "Bash"}
     )
-    supported_sandboxes: frozenset[str] = frozenset(
-        {"none", "read-only", "workspace-write", "strict"}
-    )
     supports_effort = True
     effort_to_thinking = {
         "minimal": 0,
@@ -181,7 +178,7 @@ class OpenRouterProvider:
 
         if resp.status_code != 200:
             raise ProviderHTTPError(
-                f"OpenRouter returned HTTP {resp.status_code}: {resp.text[:500]}"
+                _format_openrouter_http_error(resp.status_code, resp.text, payload)
             )
         try:
             return resp.json()
@@ -344,16 +341,7 @@ class OpenRouterProvider:
                 "openrouter has no session model — each OpenRouter API call is "
                 "stateless. To replay context, prepend the prior turns to `task`."
             )
-        if sandbox == "":
-            sandbox = "none"
-
         if not tools:
-            if sandbox != "none":
-                raise UnsupportedCapability(
-                    f"{self.name}.exec() sandbox={sandbox!r} is not meaningful "
-                    "without tools. Use sandbox='none' for a text-only exec, "
-                    "or pass --tools with a supported tool set."
-                )
             return self.call(
                 task,
                 model=model,
@@ -371,15 +359,6 @@ class OpenRouterProvider:
                 f"{self.name} does not support tools {sorted(unknown)} "
                 f"(supported: {sorted(self.supported_tools)})."
             )
-        if sandbox not in self.supported_sandboxes:
-            raise UnsupportedCapability(
-                f"{self.name} does not support sandbox={sandbox!r} "
-                f"(supported: {sorted(self.supported_sandboxes)})."
-            )
-        if sandbox == "none":
-            raise UnsupportedCapability(
-                "openrouter.exec() with tools requires at least sandbox='read-only'."
-            )
 
         thinking_budget = resolve_effort_tokens(effort, self.effort_to_thinking)
         effective_task_tags = tuple(task_tags or ())
@@ -396,7 +375,7 @@ class OpenRouterProvider:
         )
 
         workdir = Path(cwd) if cwd else Path.cwd()
-        executor = ToolExecutor(cwd=workdir, sandbox=sandbox)
+        executor = ToolExecutor(cwd=workdir)
         tool_specs = build_tool_specs(tools)
 
         messages: list[dict] = [{"role": "user", "content": task}]
@@ -542,17 +521,27 @@ def select_model_for_task(
     effort: str | int,
     exclude: set[str] | frozenset[str] | None = None,
 ) -> dict[str, object]:
-    """Select an OpenRouter model from the live catalog.
+    """Select an OpenRouter completion target.
 
-    `prefer=fastest` currently uses price as a latency proxy because the public
-    catalog has no latency field. Cheaper models tend to be smaller and faster;
-    a future version can swap in measured latency when a reliable source exists.
+    ``best`` and ``balanced`` intentionally leave ``openrouter/auto``
+    unrestricted. The auto-router has a curated eligible pool that is narrower
+    than ``/models``; restricting it with concrete catalog slugs can produce
+    "No models match your request and model restrictions" even when every slug
+    appears in the public catalog. ``cheapest`` and ``fastest`` still select a
+    direct model from the catalog because those modes require local cost
+    ordering before the request is sent.
     """
     if prefer not in {"best", "balanced", "cheapest", "fastest"}:
         raise ProviderError(
             f"OpenRouter selector got unsupported prefer={prefer!r}. "
             "Use best, balanced, cheapest, or fastest."
         )
+
+    if prefer in {"best", "balanced"}:
+        return {
+            "model": OPENROUTER_DEFAULT_MODEL,
+            "reasoning": _reasoning_payload(effort),
+        }
 
     task_tag_set = set(task_tags or [])
     exclude_set = set(exclude or ())
@@ -590,40 +579,20 @@ def select_model_for_task(
         )
 
     ranked = sorted(candidates, key=_catalog_cost_sort_key)
-    if prefer in {"cheapest", "fastest"}:
-        return {"model": ranked[0].id, "reasoning": None}
-
-    shortlist = sorted(candidates, key=_catalog_recency_sort_key)[:6]
-    return {
-        "model": OPENROUTER_DEFAULT_MODEL,
-        "plugins": [
-            {
-                "id": "auto-router",
-                "allowed_models": [entry.id for entry in shortlist],
-            }
-        ],
-        "reasoning": _reasoning_payload(effort),
-    }
+    return {"model": ranked[0].id, "reasoning": None}
 
 
 def _catalog_cost_sort_key(entry: openrouter_catalog.ModelEntry) -> tuple[float, int, str]:
     return (entry.total_price_per_1k, -entry.created, entry.id)
 
 
-def _catalog_recency_sort_key(
-    entry: openrouter_catalog.ModelEntry,
-) -> tuple[int, float, str]:
-    return (-entry.created, entry.total_price_per_1k, entry.id)
-
-
 def _is_sendable_openrouter_model_id(model_id: str, catalog_ids: set[str]) -> bool:
-    """Return whether ``model_id`` is valid for OpenRouter request restrictions.
+    """Return whether ``model_id`` is valid for direct OpenRouter requests.
 
     OpenRouter exposes ``~provider/family-latest`` pages as moving aliases. Those
-    aliases are useful policy labels, but they have caused 404s when sent inside
-    the auto-router ``allowed_models`` restriction list. The selector therefore
-    only sends concrete catalog IDs, and a request-time catalog refresh drops
-    slugs that no longer exist.
+    aliases are useful policy labels, but direct requests and request-level model
+    restrictions need concrete catalog IDs. A request-time catalog refresh also
+    drops slugs that no longer exist.
     """
     return model_id in catalog_ids and not model_id.startswith("~")
 
@@ -683,13 +652,61 @@ def _log_selector_choice(
             first = plugins[0]
             if isinstance(first, dict):
                 shortlist = list(first.get("allowed_models") or [])
-        target = f"auto shortlist={shortlist}"
+        target = f"auto shortlist={shortlist}" if shortlist else "auto unrestricted"
     else:
         target = f"model={payload['model']}"
     sys.stderr.write(
         f"[conductor] openrouter selector: tags={tags_text} prefer={prefer} -> {target}\n"
     )
     sys.stderr.flush()
+
+
+def _format_openrouter_http_error(status_code: int, response_text: str, payload: dict) -> str:
+    attempted = _openrouter_attempted_models(payload)
+    parts = [
+        f"OpenRouter provider failed locally after upstream HTTP {status_code}.",
+        f"request model: {payload.get('model') or payload.get('models')}",
+    ]
+    if attempted:
+        parts.append(f"request restrictions/models tried: {attempted}")
+    if _looks_like_model_restriction_error(response_text):
+        parts.append(
+            "OpenRouter rejected the request's model restrictions. "
+            "For openrouter/auto, do not derive plugins[].allowed_models from "
+            "`GET /models`: the auto-router uses a separate curated pool and "
+            "catalog slugs can be unsendable there."
+        )
+        parts.append(
+            "Copy-paste workaround: rerun without request-level auto-router "
+            "restrictions, or choose a concrete model with "
+            "`conductor call --with openrouter --model <model-id> ...`."
+        )
+    parts.append(f"upstream response: {response_text[:500]}")
+    return " ".join(parts)
+
+
+def _openrouter_attempted_models(payload: dict) -> list[str]:
+    attempted: list[str] = []
+    model = payload.get("model")
+    if isinstance(model, str):
+        attempted.append(model)
+    models = payload.get("models")
+    if isinstance(models, list):
+        attempted.extend(str(item) for item in models)
+    plugins = payload.get("plugins")
+    if isinstance(plugins, list):
+        for plugin in plugins:
+            if not isinstance(plugin, dict):
+                continue
+            allowed = plugin.get("allowed_models")
+            if isinstance(allowed, list):
+                attempted.extend(str(item) for item in allowed)
+    return attempted
+
+
+def _looks_like_model_restriction_error(response_text: str) -> bool:
+    lowered = response_text.lower()
+    return "no models match your request and model restrictions" in lowered
 
 
 def _first_message(body: dict) -> dict:

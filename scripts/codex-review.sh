@@ -3,9 +3,9 @@
 # hooks/codex-review.sh — non-interactive AI code review + auto-fix loop.
 #
 # Touchstone 2.0+: the single reviewer is `conductor` (autumn-garage/conductor).
-# Conductor owns per-provider model selection, auth, tool/sandbox translation,
+# Conductor owns per-provider model selection, auth, tool translation,
 # route logging, and cost reporting. This hook declares *what it needs* (review
-# mode → tools + sandbox) and lets Conductor's router pick *how* to run it.
+# mode → tools) and lets Conductor's router pick *how* to run it.
 # Wired into merge-pr.sh and default-branch pre-push checks.
 #
 # Loop:
@@ -40,12 +40,12 @@
 # Modes:
 #   review-only — read + run commands, no file edits or commits
 #   fix         — full access: read, run commands, edit files, commit fixes
-#   diff-only   — read-only: diff embedded in the prompt, no tool use
+#   diff-only   — diff embedded in the prompt, no tool use
 #   no-tests    — edit + commit, no command execution (skip test runs)
 #
 #   Modes are enforced at the Conductor boundary: Touchstone translates mode
-#   → (tools, sandbox) and passes those; Conductor maps them to each
-#   provider's native flag dialect.  Set via CODEX_REVIEW_MODE env var or
+#   → tools and passes those; Conductor maps them to each provider's native
+#   flag dialect. Set via CODEX_REVIEW_MODE env var or
 #   `mode` in .codex-review.toml.
 #
 # Env overrides:
@@ -774,7 +774,7 @@ CONDUCTOR_EXCLUDE="${TOUCHSTONE_CONDUCTOR_EXCLUDE:-${CONDUCTOR_EXCLUDE:-}}"
 # Modes: review-only, fix, diff-only, no-tests
 #   review-only — read + bash, no edits, no git ops (default for merge review)
 #   fix         — full access, auto-fix + commit (default for pre-push)
-#   diff-only   — read-only, no bash, no edits
+#   diff-only   — no bash, no edits
 #   no-tests    — edit + commit, no bash (skip test execution)
 
 resolve_mode() {
@@ -932,7 +932,7 @@ context: <brief context; include files or risk areas if useful>
 TOUCHSTONE_HELP_REQUEST_END
 CODEX_REVIEW_BLOCKED
 
-The hook will ask a peer reviewer in read-only mode, then call you once more with the peer answer.
+The hook will ask a peer reviewer, then call you once more with the peer answer.
 On that second pass, do not request help again; emit the normal final sentinel.
 ASSIST_EOF
 }
@@ -946,10 +946,9 @@ ASSIST_EOF
 #   reviewer_<id>_exec PROMPT — run the review; stdout = output, exit code = success
 #
 # Touchstone 2.0 ships a single reviewer, `conductor`, which wraps the
-# autumn-garage/conductor CLI. Conductor owns the per-provider translation
-# (`--sandbox`, `--allowedTools`, `--yolo`, etc. are entirely its concern);
-# Touchstone just declares capability-level intent (what tools, what sandbox)
-# and lets the router pick.
+# autumn-garage/conductor CLI. Conductor owns per-provider translation
+# (`--allowedTools`, `--yolo`, etc. are entirely its concern); Touchstone
+# just declares capability-level intent through tools and lets the router pick.
 
 reviewer_conductor_available() {
   command -v "$CONDUCTOR_BIN" >/dev/null 2>&1
@@ -986,9 +985,9 @@ reviewer_conductor_exec() {
   # Effort applies whether manual-provider or auto-routed.
   args+=(--effort "${CONDUCTOR_EFFORT:-medium}")
 
-  # REVIEW_MODE → subcommand + tools + sandbox. Conductor translates these
+  # REVIEW_MODE → subcommand + tools. Conductor translates these
   # portable names into each provider's native flag dialect.
-  local tools sandbox
+  local tools
   case "$REVIEW_MODE" in
     diff-only)
       # Read-only review intent. The diff is embedded in the prompt, and
@@ -1008,29 +1007,24 @@ reviewer_conductor_exec() {
       else
         subcommand="exec"
         tools="Read,Grep,Glob,Bash"
-        sandbox="read-only"
       fi
       ;;
     no-tests)
       subcommand="exec"
       tools="Read,Grep,Glob,Edit,Write"
-      sandbox="workspace-write"
       ;;
     fix)
       subcommand="exec"
       tools="Read,Grep,Glob,Bash,Edit,Write"
-      sandbox="workspace-write"
       ;;
     *)
       subcommand="exec"
       tools="Read,Grep,Glob,Bash"
-      sandbox="read-only"
       ;;
   esac
 
   if [ "$subcommand" = "exec" ]; then
     args+=(--tools "$tools")
-    args+=(--sandbox "$sandbox")
     # Event-based watchdog: kill only on actual silence, not slow progress.
     # The legacy wall-clock --timeout caused PR #57's review to die at 300s on
     # a real, still-progressing 837-line review. Stall semantics tolerate long
@@ -1288,6 +1282,13 @@ handle_error() {
     echo "    Set on_error = \"fail-closed\" in .codex-review.toml to block on errors."
     exit 0
   fi
+}
+
+handle_malformed_sentinel() {
+  echo "==> ERROR (malformed sentinel) — blocking push." >&2
+  echo "    The reviewer output did not satisfy the required verdict contract;"
+  echo "    treating an ambiguous review verdict as blocked regardless of on_error=$ON_ERROR."
+  exit 1
 }
 
 # --------------------------------------------------------------------------
@@ -2228,7 +2229,7 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
       printf '%s\n' "$OUTPUT" | head -20 | sed 's/^/    /'
       REVIEW_EXIT_REASON="malformed-sentinel"
       print_summary
-      handle_error "malformed sentinel"
+      handle_malformed_sentinel
       ;;
   esac
 done

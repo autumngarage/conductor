@@ -3,7 +3,7 @@
 v0.2 surface (call/exec):
   conductor call --with <id> [--effort max] --brief "..."
   conductor call --auto [--tags a,b] [--prefer best] [--effort max] --brief "..."
-  conductor exec --auto [--tools Read,Grep,Edit] [--sandbox read-only] --brief-file PATH
+  conductor exec --auto [--tools Read,Grep,Edit] --brief-file PATH
 
 v0.1 surface (unchanged):
   conductor list [--json]
@@ -42,6 +42,7 @@ from conductor.profiles import ProfileError, ProfileSpec, get_profile, load_prof
 from conductor.providers import (
     QUALITY_TIERS,
     CallResponse,
+    ClaudeProvider,
     NativeReviewProvider,
     OpenRouterProvider,
     ProviderConfigError,
@@ -52,7 +53,10 @@ from conductor.providers import (
     get_provider,
     known_providers,
 )
-from conductor.providers.review_contract import build_review_task_prompt
+from conductor.providers.review_contract import (
+    ReviewContextError,
+    build_review_task_prompt,
+)
 from conductor.router import (
     VALID_PREFER_MODES,
     InvalidRouterRequest,
@@ -87,7 +91,9 @@ from conductor.session_log import (
 from conductor.wizard import run_init_wizard
 
 VALID_TOOLS = ("Read", "Grep", "Glob", "Edit", "Write", "Bash")
-VALID_SANDBOXES = ("read-only", "workspace-write", "strict", "none")
+SANDBOX_DEPRECATION_WARNING = (
+    "[conductor] --sandbox is deprecated and ignored; conductor exec now runs unsandboxed."
+)
 VALID_EFFORT_LEVELS = ("minimal", "low", "medium", "high", "max")
 PROFILE_PRECEDENCE_TEXT = (
     "Resolution order: profile defaults < CONDUCTOR_* env vars < explicit CLI flags."
@@ -258,17 +264,12 @@ def _validate_tools(raw: str | None) -> frozenset[str]:
     return frozenset(tools)
 
 
-def _validate_sandbox(raw: str | None) -> str:
+def _validate_sandbox(raw: str | None, *, warn: bool = False) -> str:
     if raw is None:
         return "none"
-    if raw not in VALID_SANDBOXES:
-        hint = _closest(raw, VALID_SANDBOXES)
-        raise click.UsageError(
-            f"--sandbox={raw!r} is not valid. "
-            f"Use one of: {list(VALID_SANDBOXES)}. "
-            f"Did you mean '{hint}'?"
-        )
-    return raw
+    if warn:
+        click.echo(SANDBOX_DEPRECATION_WARNING, err=True)
+    return "none"
 
 
 def _validate_prefer(raw: str | None) -> str:
@@ -291,6 +292,16 @@ def _normalize_max_stall_sec(raw: int | None) -> int | None:
         raise click.UsageError(
             f"--max-stall-seconds must be >= 0, got {raw}."
         )
+    if raw == 0:
+        return None
+    return raw
+
+
+def _normalize_start_timeout_sec(raw: float | None) -> float | None:
+    if raw is None:
+        return None
+    if raw < 0:
+        raise click.UsageError(f"--start-timeout must be >= 0, got {raw:g}.")
     if raw == 0:
         return None
     return raw
@@ -367,10 +378,10 @@ def _is_retryable(err: Exception) -> tuple[bool, str]:
     """Classify an error as retryable-with-fallback or fatal.
 
     Returns (retryable, category) — category is "rate-limit" | "5xx" |
-    "timeout" | "network" | "other" for health-tracking and fallback-UX
-    routing purposes. "network" is separate from "timeout" so the offline-
-    mode prompt can fire on the real thing (DNS/TCP failure) rather than
-    on a slow-but-reachable upstream.
+    "timeout" | "network" | "provider-error" | "other" for health-tracking
+    and fallback-UX routing purposes. "network" is separate from "timeout"
+    so the offline-mode prompt can fire on the real thing (DNS/TCP failure)
+    rather than on a slow-but-reachable upstream.
     """
     if isinstance(err, ProviderStalledError):
         return True, "timeout"
@@ -383,9 +394,11 @@ def _is_retryable(err: Exception) -> tuple[bool, str]:
         return True, "timeout"
     # HTTP 5xx — check for " 5" preceded by "http" or a similar prefix so
     # we don't match arbitrary "5" digits. Cheap heuristic; acceptable.
-    signals = ("http 5", "returned http 5", "exited 5", "overloaded", "upstream")
+    signals = ("http 5", "returned http 5", "exited 5", "overloaded")
     if any(sig in msg for sig in signals):
         return True, "5xx"
+    if isinstance(err, ProviderHTTPError):
+        return True, "provider-error"
     return False, "other"
 
 
@@ -660,6 +673,7 @@ def _invoke_with_fallback(
     cwd: str | None,
     timeout_sec: int | None,
     max_stall_sec: int | None,
+    start_timeout_sec: float | None,
     silent: bool,
     resume_session_id: str | None = None,
     session_log: SessionLog | None = None,
@@ -688,15 +702,15 @@ def _invoke_with_fallback(
         if _ollama_index(candidates) is None:
             # Offline mode promises local routing. If ollama is absent from
             # the ranking (excluded, unconfigured, or filtered out by
-            # tools/sandbox), silently cascading to a remote provider would
+            # tools), silently cascading to a remote provider would
             # violate that promise — and the remote will almost certainly
             # fail with a network error anyway. Surface the contradiction
             # up front instead.
             raise ProviderConfigError(
                 "offline mode is active but ollama is not in the routing "
                 "candidates (excluded, not configured, or filtered out by "
-                "--tools/--sandbox). Start ollama (`ollama serve`), relax "
-                "the filters, or clear the flag with --no-offline."
+                "--tools). Start ollama (`ollama serve`), relax the filters, "
+                "or clear the flag with --no-offline."
             )
         _reorder_ollama_first(candidates)
         if not silent:
@@ -743,6 +757,20 @@ def _invoke_with_fallback(
                         cwd=cwd,
                         timeout_sec=timeout_sec,
                         max_stall_sec=max_stall_sec,
+                        resume_session_id=resume_session_id,
+                        session_log=session_log,
+                    )
+                elif isinstance(provider, ClaudeProvider):
+                    response = provider.exec(
+                        task,
+                        model=model,
+                        effort=effort,
+                        tools=tools,
+                        sandbox=sandbox,
+                        cwd=cwd,
+                        timeout_sec=timeout_sec,
+                        max_stall_sec=max_stall_sec,
+                        start_timeout_sec=start_timeout_sec,
                         resume_session_id=resume_session_id,
                         session_log=session_log,
                     )
@@ -846,7 +874,7 @@ def _invoke_with_fallback(
                 if not silent:
                     click.echo(
                         f"[conductor] {candidate.name} failed ({category}) · "
-                        f"falling back → {next_name}",
+                        f"falling through to {next_name} (falling back → {next_name})",
                         err=True,
                     )
             idx += 1
@@ -901,6 +929,8 @@ def _invoke_review_with_fallback(
                         commit=commit,
                         uncommitted=uncommitted,
                         title=title,
+                        cwd=cwd,
+                        include_patch=True,
                     ),
                     effort=effort,
                     task_tags=list(decision.task_tags),
@@ -915,6 +945,8 @@ def _invoke_review_with_fallback(
                         commit=commit,
                         uncommitted=uncommitted,
                         title=title,
+                        cwd=cwd,
+                        include_patch=True,
                     ),
                     effort=effort,
                 )
@@ -946,6 +978,11 @@ def _invoke_review_with_fallback(
                 raise
             fallbacks.append(candidate.name)
             tried.append((candidate.name, _review_failure_mode(e)))
+        except ReviewContextError as e:
+            last_exc = e
+            mark_outcome(candidate.name, "review-context")
+            fallbacks.append(candidate.name)
+            tried.append((candidate.name, "review-context"))
 
         if idx + 1 < len(candidates) and not silent:
             click.echo(
@@ -1106,6 +1143,14 @@ def _emit_call(
         click.echo(response.text)
 
 
+def _emit_provider_error(err: ProviderError, *, as_json: bool) -> None:
+    payload = getattr(err, "error_response", None)
+    if as_json and isinstance(payload, dict):
+        click.echo(json.dumps(payload, default=str, indent=2))
+        return
+    click.echo(f"conductor: {err}", err=True)
+
+
 def _collect_session_auth_prompts(session_log: SessionLog | None) -> list[dict] | None:
     if session_log is None:
         return None
@@ -1242,10 +1287,9 @@ def _format_route_log_line(decision: RouteDecision) -> str:
     effort_str = (
         decision.effort if isinstance(decision.effort, str) else f"{decision.effort}tok"
     )
-    sandbox_note = f" · sandbox={decision.sandbox}" if decision.sandbox != "none" else ""
     return (
         f"[conductor] {decision.prefer} (effort={effort_str}) → {decision.provider} "
-        f"(tier: {decision.tier} · matched: {tags_matched}){sandbox_note}"
+        f"(tier: {decision.tier} · matched: {tags_matched})"
     )
 
 
@@ -1303,7 +1347,7 @@ def _format_route_ranking(decision: RouteDecision) -> list[str]:
         )
     # Don't duplicate unconfigured providers in the skipped list — they
     # already appear (with scores) in the shadow block above. Other skip
-    # reasons (excluded, missing tools, sandbox mismatch, health) still show.
+    # reasons (excluded, missing tools, health) still show.
     for name, reason in decision.candidates_skipped:
         if name in shadow_names:
             continue
@@ -1748,11 +1792,12 @@ def ask(
             tools=tools_set,
             sandbox=sandbox_value,
             cwd=cwd,
-            timeout_sec=timeout_sec,
-            max_stall_sec=max_stall_sec,
-            silent=silent_route or as_json,
-            session_log=session_log,
-            models_by_provider=models_by_provider,
+                timeout_sec=timeout_sec,
+                max_stall_sec=max_stall_sec,
+                start_timeout_sec=None,
+                silent=silent_route or as_json,
+                session_log=session_log,
+                models_by_provider=models_by_provider,
         )
     except UnsupportedCapability as e:
         if session_log is not None:
@@ -1992,6 +2037,7 @@ def call(
                 cwd=None,
                 timeout_sec=None,
                 max_stall_sec=None,
+                start_timeout_sec=None,
                 silent=silent_route or as_json,
             )
         except ProviderConfigError as e:
@@ -2352,7 +2398,7 @@ def review(
     "--auto",
     is_flag=True,
     default=False,
-    help="Let the router pick based on --tags, --prefer, --tools, --sandbox.",
+    help="Let the router pick based on --tags, --prefer, and --tools.",
 )
 @click.option("--tags", default=None, help="Comma-separated task tags.")
 @click.option(
@@ -2373,7 +2419,7 @@ def review(
 @click.option(
     "--sandbox",
     default=None,
-    help=f"Sandbox mode: {' | '.join(VALID_SANDBOXES)} (default: none).",
+    help="Deprecated and ignored; exec always runs unsandboxed.",
 )
 @click.option(
     "--exclude",
@@ -2406,6 +2452,17 @@ def review(
         "seconds. Default: 360, just past codex's 5-minute internal websocket "
         "idle (openai/codex#17003) so codex gets one retry attempt before "
         "conductor kills it. Set 0 to disable."
+    ),
+)
+@click.option(
+    "--start-timeout",
+    "start_timeout_sec",
+    default=None,
+    type=float,
+    help=(
+        "Startup watchdog in seconds for providers that may cold-load before "
+        "their first byte. Set 0 to disable. After first output, "
+        "--max-stall-seconds is the only stall watchdog."
     ),
 )
 @click.option(
@@ -2490,6 +2547,7 @@ def exec_cmd(
     cwd: str | None,
     timeout_sec: int | None,
     max_stall_sec: int | None,
+    start_timeout_sec: float | None,
     task: str | None,
     task_file: str | None,
     brief: str | None,
@@ -2552,9 +2610,10 @@ def exec_cmd(
     )
     body = brief_input.body
     tools_set = _validate_tools(tools)
-    sandbox_value = _validate_sandbox(sandbox)
+    sandbox_value = _validate_sandbox(sandbox, warn=sandbox is not None)
     effort_value = _parse_effort(effort)
     max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
+    start_timeout_sec = _normalize_start_timeout_sec(start_timeout_sec)
 
     decision: RouteDecision | None = None
     session_log: SessionLog | None = None
@@ -2608,6 +2667,7 @@ def exec_cmd(
                 cwd=cwd,
                 timeout_sec=timeout_sec,
                 max_stall_sec=max_stall_sec,
+                start_timeout_sec=start_timeout_sec,
                 silent=silent_route or as_json,
                 resume_session_id=resume_session_id,
                 session_log=session_log,
@@ -2627,7 +2687,7 @@ def exec_cmd(
         except ProviderError as e:
             if session_log is not None:
                 session_log.mark_finished()
-            click.echo(f"conductor: {e}", err=True)
+            _emit_provider_error(e, as_json=as_json)
             _maybe_echo_stall_recovery_hint(e, cwd=cwd)
             sys.exit(1)
     else:
@@ -2685,6 +2745,20 @@ def exec_cmd(
                     resume_session_id=resume_session_id,
                     session_log=session_log,
                 )
+            elif isinstance(provider, ClaudeProvider):
+                response = provider.exec(
+                    body,
+                    model=model,
+                    effort=effort_value,
+                    tools=tools_set,
+                    sandbox=sandbox_value,
+                    cwd=cwd,
+                    timeout_sec=timeout_sec,
+                    max_stall_sec=max_stall_sec,
+                    start_timeout_sec=start_timeout_sec,
+                    resume_session_id=resume_session_id,
+                    session_log=session_log,
+                )
             else:
                 response = provider.exec(
                     body,
@@ -2711,7 +2785,7 @@ def exec_cmd(
         except ProviderError as e:
             session_log.emit("provider_failed", {"provider": provider_id, "error": str(e)})
             session_log.mark_finished()
-            click.echo(f"conductor: {e}", err=True)
+            _emit_provider_error(e, as_json=as_json)
             _maybe_echo_stall_recovery_hint(e, cwd=cwd)
             _maybe_echo_explicit_network_hint(provider_id, e)
             sys.exit(1)
@@ -2757,7 +2831,7 @@ def exec_cmd(
     help=f"Thinking depth: {' | '.join(VALID_EFFORT_LEVELS)} or integer budget.",
 )
 @click.option("--tools", default=None, help="Comma-separated tool set.")
-@click.option("--sandbox", default=None, help=f"Sandbox: {' | '.join(VALID_SANDBOXES)}.")
+@click.option("--sandbox", default=None, help="Deprecated and ignored.")
 @click.option("--exclude", default=None, help="Comma-separated providers to exclude.")
 @click.option("--json", "as_json", is_flag=True, default=False)
 def route(
@@ -2775,7 +2849,7 @@ def route(
     before a real `call` or `exec`.
     """
     tools_set = _validate_tools(tools)
-    sandbox_value = _validate_sandbox(sandbox)
+    sandbox_value = _validate_sandbox(sandbox, warn=sandbox is not None)
     effort_value = _parse_effort(effort)
 
     try:
@@ -2810,9 +2884,6 @@ def route(
         click.echo(f"  matched tags: {','.join(decision.matched_tags)}")
     if decision.tools_requested:
         click.echo(f"  tools requested: {','.join(decision.tools_requested)}")
-    if decision.sandbox != "none":
-        click.echo(f"  sandbox: {decision.sandbox}")
-
     click.echo("")
     click.echo("Full ranking:")
     for line in _format_route_ranking(decision):

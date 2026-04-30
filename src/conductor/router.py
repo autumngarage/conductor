@@ -6,13 +6,12 @@ v0.2 router. Axes:
   - ``prefer``      — which dimension dominates scoring: best | cheapest | fastest | balanced
   - ``effort``      — thinking-depth dial applied to the chosen provider
   - ``tools``       — hard filter: provider.supported_tools ⊇ requested
-  - ``sandbox``     — hard filter: sandbox ∈ provider.supported_sandboxes
   - ``exclude``     — blacklist; router must never pick these
 
 Scoring pipeline:
 
   1. Filter on ``configured()`` + ``supported_tools ⊇ tools`` +
-     ``sandbox ∈ supported_sandboxes`` + ``id ∉ exclude`` + health-ok.
+     ``id ∉ exclude`` + health-ok.
   2. Score surviving candidates per ``prefer`` mode.
   3. Break ties via DEFAULT_PRIORITY.
   4. Return ``(provider, RouteDecision)``. RouteDecision always includes
@@ -340,14 +339,11 @@ def pick(
             skipped.append((name, failure))
             # Hard capability filters still apply to shadow candidates — we
             # don't want to suggest "would prefer X" for a provider that,
-            # even installed, couldn't satisfy the caller's tools/sandbox.
+            # even installed, couldn't satisfy the caller's tools.
             tools_ok = (
                 not tools_set or tools_set.issubset(provider.supported_tools)
             )
-            sandbox_ok = (
-                sandbox == "none" or sandbox in provider.supported_sandboxes
-            )
-            if tools_ok and sandbox_ok:
+            if tools_ok:
                 unconfigured[name] = failure
             continue
 
@@ -356,11 +352,6 @@ def pick(
             missing = sorted(tools_set - provider.supported_tools)
             skipped.append((name, f"does not support tools: {missing}"))
             continue
-        if sandbox not in provider.supported_sandboxes and sandbox != "none":
-            # "none" is always accepted (no-sandbox means no requirement).
-            skipped.append((name, f"does not support sandbox={sandbox!r}"))
-            continue
-
         # Session-local health filter.
         health_reason = _health_filter(name)
         if health_reason is not None:
@@ -381,7 +372,7 @@ def pick(
     if not ranked:
         raise NoConfiguredProvider(
             "no provider satisfies the routing request. "
-            f"prefer={prefer!r} tools={sorted(tools_set)} sandbox={sandbox!r} "
+            f"prefer={prefer!r} tools={sorted(tools_set)} "
             f"exclude={sorted(exclude_set)}. Skipped: {skipped}"
         )
 
