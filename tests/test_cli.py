@@ -46,10 +46,19 @@ def test_call_unknown_provider_shows_usage_error():
 
 
 def test_cli_warns_once_for_stale_agent_wiring(monkeypatch, tmp_path):
+    """Interactive users with stale wiring still get the one-time nudge.
+
+    The advisory-emission gate suppresses this notice when stderr is not a
+    TTY (programmatic / CI / piped callers). CliRunner replaces stderr with
+    its own buffer, so we patch the gate helper directly rather than chase
+    the swapped stream — gate behavior itself is covered in
+    ``tests/test_advisory_emission_gate.py``.
+    """
     repo = tmp_path / "repo"
     repo.mkdir()
     monkeypatch.chdir(repo)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setattr("conductor.cli._advisory_emission_allowed", lambda: True)
     aw.wire_agents_md(version="0.1.0")
 
     first = CliRunner().invoke(main, ["list"])
@@ -68,6 +77,7 @@ def test_cli_does_not_warn_for_fresh_agent_wiring(monkeypatch, tmp_path):
     monkeypatch.chdir(repo)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     monkeypatch.setattr("conductor.cli.__version__", "0.8.1+2.gabc123")
+    monkeypatch.setattr("conductor.cli._advisory_emission_allowed", lambda: True)
     aw.wire_agents_md(version="0.8.1")
     aw.wire_gemini_md(version="0.8.1")
     aw.wire_claude_md_repo(version="0.8.1")
