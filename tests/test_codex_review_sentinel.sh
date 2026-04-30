@@ -52,4 +52,14 @@ assert_detector \
   $'CODEX_REVIEW_CLEAN\nCODEX_REVIEW_BLOCKED\n' \
   ""
 
+# Regression: CONDUCTOR_BIN must be tokenized into CONDUCTOR_BIN_ARGV so that
+# multi-word values (e.g. CONDUCTOR_BIN="uv run conductor") work in
+# `command -v` checks and as command + args. The only legitimate single-token
+# read of CONDUCTOR_BIN is the `read -ra` tokenization itself.
+bad_uses="$(grep -nE '"\$CONDUCTOR_BIN"' "$SCRIPT" | grep -v 'read -ra' || true)"
+if [ -n "$bad_uses" ]; then
+  printf 'FAIL: CONDUCTOR_BIN must use ${CONDUCTOR_BIN_ARGV[@]} for invocation; found single-token use:\n%s\n' "$bad_uses" >&2
+  exit 1
+fi
+
 printf 'ok\n'

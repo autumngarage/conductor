@@ -141,6 +141,9 @@ TOUCHSTONE_LOCAL_REVIEWER_AUTH_COMMAND="${TOUCHSTONE_LOCAL_REVIEWER_AUTH_COMMAND
 # 2.0 conductor knobs — filled from [review.conductor] during TOML parse;
 # env vars (TOUCHSTONE_CONDUCTOR_*) override just before invocation.
 CONDUCTOR_BIN="${CONDUCTOR_BIN:-conductor}"
+# Tokenize so multi-word values (e.g. CONDUCTOR_BIN="uv run conductor") work
+# in `command -v` checks and when invoked as command + args.
+read -ra CONDUCTOR_BIN_ARGV <<< "$CONDUCTOR_BIN"
 CONDUCTOR_WITH=""
 CONDUCTOR_PREFER=""
 CONDUCTOR_EFFORT=""
@@ -951,19 +954,19 @@ ASSIST_EOF
 # just declares capability-level intent through tools and lets the router pick.
 
 reviewer_conductor_available() {
-  command -v "$CONDUCTOR_BIN" >/dev/null 2>&1
+  command -v "${CONDUCTOR_BIN_ARGV[0]}" >/dev/null 2>&1
 }
 
 reviewer_conductor_auth_ok() {
   # Delegate to `conductor doctor --json` — cheap check, makes no upstream
   # calls, confirms at least one provider is configured.
   local doctor_json
-  doctor_json=$("$CONDUCTOR_BIN" doctor --json 2>/dev/null) || return 1
+  doctor_json=$("${CONDUCTOR_BIN_ARGV[@]}" doctor --json 2>/dev/null) || return 1
   echo "$doctor_json" | grep -q '"configured"[[:space:]]*:[[:space:]]*true'
 }
 
 reviewer_conductor_supports_review() {
-  "$CONDUCTOR_BIN" review --help >/dev/null 2>&1
+  "${CONDUCTOR_BIN_ARGV[@]}" review --help >/dev/null 2>&1
 }
 
 reviewer_conductor_exec() {
@@ -1043,7 +1046,7 @@ reviewer_conductor_exec() {
   # matches Conductor's established stdin-fallback path.
   CODEX_REVIEW_IN_PROGRESS=1 \
     printf '%s' "$prompt" \
-    | "$CONDUCTOR_BIN" "$subcommand" "${args[@]}"
+    | "${CONDUCTOR_BIN_ARGV[@]}" "$subcommand" "${args[@]}"
 }
 
 # --------------------------------------------------------------------------
@@ -1817,7 +1820,7 @@ run_peer_review() {
   # wrapper when the primary timed out; peer call runs synchronously and
   # relies on conductor's own per-provider timeout (currently 300s default).
   peer_output="$(printf '%s' "$peer_prompt" \
-    | "$CONDUCTOR_BIN" call --auto \
+    | "${CONDUCTOR_BIN_ARGV[@]}" call --auto \
         --exclude "$primary_provider" \
         --tags code-review \
         --effort medium \
