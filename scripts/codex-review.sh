@@ -1284,6 +1284,13 @@ handle_error() {
   fi
 }
 
+handle_malformed_sentinel() {
+  echo "==> ERROR (malformed sentinel) — blocking push." >&2
+  echo "    The reviewer output did not satisfy the required verdict contract;"
+  echo "    treating an ambiguous review verdict as blocked regardless of on_error=$ON_ERROR."
+  exit 1
+}
+
 # --------------------------------------------------------------------------
 # Pre-flight checks
 # --------------------------------------------------------------------------
@@ -2222,7 +2229,7 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
       printf '%s\n' "$OUTPUT" | head -20 | sed 's/^/    /'
       REVIEW_EXIT_REASON="malformed-sentinel"
       print_summary
-      handle_error "malformed sentinel"
+      handle_malformed_sentinel
       ;;
   esac
 done

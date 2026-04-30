@@ -52,7 +52,10 @@ from conductor.providers import (
     get_provider,
     known_providers,
 )
-from conductor.providers.review_contract import build_review_task_prompt
+from conductor.providers.review_contract import (
+    ReviewContextError,
+    build_review_task_prompt,
+)
 from conductor.router import (
     VALID_PREFER_MODES,
     InvalidRouterRequest,
@@ -900,6 +903,8 @@ def _invoke_review_with_fallback(
                         commit=commit,
                         uncommitted=uncommitted,
                         title=title,
+                        cwd=cwd,
+                        include_patch=True,
                     ),
                     effort=effort,
                     task_tags=list(decision.task_tags),
@@ -914,6 +919,8 @@ def _invoke_review_with_fallback(
                         commit=commit,
                         uncommitted=uncommitted,
                         title=title,
+                        cwd=cwd,
+                        include_patch=True,
                     ),
                     effort=effort,
                 )
@@ -945,6 +952,11 @@ def _invoke_review_with_fallback(
                 raise
             fallbacks.append(candidate.name)
             tried.append((candidate.name, _review_failure_mode(e)))
+        except ReviewContextError as e:
+            last_exc = e
+            mark_outcome(candidate.name, "review-context")
+            fallbacks.append(candidate.name)
+            tried.append((candidate.name, "review-context"))
 
         if idx + 1 < len(candidates) and not silent:
             click.echo(

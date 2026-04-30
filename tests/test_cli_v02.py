@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import subprocess
 
 import httpx
 import pytest
@@ -88,6 +90,27 @@ def _fake_response(provider: str = "claude", model: str = "sonnet") -> CallRespo
         cost_usd=0.01,
         raw={},
     )
+
+
+def _make_diff_repo(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+    }
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, env=env, check=True)
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, env=env, check=True)
+    (repo / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, env=env, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=repo, env=env, check=True)
+    (repo / "README.md").write_text("base\nfallback diff marker\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, env=env, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "feature"], cwd=repo, env=env, check=True)
+    return repo
 
 
 class _FakeScheduledPipe:
@@ -682,6 +705,52 @@ def test_review_auto_exhausted_fallback_names_stalled_codex_and_claude(mocker):
     assert result.exit_code == 1
     assert "code review failed for all tried providers" in result.stderr
     assert "claude (timeout), codex (stall)" in result.stderr
+
+
+def test_review_auto_generic_fallback_prompt_includes_diff(mocker, tmp_path):
+    from conductor.providers.interface import ProviderStalledError
+
+    repo = _make_diff_repo(tmp_path)
+    _stub_all_configured(mocker, {"codex", "claude", "openrouter"})
+    mocker.patch.object(CodexProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(ClaudeProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(
+        ClaudeProvider,
+        "review",
+        side_effect=ProviderStalledError("claude review stalled"),
+    )
+    mocker.patch.object(
+        CodexProvider,
+        "review",
+        side_effect=ProviderStalledError("codex review stalled"),
+    )
+    openrouter_call = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response("openrouter", "test-model"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--max-fallbacks",
+            "3",
+            "--cwd",
+            str(repo),
+            "--base",
+            "HEAD~1",
+            "--brief",
+            "Review this merge using the project reviewer guide.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    prompt = openrouter_call.call_args.args[0]
+    assert "Patch context for generic review fallback" in prompt
+    assert "diff --git a/README.md b/README.md" in prompt
+    assert "+fallback diff marker" in prompt
 
 
 def test_review_with_gemini_emits_plain_text_without_json_envelope(mocker):
