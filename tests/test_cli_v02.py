@@ -21,7 +21,7 @@ import pytest
 import respx
 from click.testing import CliRunner
 
-from conductor.cli import main
+from conductor.cli import SANDBOX_DEPRECATION_WARNING, main
 from conductor.providers import (
     CallResponse,
     ClaudeProvider,
@@ -427,7 +427,7 @@ def test_ask_code_high_routes_to_codex_exec_with_default_tools(mocker):
     assert exec_mock.call_args.kwargs["tools"] == frozenset(
         {"Read", "Grep", "Glob", "Edit", "Write", "Bash"}
     )
-    assert exec_mock.call_args.kwargs["sandbox"] == "workspace-write"
+    assert exec_mock.call_args.kwargs["sandbox"] == "none"
 
 
 def test_ask_code_high_falls_back_to_openrouter_exec_before_ollama(mocker):
@@ -703,6 +703,7 @@ def test_exec_auto_routes_to_tool_capable_provider(mocker):
 
     assert result.exit_code == 0
     assert exec_mock.called
+    assert SANDBOX_DEPRECATION_WARNING in result.stderr
     # kimi would be skipped by the tools filter (supported_tools=frozenset()).
     assert "→ claude" in result.stderr
 
@@ -720,14 +721,34 @@ def test_exec_unknown_tool_errors_with_hint():
     assert "NotARealTool" in result.output
 
 
-def test_exec_unknown_sandbox_errors_with_hint():
+@pytest.mark.parametrize("sandbox", ["workspace-write", "read-only", "strict", "none", "surprise"])
+def test_exec_sandbox_values_warn_once_and_are_ignored(mocker, sandbox):
+    _stub_all_configured(mocker, {"codex"})
+    exec_mock = mocker.patch.object(
+        CodexProvider, "exec", return_value=_fake_response("codex")
+    )
+
     result = CliRunner().invoke(
         main,
-        ["exec", "--auto", "--sandbox", "reed-only", "--task", "hi"],
+        ["exec", "--auto", "--sandbox", sandbox, "--no-preflight", "--task", "hi"],
     )
-    assert result.exit_code == 2
-    assert "--sandbox='reed-only'" in result.output
-    assert "read-only" in result.output
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr.count(SANDBOX_DEPRECATION_WARNING) == 1
+    assert exec_mock.call_args.kwargs["sandbox"] == "none"
+
+
+def test_exec_without_sandbox_does_not_warn(mocker):
+    _stub_all_configured(mocker, {"codex"})
+    mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--auto", "--no-preflight", "--task", "hi"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert SANDBOX_DEPRECATION_WARNING not in result.stderr
 
 
 def test_exec_task_file_dash_reads_stdin(mocker):
@@ -967,7 +988,7 @@ def test_exec_auto_preflight_failure_does_not_attribute_error_on_str_provider(mo
         task_tags=("coding",),
         matched_tags=("coding",),
         tools_requested=("Read",),
-        sandbox="workspace-write",
+        sandbox="none",
         ranked=(),
         candidates_skipped=(),
         tag_default_applied={},

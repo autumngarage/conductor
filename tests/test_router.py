@@ -211,7 +211,7 @@ def test_invalid_prefer_raises_with_fix_it_hint():
 
 
 # ---------------------------------------------------------------------------
-# v0.2 — tools / sandbox filters
+# v0.2 — tools filters
 # ---------------------------------------------------------------------------
 
 
@@ -230,21 +230,6 @@ def test_tools_filter_excludes_providers_without_capability(mocker, monkeypatch)
     assert provider.name == "claude"
     skipped_names = {name for name, _ in decision.candidates_skipped}
     assert "kimi" in skipped_names
-    assert "ollama" in skipped_names
-
-
-def test_sandbox_filter_excludes_providers_without_capability(mocker, monkeypatch):
-    # Simulate a provider that only supports sandbox="none" so the
-    # filter removes it when workspace-write is requested. Uses ollama
-    # pinned to the v0.3.0 capability set for a deterministic check.
-    from conductor.providers.ollama import OllamaProvider
-
-    monkeypatch.setattr(
-        OllamaProvider, "supported_sandboxes", frozenset({"none"})
-    )
-    _stub_configured(mocker, {"claude": True, "ollama": True})
-    _provider, decision = pick([], sandbox="workspace-write")
-    skipped_names = {name for name, _ in decision.candidates_skipped}
     assert "ollama" in skipped_names
 
 
@@ -381,7 +366,7 @@ def test_shadow_includes_unconfigured_providers(mocker):
     _stub_configured(mocker, {"claude": True})
     _, decision = pick([], prefer="best", shadow=True)
     shadow_names = {c.name for c in decision.unconfigured_shadow}
-    # Every non-claude built-in provider that passes tools/sandbox filters
+    # Every non-claude built-in provider that passes tool filters
     # (i.e. all of them under default args) should appear.
     assert "codex" in shadow_names
     assert "kimi" in shadow_names

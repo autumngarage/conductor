@@ -419,20 +419,6 @@ def test_exec_without_tools_delegates_to_call():
     assert "tool_iterations" not in resp.usage
 
 
-def test_exec_rejects_non_none_sandbox_without_tools():
-    with pytest.raises(UnsupportedCapability) as exc:
-        OllamaProvider().exec("hi", sandbox="read-only")
-    assert "without tools" in str(exc.value)
-
-
-def test_exec_with_tools_requires_at_least_read_only():
-    with pytest.raises(UnsupportedCapability) as exc:
-        OllamaProvider().exec(
-            "hi", tools=frozenset({"Read"}), sandbox="none"
-        )
-    assert "read-only" in str(exc.value)
-
-
 def test_exec_rejects_unsupported_tool():
     with pytest.raises(UnsupportedCapability) as exc:
         OllamaProvider().exec(

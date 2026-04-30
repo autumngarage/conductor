@@ -608,7 +608,7 @@ def test_claude_exec_sets_pwd_to_configured_cwd_for_project_settings(
         "settings.local.json",
     ]
     assert settings_event["data"]["permission_keys"] == ["allow", "deny"]
-    assert settings_event["data"]["permission_mode"] == "acceptEdits"
+    assert settings_event["data"]["permission_mode"] is None
 
 
 def test_claude_exec_rejects_invalid_project_settings_before_launch(
@@ -629,38 +629,30 @@ def test_claude_exec_rejects_invalid_project_settings_before_launch(
     assert popen.call_count == 0
 
 
-def test_claude_exec_rejects_mutating_linked_worktree_cwd_before_launch(
+def test_claude_exec_allows_linked_worktree_cwd(
     mocker,
     tmp_path,
 ):
     _repo, worktree = _repo_with_linked_worktree(tmp_path)
     mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
-    runner = mocker.patch("conductor.providers.claude.run_subprocess_with_live_stderr")
-    session_log = SessionLog(path=tmp_path / "claude-linked-worktree.ndjson")
+    fake = _FakePopen(stdout_schedule=[(0, CLAUDE_JSON)])
+    captured: dict[str, object] = {}
 
-    with pytest.raises(ProviderConfigError) as exc:
-        ClaudeProvider().exec(
-            "hi",
-            sandbox="workspace-write",
-            cwd=str(worktree),
-            session_log=session_log,
-        )
+    def factory(args, **kwargs):
+        fake.args = args
+        captured.update(kwargs)
+        return fake
 
-    assert "linked git worktree" in str(exc.value)
-    assert "route mutating worktree-isolated tasks to `--with codex`" in str(exc.value)
-    assert runner.call_count == 0
-    events = [
-        json.loads(line)
-        for line in session_log.log_path.read_text(encoding="utf-8").splitlines()
-    ]
-    diagnostic = next(
-        event
-        for event in events
-        if event["event"] == "provider_diagnostic"
-        and event["data"]["check"] == "claude_linked_worktree_cwd"
+    mocker.patch("conductor.providers.claude.subprocess.Popen", side_effect=factory)
+
+    response = ClaudeProvider(first_output_timeout_sec=1).exec(
+        "hi",
+        sandbox="workspace-write",
+        cwd=str(worktree),
     )
-    assert diagnostic["data"]["allowed"] is False
-    assert diagnostic["data"]["cwd"] == str(worktree.resolve())
+
+    assert response.text == "hello from claude"
+    assert captured["cwd"] == str(worktree.resolve())
 
 
 def test_claude_exec_allows_read_only_linked_worktree_cwd(
@@ -745,6 +737,7 @@ class _FakePopen:
         returncode: int = 0,
     ) -> None:
         self.args: list[str] | None = None
+        self.env: dict[str, str] | None = None
         self.returncode: int | None = None
         self.terminated = False
         self.killed = False
@@ -796,6 +789,7 @@ class _FakePopen:
 def _patch_codex_popen(mocker, fake: _FakePopen):
     def factory(args, **kwargs):
         fake.args = args
+        fake.env = kwargs.get("env")
         return fake
 
     return mocker.patch("conductor.providers.codex.subprocess.Popen", side_effect=factory)
@@ -1093,19 +1087,8 @@ def test_codex_exec_default_timeout_is_unbounded(mocker):
     assert fake.terminated is False
 
 
-@pytest.mark.parametrize(
-    ("conductor_sandbox", "codex_sandbox"),
-    [
-        ("read-only", "read-only"),
-        ("workspace-write", "workspace-write"),
-        ("none", "danger-full-access"),
-    ],
-)
-def test_codex_exec_translates_sandbox_modes(
-    mocker,
-    conductor_sandbox,
-    codex_sandbox,
-):
+@pytest.mark.parametrize("conductor_sandbox", ["read-only", "workspace-write", "none", "strict"])
+def test_codex_exec_ignores_conductor_sandbox_modes(mocker, conductor_sandbox):
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
     fake = _FakePopen(
         stdout_schedule=[(0, line) for line in CODEX_NDJSON.splitlines(keepends=True)]
@@ -1116,7 +1099,25 @@ def test_codex_exec_translates_sandbox_modes(
 
     assert fake.args is not None
     assert "--sandbox" in fake.args
-    assert fake.args[fake.args.index("--sandbox") + 1] == codex_sandbox
+    assert fake.args[fake.args.index("--sandbox") + 1] == "danger-full-access"
+
+
+def test_codex_exec_inherits_auth_and_home_env(monkeypatch, mocker):
+    monkeypatch.setenv("GH_TOKEN", "gh-token")
+    monkeypatch.setenv("GITHUB_TOKEN", "github-token")
+    monkeypatch.setenv("HOME", "/tmp/conductor-home")
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    fake = _FakePopen(
+        stdout_schedule=[(0, line) for line in CODEX_NDJSON.splitlines(keepends=True)]
+    )
+    _patch_codex_popen(mocker, fake)
+
+    CodexProvider().exec("hi")
+
+    assert fake.env is not None
+    assert fake.env["GH_TOKEN"] == "gh-token"
+    assert fake.env["GITHUB_TOKEN"] == "github-token"
+    assert fake.env["HOME"] == "/tmp/conductor-home"
 
 
 def test_codex_exec_explicit_timeout_is_honored(mocker):
@@ -1612,7 +1613,7 @@ def test_codex_exec_writes_envelope_when_codex_emits_zero_bytes(
     # The prompt body now arrives via stdin (`codex exec -`), not argv, so
     # the envelope surfaces it as a separate `prompt` field. An operator
     # can still correlate the wedge with the request — just not by reading
-    # `command`. argv contains only the flags + sandbox + effort overrides.
+    # `command`. argv contains only the flags and effort overrides.
     assert envelope["prompt"] == "test prompt body"
     assert "-" in envelope["command"]  # stdin sentinel
     assert "test prompt body" not in envelope["command"]

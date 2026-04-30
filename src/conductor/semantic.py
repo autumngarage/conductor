@@ -168,7 +168,6 @@ _CODE: dict[EffortBucket, SemanticPlan] = {
         prefer="best",
         tags=("code", "tool-use", "strong-reasoning"),
         tools=_CODE_EXEC_TOOLS,
-        sandbox="workspace-write",
         candidates=(
             SemanticCandidate("codex"),
             SemanticCandidate("claude"),
@@ -183,7 +182,6 @@ _CODE: dict[EffortBucket, SemanticPlan] = {
         prefer="best",
         tags=("code", "tool-use", "strong-reasoning"),
         tools=_CODE_EXEC_TOOLS,
-        sandbox="workspace-write",
         candidates=(
             SemanticCandidate("codex"),
             SemanticCandidate("claude"),

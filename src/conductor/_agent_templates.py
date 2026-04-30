@@ -93,10 +93,10 @@ Pipe content in as the brief:
 
     cat long-file.md | conductor call --with kimi --brief "Summarize."
 
-Multi-turn agent session with tools (inside a sandbox):
+Multi-turn agent session with tools:
 
     conductor exec --with <provider> --tools Read,Grep,Edit \\
-        --sandbox workspace-write --brief-file /tmp/conductor-brief.md
+        --brief-file /tmp/conductor-brief.md
 
 Get JSON for scripting / piping into other tools:
 
@@ -163,7 +163,7 @@ Run the brief through conductor using the Bash tool:
   agent work), write a structured brief file first and prefer:
 
       conductor exec --with <provider> --tools Read,Grep,Edit \\
-          --sandbox workspace-write --brief-file /tmp/conductor-brief.md
+          --brief-file /tmp/conductor-brief.md
 
 Capture the provider's response. Present it to the user with a brief
 "(from <provider>)" attribution. If conductor returns an error, show
@@ -297,7 +297,6 @@ When invoked:
 2. Run (always include the watchdog flags for unattended runs):
 
        conductor exec --with codex --tools Read,Grep,Glob,Edit,Write,Bash \\
-           --sandbox workspace-write \\
            --max-stall-seconds 600 --timeout 1800 \\
            --brief-file /tmp/conductor-brief.md --json
 
@@ -330,7 +329,7 @@ cannot verify the cause" rather than naming a cause you haven't confirmed.
 If conductor errors:
 - `no provider...` → codex CLI isn't installed or authed. Tell the user
   to run `codex login` after installing, then `conductor init`.
-- `UnsupportedCapability` → the sandbox or tool combo isn't supported;
+- `UnsupportedCapability` → the tool combo isn't supported;
   relay the error so the user can adjust.
 - Runtime errors → pass through verbatim.
 
@@ -482,7 +481,7 @@ Use it when:
 - You want a cheap second opinion (`conductor call --with kimi --brief "..."`).
 - You need fresh web information (`conductor call --with gemini --brief "..."`).
 - You want to stay local / offline (`conductor call --with ollama --brief "..."`).
-- You want a true read-only code review:
+- You want a native code review:
   `conductor review --auto --base origin/main --brief-file /tmp/review.md`.
 - You're not sure which provider fits — let the router pick:
   `conductor call --auto --tags <tag1>,<tag2> --brief "..."`.
@@ -497,7 +496,7 @@ fit.
 For longer running tool-using sessions:
 
     conductor exec --with <provider> --tools Read,Edit,Bash \\
-        --sandbox workspace-write --brief-file /tmp/conductor-brief.md
+        --brief-file /tmp/conductor-brief.md
 
 Discover configured providers: `conductor list`.
 
@@ -514,9 +513,9 @@ delegate but doesn't know which provider is best.
 When invoked:
 
 1. First decide whether the task fits one of the semantic kinds:
-   - `research` — broad reading, synthesis, summarization, current context
-   - `code` — code explanation, implementation, debugging, or engineering
-   - `review` — read-only code review of a diff, merge, PR, or commit
+- `research` — broad reading, synthesis, summarization, current context
+- `code` — code explanation, implementation, debugging, or engineering
+- `review` — code review of a diff, merge, PR, or commit
    - `council` — multiple reasoning models should debate and synthesize
    If it does, prefer:
 
@@ -537,7 +536,7 @@ When invoked:
    - `cheap` — user explicitly asked for a cheap run
    - `offline` — user explicitly asked for local-only
    Pick 1–3 tags; do NOT invent new ones.
-3. If the task is a read-only code review and you are not using `ask`, use
+3. If the task is a code review and you are not using `ask`, use
    native review mode:
 
        conductor review --auto --tags code-review,<tag> --base <base-ref> \\
@@ -566,16 +565,14 @@ When invoked:
 
        conductor exec --auto --tags tool-use,<tag> \\
            --tools Read,Grep,Glob,Edit,Write,Bash \\
-           --sandbox <mode> --brief-file /tmp/conductor-brief.md --json
+           --brief-file /tmp/conductor-brief.md --json
 
    OpenRouter can participate in exec mode through Conductor's local
    tool-call loop; Codex and Claude remain the first choice for high-effort
    coding, with OpenRouter as the remote fallback before local Ollama.
 
-   Sandbox modes are: `read-only` for inspection, `workspace-write` for
-   edits in the workspace, `strict` for the strongest isolation supported
-   by local/HTTP tool loops, and `none` only for text-only work with no
-   tools.
+   The old `--sandbox` flag is deprecated and ignored; exec runs
+   unsandboxed and inherits the parent environment.
 
    If the user explicitly requires local/offline execution, prefer the
    `ollama-offline` subagent. If you must run directly, use `--offline`

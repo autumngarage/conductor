@@ -5,7 +5,6 @@ from conductor.providers.gemini import GeminiProvider
 from conductor.providers.interface import (
     EFFORT_LEVELS,
     QUALITY_TIERS,
-    SANDBOX_MODES,
     TIER_RANK,
     TOOL_NAMES,
     CallResponse,
@@ -26,7 +25,6 @@ from conductor.providers.shell import ShellProvider, ShellProviderSpec
 __all__ = [
     "EFFORT_LEVELS",
     "QUALITY_TIERS",
-    "SANDBOX_MODES",
     "TIER_RANK",
     "TOOL_NAMES",
     "CallResponse",

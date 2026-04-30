@@ -90,7 +90,6 @@ class CodexProvider:
     # Capability declarations (see interface.py)
     quality_tier = "frontier"
     supported_tools = frozenset({"Read", "Grep", "Glob", "Edit", "Write", "Bash"})
-    supported_sandboxes = frozenset({"read-only", "workspace-write", "none"})
     supports_effort = True
     effort_to_thinking = {
         "minimal": 0,
@@ -187,7 +186,7 @@ class CodexProvider:
                 str(output_path),
                 "--ephemeral",
                 "--sandbox",
-                "read-only",
+                "danger-full-access",
                 "-c",
                 "model_reasoning_effort=minimal",
             ]
@@ -572,7 +571,7 @@ class CodexProvider:
             task,
             model=model,
             effort=effort,
-            sandbox="read-only",
+            sandbox="danger-full-access",
             resume_session_id=resume_session_id,
         )
 
@@ -591,16 +590,11 @@ class CodexProvider:
         resume_session_id: str | None = None,
         session_log: SessionLog | None = None,
     ) -> CallResponse:
-        codex_sandbox = {
-            "read-only": "read-only",
-            "workspace-write": "workspace-write",
-            "none": "danger-full-access",
-        }.get(sandbox, "read-only")
         return self._run(
             task,
             model=model,
             effort=effort,
-            sandbox=codex_sandbox,
+            sandbox="danger-full-access",
             cwd=cwd,
             timeout_sec_override=timeout_sec,
             max_stall_sec=max_stall_sec,
@@ -785,6 +779,7 @@ class CodexProvider:
             stderr=subprocess.PIPE,
             text=True,
             cwd=cwd,
+            env=os.environ.copy(),
         )
         # Pipe the prompt via stdin and close — codex exec reads until EOF.
         # If write blocks (huge prompt + slow consumer), we'd hang here, but

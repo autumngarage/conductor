@@ -16,14 +16,13 @@ and the error hierarchy below.
 Capability declarations (v0.2):
   - quality_tier            — "frontier" | "strong" | "standard" | "local"
   - supported_tools         — frozenset of tool names ({Read, Grep, Glob, Edit, Write, Bash})
-  - supported_sandboxes     — frozenset of sandbox modes ({"read-only", "workspace-write", "none"})
   - supports_effort         — whether the provider has a thinking/reasoning dial
   - effort_to_thinking      — mapping from symbolic effort level to expected thinking tokens
   - cost_per_1k_in/out/thinking — for prefer=cheapest scoring
   - typical_p50_ms          — for prefer=fastest scoring
 
-Routing (see `conductor.router`) filters providers by supported_tools and
-supported_sandboxes against the caller's request, then scores by `prefer`.
+Routing (see `conductor.router`) filters providers by supported_tools, then
+scores by `prefer`.
 """
 
 from __future__ import annotations
@@ -54,7 +53,6 @@ TIER_RANK = {name: len(QUALITY_TIERS) - i for i, name in enumerate(QUALITY_TIERS
 # which of these they can drive; the router filters unsupported combinations.
 # --------------------------------------------------------------------------- #
 TOOL_NAMES = frozenset({"Read", "Grep", "Glob", "Edit", "Write", "Bash"})
-SANDBOX_MODES = frozenset({"read-only", "workspace-write", "none"})
 
 
 class ProviderError(Exception):
@@ -141,7 +139,6 @@ class Provider(Protocol):
     # --- capability declarations (hard filters + scoring dimensions) ------- #
     quality_tier: ClassVar[str]
     supported_tools: ClassVar[frozenset[str]]
-    supported_sandboxes: ClassVar[frozenset[str]]
     supports_effort: ClassVar[bool]
     effort_to_thinking: ClassVar[dict[str, int]]
     cost_per_1k_in: ClassVar[float]
@@ -208,8 +205,8 @@ class Provider(Protocol):
         may accept and ignore the value for API parity.
 
         Raises UnsupportedCapability if the provider cannot drive the
-        requested tools or sandbox, or cannot resume sessions when one
-        is requested. Raises ProviderError on runtime failure.
+        requested tools, or cannot resume sessions when one is requested.
+        Raises ProviderError on runtime failure.
         """
 
 

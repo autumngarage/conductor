@@ -9,7 +9,7 @@
 
 ## Context
 
-Outrider had a production incident Apr 25–26 (research pipeline went silent for ~8 days; runner.py was missing entirely, agent loops never invoked). The fix path was open-ended at the start, mechanical by the end. Across the day we dispatched five tasks via the `codex-coding-agent` subagent (which calls `conductor exec --with codex --tools Read,Grep,Glob,Edit,Write,Bash --sandbox workspace-write …` under the hood):
+Outrider had a production incident Apr 25–26 (research pipeline went silent for ~8 days; runner.py was missing entirely, agent loops never invoked). The fix path was open-ended at the start, mechanical by the end. Across the day we dispatched five tasks via the `codex-coding-agent` subagent (which calls `conductor exec --with codex --tools Read,Grep,Glob,Edit,Write,Bash …` under the hood):
 
 | # | Task | Wall time | Outcome |
 |---|------|-----------|---------|
@@ -40,7 +40,7 @@ All three were killed exactly at 600s with zero output. **The watchdog from #36 
 | `conductor smoke codex` | ✓ |
 | `conductor call --with codex --task "say hi"` | ✓ (6.9s, 5 tokens) |
 | `conductor call --with claude --task "Respond with just: ok"` | ✓ (~1s) |
-| `conductor exec --with codex --tools … --sandbox workspace-write --task "<real task>"` | ✗ — wedge before first byte, 3 for 3 |
+| `conductor exec --with codex --tools … --task "<real task>"` | ✗ — wedge before first byte, 3 for 3 |
 
 The single-turn path is healthy. The agent-loop bootstrap inside codex is what's wedging — model warmup, sandbox session init, or first tool registration. **Whatever it is, it produces no output on stdout or stderr** (we'd have seen it in the subagent's relay, and the new `[conductor] codex session_id=…` line from #38 didn't appear either, which suggests codex isn't even emitting the `session.created` NDJSON event that #38 hooks).
 
@@ -65,7 +65,7 @@ This is worth verifying. If our hypothesis is right, the coverage gap is "codex 
 **Subagent invocation pattern (from `~/.claude/agents/codex-coding-agent.md` v0.5.1):**
 ```
 conductor exec --with codex --tools Read,Grep,Glob,Edit,Write,Bash \
-    --sandbox workspace-write --task "<prompt>" --json
+    --task "<prompt>" --json
 ```
 Note: the v0.5.1 subagent template doesn't include `--max-stall-seconds` by default. We added it via prompt-time instruction. **A v0.5.1 template update to include `--max-stall-seconds 600` for unattended runs would close that gap.** Workaround memory entry saved on the consumer side, but template-side is the right fix.
 

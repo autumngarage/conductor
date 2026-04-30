@@ -150,16 +150,13 @@ Deferred (see `~/Repos/autumn-garage/.cortex/plans/conductor-bootstrap.md` for t
 
 ## Delegating to codex via `conductor exec`
 
-When a parent agent (like Claude Code) hands a feature build to codex via `conductor exec --with codex --sandbox workspace-write`, the codex sandbox blocks two things by default that matter for shipping a PR:
+When a parent agent (like Claude Code) hands a feature build to codex via `conductor exec --with codex`, Conductor now runs the child unsandboxed end-to-end. The parent and child share the operator's environment: git auth, `gh` auth, network egress, `HOME`, and `.git/` writes are all available to the child process.
 
-- **`.git/` is not writable.** `git checkout -b`, `git commit`, `git push` all fail with `Operation not permitted`.
-- **No network.** Even with `.git/` open, `git push` would fail because the sandbox blocks outbound network access in `workspace-write` mode.
+The old `--sandbox` flag is still parseable for compatibility, but it is deprecated and ignored. Passing any value emits:
 
-This means **codex cannot run the full branch → commit → push → open-pr.sh workflow itself.** Don't put those steps in a brief sent to codex — it'll waste minutes hitting the boundary, then report failure.
+`[conductor] --sandbox is deprecated and ignored; conductor exec now runs unsandboxed.`
 
-**The pattern that works:** scope the codex brief to *code* (write files, run tests, validate). The parent agent picks up afterward and does the git work on the host side: `git status` to see what changed, `git checkout -b`, stage explicit paths, commit, push, run `bash scripts/open-pr.sh --auto-merge`. PR #57 (OpenRouter adapter) shipped this way after the parent re-did the brief mid-flight to handle git on the outside.
-
-If you want codex to do everything end-to-end including git, you'd need to open both sandbox boundaries (`--add-dir <repo>/.git` plus a network whitelist), which is a real safety escalation worth a deliberate design decision rather than a default.
+Because the child has the same ambient authority as the parent, prompts should still be explicit about ownership: whether the child may edit files, run tests, use network, or perform git operations. For PR workflows in this repo, the parent agent still owns commit, push, and PR creation unless the user explicitly delegates those steps.
 
 <!-- conductor:begin v0.8.2 -->
 ## Conductor delegation

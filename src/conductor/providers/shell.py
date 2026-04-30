@@ -87,7 +87,6 @@ class ShellProvider:
 
     # Capability declarations that are the same for every shell provider.
     supported_tools: frozenset[str] = frozenset()
-    supported_sandboxes: frozenset[str] = frozenset({"none"})
     supports_effort: bool = False
     effort_to_thinking: dict[str, int] = {}  # noqa: RUF012
     cost_per_1k_thinking: float = 0.0
@@ -215,12 +214,7 @@ class ShellProvider:
             raise UnsupportedCapability(
                 f"custom provider `{self._spec.name}` is stateless — no session to resume."
             )
-        if sandbox not in ("", "none"):
-            raise UnsupportedCapability(
-                f"custom provider `{self._spec.name}` does not support sandbox={sandbox!r}. "
-                "Router should filter on --sandbox before invocation."
-            )
-        # No tools, no sandbox → single-turn fallback to call().
+        # No Conductor-managed tools; custom commands run their own process.
         return self._invoke(task, effort=effort, timeout_override=timeout_sec, cwd=cwd)
 
     # --- subprocess plumbing ---------------------------------------------- #

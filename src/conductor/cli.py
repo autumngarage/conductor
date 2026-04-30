@@ -3,7 +3,7 @@
 v0.2 surface (call/exec):
   conductor call --with <id> [--effort max] --brief "..."
   conductor call --auto [--tags a,b] [--prefer best] [--effort max] --brief "..."
-  conductor exec --auto [--tools Read,Grep,Edit] [--sandbox read-only] --brief-file PATH
+  conductor exec --auto [--tools Read,Grep,Edit] --brief-file PATH
 
 v0.1 surface (unchanged):
   conductor list [--json]
@@ -87,7 +87,9 @@ from conductor.session_log import (
 from conductor.wizard import run_init_wizard
 
 VALID_TOOLS = ("Read", "Grep", "Glob", "Edit", "Write", "Bash")
-VALID_SANDBOXES = ("read-only", "workspace-write", "strict", "none")
+SANDBOX_DEPRECATION_WARNING = (
+    "[conductor] --sandbox is deprecated and ignored; conductor exec now runs unsandboxed."
+)
 VALID_EFFORT_LEVELS = ("minimal", "low", "medium", "high", "max")
 PROFILE_PRECEDENCE_TEXT = (
     "Resolution order: profile defaults < CONDUCTOR_* env vars < explicit CLI flags."
@@ -258,17 +260,12 @@ def _validate_tools(raw: str | None) -> frozenset[str]:
     return frozenset(tools)
 
 
-def _validate_sandbox(raw: str | None) -> str:
+def _validate_sandbox(raw: str | None, *, warn: bool = False) -> str:
     if raw is None:
         return "none"
-    if raw not in VALID_SANDBOXES:
-        hint = _closest(raw, VALID_SANDBOXES)
-        raise click.UsageError(
-            f"--sandbox={raw!r} is not valid. "
-            f"Use one of: {list(VALID_SANDBOXES)}. "
-            f"Did you mean '{hint}'?"
-        )
-    return raw
+    if warn:
+        click.echo(SANDBOX_DEPRECATION_WARNING, err=True)
+    return "none"
 
 
 def _validate_prefer(raw: str | None) -> str:
@@ -688,15 +685,15 @@ def _invoke_with_fallback(
         if _ollama_index(candidates) is None:
             # Offline mode promises local routing. If ollama is absent from
             # the ranking (excluded, unconfigured, or filtered out by
-            # tools/sandbox), silently cascading to a remote provider would
+            # tools), silently cascading to a remote provider would
             # violate that promise — and the remote will almost certainly
             # fail with a network error anyway. Surface the contradiction
             # up front instead.
             raise ProviderConfigError(
                 "offline mode is active but ollama is not in the routing "
                 "candidates (excluded, not configured, or filtered out by "
-                "--tools/--sandbox). Start ollama (`ollama serve`), relax "
-                "the filters, or clear the flag with --no-offline."
+                "--tools). Start ollama (`ollama serve`), relax the filters, "
+                "or clear the flag with --no-offline."
             )
         _reorder_ollama_first(candidates)
         if not silent:
@@ -1242,10 +1239,9 @@ def _format_route_log_line(decision: RouteDecision) -> str:
     effort_str = (
         decision.effort if isinstance(decision.effort, str) else f"{decision.effort}tok"
     )
-    sandbox_note = f" · sandbox={decision.sandbox}" if decision.sandbox != "none" else ""
     return (
         f"[conductor] {decision.prefer} (effort={effort_str}) → {decision.provider} "
-        f"(tier: {decision.tier} · matched: {tags_matched}){sandbox_note}"
+        f"(tier: {decision.tier} · matched: {tags_matched})"
     )
 
 
@@ -1303,7 +1299,7 @@ def _format_route_ranking(decision: RouteDecision) -> list[str]:
         )
     # Don't duplicate unconfigured providers in the skipped list — they
     # already appear (with scores) in the shadow block above. Other skip
-    # reasons (excluded, missing tools, sandbox mismatch, health) still show.
+    # reasons (excluded, missing tools, health) still show.
     for name, reason in decision.candidates_skipped:
         if name in shadow_names:
             continue
@@ -2352,7 +2348,7 @@ def review(
     "--auto",
     is_flag=True,
     default=False,
-    help="Let the router pick based on --tags, --prefer, --tools, --sandbox.",
+    help="Let the router pick based on --tags, --prefer, and --tools.",
 )
 @click.option("--tags", default=None, help="Comma-separated task tags.")
 @click.option(
@@ -2373,7 +2369,7 @@ def review(
 @click.option(
     "--sandbox",
     default=None,
-    help=f"Sandbox mode: {' | '.join(VALID_SANDBOXES)} (default: none).",
+    help="Deprecated and ignored; exec always runs unsandboxed.",
 )
 @click.option(
     "--exclude",
@@ -2552,7 +2548,7 @@ def exec_cmd(
     )
     body = brief_input.body
     tools_set = _validate_tools(tools)
-    sandbox_value = _validate_sandbox(sandbox)
+    sandbox_value = _validate_sandbox(sandbox, warn=sandbox is not None)
     effort_value = _parse_effort(effort)
     max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
 
@@ -2757,7 +2753,7 @@ def exec_cmd(
     help=f"Thinking depth: {' | '.join(VALID_EFFORT_LEVELS)} or integer budget.",
 )
 @click.option("--tools", default=None, help="Comma-separated tool set.")
-@click.option("--sandbox", default=None, help=f"Sandbox: {' | '.join(VALID_SANDBOXES)}.")
+@click.option("--sandbox", default=None, help="Deprecated and ignored.")
 @click.option("--exclude", default=None, help="Comma-separated providers to exclude.")
 @click.option("--json", "as_json", is_flag=True, default=False)
 def route(
@@ -2775,7 +2771,7 @@ def route(
     before a real `call` or `exec`.
     """
     tools_set = _validate_tools(tools)
-    sandbox_value = _validate_sandbox(sandbox)
+    sandbox_value = _validate_sandbox(sandbox, warn=sandbox is not None)
     effort_value = _parse_effort(effort)
 
     try:
@@ -2810,9 +2806,6 @@ def route(
         click.echo(f"  matched tags: {','.join(decision.matched_tags)}")
     if decision.tools_requested:
         click.echo(f"  tools requested: {','.join(decision.tools_requested)}")
-    if decision.sandbox != "none":
-        click.echo(f"  sandbox: {decision.sandbox}")
-
     click.echo("")
     click.echo("Full ranking:")
     for line in _format_route_ranking(decision):

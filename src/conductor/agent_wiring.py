@@ -676,7 +676,7 @@ def wire_claude_code(
             "description": (
                 "Use for heavy multi-file coding tasks where a tool-using agent "
                 "loop is expected. Delegates to OpenAI Codex via `conductor exec "
-                "--with codex` in a workspace-write sandbox."
+                "--with codex`."
             ),
             "tools": "Bash",
         },

@@ -427,11 +427,6 @@ def test_exec_with_tools_runs_openai_tool_loop(configured, tmp_path):
     }
 
 
-def test_exec_with_tools_requires_non_none_sandbox(configured):
-    with pytest.raises(UnsupportedCapability, match="requires at least sandbox"):
-        OpenRouterProvider().exec("hi", tools=frozenset({"Read"}), sandbox="none")
-
-
 def test_exec_with_tools_rejects_model_and_models_together(configured):
     with pytest.raises(UnsupportedCapability, match="both `model` and `models`"):
         OpenRouterProvider().exec(

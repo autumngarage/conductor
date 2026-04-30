@@ -67,9 +67,6 @@ class OpenRouterProvider:
     supported_tools: frozenset[str] = frozenset(
         {"Read", "Grep", "Glob", "Edit", "Write", "Bash"}
     )
-    supported_sandboxes: frozenset[str] = frozenset(
-        {"none", "read-only", "workspace-write", "strict"}
-    )
     supports_effort = True
     effort_to_thinking = {
         "minimal": 0,
@@ -344,16 +341,7 @@ class OpenRouterProvider:
                 "openrouter has no session model — each OpenRouter API call is "
                 "stateless. To replay context, prepend the prior turns to `task`."
             )
-        if sandbox == "":
-            sandbox = "none"
-
         if not tools:
-            if sandbox != "none":
-                raise UnsupportedCapability(
-                    f"{self.name}.exec() sandbox={sandbox!r} is not meaningful "
-                    "without tools. Use sandbox='none' for a text-only exec, "
-                    "or pass --tools with a supported tool set."
-                )
             return self.call(
                 task,
                 model=model,
@@ -371,15 +359,6 @@ class OpenRouterProvider:
                 f"{self.name} does not support tools {sorted(unknown)} "
                 f"(supported: {sorted(self.supported_tools)})."
             )
-        if sandbox not in self.supported_sandboxes:
-            raise UnsupportedCapability(
-                f"{self.name} does not support sandbox={sandbox!r} "
-                f"(supported: {sorted(self.supported_sandboxes)})."
-            )
-        if sandbox == "none":
-            raise UnsupportedCapability(
-                "openrouter.exec() with tools requires at least sandbox='read-only'."
-            )
 
         thinking_budget = resolve_effort_tokens(effort, self.effort_to_thinking)
         effective_task_tags = tuple(task_tags or ())
@@ -396,7 +375,7 @@ class OpenRouterProvider:
         )
 
         workdir = Path(cwd) if cwd else Path.cwd()
-        executor = ToolExecutor(cwd=workdir, sandbox=sandbox)
+        executor = ToolExecutor(cwd=workdir)
         tool_specs = build_tool_specs(tools)
 
         messages: list[dict] = [{"role": "user", "content": task}]

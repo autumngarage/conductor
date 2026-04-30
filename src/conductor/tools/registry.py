@@ -2,9 +2,9 @@
 
 Each tool is a ``Tool`` implementation with a name, JSON-Schema-described
 parameters, and an ``execute`` method that produces a string result. The
-``ToolExecutor`` dispatches by name, enforces the sandbox, and wraps all
-errors as ``ToolExecutionError`` (which tool-use loops feed back to the
-model as the tool's ``role: tool`` response rather than aborting).
+``ToolExecutor`` dispatches by name and wraps all errors as
+``ToolExecutionError`` (which tool-use loops feed back to the model as the
+tool's ``role: tool`` response rather than aborting).
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
-import resource
 import subprocess
 from pathlib import Path
 from typing import Any, Protocol
@@ -22,20 +21,6 @@ from typing import Any, Protocol
 _BASH_DEFAULT_TIMEOUT_SEC = 60
 _BASH_MAX_TIMEOUT_SEC = 600
 _BASH_MAX_OUTPUT_BYTES = 256_000
-
-# In `strict` sandbox, BashTool adds POSIX rlimits on top of cwd-pinning:
-# CPU seconds, address space, open files, and per-file write size. macOS
-# silently ignores some of these on newer kernels; treat as best-effort,
-# not a real security boundary. The primary protection remains path
-# validation + the shell's cwd being locked to the workspace root.
-_STRICT_RLIMITS: tuple[tuple[int, tuple[int, int]], ...] = (
-    (resource.RLIMIT_CPU, (60, 60)),
-    (resource.RLIMIT_AS, (1_073_741_824, 1_073_741_824)),  # 1 GiB
-    (resource.RLIMIT_NOFILE, (256, 256)),
-    (resource.RLIMIT_FSIZE, (67_108_864, 67_108_864)),  # 64 MiB
-)
-_STRICT_BASH_DEFAULT_TIMEOUT_SEC = 30
-_STRICT_BASH_MAX_OUTPUT_BYTES = 128_000
 
 # --------------------------------------------------------------------------- #
 # Public error types
@@ -66,19 +51,8 @@ class Tool(Protocol):
     description: str
     parameters_schema: dict
 
-    def requires_sandbox(self) -> str:
-        """Minimum sandbox level this tool needs.
-
-        Returns one of: ``"read-only"`` (tools that only read the
-        filesystem or observe), ``"workspace-write"`` (tools that mutate
-        files or run commands). The executor compares against the
-        request's sandbox and refuses mismatches.
-        """
-
-    def execute(self, params: dict, *, cwd: Path, sandbox: str = "workspace-write") -> str:
-        """Run the tool. ``sandbox`` lets a tool tighten limits under
-        ``strict`` (e.g. BashTool uses smaller timeouts + rlimits). Tools
-        that don't need to differentiate can ignore the arg."""
+    def execute(self, params: dict, *, cwd: Path) -> str:
+        """Run the tool."""
 
 
 # --------------------------------------------------------------------------- #
@@ -123,7 +97,7 @@ def _resolve_in_cwd(raw: str, cwd: Path) -> Path:
 
 
 # --------------------------------------------------------------------------- #
-# Tool implementations — read-only
+# Tool implementations
 # --------------------------------------------------------------------------- #
 
 
@@ -135,10 +109,7 @@ class ReadTool:
     )
     parameters_schema: dict  # assigned below
 
-    def requires_sandbox(self) -> str:
-        return "read-only"
-
-    def execute(self, params: dict, *, cwd: Path, sandbox: str = "read-only", **_) -> str:
+    def execute(self, params: dict, *, cwd: Path, **_) -> str:
         path = _require_str(params, "path")
         max_bytes_raw = params.get("max_bytes")
         max_bytes = int(max_bytes_raw) if max_bytes_raw is not None else 64_000
@@ -196,10 +167,7 @@ class GrepTool:
     )
     parameters_schema: dict  # assigned below
 
-    def requires_sandbox(self) -> str:
-        return "read-only"
-
-    def execute(self, params: dict, *, cwd: Path, sandbox: str = "workspace-write", **_) -> str:
+    def execute(self, params: dict, *, cwd: Path, **_) -> str:
         pattern = _require_str(params, "pattern")
         path = params.get("path") or "."
         max_results = int(params.get("max_results") or 100)
@@ -294,10 +262,7 @@ class GlobTool:
     )
     parameters_schema: dict  # assigned below
 
-    def requires_sandbox(self) -> str:
-        return "read-only"
-
-    def execute(self, params: dict, *, cwd: Path, sandbox: str = "workspace-write", **_) -> str:
+    def execute(self, params: dict, *, cwd: Path, **_) -> str:
         pattern = _require_str(params, "pattern")
         path = params.get("path") or "."
         max_results = int(params.get("max_results") or 200)
@@ -350,11 +315,6 @@ GlobTool.parameters_schema = {
 }
 
 
-# --------------------------------------------------------------------------- #
-# Tool implementations — workspace-write
-# --------------------------------------------------------------------------- #
-
-
 class EditTool:
     name = "Edit"
     description = (
@@ -364,10 +324,7 @@ class EditTool:
     )
     parameters_schema: dict  # assigned below
 
-    def requires_sandbox(self) -> str:
-        return "workspace-write"
-
-    def execute(self, params: dict, *, cwd: Path, sandbox: str = "workspace-write", **_) -> str:
+    def execute(self, params: dict, *, cwd: Path, **_) -> str:
         path = _require_str(params, "path")
         old_string = params.get("old_string")
         new_string = params.get("new_string")
@@ -450,10 +407,7 @@ class WriteTool:
     )
     parameters_schema: dict  # assigned below
 
-    def requires_sandbox(self) -> str:
-        return "workspace-write"
-
-    def execute(self, params: dict, *, cwd: Path, sandbox: str = "workspace-write", **_) -> str:
+    def execute(self, params: dict, *, cwd: Path, **_) -> str:
         path = _require_str(params, "path")
         content = params.get("content")
         if not isinstance(content, str):
@@ -494,29 +448,15 @@ class BashTool:
     )
     parameters_schema: dict  # assigned below
 
-    def requires_sandbox(self) -> str:
-        return "workspace-write"
-
-    def execute(self, params: dict, *, cwd: Path, sandbox: str = "workspace-write", **_) -> str:
+    def execute(self, params: dict, *, cwd: Path, **_) -> str:
         command = _require_str(params, "command")
-        strict = sandbox == "strict"
-        default_timeout = (
-            _STRICT_BASH_DEFAULT_TIMEOUT_SEC if strict else _BASH_DEFAULT_TIMEOUT_SEC
-        )
-        max_output = (
-            _STRICT_BASH_MAX_OUTPUT_BYTES if strict else _BASH_MAX_OUTPUT_BYTES
-        )
         timeout_raw = params.get("timeout_sec")
-        timeout = int(timeout_raw) if timeout_raw is not None else default_timeout
+        timeout = int(timeout_raw) if timeout_raw is not None else _BASH_DEFAULT_TIMEOUT_SEC
         if timeout <= 0 or timeout > _BASH_MAX_TIMEOUT_SEC:
             raise ToolSchemaError(
                 f"timeout_sec must be 1..{_BASH_MAX_TIMEOUT_SEC} (got {timeout})."
             )
-        # Clamp strict to its own ceiling even if the model requests more.
-        if strict and timeout > _STRICT_BASH_DEFAULT_TIMEOUT_SEC * 2:
-            timeout = _STRICT_BASH_DEFAULT_TIMEOUT_SEC * 2
 
-        preexec = _apply_strict_rlimits if strict else None
         try:
             completed = subprocess.run(  # noqa: S602 — shell=True is intentional; tool exists to run shell
                 command,
@@ -525,7 +465,6 @@ class BashTool:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                preexec_fn=preexec,
             )
         except subprocess.TimeoutExpired as e:
             # text=True on the run() call ensures e.stdout/e.stderr are str,
@@ -543,11 +482,10 @@ class BashTool:
                 if isinstance(raw_err, bytes)
                 else raw_err
             )
-            stdout = stdout_str[: max_output // 2]
-            stderr = stderr_str[: max_output // 2]
-            tag = "STRICT TIMEOUT" if strict else "TIMEOUT"
+            stdout = stdout_str[: _BASH_MAX_OUTPUT_BYTES // 2]
+            stderr = stderr_str[: _BASH_MAX_OUTPUT_BYTES // 2]
             return (
-                f"{tag} after {timeout}s. "
+                f"TIMEOUT after {timeout}s. "
                 f"stdout (partial):\n{stdout}\n"
                 f"stderr (partial):\n{stderr}"
             )
@@ -556,13 +494,17 @@ class BashTool:
 
         stdout = completed.stdout or ""
         stderr = completed.stderr or ""
-        if len(stdout) > max_output:
-            stdout = stdout[:max_output] + f"\n[truncated at {max_output} bytes]"
-        if len(stderr) > max_output:
-            stderr = stderr[:max_output] + f"\n[truncated at {max_output} bytes]"
+        if len(stdout) > _BASH_MAX_OUTPUT_BYTES:
+            stdout = (
+                stdout[:_BASH_MAX_OUTPUT_BYTES]
+                + f"\n[truncated at {_BASH_MAX_OUTPUT_BYTES} bytes]"
+            )
+        if len(stderr) > _BASH_MAX_OUTPUT_BYTES:
+            stderr = (
+                stderr[:_BASH_MAX_OUTPUT_BYTES]
+                + f"\n[truncated at {_BASH_MAX_OUTPUT_BYTES} bytes]"
+            )
         header = f"exit={completed.returncode}"
-        if strict:
-            header += " [strict sandbox]"
         return (
             f"{header}\n"
             f"--- stdout ---\n{stdout}"
@@ -642,41 +584,31 @@ def build_tool_specs(names: frozenset[str]) -> list[dict[str, Any]]:
 
 
 class ToolExecutor:
-    """Dispatches tool calls against a fixed cwd + sandbox contract.
+    """Dispatches tool calls against a fixed cwd.
 
     Instantiated per exec() call in the HTTP tool-use loop. All
-    filesystem tools resolve paths against the given cwd; sandbox
-    rejects tools whose ``requires_sandbox`` doesn't match.
+    filesystem tools resolve paths against the given cwd.
     """
 
-    def __init__(self, *, cwd: Path, sandbox: str):
+    def __init__(self, *, cwd: Path):
         self._cwd = Path(cwd).resolve()
         if not self._cwd.exists() or not self._cwd.is_dir():
             raise ValueError(f"cwd {cwd} is not an existing directory")
-        self._sandbox = sandbox
 
     def run(self, name: str, params: dict) -> str:
         """Execute a named tool call. Returns the tool's result string.
 
-        Raises ``ToolExecutionError`` for sandbox / path / execution
-        failures. The caller (tool-use loop) should catch these and
-        feed the message back to the model as the tool's response.
+        Raises ``ToolExecutionError`` for path / execution failures. The
+        caller (tool-use loop) should catch these and feed the message back
+        to the model as the tool's response.
         """
         try:
             tool = get_tool(name)
         except KeyError as e:
             raise ToolExecutionError(str(e)) from e
 
-        required = tool.requires_sandbox()
-        if not _sandbox_satisfies(self._sandbox, required):
-            raise ToolExecutionError(
-                f"tool `{name}` requires sandbox `{required}` but the request "
-                f"provided `{self._sandbox}`. Ask for a less restrictive sandbox "
-                f"or a tool that fits."
-            )
-
         try:
-            return tool.execute(params, cwd=self._cwd, sandbox=self._sandbox)
+            return tool.execute(params, cwd=self._cwd)
         except ToolExecutionError:
             raise
         except ToolSchemaError as e:
@@ -719,36 +651,3 @@ def _require_str(params: dict, field: str) -> str:
             f"parameter `{field}` is required and must be a non-empty string."
         )
     return value
-
-
-def _sandbox_satisfies(provided: str, required: str) -> bool:
-    """True when the provided sandbox is at least as permissive as required.
-
-    Hierarchy: ``none`` (no tools permitted) < ``read-only`` (observe) <
-    ``workspace-write`` (mutate). ``strict`` is workspace-write plus
-    rlimits on BashTool — it satisfies the same tools as
-    ``workspace-write`` because all six still work, just with tighter
-    runtime constraints on the shell.
-    """
-    rank = {"none": 0, "read-only": 1, "workspace-write": 2, "strict": 2}
-    if provided not in rank:
-        return False
-    if required not in rank:
-        return False
-    return rank[provided] >= rank[required]
-
-
-def _apply_strict_rlimits() -> None:  # pragma: no cover — runs post-fork
-    """Apply POSIX rlimits in the child process before ``execve``.
-
-    Passed as ``preexec_fn`` to ``subprocess.run``. Silently skips
-    limits the kernel refuses — macOS ignores ``RLIMIT_AS`` on Apple
-    Silicon, for example. This is best-effort: the real defense is
-    cwd-pinning + path validation, not rlimits.
-    """
-    for kind, (soft, hard) in _STRICT_RLIMITS:
-        try:
-            resource.setrlimit(kind, (soft, hard))
-        except (ValueError, OSError):
-            # Kernel refused; we tried.
-            continue

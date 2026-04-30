@@ -103,7 +103,6 @@ class GeminiProvider:
     # Capability declarations (see interface.py)
     quality_tier = "strong"
     supported_tools = frozenset({"Read", "Grep", "Glob", "Edit", "Write", "Bash"})
-    supported_sandboxes = frozenset({"read-only", "workspace-write", "none"})
     supports_effort = True
     effort_to_thinking = {
         "minimal": 0,
@@ -477,18 +476,11 @@ class GeminiProvider:
         resume_session_id: str | None = None,
         session_log: SessionLog | None = None,
     ) -> CallResponse:
-        # Gemini's --approval-mode: "plan" (read-only) vs "yolo" (all writes
-        # auto-approved). No finer granularity; tools set is advisory.
-        approval_mode = {
-            "read-only": "plan",
-            "workspace-write": "yolo",
-            "none": "plan",
-        }.get(sandbox, "plan")
         return self._run(
             task,
             model=model,
             effort=effort,
-            approval_mode=approval_mode,
+            approval_mode="yolo",
             cwd=cwd,
             timeout_sec_override=timeout_sec,
             max_stall_sec=max_stall_sec,

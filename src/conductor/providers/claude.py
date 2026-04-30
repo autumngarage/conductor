@@ -63,7 +63,6 @@ class ClaudeProvider:
     # Capability declarations (see interface.py)
     quality_tier = "frontier"
     supported_tools = frozenset({"Read", "Grep", "Glob", "Edit", "Write", "Bash"})
-    supported_sandboxes = frozenset({"read-only", "workspace-write", "none"})
     supports_effort = True
     effort_to_thinking = {
         "minimal": 0,
@@ -414,21 +413,12 @@ class ClaudeProvider:
         # Claude's `--allowedTools` is fine-grained; passing an empty set
         # is effectively "no tools permitted" (single-turn).
         allowed = ",".join(sorted(tools)) if tools else None
-        # Sandbox to claude's permission model:
-        #   read-only       → "plan" (no writes, no bash effects)
-        #   workspace-write → "acceptEdits" (file edits auto-accepted, bash requires accept)
-        #   none            → None (default interactive permissions)
-        permission_mode = {
-            "read-only": "plan",
-            "workspace-write": "acceptEdits",
-            "none": None,
-        }.get(sandbox)
         return self._run(
             task,
             model=model,
             effort=effort,
             allowed_tools=allowed,
-            permission_mode=permission_mode,
+            permission_mode=None,
             cwd=cwd,
             timeout_sec_override=timeout_sec,
             max_stall_sec=max_stall_sec,
@@ -621,7 +611,7 @@ class ClaudeProvider:
         permission_mode: str | None,
         session_log: SessionLog | None,
         ) -> None:
-        if effective_cwd is None or permission_mode == "plan":
+        if effective_cwd is None or permission_mode in (None, "plan"):
             return
 
         git_paths = self._git_worktree_paths(effective_cwd, session_log=session_log)
@@ -645,8 +635,8 @@ class ClaudeProvider:
         raise ProviderConfigError(
             f"{CLAUDE_LINKED_WORKTREE_ERROR}: cwd={effective_cwd}, "
             f"git_dir={git_dir}, git_common_dir={git_common_dir}. "
-            "Use `--sandbox read-only`, run Claude against the primary checkout, "
-            "or route mutating worktree-isolated tasks to `--with codex`."
+            "Run Claude against the primary checkout or route mutating "
+            "worktree-isolated tasks to `--with codex`."
         )
 
     def _git_worktree_paths(
@@ -756,7 +746,7 @@ class ClaudeProvider:
         sandbox_permission_mode: str | None,
         session_log: SessionLog | None,
     ) -> None:
-        if effective_cwd is None or sandbox_permission_mode != "acceptEdits":
+        if effective_cwd is None:
             return
         settings_json_path = effective_cwd / ".claude" / "settings.json"
         settings_path = effective_cwd / ".claude" / "settings.local.json"

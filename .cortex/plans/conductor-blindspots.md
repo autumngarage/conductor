@@ -11,7 +11,7 @@ Cites: doctrine/0002-audit-weak-points, doctrine/0004-engineering-principles, .c
 
 # Conductor Blindspot Remediation — Top 3
 
-> **Three load-bearing gaps surfaced by audit and a Codex review of the first-pass plan, scoped into shippable slices: subprocess-adapter live-path drift, freshly-shipped agent-wiring prompt drift, and sandbox security. Each is independent, each ships as its own PR, and each replaces an unverified assumption in conductor's posture with a measurable signal.**
+> **Three load-bearing gaps surfaced by audit and a Codex review of the first-pass plan, scoped into shippable slices: subprocess-adapter live-path drift, freshly-shipped agent-wiring prompt drift, and exec authority. Each is independent, each ships as its own PR, and each replaces an unverified assumption in conductor's posture with a measurable signal.**
 
 ## Why (grounding)
 
@@ -21,7 +21,7 @@ The selection criteria, applied uniformly:
 
 - **Subprocess-adapter live smoke** — highest silent-breakage risk: `claude` / `codex` / `gemini` CLIs are owned by third parties whose argument surfaces drift; mocked tests prove our wrapper, not the live call.
 - **Subagent prompt-drift testing** — highest *recent-shipping* risk: three slices of agent wiring landed in the past two weeks (v0.4.0/4.1/4.2) and have no automated check that a real LLM, given each subagent prompt, actually invokes conductor with the right flags. As discussed in journal 2026-04-24-llm-as-router-client, the LLM-above-conductor is the de-facto semantic router; if the prompts don't enumerate the flag surface, routing quality silently degrades.
-- **Sandbox security** — highest single-incident risk: `exec` runs LLM-chosen `Bash` under `workspace-write` / `strict`, and we have no formal sandbox contract — let alone an adversarial test suite — proving the sandbox holds.
+- **Exec authority** — highest single-incident risk: `exec` runs LLM-chosen `Bash` with the operator's environment. The old sandbox contract is removed, so review focus moves to explicit delegation scope, path validation for built-in tools, and recoverability for destructive actions.
 
 Cost observability was the first-pass third slice. Codex's review noted it adds persisted derived state that needs explicit provenance and visible failure handling per `Derive, don't persist` and `No silent failures`, and that the absence of those in the draft was a band-aid pattern carried forward from `offline_mode.py`. The slice is deferred to its own follow-up plan rather than shipped under this remediation banner with the principle gaps unresolved.
 
@@ -45,7 +45,7 @@ The agent-wiring slices (v0.4.0–v0.4.2) write `_agent_templates.py`-defined sy
 
 The slice ships two layers:
 
-**Layer 1 (snapshot tests, must-have).** For each subagent template in `_agent_templates.py`, assert it mentions the flags and concepts the agent is supposed to know about. Concrete checks: `ollama-offline` mentions `--offline`; `kimi-long-context` mentions `--effort` and `--tags long-context`; `conductor-auto` mentions every prefer mode and the four sandbox modes. The list of "must-mention" tokens lives in a single `expected_template_coverage` dict so adding a new flag automatically surfaces which prompts need updating.
+**Layer 1 (snapshot tests, must-have).** For each subagent template in `_agent_templates.py`, assert it mentions the flags and concepts the agent is supposed to know about. Concrete checks: `ollama-offline` mentions `--offline`; `kimi-long-context` mentions `--effort` and `--tags long-context`; `conductor-auto` mentions every prefer mode and tool-use path. The list of "must-mention" tokens lives in a single `expected_template_coverage` dict so adding a new flag automatically surfaces which prompts need updating.
 
 **Layer 2 (instruction-following test, stretch).** Run a real LLM (Haiku via the Anthropic API, or Kimi via Cloudflare to keep cost low) against a fixture of 10–20 sample tasks and assert it produces a sensible `conductor` invocation. Gate on `RUN_LIVE_LLM=1` so it doesn't run in default CI. Out of scope for v1 of this slice if Layer 1 is bigger than expected; tracked as Phase 2.
 
@@ -55,13 +55,13 @@ Rough size: small-medium. ~200 lines for Layer 1 + tests; Layer 2 sized after La
 
 ### Slice C — Sandbox semantics + adversarial audit + guardrail tests
 
-**Phase 0 (formal sandbox contract).** Codex review caught that an attack catalog without a written contract is just empirical-behavior testing. Add `.cortex/doctrine/0007-sandbox-semantics.md` (or `docs/sandbox.md` if doctrine isn't the right home) defining for each `--sandbox` mode (`none`, `read-only`, `workspace-write`, `strict`) the invariants that must hold — what file paths can be read/written, what subprocess commands can be run, what network access is allowed/denied. Each invariant is named so Phase 1 attacks validate against the contract, not against current code behavior.
+**Phase 0 (formal exec authority contract).** Codex review caught that an attack catalog without a written contract is just empirical-behavior testing. Add doctrine defining the invariants that must hold for unsandboxed exec: what authority is inherited, what built-in tools still path-validate, and what destructive operations require in briefs or operator approval. Each invariant is named so Phase 1 attacks validate against the contract, not against current code behavior.
 
-**Phase 1 (adversarial audit).** Build `tests/security/run_attempts.py` — a small attempt-runner that takes a sandbox mode + a list of `(tool, args, expected_outcome)` tuples and records pass/fail/error per attempt against the contract from Phase 0. Catalogue ≥20 attempts across `Bash`, `Edit`, `Write`, `Read`, `Glob`, `Grep` sourced from CWE-22 (path traversal), CWE-78 (command injection), and AI-agent escape literature. Run against each sandbox mode in an isolated runner (Docker container or temp HOME, with network egress blocked except localhost) so a successful exfiltration attempt during the audit can't actually leak. Capture results in `.cortex/journal/YYYY-MM-DD-sandbox-audit.md`.
+**Phase 1 (adversarial audit).** Build `tests/security/run_attempts.py` — a small attempt-runner that takes an exec authority scenario + a list of `(tool, args, expected_outcome)` tuples and records pass/fail/error per attempt against the contract from Phase 0. Catalogue >=20 attempts across `Bash`, `Edit`, `Write`, `Read`, `Glob`, `Grep` sourced from CWE-22 (path traversal), CWE-78 (command injection), and AI-agent escape literature. Run in an isolated runner (Docker container or temp HOME, with network egress blocked except localhost) so a successful exfiltration attempt during the audit can't actually leak. Capture results in `.cortex/journal/YYYY-MM-DD-exec-authority-audit.md`.
 
-**Phase 2 (harden).** Convert each contract violation found in Phase 1 into a regression test in `tests/test_tools_security.py` and harden `src/conductor/tools/registry.py` (or new `sandbox.py` if existing inline checks don't compose) until all regression tests pass.
+**Phase 2 (harden).** Convert each contract violation found in Phase 1 into a regression test in `tests/test_tools_security.py` and harden `src/conductor/tools/registry.py` until all regression tests pass.
 
-Touches: new `.cortex/doctrine/0007-sandbox-semantics.md`, new `tests/security/`, `src/conductor/tools/registry.py`, possibly new `src/conductor/tools/sandbox.py`.
+Touches: new exec-authority doctrine, new `tests/security/`, `src/conductor/tools/registry.py`.
 
 Rough size: large and uncertain. Phase 0 is small (~1 day to write the contract). Phase 1 is exploratory (could surface 0 findings or 15). Phase 2 sized by Phase 1 output. Estimate: 0.5 day Phase 0, 1 day Phase 1, 1–3 days Phase 2. Most likely to expand beyond initial scope; the plan will be re-cut after Phase 1 if findings are extensive.
 
@@ -73,9 +73,9 @@ Rough size: large and uncertain. Phase 0 is small (~1 day to write the contract)
 
 3. **Slice B — Layer 1:** `tests/test_agent_template_drift.py` contains assertions covering every subagent in `_agent_templates.py`. Adding a new conductor CLI flag and forgetting to update its corresponding subagent prompt causes a test failure (verified by deliberately omitting `--offline` from `ollama-offline` and observing red).
 
-4. **Slice C — Phase 0:** `.cortex/doctrine/0007-sandbox-semantics.md` (or equivalent) exists and defines named invariants per sandbox mode. Each invariant has a unique identifier referenced by Phase 1 attempts.
+4. **Slice C — Phase 0:** exec-authority doctrine exists and defines named invariants. Each invariant has a unique identifier referenced by Phase 1 attempts.
 
-5. **Slice C — Phase 1:** ≥20 catalogued attempts run in an isolated environment (network-egress-blocked) with results recorded in `.cortex/journal/YYYY-MM-DD-sandbox-audit.md`. Each attempt cites the contract invariant from Phase 0 it targets.
+5. **Slice C — Phase 1:** >=20 catalogued attempts run in an isolated environment (network-egress-blocked) with results recorded in `.cortex/journal/YYYY-MM-DD-exec-authority-audit.md`. Each attempt cites the contract invariant from Phase 0 it targets.
 
 6. **Slice C — Phase 2:** every confirmed contract violation from Phase 1 has a corresponding `tests/test_tools_security.py` regression test that fails on the un-hardened code and passes on the hardened code. Pre-existing `tests/test_tools.py` continues to pass with no regressions.
 
@@ -99,7 +99,7 @@ Rough size: large and uncertain. Phase 0 is small (~1 day to write the contract)
 
 **Layer 1:**
 - [ ] If needed, refactor `src/conductor/_agent_templates.py` to expose each subagent template as an importable string constant (likely already the case).
-- [ ] New `tests/test_agent_template_drift.py` with one test per subagent. Each test reads the template and asserts a list of must-mention tokens (flags, tags, sandbox modes, provider IDs).
+- [ ] New `tests/test_agent_template_drift.py` with one test per subagent. Each test reads the template and asserts a list of must-mention tokens (flags, tags, provider IDs).
 - [ ] Centralize the must-mention list in a single dict so adding a new flag flags every subagent that should mention it.
 - [ ] Verify red-then-green: deliberately remove `--offline` from `ollama-offline`, confirm the test fails.
 
@@ -110,17 +110,17 @@ Rough size: large and uncertain. Phase 0 is small (~1 day to write the contract)
 ### Slice C — Sandbox audit
 
 **Phase 0:**
-- [ ] Write `.cortex/doctrine/0007-sandbox-semantics.md` defining invariants per sandbox mode. Each invariant gets a unique ID (e.g., `S-NONE-1: no restriction; full filesystem access`, `S-RO-1: writes always denied regardless of path`, etc.).
+- [ ] Write doctrine defining invariants for unsandboxed exec authority. Each invariant gets a unique ID covering inherited environment, path validation, and destructive-operation recoverability.
 - [ ] Get the contract reviewed (Codex pass + human pass) before Phase 1.
 
 **Phase 1:**
 - [ ] Build `tests/security/run_attempts.py` — attempt-runner with isolation (temp HOME, network-egress block via firewall rule or container).
 - [ ] Catalogue ≥20 `(tool, args, expected_outcome, contract_id)` tuples sourced from CWE-22, CWE-78, AI-agent escape literature.
-- [ ] Run catalogue against each sandbox mode; record results in `.cortex/journal/YYYY-MM-DD-sandbox-audit.md`.
+- [ ] Run catalogue; record results in `.cortex/journal/YYYY-MM-DD-exec-authority-audit.md`.
 
 **Phase 2 (depends on Phase 1):**
 - [ ] For each confirmed contract violation, write a regression test in `tests/test_tools_security.py`.
-- [ ] Harden `src/conductor/tools/registry.py` (or new `sandbox.py`) until all regression tests pass.
+- [ ] Harden `src/conductor/tools/registry.py` until all regression tests pass.
 - [ ] Cross-link the doctrine entry with the regression tests as proof of contract compliance.
 
 ## Follow-ups (deferred)
@@ -145,7 +145,7 @@ After all three slices ship, conductor will still have these accepted limitation
 - **No spend visibility.** Until cost observability lands as its own follow-up, users cannot see what they spent without external accounting.
 - **Single-shot semantics.** Each invocation is independent. Multi-turn conversational use cases require a higher-level tool (aider, future `conductor chat` if ever built) — see Follow-ups.
 - **Subagent prompt coverage is structural, not semantic.** Slice B Layer 1 proves the right tokens are mentioned in each prompt; it does not prove an LLM reading the prompt produces good routing. Layer 2 closes that, but is deferred unless Layer 1 underruns.
-- **Sandbox guarantees are best-effort, not formally verified.** Slice C raises confidence by writing the contract and adversarially testing against it, but does not prove the sandbox is sound. Formal verification is out of scope.
+- **Exec authority guarantees are best-effort, not formally verified.** Slice C raises confidence by writing the contract and adversarially testing against it. Formal verification is out of scope.
 - **Live smoke depends on third-party CLI availability.** Slice A only catches drift on CLIs the runner has installed. The hard-fail-on-missing-CLI policy keeps coverage visible, but if the install step itself is broken (e.g., upstream Homebrew tap goes 404), the workflow fails for the wrong reason. Mitigation: install-step errors get the same `live-smoke-failure` issue label.
 
 <!--

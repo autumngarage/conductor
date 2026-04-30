@@ -26,7 +26,6 @@ class KimiProvider(OpenRouterProvider):
 
     quality_tier = "strong"
     supported_tools: frozenset[str] = frozenset()
-    supported_sandboxes: frozenset[str] = frozenset({"none"})
     supports_effort = True
     effort_to_thinking = {
         "minimal": 0,
