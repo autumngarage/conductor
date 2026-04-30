@@ -8,6 +8,11 @@ import sys
 from pathlib import Path
 
 _REVIEW_SENTINEL_RE = re.compile(r"^\s*(CODEX_REVIEW_(?:CLEAN|FIXED|BLOCKED))\s*$")
+_REVIEW_SENTINELS = (
+    "CODEX_REVIEW_CLEAN",
+    "CODEX_REVIEW_FIXED",
+    "CODEX_REVIEW_BLOCKED",
+)
 _SAFE_BLOCKED_SENTINEL = "CODEX_REVIEW_BLOCKED"
 _DEFAULT_PATCH_CONTEXT_MAX_BYTES = 200_000
 
@@ -180,7 +185,7 @@ def ensure_requested_review_sentinel(
     the returned text has exactly one standalone sentinel line, and it is the
     final non-empty line. Ambiguous provider output fails closed as BLOCKED.
     """
-    if "CODEX_REVIEW_CLEAN" not in prompt:
+    if not _prompt_requests_review_sentinel(prompt):
         return text
 
     stripped = text.strip()
@@ -208,3 +213,20 @@ def ensure_requested_review_sentinel(
     if body:
         return f"{body}\n{_SAFE_BLOCKED_SENTINEL}"
     return _SAFE_BLOCKED_SENTINEL
+
+
+def _prompt_requests_review_sentinel(prompt: str) -> bool:
+    """Return True only for prompts that ask for a final review sentinel."""
+    if "CODEX_REVIEW_CLEAN" not in prompt:
+        return False
+    normalized = prompt.lower()
+    return any(
+        phrase in normalized
+        for phrase in (
+            "last line",
+            "final standalone",
+            "end with",
+            "ends with",
+            "end your output",
+        )
+    )
