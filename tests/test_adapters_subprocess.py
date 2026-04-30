@@ -729,6 +729,11 @@ class _FakeScheduledPipe:
             self._on_eof()
         return ""
 
+    def read(self, size: int = -1) -> str:
+        if size == 0:
+            return ""
+        return self.readline()
+
 
 class _FakePopen:
     def __init__(
@@ -1231,6 +1236,22 @@ def test_codex_exec_emits_liveness_signal_to_stderr(mocker, capsys):
         CodexProvider().exec("hi", max_stall_sec=0.25, liveness_interval_sec=0.1)
 
     assert "[conductor] no output from codex for " in capsys.readouterr().err
+
+
+def test_codex_exec_stall_watchdog_ignores_wrapper_heartbeats(mocker, capsys):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    fake = _FakePopen(stdout_schedule=[], hang_after_stdout=True)
+    _patch_codex_popen(mocker, fake)
+
+    with pytest.raises(ProviderStalledError) as exc:
+        CodexProvider().exec("hi", max_stall_sec=0.25, liveness_interval_sec=0.1)
+
+    err = capsys.readouterr().err
+    msg = str(exc.value)
+    assert "[conductor] no output from codex for " in err
+    assert "codex CLI stalled" in msg
+    assert "timed out" not in msg
+    assert fake.terminated is True
 
 
 def test_codex_exec_heartbeat_reports_tool_calls_from_session_log(

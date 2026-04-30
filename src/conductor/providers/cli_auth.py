@@ -209,11 +209,12 @@ def run_subprocess_with_live_stderr(
 
     def read_stream(name: str, pipe) -> None:
         try:
+            read = getattr(pipe, "read", None)
             while True:
-                line = pipe.readline()
-                if line == "":
+                chunk = read(1) if read is not None else pipe.readline()
+                if chunk == "":
                     break
-                stream_q.put((name, line))
+                stream_q.put((name, chunk))
         finally:
             stream_q.put((name, None))
 

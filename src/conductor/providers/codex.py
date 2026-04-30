@@ -739,19 +739,21 @@ class CodexProvider:
         def read_stdout() -> None:
             assert process.stdout is not None
             try:
+                read = getattr(process.stdout, "read", None)
                 while True:
-                    line = process.stdout.readline()
-                    if line == "":
+                    chunk = read(1) if read is not None else process.stdout.readline()
+                    if chunk == "":
                         break
-                    stream_q.put(("stdout", line))
+                    stream_q.put(("stdout", chunk))
             finally:
                 stream_q.put(("stdout", None))
 
         def read_stderr() -> None:
             assert process.stderr is not None
             try:
+                read = getattr(process.stderr, "read", None)
                 while True:
-                    chunk = process.stderr.readline()
+                    chunk = read(1) if read is not None else process.stderr.readline()
                     if chunk == "":
                         break
                     stream_q.put(("stderr", chunk))
@@ -769,6 +771,7 @@ class CodexProvider:
         last_liveness = start
         heartbeat_log_offset = 0
         session_id_emitted = False
+        stdout_event_buffer = ""
         while True:
             now = time.monotonic()
             if timeout is not None and now - start > timeout:
@@ -872,17 +875,21 @@ class CodexProvider:
             stdout_parts.append(item)
             last_output = time.monotonic()
             last_liveness = last_output
-            auth_tracker.observe_json_line(item, source="stdout")
-            self._emit_stream_event(item, session_log=session_log)
+            stdout_event_buffer += item
+            while "\n" in stdout_event_buffer:
+                line, stdout_event_buffer = stdout_event_buffer.split("\n", 1)
+                line = f"{line}\n"
+                auth_tracker.observe_json_line(line, source="stdout")
+                self._emit_stream_event(line, session_log=session_log)
 
-            if not session_id_emitted:
-                sid = self._extract_session_id_fast(item)
-                if sid is not None:
-                    if session_log is not None:
-                        session_log.set_session_id(sid)
-                    sys.stderr.write(f"[conductor] codex session_id={sid}\n")
-                    sys.stderr.flush()
-                    session_id_emitted = True
+                if not session_id_emitted:
+                    sid = self._extract_session_id_fast(line)
+                    if sid is not None:
+                        if session_log is not None:
+                            session_log.set_session_id(sid)
+                        sys.stderr.write(f"[conductor] codex session_id={sid}\n")
+                        sys.stderr.flush()
+                        session_id_emitted = True
 
         returncode = process.wait()
         self._join_reader_threads(stdout_thread, stderr_thread)

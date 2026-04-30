@@ -106,6 +106,11 @@ class _FakeScheduledPipe:
             self._on_eof = None
         return ""
 
+    def read(self, size: int = -1) -> str:
+        if size == 0:
+            return ""
+        return self.readline()
+
 
 class _FakePopen:
     def __init__(self, *, stdout_lines, stderr_lines=None, returncode: int = 0) -> None:
