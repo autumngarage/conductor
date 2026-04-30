@@ -42,6 +42,7 @@ from conductor.profiles import ProfileError, ProfileSpec, get_profile, load_prof
 from conductor.providers import (
     QUALITY_TIERS,
     CallResponse,
+    ClaudeProvider,
     NativeReviewProvider,
     OpenRouterProvider,
     ProviderConfigError,
@@ -759,23 +760,32 @@ def _invoke_with_fallback(
                         resume_session_id=resume_session_id,
                         session_log=session_log,
                     )
-                else:
-                    exec_kwargs = {
-                        "model": model,
-                        "effort": effort,
-                        "tools": tools,
-                        "sandbox": sandbox,
-                        "cwd": cwd,
-                        "timeout_sec": timeout_sec,
-                        "max_stall_sec": max_stall_sec,
-                        "resume_session_id": resume_session_id,
-                        "session_log": session_log,
-                    }
-                    if candidate.name == "claude":
-                        exec_kwargs["start_timeout_sec"] = start_timeout_sec
+                elif isinstance(provider, ClaudeProvider):
                     response = provider.exec(
                         task,
-                        **exec_kwargs,
+                        model=model,
+                        effort=effort,
+                        tools=tools,
+                        sandbox=sandbox,
+                        cwd=cwd,
+                        timeout_sec=timeout_sec,
+                        max_stall_sec=max_stall_sec,
+                        start_timeout_sec=start_timeout_sec,
+                        resume_session_id=resume_session_id,
+                        session_log=session_log,
+                    )
+                else:
+                    response = provider.exec(
+                        task,
+                        model=model,
+                        effort=effort,
+                        tools=tools,
+                        sandbox=sandbox,
+                        cwd=cwd,
+                        timeout_sec=timeout_sec,
+                        max_stall_sec=max_stall_sec,
+                        resume_session_id=resume_session_id,
+                        session_log=session_log,
                     )
             else:
                 if isinstance(provider, OpenRouterProvider):
@@ -2735,23 +2745,32 @@ def exec_cmd(
                     resume_session_id=resume_session_id,
                     session_log=session_log,
                 )
-            else:
-                exec_kwargs = {
-                    "model": model,
-                    "effort": effort_value,
-                    "tools": tools_set,
-                    "sandbox": sandbox_value,
-                    "cwd": cwd,
-                    "timeout_sec": timeout_sec,
-                    "max_stall_sec": max_stall_sec,
-                    "resume_session_id": resume_session_id,
-                    "session_log": session_log,
-                }
-                if provider_id == "claude":
-                    exec_kwargs["start_timeout_sec"] = start_timeout_sec
+            elif isinstance(provider, ClaudeProvider):
                 response = provider.exec(
                     body,
-                    **exec_kwargs,
+                    model=model,
+                    effort=effort_value,
+                    tools=tools_set,
+                    sandbox=sandbox_value,
+                    cwd=cwd,
+                    timeout_sec=timeout_sec,
+                    max_stall_sec=max_stall_sec,
+                    start_timeout_sec=start_timeout_sec,
+                    resume_session_id=resume_session_id,
+                    session_log=session_log,
+                )
+            else:
+                response = provider.exec(
+                    body,
+                    model=model,
+                    effort=effort_value,
+                    tools=tools_set,
+                    sandbox=sandbox_value,
+                    cwd=cwd,
+                    timeout_sec=timeout_sec,
+                    max_stall_sec=max_stall_sec,
+                    resume_session_id=resume_session_id,
+                    session_log=session_log,
                 )
         except UnsupportedCapability as e:
             session_log.emit("provider_failed", {"provider": provider_id, "error": str(e)})
