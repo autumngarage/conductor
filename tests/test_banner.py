@@ -58,6 +58,23 @@ def test_render_without_subtitle_or_version_has_blank_padding():
     assert lines[-1] == ""
 
 
+def test_render_includes_autumn_garage_attribution():
+    lines = render_banner("pick an LLM", "0.3.0", use_color=True)
+    # The attribution line ends with the literal text and lives in the
+    # banner output regardless of subtitle/version.
+    attribution = [ln for ln in lines if ln.rstrip("\033[0m").endswith("by Autumn Garage")]
+    assert attribution, "expected a 'by Autumn Garage' line"
+
+
+def test_render_attribution_is_plain_when_color_disabled():
+    lines = render_banner(use_color=False)
+    plain = [ln for ln in lines if ln.strip() == "by Autumn Garage"]
+    assert plain, "expected a plain 'by Autumn Garage' line when use_color=False"
+    # And no ANSI escapes anywhere in the rendered output.
+    for line in lines:
+        assert "\033" not in line
+
+
 def test_print_banner_writes_to_supplied_stream():
     buf = io.StringIO()
     print_banner("hi", "0.0.1", stream=buf)
@@ -158,7 +175,7 @@ def test_print_caller_banner_colors_conductor_word_on_tty(monkeypatch):
     out = buf.getvalue()
     # The literal "Conductor" word is wrapped in the purple ANSI code
     # when stderr is a TTY; surrounding text stays plain.
-    assert "\033[1;38;5;99mConductor\033[0m" in out
+    assert "\033[38;5;147mConductor\033[0m" in out
 
 
 def test_print_caller_banner_does_not_crash_on_closed_stream(monkeypatch):

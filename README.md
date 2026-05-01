@@ -1,3 +1,15 @@
+```text
+   ___                _            _
+  / __\___  _ __   __| |_   _  ___| |_ ___  _ __
+ / /  / _ \| '_ \ / _` | | | |/ __| __/ _ \| '__|
+/ /__| (_) | | | | (_| | |_| | (__| || (_) | |
+\____/\___/|_| |_|\__,_|\__,_|\___|\__\___/|_|
+```
+
+> *Pick an LLM, give it a job.*
+>
+> by **[Autumn Garage](https://github.com/autumngarage/autumn-garage)** · alongside [Touchstone](https://github.com/autumngarage/touchstone) · [Cortex](https://github.com/autumngarage/cortex) · [Sentinel](https://github.com/autumngarage/sentinel)
+
 # conductor
 
 Pick an LLM, give it a job. Manual or auto routing across providers.

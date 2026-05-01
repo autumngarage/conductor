@@ -24,10 +24,12 @@ _CONDUCTOR_GLYPHS: tuple[str, ...] = (
     r"\____/\___/|_| |_|\__,_|\__,_|\___|\__\___/|_|     ",
 )
 
-# Deep purple — distinguishes conductor from touchstone's orange and
-# cortex's cyan/green when the four tools print side by side.
-_ANSI_PURPLE = "\033[1;38;5;99m"
-_ANSI_DIM = "\033[2m"
+# Pastel palette — see Autumn Garage Doctrine 0007. Tone-on-tone
+# lavender (147) + lilac (183) distinguishes conductor from touchstone's
+# peach (216/223), cortex's aqua (152/159), and sentinel's sage (151/157)
+# when the four tools print side by side.
+_ANSI_LAVENDER = "\033[38;5;147m"
+_ANSI_LILAC = "\033[38;5;183m"
 _ANSI_RESET = "\033[0m"
 
 
@@ -52,13 +54,14 @@ def render_banner(
     """Return the banner as a list of lines (no trailing newline per line).
 
     When ``use_color`` is True, each glyph line is wrapped with the
-    conductor purple ANSI code; subtitle/version lines use the dim code.
-    Callers writing to a non-TTY should pass ``use_color=False``.
+    pastel lavender ANSI code; subtitle/version lines and the
+    ``by Autumn Garage`` attribution use the lilac code. Callers
+    writing to a non-TTY should pass ``use_color=False``.
     """
     lines: list[str] = [""]
     for glyph in _CONDUCTOR_GLYPHS:
         if use_color:
-            lines.append(f"  {_ANSI_PURPLE}{glyph}{_ANSI_RESET}")
+            lines.append(f"  {_ANSI_LAVENDER}{glyph}{_ANSI_RESET}")
         else:
             lines.append(f"  {glyph}")
 
@@ -70,9 +73,13 @@ def render_banner(
     if sub_parts:
         sub_text = "  ·  ".join(sub_parts)
         if use_color:
-            lines.append(f"  {_ANSI_DIM}{sub_text}{_ANSI_RESET}")
+            lines.append(f"  {_ANSI_LILAC}{sub_text}{_ANSI_RESET}")
         else:
             lines.append(f"  {sub_text}")
+    if use_color:
+        lines.append(f"  {_ANSI_LILAC}by Autumn Garage{_ANSI_RESET}")
+    else:
+        lines.append("  by Autumn Garage")
     lines.append("")
     return lines
 
@@ -180,7 +187,7 @@ def print_caller_banner(
         return
 
     use_color = _color_enabled(target)
-    name = f"{_ANSI_PURPLE}Conductor{_ANSI_RESET}" if use_color else "Conductor"
+    name = f"{_ANSI_LAVENDER}Conductor{_ANSI_RESET}" if use_color else "Conductor"
     line = (
         f"▸ {caller} is using {name} → {provider}"
         if caller
