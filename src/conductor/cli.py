@@ -45,6 +45,7 @@ from conductor.openrouter_stack_audit import (
 from conductor.profiles import ProfileError, ProfileSpec, get_profile, load_profiles
 from conductor.providers import (
     QUALITY_TIERS,
+    TOOL_NAMES,
     CallResponse,
     ClaudeProvider,
     CodexProvider,
@@ -4145,6 +4146,16 @@ def profiles_show(name: str) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _tools_label(provider) -> str:
+    """Compact tool-support label for display: 'all', 'none', or sorted list."""
+    tools: frozenset[str] = getattr(provider, "supported_tools", frozenset())
+    if tools == TOOL_NAMES:
+        return "all"
+    if not tools:
+        return "none"
+    return ",".join(sorted(tools))
+
+
 def _provider_rows() -> list[dict]:
     muted = set(load_muted_provider_ids(known=set(known_providers())))
     rows = []
@@ -4167,6 +4178,7 @@ def _provider_rows() -> list[dict]:
                 "tags": list(provider.tags),
                 "tier": provider.quality_tier,
                 "muted": name in muted,
+                "tools": _tools_label(provider),
             }
         )
     return rows
@@ -4193,11 +4205,13 @@ def list_cmd(as_json: bool) -> None:
     name_w = max(len("PROVIDER"), max(len(r["provider"]) for r in rows))
     model_w = max(len("DEFAULT MODEL"), max(len(r["default_model"]) for r in rows))
     tier_w = max(len("TIER"), max(len(r["tier"]) for r in rows))
+    tags_w = max(len("TAGS"), max(len(",".join(r["tags"])) for r in rows))
     header = (
         f"{'PROVIDER':<{name_w}}  "
         f"{'READY':<5}  "
         f"{'TIER':<{tier_w}}  "
-        f"{'DEFAULT MODEL':<{model_w}}  TAGS"
+        f"{'DEFAULT MODEL':<{model_w}}  "
+        f"{'TAGS':<{tags_w}}  TOOLS"
     )
     click.echo(header)
     click.echo("-" * len(header))
@@ -4209,7 +4223,8 @@ def list_cmd(as_json: bool) -> None:
             f"{ready:<5}  "
             f"{r['tier']:<{tier_w}}  "
             f"{r['default_model']:<{model_w}}  "
-            f"{tags}"
+            f"{tags:<{tags_w}}  "
+            f"{r['tools']}"
         )
         if not r["configured"] and r["reason"]:
             click.echo(f"{'':<{name_w}}  {'':<5}  └─ {r['reason']}")
