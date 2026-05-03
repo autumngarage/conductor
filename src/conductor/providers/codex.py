@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 
 from conductor import __version__ as _conductor_version
 from conductor.offline_mode import _cache_dir
+from conductor.orphan_detect import find_orphan_codex_processes, format_orphan_hints
 from conductor.providers.cli_auth import AuthPromptTracker
 from conductor.providers.interface import (
     CallResponse,
@@ -1362,7 +1363,15 @@ class CodexProvider:
                 parts.append(")")
         elif envelope_path is not None:
             parts.append(f" (forensic envelope: {envelope_path})")
-        return "".join(parts)
+        message = "".join(parts)
+        if kind == "stall":
+            try:
+                orphans = find_orphan_codex_processes(self._cli)
+                if orphans:
+                    message = message + "\n" + format_orphan_hints(orphans)
+            except Exception as exc:  # noqa: BLE001
+                sys.stderr.write(f"[conductor] orphan detection failed: {exc!r}\n")
+        return message
 
     def _save_forensic_envelope(
         self,
