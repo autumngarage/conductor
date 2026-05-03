@@ -2134,6 +2134,82 @@ def test_call_fallback_exhausted_propagates_last_error(mocker):
     assert "502" in result.stderr or "bad gateway" in result.stderr
 
 
+def test_invoke_with_fallback_skips_undersized_context(mocker):
+    """Fallback chain skips a candidate whose context can't hold the brief."""
+    from conductor.cli import _invoke_with_fallback
+    from conductor.providers.interface import ProviderHTTPError
+    from conductor.router import RankedCandidate, RouteDecision
+
+    # Three-provider chain: claude (primary, fails) → ollama (won't fit) → codex (fits, wins).
+    decision = RouteDecision(
+        provider="claude",
+        prefer="best",
+        effort="medium",
+        thinking_budget=0,
+        tier="frontier",
+        task_tags=(),
+        matched_tags=(),
+        tools_requested=(),
+        sandbox="read-only",
+        candidates_skipped=(),
+        ranked=(
+            RankedCandidate(
+                name="claude", tier="frontier", tier_rank=0, matched_tags=(),
+                tag_score=0, cost_score=0.0, latency_ms=0, health_penalty=0.0,
+                combined_score=1.0,
+            ),
+            RankedCandidate(
+                name="ollama", tier="local", tier_rank=2, matched_tags=(),
+                tag_score=0, cost_score=0.0, latency_ms=0, health_penalty=0.0,
+                combined_score=0.5,
+            ),
+            RankedCandidate(
+                name="codex", tier="frontier", tier_rank=0, matched_tags=(),
+                tag_score=0, cost_score=0.0, latency_ms=0, health_penalty=0.0,
+                combined_score=0.4,
+            ),
+        ),
+    )
+
+    # Pin ollama's context to a tiny number so any nontrivial brief overflows.
+    mocker.patch.object(OllamaProvider, "max_context_tokens", 100)
+
+    claude_call = mocker.patch.object(
+        ClaudeProvider, "call",
+        side_effect=ProviderHTTPError("HTTP 503: unavailable"),
+    )
+    ollama_call = mocker.patch.object(OllamaProvider, "call")
+    codex_call = mocker.patch.object(
+        CodexProvider, "call", return_value=_fake_response("codex"),
+    )
+
+    # Brief at ~250 tokens (1000 chars / 4) — well over ollama's pinned 100.
+    long_brief = "x" * 1000
+
+    response, fallbacks = _invoke_with_fallback(
+        decision,
+        mode="call",
+        task=long_brief,
+        model=None,
+        effort="medium",
+        tools=frozenset(),
+        sandbox="read-only",
+        cwd=None,
+        timeout_sec=None,
+        max_stall_sec=None,
+        start_timeout_sec=None,
+        silent=False,
+    )
+
+    assert response.provider == "codex"
+    assert claude_call.called
+    assert not ollama_call.called  # skipped before invocation
+    assert codex_call.called
+    # Ollama appears in the fallback list (skipped, not attempted).
+    assert "ollama" in fallbacks
+    assert "codex" not in fallbacks  # codex won, so it's not "fallback used"
+
+
 def test_call_with_single_provider_does_not_retry(mocker):
     """--with disables fallback (user picked explicitly)."""
     from conductor.providers.interface import ProviderHTTPError
