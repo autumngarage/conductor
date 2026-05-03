@@ -70,13 +70,13 @@ _REPO_SCOPED_KINDS = frozenset(
 
 def _managed_comment(version: str) -> str:
     return (
-        f"<!-- managed-by: conductor v{version} — "
+        f"<!-- managed-by: conductor v{_canonical_wiring_version(version)} — "
         f"do not edit; run `conductor init --unwire` to remove -->"
     )
 
 
 def _sentinel_begin(version: str) -> str:
-    return f"<!-- conductor:begin v{version} -->"
+    return f"<!-- conductor:begin v{_canonical_wiring_version(version)} -->"
 
 
 def _normalize_generated_text(text: str) -> str:
@@ -431,7 +431,7 @@ def write_managed_frontmatter(
         lines.append(_frontmatter_line(key, value))
     # managed-by last: the user sees name/description/etc. first when they
     # open the file; our marker sits at the bottom of the frontmatter.
-    lines.append(f"managed-by: conductor v{version}")
+    lines.append(f"managed-by: conductor v{_canonical_wiring_version(version)}")
     lines.append("---")
     path.write_text(
         _normalize_generated_text("\n".join(lines) + "\n\n" + body),
