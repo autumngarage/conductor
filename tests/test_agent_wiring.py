@@ -242,6 +242,33 @@ def test_remove_sentinel_block_on_unmanaged_file_returns_false(tmp_path):
     assert path.read_text(encoding="utf-8") == "# user-owned\n"
 
 
+def test_wiring_writers_strip_local_build_version_metadata(tmp_path):
+    # Writes mirror the freshness check's canonicalization so committed
+    # wiring files don't carry developer-specific +local-build hashes
+    # when init is run from a working tree ahead of the latest tag.
+    dirty = "0.8.3+1.g7fb0b70"
+
+    sentinel_path = tmp_path / "AGENTS.md"
+    aw.inject_sentinel_block(sentinel_path, "@x", version=dirty)
+    sentinel_text = sentinel_path.read_text(encoding="utf-8")
+    assert "<!-- conductor:begin v0.8.3 -->" in sentinel_text
+    assert "+1.g7fb0b70" not in sentinel_text
+
+    md_path = tmp_path / "guidance.md"
+    aw.write_managed_markdown(md_path, "body\n", version=dirty)
+    md_text = md_path.read_text(encoding="utf-8")
+    assert "managed-by: conductor v0.8.3" in md_text
+    assert "+1.g7fb0b70" not in md_text
+
+    fm_path = tmp_path / "rule.mdc"
+    aw.write_managed_frontmatter(
+        fm_path, {"description": "x"}, "body", version=dirty
+    )
+    fm_text = fm_path.read_text(encoding="utf-8")
+    assert "managed-by: conductor v0.8.3" in fm_text
+    assert "+1.g7fb0b70" not in fm_text
+
+
 # --------------------------------------------------------------------------- #
 # wire_claude_code end-to-end.
 # --------------------------------------------------------------------------- #
@@ -381,7 +408,8 @@ def test_wire_then_unwire_then_wire_round_trip():
 def test_version_extraction_handles_prerelease(tmp_path):
     path = tmp_path / "notes.md"
     aw.write_managed_markdown(path, "body", version="0.4.0.dev1+g1234abc")
-    assert aw.read_managed_version(path) == "0.4.0.dev1+g1234abc"
+    # Prerelease tag is preserved; local-build metadata is stripped at write.
+    assert aw.read_managed_version(path) == "0.4.0.dev1"
 
 
 def test_managed_path_stays_out_of_arbitrary_dirs(tmp_path):
