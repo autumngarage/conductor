@@ -1187,6 +1187,19 @@ def _invoke_council(
         log_selection=False,
     )
 
+    member_costs = [response.cost_usd for response in member_responses]
+    all_costs = [*member_costs, synthesis.cost_usd]
+    missing_costs = [
+        f"member[{idx}]"
+        for idx, cost in enumerate(member_costs, start=1)
+        if cost is None
+    ]
+    if synthesis.cost_usd is None:
+        missing_costs.append("synthesis")
+    known_costs = [cost for cost in all_costs if cost is not None]
+    known_cost_usd = sum(known_costs) if known_costs else None
+    cost_accounting_complete = not missing_costs
+
     raw = {
         **(synthesis.raw or {}),
         "conductor_council": {
@@ -1195,6 +1208,11 @@ def _invoke_council(
             "requested_synthesis_models": list(synthesis_models),
             "rounds": rounds,
             "member_usage": [response.usage for response in member_responses],
+            "member_cost_usd": member_costs,
+            "synthesis_cost_usd": synthesis.cost_usd,
+            "known_cost_usd": known_cost_usd,
+            "cost_accounting_complete": cost_accounting_complete,
+            "missing_costs": missing_costs,
             "member_duration_ms": [response.duration_ms for response in member_responses],
         },
     }
@@ -1202,12 +1220,11 @@ def _invoke_council(
         **synthesis.usage,
         "council_members": len(member_responses),
         "council_rounds": rounds,
+        "cost_accounting_complete": cost_accounting_complete,
+        "known_cost_usd": known_cost_usd,
+        "missing_costs": missing_costs,
     }
-    cost_usd = synthesis.cost_usd
-    if cost_usd is not None and all(
-        response.cost_usd is not None for response in member_responses
-    ):
-        cost_usd += sum(response.cost_usd or 0 for response in member_responses)
+    cost_usd = known_cost_usd if cost_accounting_complete else None
     return replace(synthesis, usage=usage, cost_usd=cost_usd, raw=raw)
 
 

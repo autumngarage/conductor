@@ -88,6 +88,7 @@ def test_call_returns_normalized_response(configured):
         "usage": {
             "prompt_tokens": 7,
             "completion_tokens": 1,
+            "cost": 0.00123,
             "prompt_tokens_details": {"cached_tokens": 0},
             "completion_tokens_details": {"reasoning_tokens": 3},
         },
@@ -111,6 +112,7 @@ def test_call_returns_normalized_response(configured):
     assert response.usage["thinking_tokens"] == 3
     assert response.usage["effort"] == "medium"
     assert response.usage["thinking_budget"] == 8_000
+    assert response.cost_usd == pytest.approx(0.00123)
     assert response.duration_ms >= 0
     assert response.raw == body
 
@@ -425,7 +427,7 @@ def test_exec_with_tools_runs_openai_tool_loop(configured, tmp_path):
                     "finish_reason": "tool_calls",
                 }
             ],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2, "cost": 0.001},
         },
         {
             "model": "openai/gpt-5.5",
@@ -438,7 +440,7 @@ def test_exec_with_tools_runs_openai_tool_loop(configured, tmp_path):
                     "finish_reason": "stop",
                 }
             ],
-            "usage": {"prompt_tokens": 20, "completion_tokens": 7},
+            "usage": {"prompt_tokens": 20, "completion_tokens": 7, "cost": 0.002},
         },
     ]
 
@@ -461,6 +463,9 @@ def test_exec_with_tools_runs_openai_tool_loop(configured, tmp_path):
     assert response.usage["input_tokens"] == 30
     assert response.usage["output_tokens"] == 9
     assert response.usage["tool_iterations"] == 2
+    assert response.usage["iterations"][0]["cost_usd"] == pytest.approx(0.001)
+    assert response.usage["iterations"][1]["cost_usd"] == pytest.approx(0.002)
+    assert response.cost_usd == pytest.approx(0.003)
     assert requests[0]["tools"][0]["function"]["name"] == "Read"
     assert requests[1]["messages"][1]["tool_calls"][0]["id"] == "call_read"
     assert requests[1]["messages"][2] == {

@@ -305,6 +305,7 @@ class OpenRouterProvider:
             ) from e
 
         usage = body.get("usage") or {}
+        cost_usd = _usage_cost_usd(usage)
         return CallResponse(
             text=text,
             provider=self.name,
@@ -322,6 +323,7 @@ class OpenRouterProvider:
                 "effort": effort if isinstance(effort, str) else None,
                 "thinking_budget": thinking_budget,
             },
+            cost_usd=cost_usd,
             raw=body,
         )
 
@@ -394,6 +396,8 @@ class OpenRouterProvider:
             "cached_tokens": 0,
             "thinking_tokens": 0,
         }
+        cost_usd_total = 0.0
+        cost_usd_seen = False
         iterations_log: list[dict] = []
         final_text = ""
         final_body: dict = {}
@@ -430,6 +434,10 @@ class OpenRouterProvider:
                 usage.get("completion_tokens_details") or {},
                 "reasoning_tokens",
             )
+            usage_cost_usd = _usage_cost_usd(usage)
+            if usage_cost_usd is not None:
+                cost_usd_total += usage_cost_usd
+                cost_usd_seen = True
             totals["input_tokens"] += prompt_tokens
             totals["output_tokens"] += completion_tokens
             totals["cached_tokens"] += cached_tokens
@@ -441,6 +449,7 @@ class OpenRouterProvider:
                     "completion_tokens": completion_tokens,
                     "cached_tokens": cached_tokens,
                     "thinking_tokens": thinking_tokens,
+                    "cost_usd": usage_cost_usd,
                 }
             )
 
@@ -581,6 +590,7 @@ class OpenRouterProvider:
                 "execution_status": execution_status,
                 "iterations": iterations_log,
             },
+            cost_usd=cost_usd_total if cost_usd_seen else None,
             raw=final_body,
         )
 
@@ -1010,6 +1020,16 @@ def _usage_int(usage: dict, key: str) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def _usage_cost_usd(usage: dict) -> float | None:
+    value = usage.get("cost")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_tool_call(call: dict) -> tuple[str, dict | None, str | None]:
