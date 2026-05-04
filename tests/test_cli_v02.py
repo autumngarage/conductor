@@ -24,6 +24,7 @@ import respx
 from click.testing import CliRunner
 
 from conductor.cli import SANDBOX_DEPRECATION_WARNING, main
+from conductor.openrouter_model_stacks import OPENROUTER_CODING_HIGH
 from conductor.providers import (
     CallResponse,
     ClaudeProvider,
@@ -519,6 +520,7 @@ def test_ask_code_high_falls_back_to_openrouter_exec_before_ollama(mocker):
     assert exec_mock.call_args.kwargs["tools"] == frozenset(
         {"Read", "Grep", "Glob", "Edit", "Write", "Bash"}
     )
+    assert exec_mock.call_args.kwargs["models"] == OPENROUTER_CODING_HIGH
     payload = json.loads(result.stdout)
     assert [candidate["provider"] for candidate in payload["semantic"]["candidates"]] == [
         "codex",
@@ -526,6 +528,9 @@ def test_ask_code_high_falls_back_to_openrouter_exec_before_ollama(mocker):
         "openrouter",
         "ollama",
     ]
+    assert payload["semantic"]["candidates"][2]["models"] == list(
+        OPENROUTER_CODING_HIGH
+    )
 
 
 def test_ask_code_medium_falls_through_from_openrouter_404_to_ollama(mocker):

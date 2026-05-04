@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import pytest
 
+from conductor.openrouter_model_stacks import (
+    OPENROUTER_CODING_HIGH,
+    OPENROUTER_CODING_MAX,
+)
 from conductor.semantic import SEMANTIC_KINDS, plan_for
 
 
@@ -47,6 +51,14 @@ def test_high_code_escalates_to_agentic_coding_stack(effort):
         "openrouter",
         "ollama",
     ]
+    openrouter_candidate = plan.candidates[2]
+    expected_stack = (
+        OPENROUTER_CODING_MAX if effort == "max" else OPENROUTER_CODING_HIGH
+    )
+    assert openrouter_candidate.models == expected_stack
+    assert openrouter_candidate.models[0] == "openai/gpt-5.3-codex"
+    assert "openrouter/auto" not in openrouter_candidate.models
+    assert "google/gemini-2.5-flash-lite" not in openrouter_candidate.models
     assert plan.tools == frozenset({"Read", "Grep", "Glob", "Edit", "Write", "Bash"})
     assert plan.sandbox == "none"
 

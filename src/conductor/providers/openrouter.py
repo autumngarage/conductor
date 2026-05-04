@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 import httpx
 
 from conductor import credentials
+from conductor.openrouter_model_stacks import openrouter_coding_stack
 from conductor.providers.interface import (
     CallResponse,
     ProviderConfigError,
@@ -231,7 +232,10 @@ class OpenRouterProvider:
                 exclude=exclude,
             )
             payload.update(selector_payload)
-            selected_model = str(payload["model"])
+            if "models" in payload:
+                selected_model = str(payload["models"][0])
+            else:
+                selected_model = str(payload["model"])
             if payload.get("reasoning") is None:
                 payload.pop("reasoning", None)
             if log_selection:
@@ -538,14 +542,30 @@ def select_model_for_task(
             "Use best, balanced, cheapest, or fastest."
         )
 
+    task_tag_set = set(task_tags or [])
+    exclude_set = set(exclude or ())
+
     if prefer in {"best", "balanced"}:
+        if "tool-use" in task_tag_set:
+            coding_stack = tuple(
+                model
+                for model in openrouter_coding_stack(effort)
+                if model not in exclude_set
+            )
+            if not coding_stack:
+                raise ProviderError(
+                    "OpenRouter coding stack was fully excluded. "
+                    f"excluded models: {sorted(exclude_set)}"
+                )
+            return {
+                "models": list(coding_stack),
+                "reasoning": _reasoning_payload(effort),
+            }
         return {
             "model": OPENROUTER_DEFAULT_MODEL,
             "reasoning": _reasoning_payload(effort),
         }
 
-    task_tag_set = set(task_tags or [])
-    exclude_set = set(exclude or ())
     catalog = openrouter_catalog.load_catalog(
         force_refresh=True,
         allow_stale_on_error=False,
@@ -646,7 +666,9 @@ def _log_selector_choice(
     payload: dict[str, object],
 ) -> None:
     tags_text = ",".join(task_tags or []) or "none"
-    if payload["model"] == OPENROUTER_DEFAULT_MODEL:
+    if "models" in payload:
+        target = f"models={payload['models']}"
+    elif payload["model"] == OPENROUTER_DEFAULT_MODEL:
         plugins = payload.get("plugins") or []
         shortlist = []
         if plugins and isinstance(plugins, list):

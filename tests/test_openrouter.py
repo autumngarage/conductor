@@ -9,6 +9,7 @@ import pytest
 import respx
 
 import conductor.providers.openrouter_catalog as openrouter_catalog
+from conductor.openrouter_model_stacks import OPENROUTER_CODING_HIGH
 from conductor.providers.deepseek import DeepSeekChatProvider, DeepSeekReasonerProvider
 from conductor.providers.interface import (
     CallResponse,
@@ -451,6 +452,44 @@ def test_exec_with_tools_runs_openai_tool_loop(configured, tmp_path):
         "name": "Read",
         "content": "tool loop works",
     }
+
+
+def test_exec_with_tools_uses_curated_coding_stack_by_default(configured, tmp_path):
+    captured: dict[str, object] = {}
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "model": OPENROUTER_CODING_HIGH[0],
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "implementation complete",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 3},
+            },
+        )
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        response = OpenRouterProvider().exec(
+            "Implement the change.",
+            tools=frozenset({"Read", "Edit", "Write"}),
+            sandbox="none",
+            cwd=str(tmp_path),
+        )
+
+    assert response.model == OPENROUTER_CODING_HIGH[0]
+    assert captured["payload"]["models"] == list(OPENROUTER_CODING_HIGH)
+    assert "model" not in captured["payload"]
+    assert "openrouter/auto" not in captured["payload"]["models"]
+    assert "google/gemini-2.5-flash-lite" not in captured["payload"]["models"]
 
 
 def test_exec_with_tools_rejects_model_and_models_together(configured):
