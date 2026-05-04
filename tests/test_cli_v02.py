@@ -454,19 +454,19 @@ def test_ask_code_high_routes_to_codex_exec_with_default_tools(mocker):
     assert exec_mock.call_args.kwargs["sandbox"] == "none"
 
 
-def test_ask_code_high_falls_back_immediately_on_quota(mocker):
+def test_ask_code_high_falls_back_immediately_to_openrouter_on_quota(mocker):
     from conductor.providers.interface import ProviderHTTPError
 
-    _stub_all_configured(mocker, {"codex", "claude"})
+    _stub_all_configured(mocker, {"codex", "openrouter"})
     codex_exec = mocker.patch.object(
         CodexProvider,
         "exec",
         side_effect=ProviderHTTPError("codex reported rate limit: out of tokens"),
     )
-    claude_exec = mocker.patch.object(
-        ClaudeProvider,
+    openrouter_exec = mocker.patch.object(
+        OpenRouterProvider,
         "exec",
-        return_value=_fake_response("claude"),
+        return_value=_fake_response("openrouter"),
     )
 
     result = CliRunner().invoke(
@@ -485,10 +485,11 @@ def test_ask_code_high_falls_back_immediately_on_quota(mocker):
 
     assert result.exit_code == 0, result.output
     assert codex_exec.called
-    assert claude_exec.called
+    assert openrouter_exec.called
+    assert openrouter_exec.call_args.kwargs["models"] == OPENROUTER_CODING_HIGH
     assert "codex failed (rate-limit)" in result.stderr
     assert "falling back" in result.stderr
-    assert "→ claude" in result.stderr
+    assert "→ openrouter" in result.stderr
 
 
 def test_ask_code_high_falls_back_to_openrouter_exec_before_ollama(mocker):
@@ -524,11 +525,10 @@ def test_ask_code_high_falls_back_to_openrouter_exec_before_ollama(mocker):
     payload = json.loads(result.stdout)
     assert [candidate["provider"] for candidate in payload["semantic"]["candidates"]] == [
         "codex",
-        "claude",
         "openrouter",
         "ollama",
     ]
-    assert payload["semantic"]["candidates"][2]["models"] == list(
+    assert payload["semantic"]["candidates"][1]["models"] == list(
         OPENROUTER_CODING_HIGH
     )
 
