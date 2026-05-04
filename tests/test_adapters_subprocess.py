@@ -460,6 +460,44 @@ def test_claude_exec_surfaces_auth_prompt_and_records_notice(mocker, capsys):
     assert "https://claude.ai/oauth/authorize" in err
 
 
+def test_claude_exec_fails_fast_on_quota_stderr(mocker, tmp_path):
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    fake = _FakePopen(
+        stdout_schedule=[],
+        stderr_schedule=[
+            (
+                0,
+                '{"api_error_status":429,"result":"You have hit your limit"}\n',
+            )
+        ],
+        hang_after_stdout=True,
+    )
+    mocker.patch(
+        "conductor.providers.claude.subprocess.Popen",
+        side_effect=lambda args, **kwargs: fake,
+    )
+    session_log = SessionLog(path=tmp_path / "claude-quota.ndjson")
+
+    with pytest.raises(ProviderHTTPError) as exc:
+        ClaudeProvider(first_output_timeout_sec=0.5).exec(
+            "hi",
+            max_stall_sec=0.5,
+            session_log=session_log,
+        )
+
+    assert fake.terminated is True
+    assert "rate limit HTTP 429" in str(exc.value)
+    assert "hit your limit" in str(exc.value)
+    events = [
+        json.loads(line)
+        for line in session_log.log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    error_event = next(event for event in events if event["event"] == "error")
+    assert error_event["data"]["reason"] == "provider_terminal_failure"
+    assert error_event["data"]["category"] == "rate-limit"
+    assert error_event["data"]["status_code"] == 429
+
+
 def test_claude_exec_stall_watchdog_kills_silent_provider_and_logs_error(
     mocker,
     monkeypatch,
@@ -1284,6 +1322,44 @@ def test_codex_exec_default_timeout_is_unbounded(mocker):
     CodexProvider().exec("hi")
     assert captured.called
     assert fake.terminated is False
+
+
+def test_codex_exec_fails_fast_on_quota_stderr(mocker, tmp_path):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    fake = _FakePopen(
+        stdout_schedule=[],
+        stderr_schedule=[
+            (
+                0,
+                'ERROR: {"type":"error","status":429,'
+                '"error":{"type":"rate_limit_exceeded",'
+                '"message":"Too many requests"}}\n',
+            )
+        ],
+        hang_after_stdout=True,
+    )
+    _patch_codex_popen(mocker, fake)
+    session_log = SessionLog(path=tmp_path / "codex-quota.ndjson")
+
+    with pytest.raises(ProviderHTTPError) as exc:
+        CodexProvider().exec(
+            "hi",
+            max_stall_sec=0.5,
+            liveness_interval_sec=0,
+            session_log=session_log,
+        )
+
+    assert fake.terminated is True
+    assert "rate limit HTTP 429" in str(exc.value)
+    assert "Too many requests" in str(exc.value)
+    events = [
+        json.loads(line)
+        for line in session_log.log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    error_event = next(event for event in events if event["event"] == "error")
+    assert error_event["data"]["reason"] == "provider_terminal_failure"
+    assert error_event["data"]["category"] == "rate-limit"
+    assert error_event["data"]["status_code"] == 429
 
 
 @pytest.mark.parametrize("conductor_sandbox", ["read-only", "workspace-write", "none", "strict"])

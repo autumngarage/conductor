@@ -453,6 +453,43 @@ def test_ask_code_high_routes_to_codex_exec_with_default_tools(mocker):
     assert exec_mock.call_args.kwargs["sandbox"] == "none"
 
 
+def test_ask_code_high_falls_back_immediately_on_quota(mocker):
+    from conductor.providers.interface import ProviderHTTPError
+
+    _stub_all_configured(mocker, {"codex", "claude"})
+    codex_exec = mocker.patch.object(
+        CodexProvider,
+        "exec",
+        side_effect=ProviderHTTPError("codex reported rate limit: out of tokens"),
+    )
+    claude_exec = mocker.patch.object(
+        ClaudeProvider,
+        "exec",
+        return_value=_fake_response("claude"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "code",
+            "--effort",
+            "high",
+            "--allow-short-brief",
+            "--brief",
+            "Implement the scoped coding change.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert codex_exec.called
+    assert claude_exec.called
+    assert "codex failed (rate-limit)" in result.stderr
+    assert "falling back" in result.stderr
+    assert "→ claude" in result.stderr
+
+
 def test_ask_code_high_falls_back_to_openrouter_exec_before_ollama(mocker):
     _stub_all_configured(mocker, {"openrouter", "ollama"})
     exec_mock = mocker.patch.object(

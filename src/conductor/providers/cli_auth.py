@@ -12,7 +12,15 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from conductor.providers.interface import ProviderStalledError, ProviderStartupStalledError
+from conductor.providers.interface import (
+    ProviderHTTPError,
+    ProviderStalledError,
+    ProviderStartupStalledError,
+)
+from conductor.providers.terminal_signals import (
+    append_recent_text,
+    detect_retriable_provider_failure,
+)
 
 if TYPE_CHECKING:
     from conductor.session_log import SessionLog
@@ -230,6 +238,7 @@ def run_subprocess_with_live_stderr(
     last_output = start
     saw_output = False
     provider_label = provider_name or str(args[0])
+    stderr_tail = ""
     while True:
         now = time.monotonic()
         if timeout is not None and now - start > timeout:
@@ -326,6 +335,29 @@ def run_subprocess_with_live_stderr(
         last_output = time.monotonic()
         if stream_name == "stderr":
             tracker.observe_text(item, source="stderr")
+            stderr_tail = append_recent_text(stderr_tail, item)
+            signal = detect_retriable_provider_failure(
+                stderr_tail,
+                source="stderr",
+            )
+            if signal is not None:
+                _terminate_process(process)
+                stdout_thread.join(timeout=1)
+                stderr_thread.join(timeout=1)
+                _drain_stream_queue(stream_q, parts, tracker)
+                if session_log is not None:
+                    session_log.emit(
+                        "error",
+                        {
+                            "provider": provider_label,
+                            "reason": "provider_terminal_failure",
+                            "category": signal.category,
+                            "source": signal.source,
+                            "status_code": signal.status_code,
+                            "detail": signal.detail,
+                        },
+                    )
+                raise ProviderHTTPError(signal.error_message(provider_label))
 
     returncode = process.wait()
     stdout_thread.join(timeout=1)
