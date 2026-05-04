@@ -38,6 +38,10 @@ from conductor.muted_providers import (
     muted_providers_file_path,
     unmute_provider_ids,
 )
+from conductor.openrouter_stack_audit import (
+    StackAuditReport,
+    audit_openrouter_coding_stacks,
+)
 from conductor.profiles import ProfileError, ProfileSpec, get_profile, load_profiles
 from conductor.providers import (
     QUALITY_TIERS,
@@ -4099,6 +4103,33 @@ def models_refresh() -> None:
     )
 
 
+@models.command("validate-stacks")
+@click.option(
+    "--no-refresh",
+    is_flag=True,
+    help="Use the cached OpenRouter catalog instead of fetching the live catalog.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def models_validate_stacks(no_refresh: bool, as_json: bool) -> None:
+    """Validate curated OpenRouter stacks against the catalog."""
+    try:
+        snapshot = openrouter_catalog.load_catalog_snapshot(
+            force_refresh=not no_refresh,
+            allow_stale_on_error=no_refresh,
+        )
+    except ProviderHTTPError as e:
+        raise click.ClickException(str(e)) from e
+
+    report = audit_openrouter_coding_stacks(snapshot)
+    if as_json:
+        click.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+    else:
+        _emit_stack_audit_report(report)
+
+    if report.has_errors:
+        sys.exit(1)
+
+
 @models.command("list")
 def models_list() -> None:
     """Print the cached OpenRouter catalog summary."""
@@ -4165,6 +4196,30 @@ def models_show(slug: str) -> None:
         f"tools={'yes' if model.supports_tools else 'no'} · "
         f"vision={'yes' if model.supports_vision else 'no'}"
     )
+
+
+def _emit_stack_audit_report(report: StackAuditReport) -> None:
+    click.echo(
+        "OpenRouter coding stack audit "
+        f"(version {report.stack_version}, catalog "
+        f"{openrouter_catalog.format_timestamp(report.catalog_fetched_at)})"
+    )
+    click.echo(report.policy)
+    click.echo("")
+    if not report.findings:
+        click.echo("No stack issues found.")
+        return
+
+    errors = [finding for finding in report.findings if finding.severity == "error"]
+    warnings = [
+        finding for finding in report.findings if finding.severity == "warning"
+    ]
+    click.echo(f"{len(errors)} error(s), {len(warnings)} warning(s)")
+    for finding in report.findings:
+        click.echo(
+            f"- {finding.severity.upper()} {finding.stack} {finding.model}: "
+            f"{finding.code} - {finding.message}"
+        )
 
 
 # --------------------------------------------------------------------------- #
