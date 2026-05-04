@@ -68,6 +68,7 @@ class OpenRouterProvider:
         {"Read", "Grep", "Glob", "Edit", "Write", "Bash"}
     )
     supports_effort = True
+    supports_image_attachments = False
     effort_to_thinking = {
         "minimal": 0,
         "low": 2_000,

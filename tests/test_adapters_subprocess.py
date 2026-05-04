@@ -1205,6 +1205,48 @@ def test_codex_call_with_resume_uses_resume_subcommand(mocker):
     assert "--ephemeral" not in args
 
 
+def test_codex_call_forwards_attachments_as_image_flags(mocker, tmp_path):
+    """codex exec accepts `-i, --image <FILE>...` (repeatable). Conductor must
+    forward each attachment as a separate `-i <path>` pair so the provider
+    sees the file. Regression coverage for the cross-provider --attach plumbing."""
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    captured = mocker.patch(
+        "conductor.providers.codex.subprocess.run",
+        return_value=_fake_completed(stdout=CODEX_NDJSON),
+    )
+
+    img1 = tmp_path / "screen.png"
+    img1.write_bytes(b"\x89PNG\r\n\x1a\n")
+    img2 = tmp_path / "diagram.png"
+    img2.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    CodexProvider().call("look at these", attachments=(img1, img2))
+
+    args = captured.call_args.args[0]
+    image_pairs = [
+        (args[i], args[i + 1])
+        for i in range(len(args) - 1)
+        if args[i] == "-i"
+    ]
+    assert image_pairs == [
+        ("-i", str(img1)),
+        ("-i", str(img2)),
+    ]
+
+
+def test_codex_call_omits_image_flags_when_no_attachments(mocker):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    captured = mocker.patch(
+        "conductor.providers.codex.subprocess.run",
+        return_value=_fake_completed(stdout=CODEX_NDJSON),
+    )
+
+    CodexProvider().call("hi")
+
+    args = captured.call_args.args[0]
+    assert "-i" not in args
+
+
 def test_codex_call_raises_when_no_agent_message(mocker):
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
     mocker.patch(

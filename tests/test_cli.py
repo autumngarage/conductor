@@ -337,3 +337,53 @@ def test_router_defaults_list_marks_repo_override(monkeypatch, tmp_path):
     assert result.exit_code == 0, result.output
     assert "code-review = codex (repo override)" in result.output
     assert "long-context = gemini (home)" in result.output
+
+
+# ---------------------------------------------------------------------------
+# --attach plumbing — image attachments to providers that accept them.
+# ---------------------------------------------------------------------------
+
+
+def test_call_attach_nonexistent_path_errors():
+    """Click's `exists=True` validation rejects bogus --attach paths up front."""
+    result = CliRunner().invoke(
+        main,
+        [
+            "call",
+            "--with",
+            "codex",
+            "--brief",
+            "look at this",
+            "--attach",
+            "/nonexistent/never-here.png",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "never-here.png" in result.output
+
+
+def test_call_attach_routed_to_text_only_provider_exits_2(monkeypatch, tmp_path):
+    """A user pointing --attach at a provider that doesn't accept attachments
+    must get a copy-pasteable fix instead of a silently dropped image."""
+    monkeypatch.setenv(OPENROUTER_API_KEY_ENV, "or-test-key")
+    _stub_kimi_catalog(monkeypatch)
+    img = tmp_path / "screen.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "call",
+            "--with",
+            "kimi",
+            "--brief",
+            "describe this image",
+            "--attach",
+            str(img),
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "kimi" in result.output
+    assert "image attachments" in result.output
+    assert "--with codex" in result.output

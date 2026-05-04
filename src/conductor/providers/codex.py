@@ -91,6 +91,7 @@ class CodexProvider:
     quality_tier = "frontier"
     supported_tools = frozenset({"Read", "Grep", "Glob", "Edit", "Write", "Bash"})
     supports_effort = True
+    supports_image_attachments = True
     effort_to_thinking = {
         "minimal": 0,
         "low": 2_000,
@@ -566,6 +567,7 @@ class CodexProvider:
         *,
         effort: str | int = "medium",
         resume_session_id: str | None = None,
+        attachments: tuple[Path, ...] = (),
     ) -> CallResponse:
         return self._run(
             task,
@@ -573,6 +575,7 @@ class CodexProvider:
             effort=effort,
             sandbox="danger-full-access",
             resume_session_id=resume_session_id,
+            attachments=attachments,
         )
 
     def exec(
@@ -589,6 +592,7 @@ class CodexProvider:
         liveness_interval_sec: float = 30.0,
         resume_session_id: str | None = None,
         session_log: SessionLog | None = None,
+        attachments: tuple[Path, ...] = (),
     ) -> CallResponse:
         return self._run(
             task,
@@ -602,6 +606,7 @@ class CodexProvider:
             stream=True,
             resume_session_id=resume_session_id,
             session_log=session_log,
+            attachments=attachments,
         )
 
     def _run(
@@ -618,6 +623,7 @@ class CodexProvider:
         stream: bool = False,
         resume_session_id: str | None = None,
         session_log: SessionLog | None = None,
+        attachments: tuple[Path, ...] = (),
     ) -> CallResponse:
         # Cheap PATH check on the hot path; auth state surfaces as a CLI
         # exit failure below if needed. configured() (with auth probe) is
@@ -669,6 +675,9 @@ class CodexProvider:
             ]
         if codex_effort_flag:
             args.extend(["-c", f"model_reasoning_effort={codex_effort_flag}"])
+
+        for attachment in attachments:
+            args.extend(["-i", str(attachment)])
 
         if timeout_sec_override is _USE_DEFAULT:
             timeout = self._timeout_sec

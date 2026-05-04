@@ -276,6 +276,7 @@ def pick(
     exclude: frozenset[str] | set[str] | list[str] | None = None,
     priority: tuple[str, ...] = DEFAULT_PRIORITY,
     shadow: bool = False,
+    attachments_required: bool = False,
 ) -> tuple[Provider, RouteDecision]:
     """Pick the best provider for ``task_tags`` under the given preferences.
 
@@ -343,7 +344,11 @@ def pick(
             tools_ok = (
                 not tools_set or tools_set.issubset(provider.supported_tools)
             )
-            if tools_ok:
+            attachments_ok = (
+                not attachments_required
+                or getattr(provider, "supports_image_attachments", False)
+            )
+            if tools_ok and attachments_ok:
                 unconfigured[name] = failure
             continue
 
@@ -351,6 +356,11 @@ def pick(
         if tools_set and not tools_set.issubset(provider.supported_tools):
             missing = sorted(tools_set - provider.supported_tools)
             skipped.append((name, f"does not support tools: {missing}"))
+            continue
+        if attachments_required and not getattr(
+            provider, "supports_image_attachments", False
+        ):
+            skipped.append((name, "does not support image attachments"))
             continue
         # Session-local health filter.
         health_reason = _health_filter(name)
@@ -373,6 +383,7 @@ def pick(
         raise NoConfiguredProvider(
             "no provider satisfies the routing request. "
             f"prefer={prefer!r} tools={sorted(tools_set)} "
+            f"attachments_required={attachments_required} "
             f"exclude={sorted(exclude_set)}. Skipped: {skipped}"
         )
 
