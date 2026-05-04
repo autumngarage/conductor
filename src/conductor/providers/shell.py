@@ -88,6 +88,7 @@ class ShellProvider:
     # Capability declarations that are the same for every shell provider.
     supported_tools: frozenset[str] = frozenset()
     supports_effort: bool = False
+    supports_image_attachments: bool = False
     effort_to_thinking: dict[str, int] = {}  # noqa: RUF012
     cost_per_1k_thinking: float = 0.0
 

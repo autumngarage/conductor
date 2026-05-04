@@ -239,6 +239,27 @@ def test_unknown_tool_name_raises():
     assert "NotARealTool" in str(exc.value)
 
 
+def test_attachments_required_excludes_providers_without_capability(mocker):
+    """When the caller declares attachments_required=True, only providers with
+    supports_image_attachments=True survive routing — codex today, joined by
+    others as adapters opt in."""
+    _stub_configured(mocker, {"claude": True, "codex": True, "kimi": True})
+    provider, decision = pick(
+        [], prefer="best", attachments_required=True
+    )
+    assert provider.name == "codex"
+    skipped = dict(decision.candidates_skipped)
+    assert "does not support image attachments" in skipped["claude"]
+    assert "does not support image attachments" in skipped["kimi"]
+
+
+def test_attachments_required_no_eligible_provider_raises(mocker):
+    _stub_configured(mocker, {"claude": True, "kimi": True})
+    with pytest.raises(NoConfiguredProvider) as exc:
+        pick([], prefer="best", attachments_required=True)
+    assert "attachments_required=True" in str(exc.value)
+
+
 # ---------------------------------------------------------------------------
 # v0.2 — exclude
 # ---------------------------------------------------------------------------

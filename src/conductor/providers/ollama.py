@@ -205,6 +205,7 @@ class OllamaProvider:
         {"Read", "Grep", "Glob", "Edit", "Write", "Bash"}
     )
     supports_effort = False  # base ollama models don't expose a thinking dial
+    supports_image_attachments = False
     effort_to_thinking: dict[str, int] = {}
     cost_per_1k_in = 0.0
     cost_per_1k_out = 0.0

@@ -43,6 +43,7 @@ from conductor.providers import (
     QUALITY_TIERS,
     CallResponse,
     ClaudeProvider,
+    CodexProvider,
     NativeReviewProvider,
     OpenRouterProvider,
     ProviderConfigError,
@@ -113,6 +114,7 @@ DEFAULT_COUNCIL_ROUNDS = 1
 class BriefInput:
     body: str
     source: str
+    attachments: tuple[Path, ...] = ()
 
 
 # --------------------------------------------------------------------------- #
@@ -126,6 +128,7 @@ def _read_task(
     *,
     brief: str | None = None,
     brief_file: str | None = None,
+    attach: tuple[str, ...] = (),
 ) -> BriefInput:
     explicit_sources = [
         (name, value)
@@ -175,7 +178,19 @@ def _read_task(
     body = body.strip()
     if not body:
         raise click.UsageError("brief is empty after stripping whitespace.")
-    return BriefInput(body=body, source=source)
+
+    attachments: tuple[Path, ...] = ()
+    if attach:
+        resolved: list[Path] = []
+        for raw_path in attach:
+            path = Path(raw_path).expanduser()
+            if not path.is_file():
+                raise click.UsageError(
+                    f"--attach path {raw_path!r} is not a readable file."
+                )
+            resolved.append(path.resolve())
+        attachments = tuple(resolved)
+    return BriefInput(body=body, source=source, attachments=attachments)
 
 
 def _warn_if_short_exec_brief(
@@ -192,6 +207,27 @@ def _warn_if_short_exec_brief(
         "--brief-file with goal, context, scope, constraints, expected output, "
         "and validation. Pass --allow-short-brief to silence this warning.",
         err=True,
+    )
+
+
+def _ensure_supports_attachments(
+    provider_obj: object,
+    attachments: tuple[Path, ...],
+) -> None:
+    """Raise UnsupportedCapability if attachments cannot route to this provider.
+
+    The supported set is currently {codex}; surface a copy-pasteable fix so the
+    operator doesn't have to guess which provider to switch to.
+    """
+    if not attachments:
+        return
+    if getattr(provider_obj, "supports_image_attachments", False):
+        return
+    name = getattr(provider_obj, "name", provider_obj.__class__.__name__)
+    raise UnsupportedCapability(
+        f"provider {name!r} does not accept image attachments. "
+        "Re-run with `--with codex` (or `--auto` once another image-capable "
+        "provider lands)."
     )
 
 
@@ -679,6 +715,7 @@ def _invoke_with_fallback(
     resume_session_id: str | None = None,
     session_log: SessionLog | None = None,
     models_by_provider: dict[str, tuple[str, ...]] | None = None,
+    attachments: tuple[Path, ...] = (),
 ) -> tuple[CallResponse, list[str]]:
     """Try the decision's ranked providers in order; fallback on retryable errors.
 
@@ -762,6 +799,7 @@ def _invoke_with_fallback(
                         session_log=session_log,
                     )
                 elif isinstance(provider, ClaudeProvider):
+                    _ensure_supports_attachments(provider, attachments)
                     response = provider.exec(
                         task,
                         model=model,
@@ -775,7 +813,22 @@ def _invoke_with_fallback(
                         resume_session_id=resume_session_id,
                         session_log=session_log,
                     )
+                elif isinstance(provider, CodexProvider):
+                    response = provider.exec(
+                        task,
+                        model=model,
+                        effort=effort,
+                        tools=tools,
+                        sandbox=sandbox,
+                        cwd=cwd,
+                        timeout_sec=timeout_sec,
+                        max_stall_sec=max_stall_sec,
+                        resume_session_id=resume_session_id,
+                        session_log=session_log,
+                        attachments=attachments,
+                    )
                 else:
+                    _ensure_supports_attachments(provider, attachments)
                     response = provider.exec(
                         task,
                         model=model,
@@ -790,6 +843,7 @@ def _invoke_with_fallback(
                     )
             else:
                 if isinstance(provider, OpenRouterProvider):
+                    _ensure_supports_attachments(provider, attachments)
                     response = provider.call(
                         task,
                         model=model,
@@ -800,7 +854,16 @@ def _invoke_with_fallback(
                         log_selection=not silent,
                         resume_session_id=resume_session_id,
                     )
+                elif isinstance(provider, CodexProvider):
+                    response = provider.call(
+                        task,
+                        model=model,
+                        effort=effort,
+                        resume_session_id=resume_session_id,
+                        attachments=attachments,
+                    )
                 else:
+                    _ensure_supports_attachments(provider, attachments)
                     response = provider.call(
                         task,
                         model=model,
@@ -1630,6 +1693,16 @@ def main(ctx: click.Context) -> None:
     default=None,
     help="Read the delegation brief from a UTF-8 file. Use '-' to read stdin.",
 )
+@click.option(
+    "--attach",
+    "attach",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False, readable=True),
+    help=(
+        "Attach a file to the brief. Repeat for multiple. Today only `codex` "
+        "accepts attachments; review and council kinds do not pass them through."
+    ),
+)
 @click.option("--log-file", default=None, help="For exec: write structured NDJSON events.")
 @click.option("--json", "as_json", is_flag=True, default=False)
 @click.option("--verbose-route", is_flag=True, default=False)
@@ -1666,6 +1739,7 @@ def ask(
     task_file: str | None,
     brief: str | None,
     brief_file: str | None,
+    attach: tuple[str, ...],
     log_file: str | None,
     as_json: bool,
     verbose_route: bool,
@@ -1698,10 +1772,23 @@ def ask(
     if review_target_count > 1:
         raise click.UsageError("use only one of --base, --commit, or --uncommitted.")
 
-    brief_input = _read_task(task, task_file, brief=brief, brief_file=brief_file)
+    brief_input = _read_task(
+        task, task_file, brief=brief, brief_file=brief_file, attach=attach
+    )
     if plan.mode == "exec":
         _warn_if_short_exec_brief(brief_input, allow_short_brief=allow_short_brief)
     body = brief_input.body
+    attachments = brief_input.attachments
+
+    # `ask --kind {review,council}` doesn't have a path for attachments —
+    # review forwards a diff to the provider's native review mode (no attach
+    # API), and council always routes through OpenRouter. Reject up front
+    # rather than silently dropping the user's files.
+    if attachments and plan.mode in {"review", "council"}:
+        raise click.UsageError(
+            f"--attach is not supported for --kind {plan.mode}; "
+            "use `conductor exec --with codex --attach ...` instead."
+        )
 
     if not (silent_route or as_json):
         click.echo(_format_semantic_plan_line(plan), err=True)
@@ -1781,6 +1868,7 @@ def ask(
             exclude=exclude_set,
             priority=_semantic_priority(plan),
             shadow=True,
+            attachments_required=bool(attachments),
         )
     except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
         click.echo(f"conductor: {e}", err=True)
@@ -1827,6 +1915,7 @@ def ask(
                 silent=silent_route or as_json,
                 session_log=session_log,
                 models_by_provider=models_by_provider,
+                attachments=attachments,
         )
     except UnsupportedCapability as e:
         if session_log is not None:
@@ -1935,6 +2024,16 @@ def ask(
     help="Read the delegation brief from a UTF-8 file. Use '-' to read stdin.",
 )
 @click.option(
+    "--attach",
+    "attach",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False, readable=True),
+    help=(
+        "Attach a file to the brief. Repeat for multiple. Today only `codex` "
+        "accepts attachments; `--auto` will route accordingly."
+    ),
+)
+@click.option(
     "--model",
     default=None,
     help="Override the provider's default model.",
@@ -1984,6 +2083,7 @@ def call(
     task_file: str | None,
     brief: str | None,
     brief_file: str | None,
+    attach: tuple[str, ...],
     model: str | None,
     as_json: bool,
     verbose_route: bool,
@@ -2034,8 +2134,10 @@ def call(
         task_file,
         brief=brief,
         brief_file=brief_file,
+        attach=attach,
     )
     body = brief_input.body
+    attachments = brief_input.attachments
     effort_value = _parse_effort(effort)
 
     decision: RouteDecision | None = None
@@ -2047,6 +2149,7 @@ def call(
                 effort=effort_value,
                 exclude=frozenset(_parse_csv(exclude)),
                 shadow=True,
+                attachments_required=bool(attachments),
             )
         except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
             click.echo(f"conductor: {e}", err=True)
@@ -2068,6 +2171,7 @@ def call(
                 max_stall_sec=None,
                 start_timeout_sec=None,
                 silent=silent_route or as_json,
+                attachments=attachments,
             )
         except ProviderConfigError as e:
             click.echo(f"conductor: {e}", err=True)
@@ -2085,6 +2189,11 @@ def call(
             provider = get_provider(provider_id)
         except KeyError as e:
             raise click.UsageError(str(e)) from e
+        try:
+            _ensure_supports_attachments(provider, attachments)
+        except UnsupportedCapability as e:
+            click.echo(f"conductor: {e}", err=True)
+            sys.exit(2)
         print_caller_banner(provider_id, silent=silent_route or as_json)
         try:
             if isinstance(provider, OpenRouterProvider):
@@ -2096,6 +2205,14 @@ def call(
                     prefer=_validate_prefer(prefer),
                     log_selection=not (silent_route or as_json),
                     resume_session_id=resume_session_id,
+                )
+            elif isinstance(provider, CodexProvider):
+                response = provider.call(
+                    body,
+                    model=model,
+                    effort=effort_value,
+                    resume_session_id=resume_session_id,
+                    attachments=attachments,
                 )
             else:
                 response = provider.call(
@@ -2517,6 +2634,16 @@ def review(
     default=None,
     help="Read the delegation brief from a UTF-8 file. Use '-' to read stdin.",
 )
+@click.option(
+    "--attach",
+    "attach",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False, readable=True),
+    help=(
+        "Attach a file to the brief. Repeat for multiple. Today only `codex` "
+        "accepts attachments; `--auto` will route accordingly."
+    ),
+)
 @click.option("--model", default=None, help="Override the provider's default model.")
 @click.option(
     "--log-file",
@@ -2581,6 +2708,7 @@ def exec_cmd(
     task_file: str | None,
     brief: str | None,
     brief_file: str | None,
+    attach: tuple[str, ...],
     model: str | None,
     log_file: str | None,
     as_json: bool,
@@ -2632,12 +2760,14 @@ def exec_cmd(
         task_file,
         brief=brief,
         brief_file=brief_file,
+        attach=attach,
     )
     _warn_if_short_exec_brief(
         brief_input,
         allow_short_brief=allow_short_brief,
     )
     body = brief_input.body
+    attachments = brief_input.attachments
     tools_set = _validate_tools(tools)
     sandbox_value = _validate_sandbox(sandbox, warn=sandbox is not None)
     effort_value = _parse_effort(effort)
@@ -2656,6 +2786,7 @@ def exec_cmd(
                 sandbox=sandbox_value,
                 exclude=frozenset(_parse_csv(exclude)),
                 shadow=True,
+                attachments_required=bool(attachments),
             )
         except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
             click.echo(f"conductor: {e}", err=True)
@@ -2700,6 +2831,7 @@ def exec_cmd(
                 silent=silent_route or as_json,
                 resume_session_id=resume_session_id,
                 session_log=session_log,
+                attachments=attachments,
             )
         except UnsupportedCapability as e:
             if session_log is not None:
@@ -2729,6 +2861,11 @@ def exec_cmd(
             provider = get_provider(provider_id)
         except KeyError as e:
             raise click.UsageError(str(e)) from e
+        try:
+            _ensure_supports_attachments(provider, attachments)
+        except UnsupportedCapability as e:
+            click.echo(f"conductor: {e}", err=True)
+            sys.exit(2)
         session_log = _start_exec_session_log(
             log_file=log_file,
             resume_session_id=resume_session_id,
@@ -2787,6 +2924,20 @@ def exec_cmd(
                     start_timeout_sec=start_timeout_sec,
                     resume_session_id=resume_session_id,
                     session_log=session_log,
+                )
+            elif isinstance(provider, CodexProvider):
+                response = provider.exec(
+                    body,
+                    model=model,
+                    effort=effort_value,
+                    tools=tools_set,
+                    sandbox=sandbox_value,
+                    cwd=cwd,
+                    timeout_sec=timeout_sec,
+                    max_stall_sec=max_stall_sec,
+                    resume_session_id=resume_session_id,
+                    session_log=session_log,
+                    attachments=attachments,
                 )
             else:
                 response = provider.exec(
