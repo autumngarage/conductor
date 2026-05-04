@@ -98,6 +98,10 @@ Multi-turn agent session with tools:
     conductor exec --with <provider> --tools Read,Grep,Edit \\
         --brief-file /tmp/conductor-brief.md
 
+Use `--permission-profile read-only`, `patch`, or `full` instead of
+`--tools` when the caller needs Conductor to enforce a portable tool
+whitelist; profiles route only to providers that honor that whitelist.
+
 Get JSON for scripting / piping into other tools:
 
     conductor call --with kimi --brief "..." --json
@@ -164,6 +168,9 @@ Run the brief through conductor using the Bash tool:
 
       conductor exec --with <provider> --tools Read,Grep,Edit \\
           --brief-file /tmp/conductor-brief.md
+
+  If the caller needs an enforceable tool boundary, use
+  `--permission-profile read-only`, `patch`, or `full` instead.
 
 Capture the provider's response. Present it to the user with a brief
 "(from <provider>)" attribution. If conductor returns an error, show
@@ -564,15 +571,18 @@ When invoked:
    use exec mode instead:
 
        conductor exec --auto --tags tool-use,<tag> \\
-           --tools Read,Grep,Glob,Edit,Write,Bash \\
+           --permission-profile full \\
            --brief-file /tmp/conductor-brief.md --json
 
    OpenRouter can participate in exec mode through Conductor's local
-   tool-call loop; Codex and Claude remain the first choice for high-effort
-   coding, with OpenRouter as the remote fallback before local Ollama.
+   tool-call loop; permission-profile routing keeps only providers that can
+   enforce the requested Conductor tool whitelist, then falls back before
+   local Ollama.
 
    The old `--sandbox` flag is deprecated and ignored; exec runs
-   unsandboxed and inherits the parent environment.
+   unsandboxed and inherits the parent environment. Use `--permission-profile`
+   when a downstream tool needs Conductor to enforce read/edit/Bash limits.
+   Profiles are `read-only`, `patch`, and `full`.
 
    If the user explicitly requires local/offline execution, prefer the
    `ollama-offline` subagent. If you must run directly, use `--offline`

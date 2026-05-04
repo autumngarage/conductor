@@ -154,7 +154,9 @@ When a parent agent (like Claude Code) hands a feature build to codex via `condu
 
 The old `--sandbox` flag is still parseable for compatibility, but it is deprecated and ignored. Passing any value emits:
 
-`[conductor] --sandbox is deprecated and ignored; conductor exec now runs unsandboxed.`
+`[conductor] --sandbox is deprecated and ignored; conductor exec runs unsandboxed. Use --permission-profile for an enforceable Conductor tool whitelist.`
+
+Use `--permission-profile read-only` for inspect-only exec work (`Read,Grep,Glob`), `--permission-profile patch` for file edits without shell commands (`Read,Grep,Glob,Edit,Write`), and `--permission-profile full` for normal coding agent work (`Read,Grep,Glob,Edit,Write,Bash`). Permission profiles only route to providers that enforce Conductor's tool whitelist.
 
 Because the child has the same ambient authority as the parent, prompts should still be explicit about ownership: whether the child may edit files, run tests, use network, or perform git operations. For PR workflows in this repo, the parent agent still owns commit, push, and PR creation unless the user explicitly delegates those steps.
 

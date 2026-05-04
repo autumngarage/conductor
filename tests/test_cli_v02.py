@@ -1175,6 +1175,93 @@ def test_exec_without_sandbox_does_not_warn(mocker):
     assert SANDBOX_DEPRECATION_WARNING not in result.stderr
 
 
+def test_exec_permission_profile_auto_routes_to_enforcing_provider(mocker):
+    _stub_all_configured(mocker, {"claude", "codex", "gemini"})
+    claude_exec = mocker.patch.object(
+        ClaudeProvider, "exec", return_value=_fake_response("claude")
+    )
+    codex_exec = mocker.patch.object(
+        CodexProvider, "exec", return_value=_fake_response("codex")
+    )
+    gemini_exec = mocker.patch.object(
+        GeminiProvider, "exec", return_value=_fake_response("gemini")
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--auto",
+            "--prefer",
+            "best",
+            "--permission-profile",
+            "read-only",
+            "--no-preflight",
+            "--allow-short-brief",
+            "--task",
+            "inspect without editing",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert claude_exec.called
+    assert not codex_exec.called
+    assert not gemini_exec.called
+    assert claude_exec.call_args.kwargs["tools"] == frozenset({"Read", "Grep", "Glob"})
+    assert "→ claude" in result.stderr
+
+
+def test_exec_permission_profile_rejects_non_enforcing_direct_provider(mocker):
+    _stub_all_configured(mocker, {"codex"})
+    exec_mock = mocker.patch.object(
+        CodexProvider, "exec", return_value=_fake_response("codex")
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "codex",
+            "--permission-profile",
+            "read-only",
+            "--no-preflight",
+            "--allow-short-brief",
+            "--task",
+            "inspect",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert not exec_mock.called
+    assert "requires a provider that enforces Conductor exec tool whitelists" in (
+        result.output
+    )
+    assert "provider 'codex' does not" in result.output
+
+
+def test_exec_permission_profile_rejects_conflicting_tools():
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "claude",
+            "--permission-profile",
+            "read-only",
+            "--tools",
+            "Read,Edit",
+            "--allow-short-brief",
+            "--task",
+            "inspect",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "--tools conflicts with --permission-profile='read-only'" in result.output
+    assert "Read,Grep,Glob" in result.output
+
+
 def test_exec_task_file_dash_reads_stdin(mocker):
     _stub_all_configured(mocker, {"codex"})
     exec_mock = mocker.patch.object(
@@ -1693,13 +1780,16 @@ def test_config_show_includes_tags_and_with(monkeypatch):
 def test_config_show_json_tracks_all_env_sources(monkeypatch):
     monkeypatch.setenv("CONDUCTOR_TAGS", "code-review")
     monkeypatch.setenv("CONDUCTOR_WITH", "codex")
+    monkeypatch.setenv("CONDUCTOR_PERMISSION_PROFILE", "read-only")
     result = CliRunner().invoke(main, ["config", "show", "--json"])
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["effective"]["tags"] == ["code-review"]
     assert payload["effective"]["with"] == "codex"
+    assert payload["effective"]["permission_profile"] == "read-only"
     assert payload["sources"]["CONDUCTOR_TAGS"] == "env"
     assert payload["sources"]["CONDUCTOR_WITH"] == "env"
+    assert payload["sources"]["CONDUCTOR_PERMISSION_PROFILE"] == "env"
 
 
 # ---------------------------------------------------------------------------

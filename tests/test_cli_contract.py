@@ -47,8 +47,9 @@ DOCUMENTED_STABLE_FLAGS: frozenset[str] = frozenset(
 )
 
 # Documented stable flag surface for `conductor exec`.
-# Mirrors call's core flags plus exec-specific additions: tools, sandbox, cwd,
-# timeout, max-stall-seconds, log-file, preflight, and allow-short-brief.
+# Mirrors call's core flags plus exec-specific additions: tools,
+# permission-profile, sandbox, cwd, timeout, max-stall-seconds, log-file,
+# preflight, and allow-short-brief.
 DOCUMENTED_EXEC_FLAGS: frozenset[str] = frozenset(
     {
         "--with",
@@ -70,6 +71,7 @@ DOCUMENTED_EXEC_FLAGS: frozenset[str] = frozenset(
         "--no-offline",
         "--profile",
         "--tools",
+        "--permission-profile",
         "--sandbox",
         "--cwd",
         "--timeout",

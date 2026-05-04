@@ -204,6 +204,7 @@ class OllamaProvider:
     supported_tools: frozenset[str] = frozenset(
         {"Read", "Grep", "Glob", "Edit", "Write", "Bash"}
     )
+    enforces_exec_tool_permissions = True
     supports_effort = False  # base ollama models don't expose a thinking dial
     supports_image_attachments = False
     effort_to_thinking: dict[str, int] = {}

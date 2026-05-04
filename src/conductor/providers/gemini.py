@@ -103,6 +103,7 @@ class GeminiProvider:
     # Capability declarations (see interface.py)
     quality_tier = "strong"
     supported_tools = frozenset({"Read", "Grep", "Glob", "Edit", "Write", "Bash"})
+    enforces_exec_tool_permissions = False
     supports_effort = True
     supports_image_attachments = False
     effort_to_thinking = {

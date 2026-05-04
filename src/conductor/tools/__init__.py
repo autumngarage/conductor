@@ -1,17 +1,18 @@
 """Portable tool registry for Conductor's HTTP tool-use loop.
 
-Shell-out providers (claude/codex/gemini) own their own tool-use: we
-hand them ``--tools Read,Grep,...`` and they execute the tools inside
-their own process. For HTTP providers (openrouter, ollama, and compatible
-presets when enabled), Conductor has to drive the loop itself. That means
+Shell-out providers own their own tool-use when their CLI exposes a portable
+allow-list (Claude Code does via ``--allowedTools``). Other CLI providers may
+run agent loops but cannot enforce Conductor's tool whitelist. For HTTP
+providers (openrouter, ollama, and compatible presets when enabled), Conductor
+has to drive the loop itself. That means
 registering tools with the model, executing whichever the model picks,
 feeding results back, and repeating until the model answers.
 
 This module owns the portable Tool set Conductor exposes. Each tool:
 
 - has a stable name (``Read``, ``Grep``, ``Glob``, ``Edit``, ``Write``,
-  ``Bash``) — the same names shell-out providers accept via their
-  respective ``--tools`` / ``--allowedTools`` flags;
+  ``Bash``) — the same names supported shell-out providers accept via
+  native allow-list flags;
 - declares a JSON Schema for its parameters (used as the ``tools``
   parameter in OpenAI-compatible chat completions).
 

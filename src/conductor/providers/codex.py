@@ -94,6 +94,7 @@ class CodexProvider:
     # Capability declarations (see interface.py)
     quality_tier = "frontier"
     supported_tools = frozenset({"Read", "Grep", "Glob", "Edit", "Write", "Bash"})
+    enforces_exec_tool_permissions = False
     supports_effort = True
     supports_image_attachments = True
     effort_to_thinking = {
