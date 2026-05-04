@@ -8,6 +8,8 @@ executes local filesystem/shell tools and feeds results back to the model.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -21,6 +23,7 @@ from conductor.providers.interface import (
     CallResponse,
     ProviderConfigError,
     ProviderError,
+    ProviderExecutionError,
     ProviderHTTPError,
     UnsupportedCapability,
     resolve_effort_tokens,
@@ -395,6 +398,13 @@ class OpenRouterProvider:
         final_text = ""
         final_body: dict = {}
         hit_cap = False
+        tool_call_count = 0
+        write_success_count = 0
+        tool_errors: list[dict[str, object]] = []
+        bash_failures: list[dict[str, object]] = []
+        validation_failures: list[dict[str, object]] = []
+        repo_changing_task = _is_repo_changing_tool_task(effective_task_tags, tools)
+        git_status_before = _git_clean_status(workdir) if repo_changing_task else None
 
         start = time.monotonic()
         while iteration < OPENROUTER_MAX_TOOL_ITERATIONS:
@@ -461,11 +471,40 @@ class OpenRouterProvider:
 
             for idx, call in enumerate(tool_calls):
                 name, args, result = _parse_tool_call(call)
+                tool_call_count += 1
+                tool_error: str | None = None
+                executed_tool = False
                 if result is None:
                     try:
                         result = executor.run(name, args or {})
+                        executed_tool = True
                     except ToolExecutionError as e:
+                        tool_error = str(e)
                         result = f"error: {e}"
+                elif isinstance(result, str) and result.startswith("error:"):
+                    tool_error = result.removeprefix("error:").strip()
+
+                if tool_error is not None:
+                    tool_errors.append(
+                        {
+                            "iteration": iteration,
+                            "name": name,
+                            "error": tool_error,
+                        }
+                    )
+                elif executed_tool and name in {"Edit", "Write"}:
+                    write_success_count += 1
+
+                if executed_tool and name == "Bash" and isinstance(result, str):
+                    bash_failure = _bash_failure(
+                        args or {},
+                        result,
+                        iteration=iteration,
+                    )
+                    if bash_failure is not None:
+                        bash_failures.append(bash_failure)
+                        if _is_validation_command(str(bash_failure["command"])):
+                            validation_failures.append(bash_failure)
 
                 if session_log is not None:
                     session_log.emit(
@@ -498,7 +537,28 @@ class OpenRouterProvider:
                 "Re-run with a narrower task or a larger budget.]"
             )
 
+        git_status_after = _git_clean_status(workdir) if repo_changing_task else None
+        execution_status = _execution_status(
+            repo_changing_task=repo_changing_task,
+            tool_call_count=tool_call_count,
+            write_success_count=write_success_count,
+            tool_errors=tool_errors,
+            bash_failures=bash_failures,
+            validation_failures=validation_failures,
+            hit_cap=hit_cap,
+            git_status_before=git_status_before,
+            git_status_after=git_status_after,
+        )
         duration_ms = int((time.monotonic() - start) * 1000)
+        execution_status["duration_ms"] = duration_ms
+        failure_message = _execution_failure_message(execution_status)
+        if failure_message is not None:
+            raise ProviderExecutionError(
+                f"OpenRouter code execution failed: {failure_message}",
+                provider=self.name,
+                status=execution_status,
+            )
+
         return CallResponse(
             text=final_text,
             provider=self.name,
@@ -514,10 +574,197 @@ class OpenRouterProvider:
                 "tool_iterations": iteration,
                 "tool_names": sorted(tools),
                 "hit_iteration_cap": hit_cap,
+                "tool_call_count": tool_call_count,
+                "write_success_count": write_success_count,
+                "tool_error_count": len(tool_errors),
+                "bash_failure_count": len(bash_failures),
+                "execution_status": execution_status,
                 "iterations": iterations_log,
             },
             raw=final_body,
         )
+
+
+_CODE_TASK_TAGS = frozenset({"code", "coding"})
+_WRITE_TOOLS = frozenset({"Edit", "Write"})
+
+
+def _is_repo_changing_tool_task(
+    task_tags: tuple[str, ...],
+    tools: frozenset[str],
+) -> bool:
+    return bool(_CODE_TASK_TAGS.intersection(task_tags)) and bool(
+        _WRITE_TOOLS.intersection(tools)
+    )
+
+
+def _git_clean_status(cwd: Path) -> dict[str, object]:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(cwd), "status", "--porcelain", "--untracked-files=all"],
+            capture_output=True,
+            env=_scrub_git_env(),
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except FileNotFoundError as err:
+        return {"available": False, "clean": None, "error": f"git unavailable: {err}"}
+    except subprocess.TimeoutExpired as err:
+        return {
+            "available": False,
+            "clean": None,
+            "error": f"git status timed out after {err.timeout}s",
+        }
+
+    if result.returncode != 0:
+        error = (result.stderr or result.stdout or "").strip()
+        return {
+            "available": False,
+            "clean": None,
+            "error": error or f"git status exited {result.returncode}",
+        }
+
+    return {
+        "available": True,
+        "clean": not result.stdout.strip(),
+        "porcelain": result.stdout,
+    }
+
+
+def _scrub_git_env() -> dict[str, str]:
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key
+        not in {
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_NAMESPACE",
+        }
+    }
+
+
+def _bash_failure(
+    args: dict,
+    result: str,
+    *,
+    iteration: int,
+) -> dict[str, object] | None:
+    command = args.get("command")
+    if not isinstance(command, str):
+        command = ""
+
+    first_line = result.splitlines()[0] if result else ""
+    if first_line.startswith("exit="):
+        raw_exit = first_line.removeprefix("exit=").strip()
+        try:
+            exit_code = int(raw_exit)
+        except ValueError:
+            exit_code = 0
+        if exit_code == 0:
+            return None
+        return {
+            "iteration": iteration,
+            "command": command,
+            "exit_code": exit_code,
+            "result_preview": result[:500],
+        }
+
+    if result.startswith("TIMEOUT after"):
+        return {
+            "iteration": iteration,
+            "command": command,
+            "timeout": True,
+            "result_preview": result[:500],
+        }
+
+    return None
+
+
+def _is_validation_command(command: str) -> bool:
+    normalized = command.strip().lower()
+    if not normalized:
+        return False
+    validation_signals = (
+        "pytest",
+        "tox",
+        "unittest",
+        "npm test",
+        "pnpm test",
+        "yarn test",
+        "bun test",
+        "cargo test",
+        "go test",
+        "gradle test",
+        "mvn test",
+        "make test",
+        "ruff",
+        "mypy",
+        "pyright",
+        "tsc",
+        "eslint",
+        "prettier",
+        "git diff --check",
+    )
+    return any(signal in normalized for signal in validation_signals)
+
+
+def _execution_status(
+    *,
+    repo_changing_task: bool,
+    tool_call_count: int,
+    write_success_count: int,
+    tool_errors: list[dict[str, object]],
+    bash_failures: list[dict[str, object]],
+    validation_failures: list[dict[str, object]],
+    hit_cap: bool,
+    git_status_before: dict[str, object] | None,
+    git_status_after: dict[str, object] | None,
+) -> dict[str, object]:
+    state = "completed"
+    after_clean = (
+        git_status_after.get("clean") if git_status_after is not None else None
+    )
+    if hit_cap:
+        state = "iteration-cap"
+    elif repo_changing_task and validation_failures:
+        state = "validation-failed"
+    elif repo_changing_task and tool_errors and write_success_count == 0:
+        state = "tool-error"
+    elif repo_changing_task and (
+        write_success_count == 0 or after_clean is True
+    ):
+        state = "no-op"
+
+    return {
+        "state": state,
+        "repo_changing": repo_changing_task,
+        "tool_calls": tool_call_count,
+        "successful_write_tools": write_success_count,
+        "tool_errors": tool_errors,
+        "bash_failures": bash_failures,
+        "validation_failures": validation_failures,
+        "hit_iteration_cap": hit_cap,
+        "git_status_before": git_status_before,
+        "git_status_after": git_status_after,
+    }
+
+
+def _execution_failure_message(status: dict[str, object]) -> str | None:
+    state = status.get("state")
+    if state == "iteration-cap":
+        return "tool-use loop hit max iterations before completing the code task"
+    if state == "validation-failed":
+        return "validation command failed after edits"
+    if state == "tool-error":
+        return "tool schema/execution errors occurred before any edit/write succeeded"
+    if state == "no-op":
+        return "repo-changing code task produced no net workspace changes"
+    return None
 
 
 def select_model_for_task(

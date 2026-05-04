@@ -35,6 +35,7 @@ from conductor.providers import (
     KimiProvider,
     OllamaProvider,
     OpenRouterProvider,
+    ProviderExecutionError,
 )
 from conductor.router import RouteDecision, reset_health
 
@@ -531,6 +532,45 @@ def test_ask_code_high_falls_back_to_openrouter_exec_before_ollama(mocker):
     assert payload["semantic"]["candidates"][1]["models"] == list(
         OPENROUTER_CODING_HIGH
     )
+
+
+def test_ask_code_high_falls_back_after_openrouter_execution_failure(mocker):
+    _stub_all_configured(mocker, {"openrouter", "ollama"})
+    openrouter_exec = mocker.patch.object(
+        OpenRouterProvider,
+        "exec",
+        side_effect=ProviderExecutionError(
+            "OpenRouter code execution failed: no-op",
+            provider="openrouter",
+            status={"state": "no-op", "repo_changing": True},
+        ),
+    )
+    ollama_exec = mocker.patch.object(
+        OllamaProvider,
+        "exec",
+        return_value=_fake_response("ollama", "qwen2.5-coder:14b"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "code",
+            "--effort",
+            "high",
+            "--allow-short-brief",
+            "--brief",
+            "Implement the scoped coding change.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert openrouter_exec.called
+    assert ollama_exec.called
+    assert "openrouter failed (provider-error)" in result.stderr
+    assert "falling back" in result.stderr
+    assert "→ ollama" in result.stderr
 
 
 def test_ask_code_medium_falls_through_from_openrouter_404_to_ollama(mocker):
