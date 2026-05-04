@@ -174,6 +174,9 @@ When `--auto` is used, the JSON adds a `route` field with the same `RouteDecisio
     "matched_tags": ["code-review"],
     "tools_requested": [],
     "sandbox": "none",
+    "estimated_input_tokens": 1250,
+    "estimated_output_tokens": 500,
+    "estimated_thinking_tokens": 8000,
     "ranked": [
       {
         "name": "claude",
@@ -185,7 +188,10 @@ When `--auto` is used, the JSON adds a `route` field with the same `RouteDecisio
         "latency_ms": 7000,
         "health_penalty": 0.0,
         "combined_score": 4001.0,
-        "unconfigured_reason": null
+        "unconfigured_reason": null,
+        "estimated_input_tokens": 1250,
+        "estimated_output_tokens": 500,
+        "estimated_thinking_tokens": 8000
       }
     ],
     "candidates_skipped": [],
@@ -195,6 +201,8 @@ When `--auto` is used, the JSON adds a `route` field with the same `RouteDecisio
   }
 }
 ```
+
+Route estimates are pre-call assumptions used only for routing and dry-run previews. Observed provider usage stays in the top-level `usage` object after a call returns. `call`, `ask`, `review`, and `exec` estimate input tokens from the current brief; review also includes patch context when a base, commit, or uncommitted target is supplied. Dry-run callers such as Touchstone can pass `conductor route --estimated-input-tokens <n> --estimated-output-tokens <n>` to score the current prompt or diff size without reaching a model. When omitted, Conductor uses its legacy typical-request assumptions: 4,000 input tokens and 500 output tokens.
 
 For human diagnostics without `--json`, use `--verbose-route` to print the full ranking table on stderr. In `--json` mode, route logging is suppressed so stdout stays machine-parseable; read the `route` field instead.
 

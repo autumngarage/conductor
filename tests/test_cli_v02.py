@@ -192,6 +192,25 @@ def test_call_auto_prefer_best_routes_to_frontier(mocker):
     assert "tier: frontier" in result.stderr
 
 
+def test_call_auto_route_json_includes_prompt_size_estimate(mocker):
+    _stub_all_configured(mocker, {"claude"})
+    mocker.patch.object(ClaudeProvider, "call", return_value=_fake_response("claude"))
+    prompt = "x" * 1000
+
+    result = CliRunner().invoke(
+        main,
+        ["call", "--auto", "--prefer", "best", "--task", prompt, "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["usage"]["input_tokens"] == 50
+    assert payload["route"]["estimated_input_tokens"] == 250
+    assert payload["route"]["estimated_output_tokens"] == 500
+    assert payload["route"]["estimated_thinking_tokens"] == 8_000
+    assert payload["route"]["ranked"][0]["estimated_input_tokens"] == 250
+
+
 def test_call_auto_effort_max_flows_to_provider(mocker):
     _stub_all_configured(mocker, {"claude"})
     call_mock = mocker.patch.object(
@@ -1724,6 +1743,76 @@ def test_route_json_mode(mocker):
     payload = json.loads(result.output)
     assert payload["provider"] == "claude"
     assert payload["prefer"] == "best"
+
+
+def test_route_json_accepts_explicit_size_estimate(mocker):
+    _stub_all_configured(mocker, {"claude"})
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "route",
+            "--prefer",
+            "best",
+            "--estimated-input-tokens",
+            "123",
+            "--estimated-output-tokens",
+            "45",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["estimated_input_tokens"] == 123
+    assert payload["estimated_output_tokens"] == 45
+    assert payload["estimated_thinking_tokens"] == 8_000
+    assert payload["ranked"][0]["estimated_input_tokens"] == 123
+
+
+def test_ask_call_mode_routes_with_prompt_size_estimate(mocker):
+    _stub_all_configured(mocker, {"ollama"})
+    mocker.patch.object(OllamaProvider, "call", return_value=_fake_response("ollama"))
+    prompt = "x" * 2000
+
+    result = CliRunner().invoke(
+        main,
+        ["ask", "--kind", "code", "--effort", "low", "--task", prompt, "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["route"]["estimated_input_tokens"] == 500
+    assert payload["route"]["estimated_output_tokens"] == 500
+
+
+def test_review_auto_route_includes_patch_size_estimate(mocker, tmp_path):
+    repo = _make_diff_repo(tmp_path)
+    _stub_all_configured(mocker, {"claude"})
+    mocker.patch.object(ClaudeProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(
+        ClaudeProvider, "review", return_value=_fake_response("claude")
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--base",
+            "HEAD~1",
+            "--cwd",
+            str(repo),
+            "--brief",
+            "review",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["route"]["estimated_input_tokens"] > 2
+    assert payload["route"]["estimated_output_tokens"] == 500
 
 
 def test_route_no_configured_provider_exits_nonzero(mocker):

@@ -62,6 +62,9 @@ ROUTE_REQUIRED_KEYS = {
     "matched_tags",
     "tools_requested",
     "sandbox",
+    "estimated_input_tokens",
+    "estimated_output_tokens",
+    "estimated_thinking_tokens",
     "ranked",
     "candidates_skipped",
     "tag_default_applied",
@@ -188,6 +191,9 @@ def _assert_route_payload_contract(route: dict[str, Any]) -> None:
     assert isinstance(route["task_tags"], list)
     assert isinstance(route["matched_tags"], list)
     assert isinstance(route["tools_requested"], list)
+    assert isinstance(route["estimated_input_tokens"], int)
+    assert isinstance(route["estimated_output_tokens"], int)
+    assert isinstance(route["estimated_thinking_tokens"], int)
     assert isinstance(route["ranked"], list)
     assert route["ranked"], "route contract includes the full ranked candidate list"
 
@@ -301,6 +307,8 @@ def test_consumer_doc_names_the_guarded_contract_edges():
     assert '"input_tokens": "integer | null"' in docs
     assert "conductor call --offline" in docs
     assert "multi-line `Usage` / `Try` / `Error` output" in docs
+    assert '"estimated_input_tokens": 1250' in docs
+    assert "--estimated-input-tokens" in docs
     assert "tests/test_consumer_contract.py" in docs
 
 

@@ -163,6 +163,9 @@ ROUTE_REQUIRED_FIELDS: frozenset[str] = frozenset(
         "matched_tags",
         "tools_requested",
         "sandbox",
+        "estimated_input_tokens",
+        "estimated_output_tokens",
+        "estimated_thinking_tokens",
         "ranked",
     }
 )
