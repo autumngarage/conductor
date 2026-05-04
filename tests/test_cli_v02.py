@@ -454,19 +454,19 @@ def test_ask_code_high_routes_to_codex_exec_with_default_tools(mocker):
     assert exec_mock.call_args.kwargs["sandbox"] == "none"
 
 
-def test_ask_code_high_falls_back_immediately_on_quota(mocker):
+def test_ask_code_high_falls_back_immediately_to_openrouter_on_quota(mocker):
     from conductor.providers.interface import ProviderHTTPError
 
-    _stub_all_configured(mocker, {"codex", "claude"})
+    _stub_all_configured(mocker, {"codex", "openrouter"})
     codex_exec = mocker.patch.object(
         CodexProvider,
         "exec",
         side_effect=ProviderHTTPError("codex reported rate limit: out of tokens"),
     )
-    claude_exec = mocker.patch.object(
-        ClaudeProvider,
+    openrouter_exec = mocker.patch.object(
+        OpenRouterProvider,
         "exec",
-        return_value=_fake_response("claude"),
+        return_value=_fake_response("openrouter"),
     )
 
     result = CliRunner().invoke(
@@ -485,10 +485,11 @@ def test_ask_code_high_falls_back_immediately_on_quota(mocker):
 
     assert result.exit_code == 0, result.output
     assert codex_exec.called
-    assert claude_exec.called
+    assert openrouter_exec.called
+    assert openrouter_exec.call_args.kwargs["models"] == OPENROUTER_CODING_HIGH
     assert "codex failed (rate-limit)" in result.stderr
     assert "falling back" in result.stderr
-    assert "→ claude" in result.stderr
+    assert "→ openrouter" in result.stderr
 
 
 def test_ask_code_high_falls_back_to_openrouter_exec_before_ollama(mocker):
@@ -524,11 +525,10 @@ def test_ask_code_high_falls_back_to_openrouter_exec_before_ollama(mocker):
     payload = json.loads(result.stdout)
     assert [candidate["provider"] for candidate in payload["semantic"]["candidates"]] == [
         "codex",
-        "claude",
         "openrouter",
         "ollama",
     ]
-    assert payload["semantic"]["candidates"][2]["models"] == list(
+    assert payload["semantic"]["candidates"][1]["models"] == list(
         OPENROUTER_CODING_HIGH
     )
 
@@ -793,6 +793,68 @@ def test_review_auto_generic_fallback_prompt_includes_diff(mocker, tmp_path):
     assert "Patch context for generic review fallback" in prompt
     assert "diff --git a/README.md b/README.md" in prompt
     assert "+fallback diff marker" in prompt
+
+
+def test_ask_review_uses_openrouter_code_stack_instead_of_gemini(mocker, tmp_path):
+    from conductor.providers.interface import ProviderStalledError
+
+    repo = _make_diff_repo(tmp_path)
+    _stub_all_configured(mocker, {"codex", "claude", "gemini", "openrouter"})
+    mocker.patch.object(CodexProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(ClaudeProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(GeminiProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(
+        CodexProvider,
+        "review",
+        side_effect=ProviderStalledError("codex review stalled"),
+    )
+    mocker.patch.object(
+        ClaudeProvider,
+        "review",
+        side_effect=ProviderStalledError("claude review stalled"),
+    )
+    gemini_review = mocker.patch.object(
+        GeminiProvider,
+        "review",
+        return_value=_fake_response("gemini", "gemini-2.5-pro"),
+    )
+    openrouter_call = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response("openrouter", OPENROUTER_CODING_HIGH[0]),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "review",
+            "--cwd",
+            str(repo),
+            "--base",
+            "HEAD~1",
+            "--brief",
+            "Review this merge using the project reviewer guide.",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert not gemini_review.called
+    assert openrouter_call.called
+    assert openrouter_call.call_args.kwargs["models"] == OPENROUTER_CODING_HIGH
+    prompt = openrouter_call.call_args.args[0]
+    assert "Patch context for generic review fallback" in prompt
+    payload = json.loads(result.stdout)
+    assert [candidate["provider"] for candidate in payload["semantic"]["candidates"]] == [
+        "codex",
+        "claude",
+        "openrouter",
+    ]
+    assert payload["semantic"]["candidates"][2]["models"] == list(
+        OPENROUTER_CODING_HIGH
+    )
 
 
 def test_review_auto_generic_fallback_repairs_requested_sentinel(mocker, tmp_path):

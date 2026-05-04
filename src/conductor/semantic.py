@@ -175,7 +175,6 @@ _CODE: dict[EffortBucket, SemanticPlan] = {
         tools=_CODE_EXEC_TOOLS,
         candidates=(
             SemanticCandidate("codex"),
-            SemanticCandidate("claude"),
             SemanticCandidate("openrouter", OPENROUTER_CODING_HIGH),
             SemanticCandidate("ollama"),
         ),
@@ -189,7 +188,6 @@ _CODE: dict[EffortBucket, SemanticPlan] = {
         tools=_CODE_EXEC_TOOLS,
         candidates=(
             SemanticCandidate("codex"),
-            SemanticCandidate("claude"),
             SemanticCandidate("openrouter", OPENROUTER_CODING_MAX),
             SemanticCandidate("ollama"),
         ),
@@ -207,7 +205,12 @@ _REVIEW: dict[EffortBucket, SemanticPlan] = {
         candidates=(
             SemanticCandidate("codex"),
             SemanticCandidate("claude"),
-            SemanticCandidate("gemini"),
+            SemanticCandidate(
+                "openrouter",
+                OPENROUTER_CODING_MAX
+                if bucket == "max"
+                else OPENROUTER_CODING_HIGH,
+            ),
         ),
     )
     for bucket in EFFORT_BUCKETS
