@@ -16,6 +16,7 @@ and the error hierarchy below.
 Capability declarations (v0.2):
   - quality_tier            — "frontier" | "strong" | "standard" | "local"
   - supported_tools         — frozenset of tool names ({Read, Grep, Glob, Edit, Write, Bash})
+  - enforces_exec_tool_permissions — whether exec() honors Conductor's requested tool whitelist
   - supports_effort         — whether the provider has a thinking/reasoning dial
   - supports_image_attachments — whether the provider can accept image file attachments
                                  alongside the brief (today: codex only)
@@ -187,6 +188,7 @@ class Provider(Protocol):
     # --- capability declarations (hard filters + scoring dimensions) ------- #
     quality_tier: ClassVar[str]
     supported_tools: ClassVar[frozenset[str]]
+    enforces_exec_tool_permissions: ClassVar[bool]
     supports_effort: ClassVar[bool]
     supports_image_attachments: ClassVar[bool]
     effort_to_thinking: ClassVar[dict[str, int]]

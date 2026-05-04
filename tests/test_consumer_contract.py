@@ -302,3 +302,15 @@ def test_consumer_doc_names_the_guarded_contract_edges():
     assert "conductor call --offline" in docs
     assert "multi-line `Usage` / `Try` / `Error` output" in docs
     assert "tests/test_consumer_contract.py" in docs
+
+
+def test_consumer_doc_documents_exec_permission_contract():
+    docs = DOC_PATH.read_text(encoding="utf-8")
+
+    assert "## Exec permission contract" in docs
+    assert "`--sandbox` is compatibility-only" in docs
+    assert "`read-only` | `Read,Grep,Glob`" in docs
+    assert "`patch` | `Read,Grep,Glob,Edit,Write`" in docs
+    assert "`full` | `Read,Grep,Glob,Edit,Write,Bash`" in docs
+    assert "Conductor excludes providers that do not enforce" in docs
+    assert "`codex` | No" in docs

@@ -98,8 +98,15 @@ from conductor.session_log import (
 from conductor.wizard import run_init_wizard
 
 VALID_TOOLS = ("Read", "Grep", "Glob", "Edit", "Write", "Bash")
+EXEC_PERMISSION_PROFILES: dict[str, frozenset[str]] = {
+    "read-only": frozenset({"Read", "Grep", "Glob"}),
+    "patch": frozenset({"Read", "Grep", "Glob", "Edit", "Write"}),
+    "full": frozenset(VALID_TOOLS),
+}
 SANDBOX_DEPRECATION_WARNING = (
-    "[conductor] --sandbox is deprecated and ignored; conductor exec now runs unsandboxed."
+    "[conductor] --sandbox is deprecated and ignored; conductor exec runs "
+    "unsandboxed. Use --permission-profile for an enforceable Conductor "
+    "tool whitelist."
 )
 VALID_EFFORT_LEVELS = ("minimal", "low", "medium", "high", "max")
 PROFILE_PRECEDENCE_TEXT = (
@@ -304,6 +311,97 @@ def _validate_tools(raw: str | None) -> frozenset[str]:
             f"Known: {list(VALID_TOOLS)}."
         )
     return frozenset(tools)
+
+
+def _ordered_tools_csv(tools: frozenset[str]) -> str:
+    return ",".join(tool for tool in VALID_TOOLS if tool in tools)
+
+
+def _validate_permission_profile(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    if raw not in EXEC_PERMISSION_PROFILES:
+        hint = _closest(raw, tuple(EXEC_PERMISSION_PROFILES))
+        raise click.UsageError(
+            f"--permission-profile={raw!r} is not valid. "
+            f"Use one of: {list(EXEC_PERMISSION_PROFILES)}. "
+            f"Did you mean '{hint}'?"
+        )
+    return raw
+
+
+def _resolve_exec_tools(
+    raw_tools: str | None,
+    *,
+    permission_profile: str | None,
+) -> frozenset[str]:
+    tools = _validate_tools(raw_tools)
+    if permission_profile is None:
+        return tools
+
+    profile_tools = EXEC_PERMISSION_PROFILES[permission_profile]
+    if raw_tools is not None and tools != profile_tools:
+        raise click.UsageError(
+            f"--tools conflicts with --permission-profile={permission_profile!r}; "
+            "omit --tools or pass exactly "
+            f"{_ordered_tools_csv(profile_tools)!r}."
+        )
+    return profile_tools
+
+
+def _provider_enforces_exec_tool_permissions(provider_obj: object) -> bool:
+    return bool(getattr(provider_obj, "enforces_exec_tool_permissions", False))
+
+
+def _permission_profile_excludes(
+    raw_exclude: str | None,
+    *,
+    permission_profile: str | None,
+) -> frozenset[str]:
+    excluded = set(_parse_csv(raw_exclude))
+    if permission_profile is None:
+        return frozenset(excluded)
+
+    for name in known_providers():
+        if name in excluded:
+            continue
+        try:
+            provider_obj = get_provider(name)
+        except KeyError:
+            continue
+        if not _provider_enforces_exec_tool_permissions(provider_obj):
+            excluded.add(name)
+    return frozenset(excluded)
+
+
+def _ensure_permission_profile_supported(
+    provider_obj: object,
+    *,
+    provider_id: str,
+    permission_profile: str | None,
+    tools: frozenset[str],
+) -> None:
+    if permission_profile is None:
+        return
+    if not _provider_enforces_exec_tool_permissions(provider_obj):
+        raise click.UsageError(
+            f"--permission-profile={permission_profile!r} requires a provider "
+            "that enforces Conductor exec tool whitelists; "
+            f"provider {provider_id!r} does not."
+        )
+
+    supported_tools: frozenset[str] = getattr(
+        provider_obj,
+        "supported_tools",
+        frozenset(),
+    )
+    missing = tools - supported_tools
+    if missing:
+        raise click.UsageError(
+            f"--permission-profile={permission_profile!r} requires tools "
+            f"{_ordered_tools_csv(tools)!r}, but provider {provider_id!r} "
+            f"does not support {sorted(missing)}."
+        )
 
 
 def _validate_sandbox(raw: str | None, *, warn: bool = False) -> str:
@@ -2648,6 +2746,15 @@ def review(
     help=f"Comma-separated tool set: {','.join(VALID_TOOLS)}.",
 )
 @click.option(
+    "--permission-profile",
+    default=None,
+    help=(
+        "Enforce an exec tool whitelist: "
+        f"{' | '.join(EXEC_PERMISSION_PROFILES)}. "
+        "Excludes providers that cannot honor Conductor tool limits."
+    ),
+)
+@click.option(
     "--sandbox",
     default=None,
     help="Deprecated and ignored; exec always runs unsandboxed.",
@@ -2783,6 +2890,7 @@ def exec_cmd(
     prefer: str | None,
     effort: str | None,
     tools: str | None,
+    permission_profile: str | None,
     sandbox: str | None,
     exclude: str | None,
     cwd: str | None,
@@ -2822,6 +2930,10 @@ def exec_cmd(
         env_key="CONDUCTOR_EFFORT",
         profile_value=profile_spec.effort if profile_spec else None,
     )
+    permission_profile = _resolve_layered_value(
+        permission_profile,
+        env_key="CONDUCTOR_PERMISSION_PROFILE",
+    )
     sandbox = _resolve_layered_value(
         sandbox,
         env_key="CONDUCTOR_SANDBOX",
@@ -2853,7 +2965,11 @@ def exec_cmd(
     )
     body = brief_input.body
     attachments = brief_input.attachments
-    tools_set = _validate_tools(tools)
+    permission_profile_value = _validate_permission_profile(permission_profile)
+    tools_set = _resolve_exec_tools(
+        tools,
+        permission_profile=permission_profile_value,
+    )
     sandbox_value = _validate_sandbox(sandbox, warn=sandbox is not None)
     effort_value = _parse_effort(effort)
     max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
@@ -2869,13 +2985,22 @@ def exec_cmd(
                 effort=effort_value,
                 tools=tools_set,
                 sandbox=sandbox_value,
-                exclude=frozenset(_parse_csv(exclude)),
+                exclude=_permission_profile_excludes(
+                    exclude,
+                    permission_profile=permission_profile_value,
+                ),
                 shadow=True,
                 attachments_required=bool(attachments),
             )
         except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
+        _ensure_permission_profile_supported(
+            _provider_for_preflight(provider),
+            provider_id=decision.provider,
+            permission_profile=permission_profile_value,
+            tools=tools_set,
+        )
         session_log = _start_exec_session_log(
             log_file=log_file,
             resume_session_id=resume_session_id,
@@ -2946,6 +3071,12 @@ def exec_cmd(
             provider = get_provider(provider_id)
         except KeyError as e:
             raise click.UsageError(str(e)) from e
+        _ensure_permission_profile_supported(
+            provider,
+            provider_id=provider_id,
+            permission_profile=permission_profile_value,
+            tools=tools_set,
+        )
         try:
             _ensure_supports_attachments(provider, attachments)
         except UnsupportedCapability as e:
@@ -3096,6 +3227,11 @@ def exec_cmd(
     help=f"Thinking depth: {' | '.join(VALID_EFFORT_LEVELS)} or integer budget.",
 )
 @click.option("--tools", default=None, help="Comma-separated tool set.")
+@click.option(
+    "--permission-profile",
+    default=None,
+    help="Exec tool whitelist profile: read-only | patch | full.",
+)
 @click.option("--sandbox", default=None, help="Deprecated and ignored.")
 @click.option("--exclude", default=None, help="Comma-separated providers to exclude.")
 @click.option("--json", "as_json", is_flag=True, default=False)
@@ -3104,6 +3240,7 @@ def route(
     prefer: str | None,
     effort: str | None,
     tools: str | None,
+    permission_profile: str | None,
     sandbox: str | None,
     exclude: str | None,
     as_json: bool,
@@ -3113,7 +3250,11 @@ def route(
     Makes no upstream calls. Used for sanity-checking config + routing
     before a real `call` or `exec`.
     """
-    tools_set = _validate_tools(tools)
+    permission_profile_value = _validate_permission_profile(permission_profile)
+    tools_set = _resolve_exec_tools(
+        tools,
+        permission_profile=permission_profile_value,
+    )
     sandbox_value = _validate_sandbox(sandbox, warn=sandbox is not None)
     effort_value = _parse_effort(effort)
 
@@ -3124,7 +3265,10 @@ def route(
             effort=effort_value,
             tools=tools_set,
             sandbox=sandbox_value,
-            exclude=frozenset(_parse_csv(exclude)),
+            exclude=_permission_profile_excludes(
+                exclude,
+                permission_profile=permission_profile_value,
+            ),
             shadow=True,
         )
     except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
@@ -3251,6 +3395,7 @@ def config(subcommand: str, as_json: bool) -> None:
         "CONDUCTOR_EFFORT": os.environ.get("CONDUCTOR_EFFORT"),
         "CONDUCTOR_TAGS": os.environ.get("CONDUCTOR_TAGS"),
         "CONDUCTOR_SANDBOX": os.environ.get("CONDUCTOR_SANDBOX"),
+        "CONDUCTOR_PERMISSION_PROFILE": os.environ.get("CONDUCTOR_PERMISSION_PROFILE"),
         "CONDUCTOR_WITH": os.environ.get("CONDUCTOR_WITH"),
         "CONDUCTOR_EXCLUDE": os.environ.get("CONDUCTOR_EXCLUDE"),
     }
@@ -3259,6 +3404,7 @@ def config(subcommand: str, as_json: bool) -> None:
         "effort": env_overrides["CONDUCTOR_EFFORT"] or "medium",
         "tags": _parse_csv(env_overrides["CONDUCTOR_TAGS"]),
         "sandbox": env_overrides["CONDUCTOR_SANDBOX"] or "none",
+        "permission_profile": env_overrides["CONDUCTOR_PERMISSION_PROFILE"] or None,
         "with": env_overrides["CONDUCTOR_WITH"] or None,
         "exclude": _parse_csv(env_overrides["CONDUCTOR_EXCLUDE"]),
     }

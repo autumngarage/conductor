@@ -64,6 +64,7 @@ class ClaudeProvider:
     # Capability declarations (see interface.py)
     quality_tier = "frontier"
     supported_tools = frozenset({"Read", "Grep", "Glob", "Edit", "Write", "Bash"})
+    enforces_exec_tool_permissions = True
     supports_effort = True
     supports_image_attachments = False
     effort_to_thinking = {

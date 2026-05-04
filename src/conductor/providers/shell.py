@@ -87,6 +87,7 @@ class ShellProvider:
 
     # Capability declarations that are the same for every shell provider.
     supported_tools: frozenset[str] = frozenset()
+    enforces_exec_tool_permissions: bool = False
     supports_effort: bool = False
     supports_image_attachments: bool = False
     effort_to_thinking: dict[str, int] = {}  # noqa: RUF012

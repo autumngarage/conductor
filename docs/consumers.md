@@ -33,6 +33,10 @@ conductor call --offline [options]
 # Native code-review mode
 conductor review --auto --base <branch-or-ref> [options]
 conductor review --with <provider> --base <branch-or-ref> [options]
+
+# Agentic code/edit mode
+conductor exec --auto --permission-profile <read-only|patch|full> [options]
+conductor exec --with <provider> --permission-profile <read-only|patch|full> [options]
 ```
 
 Use `conductor ask` when the caller knows the semantic kind but does not want to reason about providers. It applies Conductor's deterministic `kind × effort` matrix, then delegates to `call`, `exec`, `review`, or council fan-out internally. Provider/model/tag/tool overrides intentionally stay on the lower-level `call`, `exec`, and `review` commands.
@@ -52,7 +56,7 @@ Use `conductor review` for code review. It only routes to providers with native 
 | `research` | `high`, `max` | `call` | `openrouter` auto with strong-reasoning bias → `ollama` |
 | `code` | `minimal`, `low` | `call` | `openrouter` auto with coding/cheap bias → `ollama` |
 | `code` | `medium` | `call` | `openrouter` auto with coding/thinking bias → `ollama` |
-| `code` | `high`, `max` | `exec` | `codex` -> `claude` -> `openrouter` -> `ollama`, with `Read,Grep,Glob,Edit,Write,Bash`; exec runs unsandboxed |
+| `code` | `high`, `max` | `exec` | `codex` -> `claude` -> `openrouter` -> `ollama`, with `Read,Grep,Glob,Edit,Write,Bash`; exec runs unsandboxed, and callers can opt into tool permission profiles |
 | `review` | all levels | `review` | `codex` → `claude` → `gemini`, native review only |
 | `council` | `minimal`, `low` | `council` | OpenRouter fan-out: `~google/gemini-flash-latest`, `~openai/gpt-mini-latest`; synthesize with the same stack |
 | `council` | `medium` | `council` | OpenRouter fan-out: `~google/gemini-pro-latest`, `~moonshotai/kimi-latest`, `deepseek/deepseek-v4-pro`; synthesize with `~google/gemini-pro-latest` → `~openai/gpt-latest` |
@@ -69,6 +73,35 @@ The task prompt, usually a delegation brief, comes from one of these sources:
 3. **Stdin** — when no input flag is set, conductor reads stdin until EOF.
 
 `--brief` and `--brief-file` are the preferred spellings for delegation. `--task` and `--task-file` remain compatibility aliases. Long prompts: prefer `--brief-file` or stdin to keep the brief out of process listings.
+
+## Exec permission contract
+
+`conductor exec` always runs with the ambient permissions of the Conductor process: same working tree, same network, same environment, same CLI auth, and the ability to write `.git/` if the selected provider does so. `--sandbox` is compatibility-only, deprecated, and ignored; it always resolves to `"none"` in route JSON and must not be treated as a security boundary.
+
+The supported downstream permission contract is the Conductor tool whitelist. Use `--permission-profile` when a caller needs enforceable limits:
+
+| Profile | Tools exposed | Intended use |
+|---|---|---|
+| `read-only` | `Read,Grep,Glob` | Inspect files without edit/write/Bash tools |
+| `patch` | `Read,Grep,Glob,Edit,Write` | Modify files without shell command execution |
+| `full` | `Read,Grep,Glob,Edit,Write,Bash` | Normal coding agent work, including test commands |
+
+When `--permission-profile` is set, Conductor derives `--tools` from the profile. Passing both is allowed only when the sets match exactly; a mismatch exits `2`. In `--auto`, Conductor excludes providers that do not enforce Conductor's tool whitelist. In `--with`, Conductor exits `2` before provider execution if the provider cannot honor the profile.
+
+Current enforcement support:
+
+| Provider path | Permission-profile support | Notes |
+|---|---|---|
+| `claude` | Yes | Uses Claude Code `--allowedTools` |
+| `openrouter` | Yes | Uses Conductor's local tool loop |
+| `ollama` | Yes | Uses Conductor's local tool loop |
+| `codex` | No | Codex CLI does not expose Conductor's portable tool whitelist |
+| `gemini` | No | Gemini CLI exec approval mode is not a Conductor tool whitelist |
+| custom shell providers | No | The shell command owns its own behavior |
+
+If the workflow only needs review with no file mutation, prefer `conductor review` or `conductor ask --kind review`. Use `exec --permission-profile read-only` only for agentic inspection workflows that need the multi-turn exec machinery.
+
+`conductor exec --help` is the canonical reference for agentic code/edit mode. Its stable exec-specific flags are: --tools, --permission-profile, --sandbox, --cwd, --timeout, --max-stall-seconds, --start-timeout, --log-file, --preflight, --no-preflight, and --allow-short-brief. `--sandbox` remains parseable for compatibility but is deprecated and ignored.
 
 ## Flags
 
@@ -206,7 +239,7 @@ Sentinel maps the JSON response into its `ChatResponse` dataclass: `text` → `r
 
 ### Sentinel — agentic code (Coder role)
 
-The Coder role should use `conductor exec`, not `conductor call`. `exec` is the agentic subcommand for multi-turn work with tool access, preflight checks, startup timeout control (`--start-timeout`), stall detection, and session logs. Its consumer contract is separate from this `conductor call` contract; use `conductor exec --help` for the current flag surface until that contract is documented.
+The Coder role should use `conductor exec`, not `conductor call`. `exec` is the agentic subcommand for multi-turn work with tool access, preflight checks, startup timeout control (`--start-timeout`), stall detection, and session logs. Use `--permission-profile read-only` for inspect-only work, `--permission-profile patch` for file edits without shell commands, and `--permission-profile full` for normal coding tasks that may run tests.
 
 ### Generic semantic delegation
 
