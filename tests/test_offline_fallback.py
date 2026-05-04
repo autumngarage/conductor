@@ -163,6 +163,14 @@ def test_is_retryable_still_handles_known_categories():
         True,
         "rate-limit",
     )
+    assert _is_retryable(ProviderHTTPError("quota exceeded: out of tokens")) == (
+        True,
+        "rate-limit",
+    )
+    assert _is_retryable(ProviderHTTPError("provider API is down")) == (
+        True,
+        "5xx",
+    )
     assert _is_retryable(ValueError("some other failure")) == (False, "other")
 
 

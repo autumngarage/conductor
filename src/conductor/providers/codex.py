@@ -39,6 +39,10 @@ from conductor.providers.interface import (
     resolve_effort_tokens,
 )
 from conductor.providers.review_contract import ensure_requested_review_sentinel
+from conductor.providers.terminal_signals import (
+    append_recent_text,
+    detect_retriable_provider_failure,
+)
 
 if TYPE_CHECKING:
     from conductor.session_log import SessionLog
@@ -862,6 +866,7 @@ class CodexProvider:
         heartbeat_log_offset = 0
         session_id_emitted = False
         stdout_event_buffer = ""
+        stderr_failure_tail = ""
         try:
             while True:
                 now = time.monotonic()
@@ -996,6 +1001,33 @@ class CodexProvider:
                     last_output = time.monotonic()
                     last_liveness = last_output
                     auth_tracker.observe_text(item, source="stderr")
+                    stderr_failure_tail = append_recent_text(
+                        stderr_failure_tail,
+                        item,
+                    )
+                    signal = detect_retriable_provider_failure(
+                        stderr_failure_tail,
+                        source="stderr",
+                    )
+                    if signal is not None:
+                        self._terminate_process(process)
+                        self._join_reader_threads(stdout_thread, stderr_thread)
+                        self._drain_stream_queue(
+                            stream_q, stdout_parts, stderr_parts, auth_tracker
+                        )
+                        if session_log is not None:
+                            session_log.emit(
+                                "error",
+                                {
+                                    "provider": self.name,
+                                    "reason": "provider_terminal_failure",
+                                    "category": signal.category,
+                                    "source": signal.source,
+                                    "status_code": signal.status_code,
+                                    "detail": signal.detail,
+                                },
+                            )
+                        raise ProviderHTTPError(signal.error_message(self.name))
                     continue
 
                 stdout_parts.append(item)
@@ -1007,6 +1039,30 @@ class CodexProvider:
                     line = f"{line}\n"
                     auth_tracker.observe_json_line(line, source="stdout")
                     self._emit_stream_event(line, session_log=session_log)
+                    signal = detect_retriable_provider_failure(
+                        line,
+                        source="stdout",
+                        structured_only=True,
+                    )
+                    if signal is not None:
+                        self._terminate_process(process)
+                        self._join_reader_threads(stdout_thread, stderr_thread)
+                        self._drain_stream_queue(
+                            stream_q, stdout_parts, stderr_parts, auth_tracker
+                        )
+                        if session_log is not None:
+                            session_log.emit(
+                                "error",
+                                {
+                                    "provider": self.name,
+                                    "reason": "provider_terminal_failure",
+                                    "category": signal.category,
+                                    "source": signal.source,
+                                    "status_code": signal.status_code,
+                                    "detail": signal.detail,
+                                },
+                            )
+                        raise ProviderHTTPError(signal.error_message(self.name))
 
                     if not session_id_emitted:
                         sid = self._extract_session_id_fast(line)

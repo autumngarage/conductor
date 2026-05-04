@@ -410,6 +410,44 @@ _NETWORK_ERROR_SIGNALS = (
     "getaddrinfo failed",
 )
 
+_RATE_LIMIT_ERROR_SIGNALS = (
+    "rate limit",
+    "rate_limit",
+    "ratelimit",
+    "rate-limit",
+    "too many requests",
+    "quota exceeded",
+    "exceeded your current quota",
+    "insufficient quota",
+    "usage limit",
+    "daily limit",
+    "limit reached",
+    "hit your limit",
+    "out of tokens",
+    "token quota",
+    "credit balance",
+    "insufficient credits",
+    "billing quota",
+)
+
+_UPSTREAM_DOWN_ERROR_SIGNALS = (
+    "http 5",
+    "returned http 5",
+    "exited 5",
+    "service unavailable",
+    "bad gateway",
+    "gateway timeout",
+    "internal server error",
+    "server error",
+    "overloaded",
+    "temporarily unavailable",
+    "upstream unavailable",
+    "upstream error",
+    "provider unavailable",
+    "api unavailable",
+    "api is down",
+)
+
 
 def _is_retryable(err: Exception) -> tuple[bool, str]:
     """Classify an error as retryable-with-fallback or fatal.
@@ -423,7 +461,7 @@ def _is_retryable(err: Exception) -> tuple[bool, str]:
     if isinstance(err, ProviderStalledError):
         return True, "timeout"
     msg = str(err).lower()
-    if "429" in msg or "rate limit" in msg or "ratelimit" in msg:
+    if "429" in msg or any(sig in msg for sig in _RATE_LIMIT_ERROR_SIGNALS):
         return True, "rate-limit"
     if any(sig in msg for sig in _NETWORK_ERROR_SIGNALS):
         return True, "network"
@@ -431,8 +469,7 @@ def _is_retryable(err: Exception) -> tuple[bool, str]:
         return True, "timeout"
     # HTTP 5xx — check for " 5" preceded by "http" or a similar prefix so
     # we don't match arbitrary "5" digits. Cheap heuristic; acceptable.
-    signals = ("http 5", "returned http 5", "exited 5", "overloaded")
-    if any(sig in msg for sig in signals):
+    if any(sig in msg for sig in _UPSTREAM_DOWN_ERROR_SIGNALS):
         return True, "5xx"
     if isinstance(err, ProviderHTTPError):
         return True, "provider-error"
