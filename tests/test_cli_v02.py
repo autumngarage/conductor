@@ -77,7 +77,12 @@ def _stub_all_configured(mocker, configured_names: set[str]) -> None:
         )
 
 
-def _fake_response(provider: str = "claude", model: str = "sonnet") -> CallResponse:
+def _fake_response(
+    provider: str = "claude",
+    model: str = "sonnet",
+    *,
+    cost_usd: float | None = 0.01,
+) -> CallResponse:
     return CallResponse(
         text="hello",
         provider=provider,
@@ -89,7 +94,7 @@ def _fake_response(provider: str = "claude", model: str = "sonnet") -> CallRespo
             "thinking_tokens": 4_000,
             "cached_tokens": 0,
         },
-        cost_usd=0.01,
+        cost_usd=cost_usd,
         raw={},
     )
 
@@ -680,6 +685,52 @@ def test_ask_council_fans_out_through_openrouter_only(mocker):
     payload = json.loads(result.stdout)
     assert payload["semantic"]["kind"] == "council"
     assert payload["semantic"]["candidates"][0]["provider"] == "openrouter"
+    assert payload["cost_usd"] == pytest.approx(0.04)
+    assert payload["usage"]["cost_accounting_complete"] is True
+    assert payload["raw"]["conductor_council"]["member_cost_usd"] == [
+        0.01,
+        0.01,
+        0.01,
+    ]
+    assert payload["raw"]["conductor_council"]["synthesis_cost_usd"] == 0.01
+    assert payload["raw"]["conductor_council"]["known_cost_usd"] == pytest.approx(0.04)
+
+
+def test_ask_council_marks_incomplete_cost_accounting(mocker):
+    _stub_all_configured(mocker, {"openrouter"})
+    responses = [
+        _fake_response("openrouter", "member-a", cost_usd=0.01),
+        _fake_response("openrouter", "member-b", cost_usd=None),
+        _fake_response("openrouter", "member-c", cost_usd=0.03),
+        _fake_response("openrouter", "synthesis", cost_usd=0.04),
+    ]
+    mocker.patch.object(OpenRouterProvider, "call", side_effect=responses)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "council",
+            "--effort",
+            "medium",
+            "--brief",
+            "Debate this architecture decision.",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["cost_usd"] is None
+    assert payload["usage"]["cost_accounting_complete"] is False
+    assert payload["usage"]["known_cost_usd"] == pytest.approx(0.08)
+    assert payload["usage"]["missing_costs"] == ["member[2]"]
+    assert payload["raw"]["conductor_council"]["member_cost_usd"] == [
+        0.01,
+        None,
+        0.03,
+    ]
 
 
 def test_council_synthesis_prompt_handles_empty_member_text():
