@@ -682,6 +682,24 @@ def test_ask_council_fans_out_through_openrouter_only(mocker):
     assert payload["semantic"]["candidates"][0]["provider"] == "openrouter"
 
 
+def test_council_synthesis_prompt_handles_empty_member_text():
+    from conductor.cli import _council_synthesis_prompt
+
+    response = CallResponse(
+        text=None,
+        provider="openrouter",
+        model="member-a",
+        duration_ms=10,
+        usage={},
+        raw={},
+    )
+
+    prompt = _council_synthesis_prompt("Debate this.", [response])
+
+    assert "## Member 1: member-a\n\n[empty response]" in prompt
+    assert "None" not in prompt
+
+
 def test_ask_council_rejects_offline():
     result = CliRunner().invoke(
         main,

@@ -1222,7 +1222,8 @@ def _council_synthesis_prompt(task: str, member_responses: list[CallResponse]) -
     sections = []
     for i, response in enumerate(member_responses, start=1):
         sections.append(
-            f"## Member {i}: {response.model}\n\n{response.text.strip()}"
+            f"## Member {i}: {response.model}\n\n"
+            f"{_council_member_response_text(response)}"
         )
     return (
         "You are synthesizing a multi-model council. Compare the independent "
@@ -1234,6 +1235,16 @@ def _council_synthesis_prompt(task: str, member_responses: list[CallResponse]) -
         "Council member responses:\n\n"
         + "\n\n".join(sections)
     )
+
+
+def _council_member_response_text(response: CallResponse) -> str:
+    text = getattr(response, "text", None)
+    if text is None:
+        return "[empty response]"
+    if not isinstance(text, str):
+        text = str(text)
+    stripped = text.strip()
+    return stripped if stripped else "[empty response]"
 
 
 def _emit_call(
