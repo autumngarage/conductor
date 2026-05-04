@@ -6,8 +6,10 @@ import httpx
 import respx
 from click.testing import CliRunner
 
+import conductor.openrouter_stack_audit as openrouter_stack_audit
 import conductor.providers.openrouter_catalog as openrouter_catalog
 from conductor.cli import main
+from conductor.openrouter_stack_audit import StackDefinition
 
 
 def _patch_catalog_cache(monkeypatch, tmp_path):
@@ -99,6 +101,31 @@ def test_models_show_prints_one_model(monkeypatch, tmp_path):
     assert "Claude Sonnet 4.6" in result.output
     assert "context length: 200,000" in result.output
     assert "thinking=yes" in result.output
+
+
+def test_models_validate_stacks_reports_curated_stack(monkeypatch, tmp_path):
+    _patch_catalog_cache(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        openrouter_stack_audit,
+        "default_openrouter_coding_stacks",
+        lambda: (
+            StackDefinition(
+                name="TEST_STACK",
+                effort="high",
+                models=("anthropic/claude-sonnet-4.6",),
+            ),
+        ),
+    )
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.get("/models").mock(
+            return_value=httpx.Response(200, json=_catalog_response())
+        )
+        result = CliRunner().invoke(main, ["models", "validate-stacks", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert '"stack_version"' in result.output
+    assert "anthropic/claude-sonnet-4.6" in result.output
 
 
 def test_models_list_errors_when_cache_is_missing(monkeypatch, tmp_path):

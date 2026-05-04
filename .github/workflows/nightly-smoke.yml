@@ -18,6 +18,87 @@ permissions:
   issues: write
 
 jobs:
+  openrouter-stack-audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Audit curated OpenRouter stacks
+        id: stack_audit
+        shell: bash
+        run: |
+          set +e
+          uv run conductor models validate-stacks --json \
+            > openrouter-stack-audit.json \
+            2> openrouter-stack-audit.err
+          status=$?
+          cat openrouter-stack-audit.json
+          cat openrouter-stack-audit.err
+          exit "$status"
+
+      - name: Open failure issue
+        if: failure() && steps.stack_audit.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            echo "Curated OpenRouter model stack audit failed."
+            echo
+            echo "Run: $RUN_URL"
+            echo
+            echo '```json'
+            cat openrouter-stack-audit.json
+            echo '```'
+            if [ -s openrouter-stack-audit.err ]; then
+              echo
+              echo '```'
+              cat openrouter-stack-audit.err
+              echo '```'
+            fi
+          } > openrouter-stack-audit-issue.md
+
+          if ! gh label list --search openrouter-stack-audit --json name --jq '.[].name' \
+            | grep -qx openrouter-stack-audit; then
+            gh label create openrouter-stack-audit \
+              --description "Curated OpenRouter stack audit failure" \
+              --color 6A4C93
+          fi
+          existing_issue="$(
+            gh issue list \
+              --state open \
+              --label openrouter-stack-audit \
+              --json number \
+              --jq '.[0].number // empty'
+          )"
+          if [ -n "$existing_issue" ]; then
+            gh issue comment "$existing_issue" --body-file openrouter-stack-audit-issue.md
+          else
+            gh issue create \
+              --title "OpenRouter coding stack audit failed: $(date -u +%Y-%m-%d)" \
+              --label openrouter-stack-audit \
+              --body-file openrouter-stack-audit-issue.md
+          fi
+
+      - name: Log heartbeat
+        if: success()
+        run: |
+          echo "OpenRouter stack audit passed at $(date -u --iso-8601=seconds)." >> "$GITHUB_STEP_SUMMARY"
+
   subprocess-adapter-live-smoke:
     runs-on: ubuntu-latest
 
