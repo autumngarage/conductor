@@ -48,6 +48,7 @@ from conductor.providers import (
     OpenRouterProvider,
     ProviderConfigError,
     ProviderError,
+    ProviderExecutionError,
     ProviderHTTPError,
     ProviderStalledError,
     UnsupportedCapability,
@@ -460,6 +461,8 @@ def _is_retryable(err: Exception) -> tuple[bool, str]:
     """
     if isinstance(err, ProviderStalledError):
         return True, "timeout"
+    if isinstance(err, ProviderExecutionError):
+        return True, "provider-error"
     msg = str(err).lower()
     if "429" in msg or any(sig in msg for sig in _RATE_LIMIT_ERROR_SIGNALS):
         return True, "rate-limit"
@@ -937,13 +940,16 @@ def _invoke_with_fallback(
             mark_outcome(candidate.name, category)
             last_exc = e
             if session_log is not None:
+                failure_event: dict[str, object] = {
+                    "provider": candidate.name,
+                    "category": category,
+                    "error": str(e),
+                }
+                if isinstance(e, ProviderExecutionError):
+                    failure_event["execution_status"] = e.status
                 session_log.emit(
                     "provider_failed",
-                    {
-                        "provider": candidate.name,
-                        "category": category,
-                        "error": str(e),
-                    },
+                    failure_event,
                 )
             if not retryable:
                 raise

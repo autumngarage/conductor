@@ -74,6 +74,27 @@ class ProviderHTTPError(ProviderError):
     (non-2xx, malformed JSON, timeout)."""
 
 
+class ProviderExecutionError(ProviderError):
+    """Raised when a provider completes transport but fails execution policy."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str | None = None,
+        status: dict | None = None,
+    ) -> None:
+        self.provider = provider
+        self.status = status or {}
+        self.error_response = {
+            "error": "provider_execution_failed",
+            "provider": provider,
+            "message": message,
+            "execution_status": self.status,
+        }
+        super().__init__(message)
+
+
 class ProviderStalledError(ProviderError):
     """Raised when a provider produced no output for longer than the
     configured max_stall_sec watchdog. Distinct from wall-clock timeout —

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
 import httpx
 import pytest
@@ -15,12 +16,14 @@ from conductor.providers.interface import (
     CallResponse,
     ProviderConfigError,
     ProviderError,
+    ProviderExecutionError,
     UnsupportedCapability,
 )
 from conductor.providers.kimi import KimiProvider
 from conductor.providers.openrouter import (
     OPENROUTER_API_KEY_ENV,
     OPENROUTER_DEFAULT_MODEL,
+    OPENROUTER_MAX_TOOL_ITERATIONS,
     OpenRouterProvider,
 )
 
@@ -44,6 +47,20 @@ def no_key(monkeypatch):
         "get",
         lambda key: None if key == OPENROUTER_API_KEY_ENV else _orig_get(key),
     )
+
+
+def _init_clean_git_repo(path):
+    env = {
+        "GIT_AUTHOR_NAME": "Tester",
+        "GIT_AUTHOR_EMAIL": "tester@example.com",
+        "GIT_COMMITTER_NAME": "Tester",
+        "GIT_COMMITTER_EMAIL": "tester@example.com",
+    }
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=path, env=env, check=True)
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=path, env=env, check=True)
+    (path / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=path, env=env, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=path, env=env, check=True)
 
 
 def test_configured_true_when_env_set(configured):
@@ -490,6 +507,262 @@ def test_exec_with_tools_uses_curated_coding_stack_by_default(configured, tmp_pa
     assert "model" not in captured["payload"]
     assert "openrouter/auto" not in captured["payload"]["models"]
     assert "google/gemini-2.5-flash-lite" not in captured["payload"]["models"]
+
+
+def test_exec_code_task_no_tool_calls_raises_noop_status(configured, tmp_path):
+    _init_clean_git_repo(tmp_path)
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "model": "openai/gpt-5.5",
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "I will make a plan first.",
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 3},
+                },
+            )
+        )
+        with pytest.raises(ProviderExecutionError) as exc:
+            OpenRouterProvider().exec(
+                "Implement the change.",
+                model="openai/gpt-5.5",
+                tools=frozenset({"Read", "Edit", "Write", "Bash"}),
+                task_tags=("code", "tool-use"),
+                sandbox="none",
+                cwd=str(tmp_path),
+            )
+
+    status = exc.value.status
+    assert status["state"] == "no-op"
+    assert status["tool_calls"] == 0
+    assert status["successful_write_tools"] == 0
+    assert status["git_status_after"]["clean"] is True
+
+
+def test_exec_code_task_invalid_write_args_raise_tool_error_status(
+    configured, tmp_path
+):
+    responses = [
+        {
+            "model": "openai/gpt-5.5",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_write",
+                                "type": "function",
+                                "function": {
+                                    "name": "Write",
+                                    "arguments": json.dumps({"content": "changed"}),
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+        },
+        {
+            "model": "openai/gpt-5.5",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "I changed the files and tests passed.",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 6},
+        },
+    ]
+    requests: list[dict] = []
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=responses[len(requests) - 1])
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        with pytest.raises(ProviderExecutionError) as exc:
+            OpenRouterProvider().exec(
+                "Implement the change.",
+                model="openai/gpt-5.5",
+                tools=frozenset({"Write"}),
+                task_tags=("code", "tool-use"),
+                sandbox="none",
+                cwd=str(tmp_path),
+            )
+
+    status = exc.value.status
+    assert status["state"] == "tool-error"
+    assert status["successful_write_tools"] == 0
+    assert status["tool_errors"][0]["name"] == "Write"
+    assert "bad parameters" in status["tool_errors"][0]["error"]
+    assert requests[1]["messages"][2]["content"].startswith("error:")
+
+
+def test_exec_code_task_failed_validation_bash_raises_status(
+    configured, tmp_path
+):
+    responses = [
+        {
+            "model": "openai/gpt-5.5",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_write",
+                                "type": "function",
+                                "function": {
+                                    "name": "Write",
+                                    "arguments": json.dumps(
+                                        {
+                                            "path": "test_failure.py",
+                                            "content": (
+                                                "def test_failure():\n"
+                                                "    assert False\n"
+                                            ),
+                                        }
+                                    ),
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+        },
+        {
+            "model": "openai/gpt-5.5",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_pytest",
+                                "type": "function",
+                                "function": {
+                                    "name": "Bash",
+                                    "arguments": json.dumps({"command": "pytest -q"}),
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 3},
+        },
+        {
+            "model": "openai/gpt-5.5",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "Implementation complete; tests passed.",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 30, "completion_tokens": 6},
+        },
+    ]
+    requests: list[dict] = []
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=responses[len(requests) - 1])
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        with pytest.raises(ProviderExecutionError) as exc:
+            OpenRouterProvider().exec(
+                "Implement the change and run tests.",
+                model="openai/gpt-5.5",
+                tools=frozenset({"Write", "Bash"}),
+                task_tags=("code", "tool-use"),
+                sandbox="none",
+                cwd=str(tmp_path),
+            )
+
+    status = exc.value.status
+    assert status["state"] == "validation-failed"
+    assert status["successful_write_tools"] == 1
+    assert status["validation_failures"][0]["command"] == "pytest -q"
+    assert status["validation_failures"][0]["exit_code"] != 0
+
+
+def test_exec_code_task_iteration_cap_raises_status(configured, tmp_path):
+    (tmp_path / "note.txt").write_text("still looping", encoding="utf-8")
+    requests: list[dict] = []
+    responses = [
+        {
+            "model": "openai/gpt-5.5",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": f"call_read_{idx}",
+                                "type": "function",
+                                "function": {
+                                    "name": "Read",
+                                    "arguments": json.dumps({"path": "note.txt"}),
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+        }
+        for idx in range(OPENROUTER_MAX_TOOL_ITERATIONS)
+    ]
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=responses[len(requests) - 1])
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        with pytest.raises(ProviderExecutionError) as exc:
+            OpenRouterProvider().exec(
+                "Implement the change.",
+                model="openai/gpt-5.5",
+                tools=frozenset({"Read", "Edit"}),
+                task_tags=("code", "tool-use"),
+                sandbox="none",
+                cwd=str(tmp_path),
+            )
+
+    status = exc.value.status
+    assert status["state"] == "iteration-cap"
+    assert status["hit_iteration_cap"] is True
+    assert status["tool_calls"] == OPENROUTER_MAX_TOOL_ITERATIONS
+    assert len(requests) == OPENROUTER_MAX_TOOL_ITERATIONS
 
 
 def test_exec_with_tools_rejects_model_and_models_together(configured):
