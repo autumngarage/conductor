@@ -61,10 +61,13 @@ from conductor.providers import (
 )
 from conductor.providers.review_contract import (
     ReviewContextError,
+    build_review_patch_context,
     build_review_task_prompt,
     ensure_requested_review_sentinel,
 )
 from conductor.router import (
+    DEFAULT_ESTIMATED_INPUT_TOKENS,
+    DEFAULT_ESTIMATED_OUTPUT_TOKENS,
     VALID_PREFER_MODES,
     InvalidRouterRequest,
     NoConfiguredProvider,
@@ -120,6 +123,7 @@ GIT_RECOVERY_MAX_STATUS_PATHS = 8
 NATIVE_REVIEW_TAG = "code-review"
 DEFAULT_REVIEW_MAX_FALLBACKS = 3
 DEFAULT_COUNCIL_ROUNDS = 1
+ESTIMATED_CHARS_PER_TOKEN = 4
 
 
 @dataclass(frozen=True)
@@ -311,6 +315,34 @@ def _validate_tools(raw: str | None) -> frozenset[str]:
             f"Known: {list(VALID_TOOLS)}."
         )
     return frozenset(tools)
+
+
+def _estimate_text_tokens(text: str) -> int:
+    return max(1, (len(text) + ESTIMATED_CHARS_PER_TOKEN - 1) // ESTIMATED_CHARS_PER_TOKEN)
+
+
+def _estimate_review_input_tokens(
+    task: str,
+    *,
+    base: str | None,
+    commit: str | None,
+    uncommitted: bool,
+    cwd: str | None,
+) -> int:
+    estimated = _estimate_text_tokens(task)
+    if not (base or commit or uncommitted):
+        return estimated
+    try:
+        patch_context = build_review_patch_context(
+            base=base,
+            commit=commit,
+            uncommitted=uncommitted,
+            cwd=cwd,
+        )
+    except ReviewContextError as e:
+        click.echo(f"[conductor] could not estimate review patch size: {e}", err=True)
+        return estimated
+    return estimated + _estimate_text_tokens(patch_context)
 
 
 def _ordered_tools_csv(tools: frozenset[str]) -> str:
@@ -1536,7 +1568,9 @@ def _format_route_log_line(decision: RouteDecision) -> str:
     )
     return (
         f"[conductor] {decision.prefer} (effort={effort_str}) → {decision.provider} "
-        f"(tier: {decision.tier} · matched: {tags_matched})"
+        f"(tier: {decision.tier} · matched: {tags_matched} · "
+        f"est: {decision.estimated_input_tokens:,} in/"
+        f"{decision.estimated_output_tokens:,} out)"
     )
 
 
@@ -1577,7 +1611,10 @@ def _format_route_ranking(decision: RouteDecision) -> list[str]:
             f"  {i}. {c.name:<8} "
             f"(tier={c.tier}[{c.tier_rank}] "
             f"tags=+{c.tag_score}:{tags} "
-            f"cost≈${c.cost_score:.4f}/1k "
+            f"cost≈${c.cost_score:.4f} "
+            f"tokens≈{c.estimated_input_tokens:,}in/"
+            f"{c.estimated_output_tokens:,}out/"
+            f"{c.estimated_thinking_tokens:,}think "
             f"p50={c.latency_ms}ms"
             f"){marker}"
         )
@@ -1588,7 +1625,10 @@ def _format_route_ranking(decision: RouteDecision) -> list[str]:
             f"  ?  {c.name:<8} "
             f"(tier={c.tier}[{c.tier_rank}] "
             f"tags=+{c.tag_score}:{tags} "
-            f"cost≈${c.cost_score:.4f}/1k "
+            f"cost≈${c.cost_score:.4f} "
+            f"tokens≈{c.estimated_input_tokens:,}in/"
+            f"{c.estimated_output_tokens:,}out/"
+            f"{c.estimated_thinking_tokens:,}think "
             f"p50={c.latency_ms}ms"
             f") ← would rank if installed: {c.unconfigured_reason}"
         )
@@ -1685,6 +1725,9 @@ def _emit_session_route_decision(
             "matched_tags": list(decision.matched_tags),
             "tools_requested": list(decision.tools_requested),
             "sandbox": decision.sandbox,
+            "estimated_input_tokens": decision.estimated_input_tokens,
+            "estimated_output_tokens": decision.estimated_output_tokens,
+            "estimated_thinking_tokens": decision.estimated_thinking_tokens,
             "tag_default_applied": decision.tag_default_applied,
             "tag_default_considered": [
                 {"tag": tag, "provider": provider, "status": status}
@@ -1955,6 +1998,7 @@ def ask(
         _warn_if_short_exec_brief(brief_input, allow_short_brief=allow_short_brief)
     body = brief_input.body
     attachments = brief_input.attachments
+    estimated_input_tokens = _estimate_text_tokens(body)
 
     # `ask --kind {review,council}` doesn't have a path for attachments —
     # review forwards a diff to the provider's native review mode (no attach
@@ -2002,6 +2046,13 @@ def ask(
                 exclude=exclude_set,
                 priority=_semantic_priority(plan),
                 shadow=True,
+                estimated_input_tokens=_estimate_review_input_tokens(
+                    body,
+                    base=base,
+                    commit=commit,
+                    uncommitted=uncommitted,
+                    cwd=cwd,
+                ),
             )
         except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
             click.echo(f"conductor: {_native_review_unavailable_message(review_reasons)}", err=True)
@@ -2052,6 +2103,7 @@ def ask(
             priority=_semantic_priority(plan),
             shadow=True,
             attachments_required=bool(attachments),
+            estimated_input_tokens=estimated_input_tokens,
         )
     except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
         click.echo(f"conductor: {e}", err=True)
@@ -2322,6 +2374,7 @@ def call(
     body = brief_input.body
     attachments = brief_input.attachments
     effort_value = _parse_effort(effort)
+    estimated_input_tokens = _estimate_text_tokens(body)
 
     decision: RouteDecision | None = None
     if auto:
@@ -2333,6 +2386,7 @@ def call(
                 exclude=frozenset(_parse_csv(exclude)),
                 shadow=True,
                 attachments_required=bool(attachments),
+                estimated_input_tokens=estimated_input_tokens,
             )
         except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
             click.echo(f"conductor: {e}", err=True)
@@ -2620,6 +2674,13 @@ def review(
     )
     body = brief_input.body
     effort_value = _parse_effort(effort)
+    estimated_input_tokens = _estimate_review_input_tokens(
+        body,
+        base=base,
+        commit=commit,
+        uncommitted=uncommitted,
+        cwd=cwd,
+    )
     max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
     max_fallbacks = _validate_max_fallbacks(max_fallbacks)
     prefer_value = _validate_prefer(prefer) if prefer is not None else "best"
@@ -2635,6 +2696,7 @@ def review(
                 effort=effort_value,
                 exclude=review_exclude,
                 shadow=True,
+                estimated_input_tokens=estimated_input_tokens,
             )
         except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
             click.echo(f"conductor: {_native_review_unavailable_message(review_reasons)}", err=True)
@@ -2965,6 +3027,7 @@ def exec_cmd(
     )
     body = brief_input.body
     attachments = brief_input.attachments
+    estimated_input_tokens = _estimate_text_tokens(body)
     permission_profile_value = _validate_permission_profile(permission_profile)
     tools_set = _resolve_exec_tools(
         tools,
@@ -2991,6 +3054,7 @@ def exec_cmd(
                 ),
                 shadow=True,
                 attachments_required=bool(attachments),
+                estimated_input_tokens=estimated_input_tokens,
             )
         except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
             click.echo(f"conductor: {e}", err=True)
@@ -3234,6 +3298,24 @@ def exec_cmd(
 )
 @click.option("--sandbox", default=None, help="Deprecated and ignored.")
 @click.option("--exclude", default=None, help="Comma-separated providers to exclude.")
+@click.option(
+    "--estimated-input-tokens",
+    default=None,
+    type=click.IntRange(min=0),
+    help=(
+        "Estimated prompt/diff input tokens for cost scoring. "
+        f"Default: {DEFAULT_ESTIMATED_INPUT_TOKENS}."
+    ),
+)
+@click.option(
+    "--estimated-output-tokens",
+    default=None,
+    type=click.IntRange(min=0),
+    help=(
+        "Estimated output tokens for cost scoring. "
+        f"Default: {DEFAULT_ESTIMATED_OUTPUT_TOKENS}."
+    ),
+)
 @click.option("--json", "as_json", is_flag=True, default=False)
 def route(
     tags: str | None,
@@ -3243,6 +3325,8 @@ def route(
     permission_profile: str | None,
     sandbox: str | None,
     exclude: str | None,
+    estimated_input_tokens: int | None,
+    estimated_output_tokens: int | None,
     as_json: bool,
 ) -> None:
     """Dry-run the router: show which provider would be picked and why.
@@ -3270,6 +3354,8 @@ def route(
                 permission_profile=permission_profile_value,
             ),
             shadow=True,
+            estimated_input_tokens=estimated_input_tokens,
+            estimated_output_tokens=estimated_output_tokens,
         )
     except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
         if as_json:
@@ -3288,6 +3374,12 @@ def route(
         f"  ·  prefer: {decision.prefer}"
         f"  ·  effort: {decision.effort}"
         f" (thinking budget: {decision.thinking_budget} tokens)"
+    )
+    click.echo(
+        "  cost estimate: "
+        f"{decision.estimated_input_tokens:,} input tokens · "
+        f"{decision.estimated_output_tokens:,} output tokens · "
+        f"{decision.estimated_thinking_tokens:,} thinking tokens"
     )
     if decision.matched_tags:
         click.echo(f"  matched tags: {','.join(decision.matched_tags)}")

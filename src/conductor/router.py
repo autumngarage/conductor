@@ -5,6 +5,7 @@ v0.2 router. Axes:
   - ``tags``        — capability tags for soft matching (code-review, long-context, ...)
   - ``prefer``      — which dimension dominates scoring: best | cheapest | fastest | balanced
   - ``effort``      — thinking-depth dial applied to the chosen provider
+  - ``estimated_*`` — optional prompt/output token estimates for cost scoring
   - ``tools``       — hard filter: provider.supported_tools ⊇ requested
   - ``exclude``     — blacklist; router must never pick these
 
@@ -49,6 +50,8 @@ from conductor.router_defaults import load_tag_defaults
 # Priority (v0.1 carry-over, tiebreak only).
 # --------------------------------------------------------------------------- #
 DEFAULT_PRIORITY: tuple[str, ...] = ("kimi", "claude", "mistral", "codex", "gemini", "ollama")
+DEFAULT_ESTIMATED_INPUT_TOKENS = 4_000
+DEFAULT_ESTIMATED_OUTPUT_TOKENS = 500
 
 PreferMode = Literal["best", "cheapest", "fastest", "balanced"]
 VALID_PREFER_MODES: tuple[str, ...] = ("best", "cheapest", "fastest", "balanced")
@@ -157,11 +160,14 @@ class RankedCandidate:
     tier_rank: int
     matched_tags: tuple[str, ...]
     tag_score: int
-    cost_score: float           # estimated total cost/1k at requested effort
+    cost_score: float           # estimated request cost at requested effort/size
     latency_ms: int
     health_penalty: float
     combined_score: float       # the key used by the current prefer mode (higher=better)
     unconfigured_reason: str | None = None
+    estimated_input_tokens: int = DEFAULT_ESTIMATED_INPUT_TOKENS
+    estimated_output_tokens: int = DEFAULT_ESTIMATED_OUTPUT_TOKENS
+    estimated_thinking_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -189,6 +195,9 @@ class RouteDecision:
     tag_default_applied: dict[str, str] = field(default_factory=dict)
     tag_default_considered: tuple[tuple[str, str, str], ...] = ()
     unconfigured_shadow: tuple[RankedCandidate, ...] = ()  # descending; never winners
+    estimated_input_tokens: int = DEFAULT_ESTIMATED_INPUT_TOKENS
+    estimated_output_tokens: int = DEFAULT_ESTIMATED_OUTPUT_TOKENS
+    estimated_thinking_tokens: int = 0
 
     # Legacy fields retained for v0.1 callers that destructured these.
     @property
@@ -213,6 +222,8 @@ def _score_one(
     prefer: str,
     effort: str | int,
     priority_index: int,
+    estimated_input_tokens: int,
+    estimated_output_tokens: int,
     tag_default_boost: int = 0,
     unconfigured_reason: str | None = None,
 ) -> RankedCandidate:
@@ -231,13 +242,10 @@ def _score_one(
     tag_score = len(matched)
     tier_rank = TIER_RANK.get(provider.quality_tier, 0)
 
-    # Expected total cost per 1k tokens at the requested effort.
-    # We don't know the actual token count yet; use a per-request estimate
-    # assuming ~4k input and ~500 output (typical review sizes).
     thinking_tokens = resolve_effort_tokens(effort, provider.effort_to_thinking)
     cost_estimate = (
-        provider.cost_per_1k_in * 4
-        + provider.cost_per_1k_out * 0.5
+        provider.cost_per_1k_in * (estimated_input_tokens / 1_000)
+        + provider.cost_per_1k_out * (estimated_output_tokens / 1_000)
         + provider.cost_per_1k_thinking * (thinking_tokens / 1_000)
     )
 
@@ -263,7 +271,18 @@ def _score_one(
         health_penalty=penalty,
         combined_score=combined,
         unconfigured_reason=unconfigured_reason,
+        estimated_input_tokens=estimated_input_tokens,
+        estimated_output_tokens=estimated_output_tokens,
+        estimated_thinking_tokens=thinking_tokens,
     )
+
+
+def _normalize_estimated_tokens(raw: int | None, *, default: int, label: str) -> int:
+    if raw is None:
+        return default
+    if raw < 0:
+        raise InvalidRouterRequest(f"{label} must be >= 0, got {raw}.")
+    return raw
 
 
 def pick(
@@ -277,6 +296,8 @@ def pick(
     priority: tuple[str, ...] = DEFAULT_PRIORITY,
     shadow: bool = False,
     attachments_required: bool = False,
+    estimated_input_tokens: int | None = None,
+    estimated_output_tokens: int | None = None,
 ) -> tuple[Provider, RouteDecision]:
     """Pick the best provider for ``task_tags`` under the given preferences.
 
@@ -301,6 +322,16 @@ def pick(
 
     task_tag_set = set(task_tags or [])
     tools_set = frozenset(tools or ())
+    input_estimate = _normalize_estimated_tokens(
+        estimated_input_tokens,
+        default=DEFAULT_ESTIMATED_INPUT_TOKENS,
+        label="estimated_input_tokens",
+    )
+    output_estimate = _normalize_estimated_tokens(
+        estimated_output_tokens,
+        default=DEFAULT_ESTIMATED_OUTPUT_TOKENS,
+        label="estimated_output_tokens",
+    )
     persisted_muted = frozenset(load_muted_provider_ids(known=set(known_providers())))
     exclude_set = frozenset(exclude or ()) | persisted_muted
     tag_defaults = load_tag_defaults()
@@ -376,6 +407,8 @@ def pick(
                 prefer=prefer,
                 effort=effort,
                 priority_index=priority_index[name],
+                estimated_input_tokens=input_estimate,
+                estimated_output_tokens=output_estimate,
             )
         )
 
@@ -423,6 +456,8 @@ def pick(
                     prefer=prefer,
                     effort=effort,
                     priority_index=priority_index[candidate.name],
+                    estimated_input_tokens=input_estimate,
+                    estimated_output_tokens=output_estimate,
                     tag_default_boost=tag_default_boosts.get(candidate.name, 0),
                 )
                 for candidate in ranked
@@ -445,6 +480,8 @@ def pick(
                 prefer=prefer,
                 effort=effort,
                 priority_index=priority_index[name],
+                estimated_input_tokens=input_estimate,
+                estimated_output_tokens=output_estimate,
                 tag_default_boost=tag_default_boosts.get(name, 0),
                 unconfigured_reason=reason,
             )
@@ -468,6 +505,9 @@ def pick(
         tag_default_applied=tag_default_applied,
         tag_default_considered=tuple(tag_default_considered),
         unconfigured_shadow=shadow_ranked,
+        estimated_input_tokens=winner.estimated_input_tokens,
+        estimated_output_tokens=winner.estimated_output_tokens,
+        estimated_thinking_tokens=winner.estimated_thinking_tokens,
     )
     return winner_provider, decision
 

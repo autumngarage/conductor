@@ -9,6 +9,8 @@ from __future__ import annotations
 import pytest
 
 from conductor.router import (
+    DEFAULT_ESTIMATED_INPUT_TOKENS,
+    DEFAULT_ESTIMATED_OUTPUT_TOKENS,
     DEFAULT_PRIORITY,
     InvalidRouterRequest,
     NoConfiguredProvider,
@@ -185,6 +187,57 @@ def test_prefer_cheapest_picks_lowest_cost(mocker):
     provider, decision = pick([], prefer="cheapest")
     assert provider.name == "ollama"
     assert decision.prefer == "cheapest"
+
+
+@pytest.mark.parametrize(
+    ("input_tokens", "output_tokens"),
+    [
+        (250, 100),
+        (DEFAULT_ESTIMATED_INPUT_TOKENS, DEFAULT_ESTIMATED_OUTPUT_TOKENS),
+        (120_000, 4_000),
+    ],
+)
+def test_cost_estimate_uses_requested_prompt_size(mocker, input_tokens, output_tokens):
+    _stub_configured(mocker, {"claude": True})
+
+    _provider, decision = pick(
+        [],
+        prefer="cheapest",
+        effort="medium",
+        estimated_input_tokens=input_tokens,
+        estimated_output_tokens=output_tokens,
+    )
+
+    candidate = decision.ranked[0]
+    expected_cost = (
+        candidate.estimated_input_tokens / 1_000 * 0.003
+        + candidate.estimated_output_tokens / 1_000 * 0.015
+        + candidate.estimated_thinking_tokens / 1_000 * 0.003
+    )
+    assert candidate.estimated_input_tokens == input_tokens
+    assert candidate.estimated_output_tokens == output_tokens
+    assert candidate.estimated_thinking_tokens == 8_000
+    assert candidate.cost_score == pytest.approx(expected_cost)
+    assert decision.estimated_input_tokens == input_tokens
+    assert decision.estimated_output_tokens == output_tokens
+    assert decision.estimated_thinking_tokens == 8_000
+
+
+def test_cost_estimate_defaults_preserve_legacy_typical_request(mocker):
+    _stub_configured(mocker, {"claude": True})
+
+    _provider, decision = pick([], prefer="cheapest", effort="medium")
+
+    assert decision.estimated_input_tokens == DEFAULT_ESTIMATED_INPUT_TOKENS
+    assert decision.estimated_output_tokens == DEFAULT_ESTIMATED_OUTPUT_TOKENS
+    assert decision.ranked[0].cost_score == pytest.approx(0.0435)
+
+
+def test_negative_cost_estimate_errors():
+    with pytest.raises(InvalidRouterRequest) as exc:
+        pick([], estimated_input_tokens=-1)
+
+    assert "estimated_input_tokens must be >= 0" in str(exc.value)
 
 
 def test_prefer_fastest_picks_lowest_latency(mocker):
