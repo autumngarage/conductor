@@ -62,6 +62,22 @@ def test_high_code_escalates_to_agentic_coding_stack(effort):
     assert plan.sandbox == "none"
 
 
+@pytest.mark.parametrize("effort", ["minimal", "low", "medium", "high", "max"])
+def test_review_uses_openrouter_code_stack_after_native_reviewers(effort):
+    plan = plan_for("review", effort)
+
+    assert plan.mode == "review"
+    assert [candidate.provider for candidate in plan.candidates] == [
+        "codex",
+        "claude",
+        "openrouter",
+    ]
+    expected_stack = (
+        OPENROUTER_CODING_MAX if effort == "max" else OPENROUTER_CODING_HIGH
+    )
+    assert plan.candidates[2].models == expected_stack
+
+
 def test_integer_effort_maps_into_bucketed_matrix():
     assert plan_for("research", 0).effort_bucket == "minimal"
     assert plan_for("research", 1).effort_bucket == "low"

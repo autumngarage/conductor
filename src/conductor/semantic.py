@@ -205,7 +205,12 @@ _REVIEW: dict[EffortBucket, SemanticPlan] = {
         candidates=(
             SemanticCandidate("codex"),
             SemanticCandidate("claude"),
-            SemanticCandidate("gemini"),
+            SemanticCandidate(
+                "openrouter",
+                OPENROUTER_CODING_MAX
+                if bucket == "max"
+                else OPENROUTER_CODING_HIGH,
+            ),
         ),
     )
     for bucket in EFFORT_BUCKETS

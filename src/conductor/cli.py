@@ -1001,6 +1001,7 @@ def _invoke_review_with_fallback(
     title: str | None,
     silent: bool,
     max_fallbacks: int = DEFAULT_REVIEW_MAX_FALLBACKS,
+    models_by_provider: dict[str, tuple[str, ...]] | None = None,
 ) -> tuple[CallResponse, list[str]]:
     """Try code-review providers in route order."""
     last_exc: Exception | None = None
@@ -1034,6 +1035,7 @@ def _invoke_review_with_fallback(
                         cwd=cwd,
                         include_patch=True,
                     ),
+                    models=(models_by_provider or {}).get(candidate.name),
                     effort=effort,
                     task_tags=list(decision.task_tags),
                     prefer=decision.prefer,
@@ -1855,12 +1857,14 @@ def ask(
         review_exclude, review_reasons = _review_exclude_set(
             frozenset()
         )
+        exclude_set = _semantic_candidate_exclude_set(plan, review_exclude)
         try:
             _provider, decision = pick(
                 list(plan.tags),
                 prefer=plan.prefer,
                 effort=effort_value,
-                exclude=review_exclude,
+                exclude=exclude_set,
+                priority=_semantic_priority(plan),
                 shadow=True,
             )
         except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
@@ -1882,6 +1886,11 @@ def ask(
                 uncommitted=uncommitted,
                 title=title,
                 silent=silent_route or as_json,
+                models_by_provider={
+                    candidate.provider: candidate.models
+                    for candidate in plan.candidates
+                    if candidate.models
+                },
             )
         except ProviderConfigError as e:
             click.echo(f"conductor: {e}", err=True)
