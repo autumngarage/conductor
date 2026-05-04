@@ -5,6 +5,10 @@ from __future__ import annotations
 import pytest
 
 import conductor.providers.openrouter_catalog as openrouter_catalog
+from conductor.openrouter_model_stacks import (
+    OPENROUTER_CODING_HIGH,
+    OPENROUTER_CODING_MAX,
+)
 from conductor.providers.interface import ProviderError
 from conductor.providers.openrouter import OPENROUTER_DEFAULT_MODEL, select_model_for_task
 
@@ -109,6 +113,71 @@ def test_prefer_best_returns_unrestricted_auto_without_catalog(mocker, fixture_c
     assert payload["model"] == OPENROUTER_DEFAULT_MODEL
     assert payload["reasoning"] == {"effort": "medium"}
     assert "plugins" not in payload
+    load_catalog.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("prefer", "effort", "expected_stack"),
+    [
+        ("best", "high", OPENROUTER_CODING_HIGH),
+        ("balanced", "medium", OPENROUTER_CODING_HIGH),
+        ("best", "max", OPENROUTER_CODING_MAX),
+    ],
+)
+def test_tool_use_best_and_balanced_use_curated_coding_stack_without_catalog(
+    mocker,
+    fixture_catalog,
+    prefer,
+    effort,
+    expected_stack,
+):
+    load_catalog = mocker.patch(
+        "conductor.providers.openrouter_catalog.load_catalog",
+        return_value=fixture_catalog,
+    )
+
+    payload = select_model_for_task(["tool-use", "strong-reasoning"], prefer, effort)
+
+    assert payload["models"] == list(expected_stack)
+    assert payload["models"][0] == "openai/gpt-5.3-codex"
+    assert payload["reasoning"] == {"effort": "xhigh" if effort == "max" else effort}
+    assert "model" not in payload
+    assert OPENROUTER_DEFAULT_MODEL not in payload["models"]
+    assert "google/gemini-2.5-flash-lite" not in payload["models"]
+    load_catalog.assert_not_called()
+
+
+def test_tool_use_coding_stack_honors_excluded_models(mocker, fixture_catalog):
+    load_catalog = mocker.patch(
+        "conductor.providers.openrouter_catalog.load_catalog",
+        return_value=fixture_catalog,
+    )
+
+    payload = select_model_for_task(
+        ["tool-use"],
+        "best",
+        "high",
+        exclude={OPENROUTER_CODING_HIGH[0]},
+    )
+
+    assert payload["models"] == list(OPENROUTER_CODING_HIGH[1:])
+    load_catalog.assert_not_called()
+
+
+def test_tool_use_coding_stack_errors_when_fully_excluded(mocker, fixture_catalog):
+    load_catalog = mocker.patch(
+        "conductor.providers.openrouter_catalog.load_catalog",
+        return_value=fixture_catalog,
+    )
+
+    with pytest.raises(ProviderError, match="coding stack was fully excluded"):
+        select_model_for_task(
+            ["tool-use"],
+            "best",
+            "high",
+            exclude=set(OPENROUTER_CODING_HIGH),
+        )
+
     load_catalog.assert_not_called()
 
 

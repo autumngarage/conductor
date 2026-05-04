@@ -810,6 +810,7 @@ def _invoke_with_fallback(
                     "provider": candidate.name,
                     "mode": mode,
                     "model": model,
+                    "models": list(candidate_models or ()),
                     "tools": sorted(tools),
                     "sandbox": sandbox,
                     "cwd": cwd,

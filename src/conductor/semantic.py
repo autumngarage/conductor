@@ -11,6 +11,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from conductor.openrouter_model_stacks import (
+    OPENROUTER_CODING_HIGH,
+    OPENROUTER_CODING_MAX,
+)
+
 SemanticKind = Literal["research", "code", "review", "council"]
 SemanticMode = Literal["call", "exec", "review", "council"]
 EffortBucket = Literal["minimal", "low", "medium", "high", "max"]
@@ -171,7 +176,7 @@ _CODE: dict[EffortBucket, SemanticPlan] = {
         candidates=(
             SemanticCandidate("codex"),
             SemanticCandidate("claude"),
-            SemanticCandidate("openrouter"),
+            SemanticCandidate("openrouter", OPENROUTER_CODING_HIGH),
             SemanticCandidate("ollama"),
         ),
     ),
@@ -185,7 +190,7 @@ _CODE: dict[EffortBucket, SemanticPlan] = {
         candidates=(
             SemanticCandidate("codex"),
             SemanticCandidate("claude"),
-            SemanticCandidate("openrouter"),
+            SemanticCandidate("openrouter", OPENROUTER_CODING_MAX),
             SemanticCandidate("ollama"),
         ),
     ),
