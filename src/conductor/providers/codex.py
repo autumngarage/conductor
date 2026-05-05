@@ -51,6 +51,11 @@ CODEX_DEFAULT_MODEL = "gpt-5.4"
 CODEX_REVIEW_MODEL = "codex-review"
 CODEX_REQUEST_TIMEOUT_SEC = 180.0
 CODEX_STARTUP_PROBE_TIMEOUT_SEC = 8.0
+CODEX_STARTUP_PROBE_CONFIG = (
+    "model_reasoning_effort=minimal",
+    "features.image_gen=false",
+    "features.web_search=false",
+)
 
 # Sentinel distinguishing "caller didn't specify a timeout" from "caller
 # explicitly asked for no timeout (None)". The constructor default applies
@@ -83,6 +88,61 @@ def _format_compact_count(value: int) -> str:
     if value < 10_000:
         return f"{value / 1_000:.1f}k"
     return f"{value // 1_000}k"
+
+
+def _codex_error_dict_message(error: dict[str, object]) -> str | None:
+    detail = error.get("message")
+    if not isinstance(detail, str) or not detail.strip():
+        return None
+    error_type = error.get("type")
+    param = error.get("param")
+    parts = []
+    if isinstance(error_type, str) and error_type:
+        parts.append(error_type)
+    parts.append(detail.strip())
+    if isinstance(param, str) and param:
+        parts.append(f"param={param}")
+    return ": ".join(parts)
+
+
+def _codex_nested_error_message(message: str | dict[str, object]) -> str:
+    if isinstance(message, dict):
+        return _codex_error_dict_message(message) or str(message)
+    try:
+        payload = json.loads(message)
+    except json.JSONDecodeError:
+        return message.strip()
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return message.strip()
+    return _codex_error_dict_message(error) or message.strip()
+
+
+def _codex_startup_probe_failure_detail(stdout: str, stderr: str) -> str:
+    """Prefer semantic Codex error events over noisy startup NDJSON."""
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "error":
+            message = event.get("message")
+            if isinstance(message, str) and message.strip():
+                return _codex_nested_error_message(message)
+        if event.get("type") == "turn.failed":
+            message = event.get("message") or event.get("error")
+            if isinstance(message, str) and message.strip():
+                return _codex_nested_error_message(message)
+            if isinstance(message, dict):
+                return _codex_nested_error_message(message)
+            return "codex turn failed"
+    return (stderr or stdout).strip()
+
+
+def _codex_startup_probe_failure(reason: str | None) -> bool:
+    return bool(reason and "`codex exec` startup probe" in reason)
 
 
 class CodexProvider:
@@ -139,6 +199,11 @@ class CodexProvider:
             )
         return True, None
 
+    def fix_command_for_reason(self, reason: str | None) -> str | None:
+        if _codex_startup_probe_failure(reason):
+            return None
+        return self.fix_command
+
     def _auth_probe(self) -> tuple[bool, str | None]:
         """Verify auth via `codex login status` (exit 0 = logged in)."""
         try:
@@ -193,9 +258,9 @@ class CodexProvider:
                 "--ephemeral",
                 "--sandbox",
                 "danger-full-access",
-                "-c",
-                "model_reasoning_effort=minimal",
             ]
+            for config in CODEX_STARTUP_PROBE_CONFIG:
+                args.extend(["-c", config])
             try:
                 result = subprocess.run(
                     args,
@@ -216,7 +281,10 @@ class CodexProvider:
             except (FileNotFoundError, OSError) as e:
                 return False, f"could not run `{self._cli} exec` startup probe: {e}"
         if result.returncode != 0:
-            detail = (result.stderr or result.stdout).strip()
+            detail = _codex_startup_probe_failure_detail(
+                result.stdout or "",
+                result.stderr or "",
+            )
             return False, (
                 f"`{self._cli} exec` startup probe exited {result.returncode}: "
                 f"{detail[:200]}"

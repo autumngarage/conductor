@@ -760,9 +760,16 @@ def _echo_preflight_failure(provider_or_name, reason: str | None) -> None:
     provider = _provider_for_preflight(provider_or_name)
     detail = reason or "provider health probe failed"
     click.echo(f"[conductor] preflight failed for {provider.name}: {detail}", err=True)
-    fix = getattr(provider, "fix_command", None)
+    fix = _provider_fix_command(provider, reason)
     if fix:
         click.echo(f"[conductor] try: {fix}", err=True)
+
+
+def _provider_fix_command(provider, reason: str | None) -> str | None:
+    fix_for_reason = getattr(provider, "fix_command_for_reason", None)
+    if callable(fix_for_reason):
+        return fix_for_reason(reason)
+    return getattr(provider, "fix_command", None)
 
 
 def _echo_offline_hint(failed_name: str, *, silent: bool) -> None:
@@ -3601,7 +3608,7 @@ def _provider_rows() -> list[dict]:
                 # without a canonical recipe (e.g. user-defined shell
                 # providers).
                 "fix_command": (
-                    None if ok else getattr(provider, "fix_command", None)
+                    None if ok else _provider_fix_command(provider, reason)
                 ),
                 "default_model": _provider_default_model(provider),
                 "tags": list(provider.tags),
@@ -3838,7 +3845,7 @@ def _diagnostic_payload() -> dict:
                 "configured": ok,
                 "reason": None if ok else reason,
                 "fix_command": (
-                    None if ok else getattr(provider, "fix_command", None)
+                    None if ok else _provider_fix_command(provider, reason)
                 ),
                 "default_model": _provider_default_model(provider),
                 "tags": list(provider.tags),

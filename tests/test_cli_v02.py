@@ -1533,6 +1533,32 @@ def test_exec_cli_preflight_blocks_exec_and_surfaces_fix_hint(mocker):
     assert "[conductor] try: brew install codex && codex login" in result.stderr
 
 
+def test_exec_cli_preflight_suppresses_codex_fix_for_startup_probe_failure(mocker):
+    _stub_all_configured(mocker, {"codex"})
+    mocker.patch.object(
+        CodexProvider,
+        "health_probe",
+        return_value=(
+            False,
+            "`codex exec` startup probe exited 1: invalid_request_error: "
+            "The request was rejected.: param=tools",
+        ),
+    )
+    exec_mock = mocker.patch.object(
+        CodexProvider, "exec", return_value=_fake_response("codex")
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--with", "codex", "--task", "do it"],
+    )
+
+    assert result.exit_code == 2
+    assert not exec_mock.called
+    assert "[conductor] preflight failed for codex:" in result.stderr
+    assert "[conductor] try: brew install codex && codex login" not in result.stderr
+
+
 def test_exec_auto_preflight_failure_does_not_attribute_error_on_str_provider(mocker):
     """Regression: auto-mode `pick()` may return the provider name as a string
     (test fixtures, and some legacy callers); when preflight fails the cli used

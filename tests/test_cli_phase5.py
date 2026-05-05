@@ -122,6 +122,56 @@ def test_list_text_output_shows_fix_command_under_unconfigured_provider(mocker):
     assert "→ fix: conductor init --only openrouter" in result.output
 
 
+def test_list_text_output_suppresses_codex_fix_for_probe_api_config_error(mocker):
+    from conductor.providers import CodexProvider
+
+    _stub_all_unconfigured(mocker)
+    mocker.patch.object(
+        CodexProvider,
+        "configured",
+        lambda self: (
+            False,
+            "`codex exec` startup probe exited 1: invalid_request_error: "
+            "The following tools cannot be used with reasoning.effort "
+            "'minimal': image_gen, web_search.: param=tools",
+        ),
+    )
+
+    result = CliRunner().invoke(main, ["list"])
+
+    assert result.exit_code == 0, result.output
+    assert "invalid_request_error" in result.output
+    assert "brew install codex && codex login" not in result.output
+
+
+def test_doctor_suppresses_codex_fix_for_startup_probe_failure(mocker):
+    from conductor.providers import CodexProvider
+
+    _stub_all_unconfigured(mocker)
+    mocker.patch.object(
+        CodexProvider,
+        "configured",
+        lambda self: (
+            False,
+            "`codex exec` startup probe exited 1: invalid_request_error: "
+            "The request was rejected.: param=tools",
+        ),
+    )
+
+    text_result = CliRunner().invoke(main, ["doctor"])
+    assert text_result.exit_code == 0, text_result.output
+    assert "invalid_request_error" in text_result.output
+    assert "→ fix: brew install codex && codex login" not in text_result.output
+
+    json_result = CliRunner().invoke(main, ["doctor", "--json"])
+    assert json_result.exit_code == 0, json_result.output
+    providers = {
+        row["provider"]: row for row in json.loads(json_result.output)["providers"]
+    }
+    assert providers["codex"]["reason"].startswith("`codex exec` startup probe")
+    assert providers["codex"]["fix_command"] is None
+
+
 def test_list_no_fix_line_for_configured_provider(mocker):
     from conductor.providers import (
         ClaudeProvider,
