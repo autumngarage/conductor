@@ -24,7 +24,7 @@ from conductor.providers.claude import (
     CLAUDE_EXEC_FIRST_OUTPUT_TIMEOUT_SEC,
     ClaudeProvider,
 )
-from conductor.providers.codex import CodexProvider
+from conductor.providers.codex import CODEX_STARTUP_PROBE_CONFIG, CodexProvider
 from conductor.providers.gemini import GEMINI_AUTH_ENV_VARS, GeminiProvider
 from conductor.providers.interface import (
     CallResponse,
@@ -1082,6 +1082,106 @@ def test_codex_configured_false_when_exec_startup_probe_times_out(mocker):
     assert startup_call.args[0][:3] == ["codex", "exec", "-"]
     assert startup_call.kwargs["timeout"] == 8
     assert startup_call.kwargs["input"] == "Reply with OK."
+
+
+def test_codex_startup_probe_disables_minimal_reasoning_tool_conflicts(mocker):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+
+    def run(args, **kwargs):
+        if args == ["codex", "login", "status"]:
+            return _fake_completed(stdout="Logged in using ChatGPT")
+        if args[:3] == ["codex", "exec", "-"]:
+            return _fake_completed(stdout='{"type":"turn.completed"}\n')
+        raise AssertionError(f"unexpected command: {args!r}")
+
+    captured = mocker.patch("conductor.providers.codex.subprocess.run", side_effect=run)
+
+    ok, reason = CodexProvider().configured()
+
+    assert ok is True and reason is None
+    startup_args = captured.call_args_list[1].args[0]
+    config_values = [
+        startup_args[idx + 1]
+        for idx, value in enumerate(startup_args)
+        if value == "-c"
+    ]
+    assert config_values == list(CODEX_STARTUP_PROBE_CONFIG)
+
+
+def test_codex_startup_probe_reports_api_error_instead_of_first_event(mocker):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    stdout = "\n".join(
+        [
+            '{"type":"thread.started","thread_id":"thread-123"}',
+            '{"type":"turn.started"}',
+            json.dumps(
+                {
+                    "type": "error",
+                    "message": json.dumps(
+                        {
+                            "type": "error",
+                            "error": {
+                                "type": "invalid_request_error",
+                                "message": (
+                                    "The following tools cannot be used with "
+                                    "reasoning.effort 'minimal': image_gen, web_search."
+                                ),
+                                "param": "tools",
+                            },
+                            "status": 400,
+                        }
+                    ),
+                }
+            ),
+            '{"type":"turn.failed"}',
+        ]
+    )
+
+    def run(args, **kwargs):
+        if args == ["codex", "login", "status"]:
+            return _fake_completed(stdout="Logged in using ChatGPT")
+        if args[:3] == ["codex", "exec", "-"]:
+            return _fake_completed(stdout=stdout, returncode=1)
+        raise AssertionError(f"unexpected command: {args!r}")
+
+    mocker.patch("conductor.providers.codex.subprocess.run", side_effect=run)
+
+    ok, reason = CodexProvider().configured()
+
+    assert ok is False
+    assert "`codex exec` startup probe exited 1" in reason
+    assert "invalid_request_error" in reason
+    assert "The following tools cannot be used" in reason
+    assert "param=tools" in reason
+    assert "thread.started" not in reason
+
+
+def test_codex_startup_probe_reports_turn_failed_error_dict(mocker):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    stdout = json.dumps(
+        {
+            "type": "turn.failed",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "The request was rejected.",
+                "param": "tools",
+            },
+        }
+    )
+
+    def run(args, **kwargs):
+        if args == ["codex", "login", "status"]:
+            return _fake_completed(stdout="Logged in using ChatGPT")
+        if args[:3] == ["codex", "exec", "-"]:
+            return _fake_completed(stdout=stdout, returncode=1)
+        raise AssertionError(f"unexpected command: {args!r}")
+
+    mocker.patch("conductor.providers.codex.subprocess.run", side_effect=run)
+
+    ok, reason = CodexProvider().configured()
+
+    assert ok is False
+    assert "invalid_request_error: The request was rejected.: param=tools" in reason
 
 
 def test_codex_call_parses_ndjson_and_usage(mocker):
