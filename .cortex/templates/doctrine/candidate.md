@@ -1,11 +1,12 @@
-# {{ nnnn }} — {{ Title — active-voice claim }}
+# {{ nnnn }} — {{ Title - active-voice claim }}
 
 > {{ One-sentence claim in active voice. This is the summary that loads into context when an agent grep-hits this entry. Make it readable standalone. }}
 
 **Status:** Proposed
 **Date:** {{ YYYY-MM-DD }}
-**Promoted-from:** {{ journal/<date>-<slug> or plans/<slug> or — (direct authoring) }}
-**Grounds-in:** {{ touchstone/principles/<file>.md#<section> — omit if not applicable }}
+**Promoted-from:** {{ journal/<date>-<slug> or plans/<slug> or - (direct authoring) }}
+**Cites:** {{ Cites }}
+**Grounds-in:** {{ touchstone/principles/<file>.md#<section> - omit if not applicable }}
 **Load-priority:** {{ always | default }}
 
 ## Context
@@ -14,7 +15,7 @@
 
 ## Decision
 
-{{ We will / we won't — stated as a claim, not a recommendation. Include the specific boundary: what falls inside this decision and what falls outside. }}
+{{ We will / we won't - stated as a claim, not a recommendation. Include the specific boundary: what falls inside this decision and what falls outside. }}
 
 ## Consequences
 

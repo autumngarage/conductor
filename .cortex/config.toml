@@ -1,0 +1,20 @@
+[audit-instructions]
+homebrew_tap = "autumngarage/conductor"
+siblings = [
+  "~/repos/cortex",
+  "~/repos/sentinel",
+  "~/repos/touchstone",
+  "~/repos/autumn-garage",
+]
+github_repos = [
+  "autumngarage/conductor",
+]
+scan_files = [
+  "CLAUDE.md",
+  "AGENTS.md",
+  "README.md",
+  "docs/consumers.md",
+]
+
+# Intentionally omitted: pypi_package. The bare `conductor` package on PyPI is
+# unrelated to this project; the supported Python install path is the git URL.
