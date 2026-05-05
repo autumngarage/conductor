@@ -56,6 +56,8 @@ CODEX_STARTUP_PROBE_CONFIG = (
     "features.image_gen=false",
     "features.web_search=false",
 )
+CODEX_STREAM_POLL_INTERVAL_SEC = 0.05
+CODEX_STREAM_EXIT_READER_JOIN_SEC = 0.2
 
 # Sentinel distinguishing "caller didn't specify a timeout" from "caller
 # explicitly asked for no timeout (None)". The constructor default applies
@@ -939,6 +941,9 @@ class CodexProvider:
         try:
             while True:
                 now = time.monotonic()
+                if process.poll() is not None and stream_q.empty():
+                    break
+
                 if timeout_fired.is_set() or (
                     timeout is not None and now - start > timeout
                 ):
@@ -1016,9 +1021,11 @@ class CodexProvider:
                     last_liveness = now
 
                 try:
-                    stream_name, item = stream_q.get(timeout=0.05)
+                    stream_name, item = stream_q.get(
+                        timeout=CODEX_STREAM_POLL_INTERVAL_SEC
+                    )
                 except queue.Empty:
-                    if stdout_done and stderr_done and process.poll() is not None:
+                    if process.poll() is not None:
                         break
                     continue
 
@@ -1170,7 +1177,11 @@ class CodexProvider:
             )
 
         returncode = process.wait()
-        self._join_reader_threads(stdout_thread, stderr_thread)
+        self._join_reader_threads(
+            stdout_thread,
+            stderr_thread,
+            timeout=CODEX_STREAM_EXIT_READER_JOIN_SEC,
+        )
         self._drain_stream_queue(stream_q, stdout_parts, stderr_parts, auth_tracker)
         duration_ms = int((time.monotonic() - start) * 1000)
         stdout = "".join(stdout_parts)
@@ -1225,9 +1236,11 @@ class CodexProvider:
         self,
         stdout_thread: threading.Thread,
         stderr_thread: threading.Thread,
+        *,
+        timeout: float = 1.0,
     ) -> None:
-        stdout_thread.join(timeout=1)
-        stderr_thread.join(timeout=1)
+        stdout_thread.join(timeout=timeout)
+        stderr_thread.join(timeout=timeout)
 
     def _emit_watchdog_stderr(self, text: str) -> None:
         """Best-effort operator output that cannot stop watchdog checks."""
