@@ -74,7 +74,7 @@ To refresh dependencies later, bump the date in `[tool.uv].exclude-newer` and ru
 
 ## Release & Distribution
 
-Primary channel is the Homebrew tap `autumngarage/homebrew-conductor` (install: `brew install autumngarage/conductor/conductor`) — same pattern Touchstone, Sentinel, and Cortex use. The tap repo holds the Formula; the conductor repo holds the code. Version derived from git tag via `hatch-vcs`. Release process is two steps: `git tag v0.X.Y` on main, push the tag, then `gh release create v0.X.Y --generate-notes`. The release-published event triggers `.github/workflows/release.yml`, which calls the shared `homebrew-bump.yml` reusable workflow in `autumngarage/autumn-garage` (pinned `@v1`) to rewrite the tap Formula's `url` + `sha256` and commit directly to the tap's `main` — no hand-editing. Manual escape hatch: `gh workflow run release.yml -f tag_name=v0.X.Y` re-bumps for an existing tag. Required repo secret: `HOMEBREW_TAP_PAT` (classic PAT with `repo` scope on the tap, or fine-grained with `contents:write` on `autumngarage/homebrew-conductor`). A pip install from the git URL also works (`pip install git+https://github.com/autumngarage/conductor`); note that the bare `pip install conductor` name on PyPI is an unrelated 1.0.0 project, do not advertise it.
+Primary channel is the Homebrew tap `autumngarage/homebrew-conductor` (install: `brew install autumngarage/conductor/conductor`) — same pattern Touchstone, Sentinel, and Cortex use. The tap repo holds the Formula; the conductor repo holds the code. Version derived from git tag via `hatch-vcs`. Release process is two steps: `git tag v0.X.Y` on main, push the tag, then `gh release create v0.X.Y --generate-notes`. The release-published event triggers `.github/workflows/release.yml`, which calls the shared `homebrew-bump.yml` reusable workflow in `autumngarage/autumn-garage` (pinned `@v1`) to rewrite the tap Formula's `url` + `sha256` and commit directly to the tap's `main` — no hand-editing. Manual escape hatch: `gh workflow run release.yml -f tag_name=v0.X.Y` re-bumps for an existing tag. Required repo secret: `HOMEBREW_TAP_PAT` (classic PAT with `repo` scope on the tap, or fine-grained with `contents:write` on `autumngarage/homebrew-conductor`). A pip install from the git URL also works (`pip install "git+https://github.com/autumngarage/conductor"`); note that the bare `pip install conductor` name on PyPI is an unrelated 1.0.0 project, do not advertise it.
 
 > **Source of truth:** the authoritative "is the tap wired / is a given version available" answer lives in the `autumngarage/homebrew-conductor` repo's Formula and git log — not in this file. This note describes the mechanism; the tap repo describes the state.
 
@@ -160,7 +160,7 @@ Use `--permission-profile read-only` for inspect-only exec work (`Read,Grep,Glob
 
 Because the child has the same ambient authority as the parent, prompts should still be explicit about ownership: whether the child may edit files, run tests, use network, or perform git operations. For PR workflows in this repo, the parent agent still owns commit, push, and PR creation unless the user explicitly delegates those steps.
 
-<!-- conductor:begin v0.8.3 -->
+<!-- conductor:begin v0.8.7 -->
 ## Conductor delegation
 
 This project has [conductor](https://github.com/autumngarage/conductor)

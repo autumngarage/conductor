@@ -129,14 +129,14 @@ The audit and Codex review surfaced eight additional items beyond the top-3 cut.
 
 Summary (full reasoning + priority in the journal entry):
 
-- Cost observability (`conductor usage`) — original Slice B; deferred for principle fixes.
-- `offline_mode.py` silent-no-op fix — same `No silent failures` violation as Slice B.
-- Reachability blindness in `pick()` — router is env-var-deep, not network-deep.
-- No durable session / conversation state — possibly a permanent boundary.
-- Capability-tag empirical calibration — speculative until a consumer reports bad routing.
-- Credential rotation/expiry handling — low-frequency, low-priority.
-- No structured logs for CI ingestion — consumer-driven.
-- Dependency version pinning is soft (`>=`) — no incident yet.
+- Cost observability (`conductor usage`) — original Slice B; deferred for principle fixes. Resolved to: `journal/2026-04-24-blindspot-followups-noted`.
+- `offline_mode.py` silent-no-op fix — same `No silent failures` violation as Slice B. Resolved to: `journal/2026-04-24-blindspot-followups-noted`.
+- Reachability blindness in `pick()` — router is env-var-deep, not network-deep. Resolved to: `journal/2026-04-24-blindspot-followups-noted`.
+- No durable session / conversation state — possibly a permanent boundary. Resolved to: `journal/2026-04-24-blindspot-followups-noted`.
+- Capability-tag empirical calibration — speculative until a consumer reports bad routing. Resolved to: `journal/2026-04-24-blindspot-followups-noted`.
+- Credential rotation/expiry handling — low-frequency, low-priority. Resolved to: `journal/2026-04-24-blindspot-followups-noted`.
+- No structured logs for CI ingestion — consumer-driven. Resolved to: `journal/2026-04-24-blindspot-followups-noted`.
+- Dependency version pinning is soft (`>=`) — no incident yet. Resolved to: `journal/2026-04-24-blindspot-followups-noted`.
 
 ## Known limitations at exit
 

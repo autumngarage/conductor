@@ -2,8 +2,8 @@
 
 > The set of rules an agent follows to read and write `.cortex/`. Projects import this file into `AGENTS.md` (or `CLAUDE.md`) so every agent working on the project follows the same contract.
 
-**Protocol version:** 0.2.0 (draft, ships with SPEC.md v0.3.1-dev)
-**Status:** Proposed
+**Protocol version:** 0.2.2 (ships with SPEC.md v0.5.0; § 1 adds canonical-ownership requirement per Doctrine 0007 — additive minor per SPEC § 6)
+**Status:** Active
 **Imports:** this file is imported into `AGENTS.md` via `@.cortex/protocol.md`
 
 ---
@@ -26,9 +26,9 @@ The manifest is a token-budgeted slice of `.cortex/`, not the whole store. Defau
 | Journal entries from last 72h + latest digest | ~1.5k | By date |
 | Promotion-queue depth summary | ~100t | Count only |
 
-**No semantic retrieval at session start.** Cortex storage is markdown + git + grep — not a vector store (Doctrine 0005 #1, supersedes 0004). The default manifest loads Doctrine by `Load-priority: always` pins plus recency, never by embedding similarity. Projects that want semantic retrieval wire up their own index over `.cortex/` as a read-side layer; that index is out of scope for the Protocol.
+**No semantic retrieval at session start.** Cortex storage is markdown + git + grep — not a vector store (Doctrine 0006 #1, supersedes 0005). The default manifest loads Doctrine by `Load-priority: always` pins plus recency, never by embedding similarity. Cortex's CLI ships an opt-in `cortex retrieve` interface (non-normative reference implementation, gitignored derived index — see Doctrine 0006 #1) for projects that want semantic retrieval over `.cortex/` without rolling their own; the Protocol itself does not include retrieval, and consumers may bypass `cortex retrieve` entirely.
 
-**Mid-session retrieval is grep.** When the agent needs Doctrine or Journal content not in the manifest, it greps `.cortex/` directly or uses `cortex grep` (a frontmatter-aware wrapper shipping in Phase B). Protocol-aware tooling may provide typed-link traversal; the primitive is ripgrep.
+**Mid-session retrieval is grep, optionally hybrid.** When the agent needs Doctrine or Journal content not in the manifest, it greps `.cortex/` directly or uses `cortex grep` (a frontmatter-aware wrapper shipping in Phase B). Once `cortex retrieve` ships (see `.cortex/plans/cortex-retrieve.md`), agents may also call `cortex retrieve --json` for hybrid (BM25 + semantic) retrieval over the derived index — but this is opt-in convenience, not Protocol contract. The Protocol primitive is ripgrep; everything else layers on top.
 
 **Graceful degradation.** At 32k context, the manifest falls back to State only. At 100k+, it may include Journal from last 7d. The CLI computes the slice; the agent receives the output.
 
@@ -44,11 +44,13 @@ The agent imports those two files at session start via the host's `@path` mechan
 
 **The agent does not read `.cortex/` directory contents directly at session start unless the user asks or the fallback configuration is in use.** Post-session-start, grep and targeted reads are expected. This keeps Time To First Token bounded and prevents accidental full-directory loads on large corpora.
 
+**Canonical ownership** (per [Cortex Doctrine 0007](https://github.com/autumngarage/cortex/blob/main/.cortex/doctrine/0007-canonical-ownership-of-state-and-plans.md)): `.cortex/state.md` is the canonical answer to *"where are we?"* and the active master plan in `.cortex/plans/` is the canonical answer to *"what's next?"* — for *every* Cortex-using project. README and other public-facing docs link to these files; they do not restate them. Repo-root files like `ROADMAP.md`, `STATUS.md`, `PLAN.md`, `NEXT.md`, `TODO.md` that duplicate state or plan content are anti-pattern; `cortex doctor` warns on them in v0.6.0+. The override path is explicit, per-project, and lives in `.cortex/config.toml` `[doctrine.0007]` — never silent. This rule exists because Cortex itself fell into the trap on 2026-05-02 (an agent cleaning up drift created `ROADMAP.md` at repo root), and the dogfood evidence promoted the rule from an internal principle to enforceable doctrine.
+
 ---
 
 ## 2. Write on triggers (Tier 1 — machine-observable)
 
-These triggers are **deterministic, auditable, and enforceable**. When any of them fires, the agent writes a Journal entry from the matching template. A post-session audit (`cortex doctor --audit`) verifies compliance.
+These triggers are **deterministic, auditable, and enforceable**. When any of them fires, the agent writes a durable `.cortex/` artifact from the matching template — a Journal entry for most triggers, a Doctrine candidate for T1.7 (which names `doctrine/candidate.md` as its template and graduates via the promotion flow). A post-session audit (`cortex doctor --audit`) verifies compliance against the expected artifact shape for each trigger.
 
 | # | Trigger | Template |
 |---|---|---|
@@ -61,12 +63,15 @@ These triggers are **deterministic, auditable, and enforceable**. When any of th
 | T1.7 | Touchstone pre-merge ran on architecturally significant diff (touches `principles/`, `.cortex/doctrine/`, `SPEC.md`, or matches configured patterns) | `doctrine/candidate.md` (draft, awaits promotion) |
 | T1.8 | Commit message matches patterns: `fix: ... regression`, `refactor: ... (removes|introduces)`, `feat: ... (breaking|replaces)` | `journal/decision.md` |
 | T1.9 | Pull request merged to the default branch (main/master) | `journal/pr-merged.md` |
+| T1.10 | A tagged release / distribution artifact shipped (`git tag` matching a release pattern, GitHub Release published, Homebrew tap / PyPI / Docker image updated) | `journal/release.md` |
 
 **Why T1.9 matters.** The merge is the canonical "this shipped" event for team-shared memory. T1.3 (plan transition) and T1.8 (commit-message pattern) are near-misses: a PR can merge without a plan-status change, and commit-pattern matching is fuzzy. A post-merge summary closes the loop — it is the durable record that ties Plans, Journal entries written during the branch, and the final diff together at the moment ratification happened. Authored by whichever agent/human runs the merge command (or by a post-merge hook when present).
 
-**Enforcement.** Tier 1 triggers are machine-detectable; `cortex doctor --audit` walks the git log for the session period and verifies that every qualifying event has a corresponding Journal entry. Missing entries are warnings in solo mode, errors in triad mode (where Touchstone's pre-push hook blocks the push).
+**Why T1.10 matters.** The merge is when work *enters the trunk*; the release is when it *enters the world*. Downstream documentation (CLAUDE.md install commands, README quickstart, PITCH version mentions, sibling-repo formula references) refers to *released* artifacts, not merged commits. A release event without a Journal entry is the failure mode the conductor case study documented: the Homebrew tap shipped, no Journal entry recorded that reality changed, and `CLAUDE.md` kept claiming "tap planned for v0.1.0; not yet wired" for eight further releases. The `release.md` template captures `Downstream docs this changes` as the seed list for the v0.5.0 `cortex doctor --audit-instructions` check; T1.10's audit walks `git tag --list` and matches each tag against a `Type: release` Journal entry within 72h whose **`Tag:`** scalar equals the tag name (so one release entry resolves exactly one tag — preventing a single entry from accidentally satisfying every nearby release tag).
 
-**Trigger thresholds are project-configurable.** `.cortex/protocol.md` in a project can override: `N` for T1.4 file-deletion threshold; regex patterns for T1.7 architecturally-significant detection; commit-message patterns for T1.8; whether T1.9 fires on every merge or only on merges matching architecturally-significant patterns (default: every merge).
+**Enforcement.** Tier 1 triggers are machine-detectable; `cortex doctor --audit` walks the git log for the session period and verifies that every qualifying event has a corresponding artifact of the trigger's expected shape — a Journal entry for most triggers, a Doctrine candidate (produced by the deferred `cortex doctrine draft` flow) for T1.7. Missing artifacts are warnings in solo mode, errors in triad mode (where Touchstone's pre-push hook blocks the push).
+
+**Trigger thresholds are project-configurable.** `.cortex/protocol.md` in a project can override: `N` for T1.4 file-deletion threshold; regex patterns for T1.7 architecturally-significant detection; commit-message patterns for T1.8; whether T1.9 fires on every merge or only on merges matching architecturally-significant patterns (default: every merge); the regex for T1.10 tag-name detection (default: `^v\d+\.\d+\.\d+` — semver tags only; projects using calendar versioning or non-`v`-prefix tags can override).
 
 ---
 
@@ -139,6 +144,7 @@ Templates shipped with the Protocol (filenames):
 - `journal/plan-transition.md` — Plan status change
 - `journal/sentinel-cycle.md` — end-of-cycle summary
 - `journal/pr-merged.md` — post-merge summary (T1.9)
+- `journal/release.md` — release / distribution-artifact summary (T1.10)
 - `doctrine/candidate.md` — Doctrine draft pending promotion
 - `digest/monthly.md` — monthly Journal digest
 - `digest/quarterly.md` — quarterly digest

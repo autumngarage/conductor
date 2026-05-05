@@ -14,7 +14,7 @@
 
 Pick an LLM, give it a job. Manual or auto routing across providers.
 
-**Status:** shipping. Current tap release is v0.7.4 — built-in providers for `kimi`, `openrouter`, `deepseek-chat`, `deepseek-reasoner`, `claude`, `codex`, `gemini`, and `ollama`; semantic `ask`; manual + auto routing; single-turn `call`; native `review`; multi-turn unsandboxed `exec` with tools; and agent-wiring for Claude Code, Codex, Gemini, Cursor, and repo instruction files.
+**Status:** shipping. Current tap release is v0.8.7 — built-in providers for `kimi`, `openrouter`, `deepseek-chat`, `deepseek-reasoner`, `claude`, `codex`, `gemini`, and `ollama`; semantic `ask`; manual + auto routing; single-turn `call`; native `review`; multi-turn unsandboxed `exec` with tools; and agent-wiring for Claude Code, Codex, Gemini, Cursor, and repo instruction files.
 
 DeepSeek note: `deepseek-chat` and `deepseek-reasoner` now use OpenRouter credentials. Set `OPENROUTER_API_KEY`; `DEEPSEEK_API_KEY` is deprecated. Conductor resolves the newest matching DeepSeek slug from the OpenRouter catalog and falls back to the pinned default if the catalog is unavailable.
 Kimi note: `kimi` now routes through OpenRouter. Set `OPENROUTER_API_KEY`; legacy `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` are no longer used. Conductor resolves the newest matching Kimi slug from the OpenRouter catalog and falls back to the pinned default if the catalog is unavailable.
@@ -123,17 +123,10 @@ Deferred (see `autumn-garage/.cortex/plans/conductor-bootstrap.md`):
 
 ## Agent integration
 
-> **What's in v0.3.3 (tap):** user-scope Claude Code wiring only —
-> `--wire-agents`, `--patch-claude-md`, `--unwire`.
-> **On main, untagged (next tap bump):** repo-scope `AGENTS.md` /
-> `GEMINI.md` / `CLAUDE.md` patching plus Cursor rule — adds
-> `--patch-agents-md`, `--patch-gemini-md`, `--patch-claude-md-repo`,
-> `--wire-cursor`. Users on the tap version will hit "unknown option"
-> errors if they try the untagged flags — install from the dev path
-> above, or:
-> ```sh
-> pip install git+https://github.com/autumngarage/conductor
-> ```
+> **What's in v0.8.7 (tap):** user-scope Claude Code wiring, repo-scope
+> `AGENTS.md` / `GEMINI.md` / `CLAUDE.md` patching, Cursor rules, and
+> `--unwire`. The repo-scope flags are `--patch-agents-md`,
+> `--patch-gemini-md`, `--patch-claude-md-repo`, and `--wire-cursor`.
 
 `conductor init` detects which agent tools you have installed (Claude Code,
 Codex, Cursor, Gemini CLI, Zed — anything that reads `AGENTS.md` /

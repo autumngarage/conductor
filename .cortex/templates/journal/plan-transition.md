@@ -23,6 +23,6 @@
 
 ## Deferred items
 
-- {{ item — resolved to: plans/<new-slug> | journal/<date>-<slug> }}
+- {{ item — resolved to: plans/<new-slug> | journal/<date>-<slug> | doctrine/<nnnn>-<slug> }}
 
-(Per SPEC § 4.2, every deferred item must resolve to another plan or a journal entry in the same commit. No orphans.)
+(Per SPEC § 4.2, every deferred item must resolve to another Plan, Journal entry, or Doctrine entry in the same commit. No orphans.)
