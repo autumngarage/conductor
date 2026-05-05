@@ -889,12 +889,15 @@ class _FakeScheduledPipe:
         terminated: threading.Event,
         on_eof,
         raise_after_schedule: BaseException | None = None,
+        on_schedule_exhausted=None,
     ) -> None:
         self._schedule = schedule
         self._hang_after_schedule = hang_after_schedule
         self._terminated = terminated
         self._on_eof = on_eof
         self._raise_after_schedule = raise_after_schedule
+        self._on_schedule_exhausted = on_schedule_exhausted
+        self._schedule_exhausted = False
         self._idx = 0
 
     def readline(self) -> str:
@@ -904,6 +907,10 @@ class _FakeScheduledPipe:
             if self._terminated.wait(delay):
                 return ""
             return line
+        if not self._schedule_exhausted:
+            self._schedule_exhausted = True
+            if self._on_schedule_exhausted is not None:
+                self._on_schedule_exhausted()
         if self._raise_after_schedule is not None:
             raise self._raise_after_schedule
         if self._hang_after_schedule:
@@ -925,6 +932,7 @@ class _FakePopen:
         stdout_schedule: list[tuple[float, str]],
         stderr_schedule: list[tuple[float, str]] | None = None,
         hang_after_stdout: bool = False,
+        exit_after_stdout_schedule: bool = False,
         returncode: int = 0,
         stdout_reader_error: BaseException | None = None,
         stderr_reader_error: BaseException | None = None,
@@ -943,6 +951,9 @@ class _FakePopen:
             terminated=self._terminated_event,
             on_eof=self._finish_success,
             raise_after_schedule=stdout_reader_error,
+            on_schedule_exhausted=(
+                self._finish_success if exit_after_stdout_schedule else None
+            ),
         )
         self.stderr = _FakeScheduledPipe(
             stderr_schedule or [],
@@ -1616,6 +1627,39 @@ def test_codex_exec_streams_output_resets_stall_clock(mocker):
     assert response.text == "done"
     assert response.session_id == "sess-streaming-1"
     assert fake.terminated is False
+
+
+def test_codex_exec_returns_after_process_exit_when_stdout_reader_lingers(
+    mocker, capsys
+):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    lines = [
+        '{"type":"session.created","session_id":"sess-exited-reader"}\n',
+        '{"type":"item.started","item":{"type":"agent_message"}}\n',
+        '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n',
+        '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":2}}\n',
+    ]
+    fake = _FakePopen(
+        stdout_schedule=[(0, line) for line in lines],
+        hang_after_stdout=True,
+        exit_after_stdout_schedule=True,
+    )
+    _patch_codex_popen(mocker, fake)
+
+    started = time.monotonic()
+    response = CodexProvider().exec(
+        "hi",
+        timeout_sec=0.4,
+        max_stall_sec=None,
+        liveness_interval_sec=0.01,
+    )
+    elapsed = time.monotonic() - started
+
+    assert response.text == "done"
+    assert response.session_id == "sess-exited-reader"
+    assert fake.terminated is False
+    assert elapsed < 0.8
+    assert "[conductor] no output from codex for " not in capsys.readouterr().err
 
 
 def test_codex_exec_no_stall_watchdog_by_default(mocker):
