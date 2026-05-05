@@ -267,6 +267,7 @@ class OpenRouterProvider:
         prefer: str = "balanced",
         exclude: set[str] | frozenset[str] | None = None,
         log_selection: bool = True,
+        max_tokens: int | None = None,
         resume_session_id: str | None = None,
     ) -> CallResponse:
         if resume_session_id:
@@ -293,6 +294,8 @@ class OpenRouterProvider:
             **target_payload,
             "messages": [{"role": "user", "content": task}],
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max(1, max_tokens)
 
         start = time.monotonic()
         body = self._post_chat(payload)

@@ -82,6 +82,7 @@ def _fake_response(
     model: str = "sonnet",
     *,
     cost_usd: float | None = 0.01,
+    output_tokens: int | None = 10,
 ) -> CallResponse:
     return CallResponse(
         text="hello",
@@ -90,7 +91,7 @@ def _fake_response(
         duration_ms=1234,
         usage={
             "input_tokens": 50,
-            "output_tokens": 10,
+            "output_tokens": output_tokens,
             "thinking_tokens": 4_000,
             "cached_tokens": 0,
         },
@@ -750,6 +751,132 @@ def test_ask_council_marks_incomplete_cost_accounting(mocker):
         None,
         0.03,
     ]
+
+
+def test_ask_council_known_cost_cap_returns_partial_error(mocker):
+    _stub_all_configured(mocker, {"openrouter"})
+    responses = [
+        _fake_response("openrouter", "member-a", cost_usd=0.02),
+        _fake_response("openrouter", "member-b", cost_usd=0.02),
+        _fake_response("openrouter", "member-c", cost_usd=0.02),
+        _fake_response("openrouter", "synthesis", cost_usd=0.02),
+    ]
+    call_mock = mocker.patch.object(OpenRouterProvider, "call", side_effect=responses)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "council",
+            "--effort",
+            "medium",
+            "--council-max-cost-usd",
+            "0.03",
+            "--brief",
+            "Debate this architecture decision.",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "known cost cap" in result.stderr
+    assert call_mock.call_count == 2
+    assert "models" not in call_mock.call_args_list[-1].kwargs
+    payload = json.loads(result.stdout)
+    council = payload["raw"]["conductor_council"]
+    assert payload["usage"]["council_complete"] is False
+    assert payload["usage"]["known_cost_usd"] == pytest.approx(0.04)
+    assert council["complete"] is False
+    assert council["cap_hit"]["kind"] == "known_cost_usd"
+    assert council["cap_hit"]["completed_member_calls"] == 2
+    assert council["cap_hit"]["total_member_calls"] == 3
+    assert council["cap_hit"]["skipped_member_models"] == ["deepseek/deepseek-v4-pro"]
+    assert council["synthesis_cost_usd"] is None
+    assert "## Member 2: member-b" in payload["text"]
+
+
+def test_ask_council_output_token_cap_returns_partial_error(mocker):
+    _stub_all_configured(mocker, {"openrouter"})
+    responses = [
+        _fake_response("openrouter", "member-a", output_tokens=12),
+        _fake_response("openrouter", "member-b", output_tokens=12),
+        _fake_response("openrouter", "member-c", output_tokens=12),
+        _fake_response("openrouter", "synthesis", output_tokens=12),
+    ]
+    call_mock = mocker.patch.object(OpenRouterProvider, "call", side_effect=responses)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "council",
+            "--effort",
+            "medium",
+            "--council-max-output-tokens",
+            "12",
+            "--brief",
+            "Debate this architecture decision.",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "output-token cap" in result.stderr
+    assert call_mock.call_count == 1
+    assert call_mock.call_args_list[0].kwargs["max_tokens"] == 12
+    payload = json.loads(result.stdout)
+    council = payload["raw"]["conductor_council"]
+    assert payload["usage"]["council_known_output_tokens"] == 12
+    assert council["cap_hit"]["kind"] == "output_tokens"
+    assert council["cap_hit"]["observed"] == 12
+    assert council["cap_hit"]["completed_member_calls"] == 1
+    assert council["member_output_tokens"] == [12]
+    assert council["requested_synthesis_models"] == [
+        "~google/gemini-pro-latest",
+        "~openai/gpt-latest",
+    ]
+
+
+def test_ask_council_wall_clock_cap_returns_partial_error(mocker):
+    _stub_all_configured(mocker, {"openrouter"})
+    mocker.patch("conductor.cli.time.monotonic", side_effect=[0.0, 0.0, 2.0])
+    responses = [
+        _fake_response("openrouter", "member-a"),
+        _fake_response("openrouter", "member-b"),
+        _fake_response("openrouter", "member-c"),
+        _fake_response("openrouter", "synthesis"),
+    ]
+    call_mock = mocker.patch.object(OpenRouterProvider, "call", side_effect=responses)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "council",
+            "--effort",
+            "medium",
+            "--council-timeout",
+            "1",
+            "--brief",
+            "Debate this architecture decision.",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "wall-clock cap" in result.stderr
+    assert call_mock.call_count == 1
+    payload = json.loads(result.stdout)
+    council = payload["raw"]["conductor_council"]
+    assert payload["duration_ms"] == 2000
+    assert council["elapsed_ms"] == 2000
+    assert council["cap_hit"]["kind"] == "wall_clock"
+    assert council["cap_hit"]["elapsed_sec"] == 2.0
+    assert council["cap_hit"]["completed_member_calls"] == 1
+    assert council["cap_hit"]["model"] == "~google/gemini-pro-latest"
 
 
 def test_council_synthesis_prompt_handles_empty_member_text():

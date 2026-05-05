@@ -123,6 +123,9 @@ GIT_RECOVERY_MAX_STATUS_PATHS = 8
 NATIVE_REVIEW_TAG = "code-review"
 DEFAULT_REVIEW_MAX_FALLBACKS = 3
 DEFAULT_COUNCIL_ROUNDS = 1
+DEFAULT_COUNCIL_TIMEOUT_SEC = 180
+DEFAULT_COUNCIL_MAX_OUTPUT_TOKENS = 6_000
+DEFAULT_COUNCIL_MAX_COST_USD = 0.25
 ESTIMATED_CHARS_PER_TOKEN = 4
 
 
@@ -131,6 +134,13 @@ class BriefInput:
     body: str
     source: str
     attachments: tuple[Path, ...] = ()
+
+
+@dataclass(frozen=True)
+class CouncilCaps:
+    timeout_sec: int | None
+    max_output_tokens: int | None
+    max_cost_usd: float | None
 
 
 # --------------------------------------------------------------------------- #
@@ -1263,12 +1273,22 @@ def _invoke_review_with_fallback(
     raise last_exc
 
 
+class CouncilCapError(ProviderError):
+    """Raised when council caps stop fan-out before a complete synthesis."""
+
+    def __init__(self, response: CallResponse) -> None:
+        self.response = response
+        council_raw = (response.raw or {}).get("conductor_council") or {}
+        super().__init__(_format_council_cap_hit(council_raw.get("cap_hit") or {}))
+
+
 def _invoke_council(
     plan: SemanticPlan,
     *,
     task: str,
     effort: str | int,
     timeout_sec: int | None,
+    caps: CouncilCaps,
     rounds: int,
     silent: bool,
 ) -> CallResponse:
@@ -1276,6 +1296,8 @@ def _invoke_council(
 
     Council is intentionally OpenRouter-only: it fans out to the policy's
     member model stack, then asks a synthesis model to reconcile disagreements.
+    Caps are checked before starting each upstream call so a known-over-budget
+    council cannot silently continue spending time, tokens, or money.
     """
     if plan.candidates[0].provider != "openrouter":
         raise ProviderConfigError(
@@ -1291,78 +1313,564 @@ def _invoke_council(
         raise ProviderConfigError(
             "provider registry invariant violated: openrouter is not OpenRouterProvider."
         )
-    if timeout_sec is not None:
-        provider = OpenRouterProvider(timeout_sec=float(timeout_sec))
 
+    started_at = time.monotonic()
     member_responses: list[CallResponse] = []
     member_prompt = _council_member_prompt(task, rounds=rounds)
+    synthesis_models = plan.council_synthesis_models or plan.council_member_models[:1]
+
     for idx, model in enumerate(plan.council_member_models, start=1):
+        elapsed_ms = _council_elapsed_ms(started_at)
+        _raise_if_council_cap_hit(
+            plan=plan,
+            caps=caps,
+            effort=effort,
+            rounds=rounds,
+            member_responses=member_responses,
+            synthesis=None,
+            synthesis_models=synthesis_models,
+            stage="before_member",
+            model=model,
+            elapsed_ms=elapsed_ms,
+        )
         if not silent:
             click.echo(f"[conductor] council member {idx}: {model}", err=True)
-        response = provider.call(
+        response = _openrouter_council_provider(
+            provider=provider,
+            timeout_sec=timeout_sec,
+            remaining_sec=_council_remaining_sec(caps, elapsed_ms),
+        ).call(
             member_prompt,
             model=model,
             effort=effort,
             task_tags=list(plan.tags),
             prefer=plan.prefer,
             log_selection=False,
+            max_tokens=_council_remaining_output_tokens(caps, member_responses),
         )
         member_responses.append(response)
+        _raise_if_council_cap_hit(
+            plan=plan,
+            caps=caps,
+            effort=effort,
+            rounds=rounds,
+            member_responses=member_responses,
+            synthesis=None,
+            synthesis_models=synthesis_models,
+            stage="after_member",
+            model=model,
+            elapsed_ms=_council_elapsed_ms(started_at),
+        )
 
-    synthesis_models = plan.council_synthesis_models or plan.council_member_models[:1]
+    elapsed_ms = _council_elapsed_ms(started_at)
+    _raise_if_council_cap_hit(
+        plan=plan,
+        caps=caps,
+        effort=effort,
+        rounds=rounds,
+        member_responses=member_responses,
+        synthesis=None,
+        synthesis_models=synthesis_models,
+        stage="before_synthesis",
+        model=",".join(synthesis_models),
+        elapsed_ms=elapsed_ms,
+    )
     if not silent:
         click.echo(
             "[conductor] council synthesis: " + ",".join(synthesis_models),
             err=True,
         )
-    synthesis = provider.call(
+    synthesis = _openrouter_council_provider(
+        provider=provider,
+        timeout_sec=timeout_sec,
+        remaining_sec=_council_remaining_sec(caps, elapsed_ms),
+    ).call(
         _council_synthesis_prompt(task, member_responses),
         models=synthesis_models,
         effort=effort,
         task_tags=list(plan.tags),
         prefer=plan.prefer,
         log_selection=False,
+        max_tokens=_council_remaining_output_tokens(caps, member_responses),
     )
 
+    raw, usage, cost_usd = _council_response_metadata(
+        plan=plan,
+        caps=caps,
+        effort=effort,
+        rounds=rounds,
+        member_responses=member_responses,
+        synthesis=synthesis,
+        synthesis_models=synthesis_models,
+        elapsed_ms=_council_elapsed_ms(started_at),
+        cap_hit=None,
+    )
+    return replace(
+        synthesis,
+        usage=usage,
+        cost_usd=cost_usd,
+        raw={**(synthesis.raw or {}), **raw},
+    )
+
+
+def _openrouter_council_provider(
+    *,
+    provider: OpenRouterProvider,
+    timeout_sec: int | None,
+    remaining_sec: float | None,
+) -> OpenRouterProvider:
+    timeout_limits: list[float] = []
+    if timeout_sec is not None:
+        timeout_limits.append(float(timeout_sec))
+    if remaining_sec is not None:
+        timeout_limits.append(remaining_sec)
+    if not timeout_limits:
+        return provider
+    return OpenRouterProvider(timeout_sec=max(0.001, min(timeout_limits)))
+
+
+def _council_elapsed_ms(started_at: float) -> int:
+    return int(max(0.0, time.monotonic() - started_at) * 1000)
+
+
+def _council_remaining_sec(caps: CouncilCaps, elapsed_ms: int) -> float | None:
+    if caps.timeout_sec is None:
+        return None
+    return max(0.0, float(caps.timeout_sec) - (elapsed_ms / 1000))
+
+
+def _council_remaining_output_tokens(
+    caps: CouncilCaps,
+    member_responses: list[CallResponse],
+) -> int | None:
+    if caps.max_output_tokens is None:
+        return None
+    known_output_tokens, output_complete, _missing, _member_tokens, _synthesis_tokens = (
+        _council_output_token_accounting(member_responses, None)
+    )
+    if not output_complete:
+        return None
+    return max(1, caps.max_output_tokens - known_output_tokens)
+
+
+def _raise_if_council_cap_hit(
+    *,
+    plan: SemanticPlan,
+    caps: CouncilCaps,
+    effort: str | int,
+    rounds: int,
+    member_responses: list[CallResponse],
+    synthesis: CallResponse | None,
+    synthesis_models: tuple[str, ...],
+    stage: str,
+    model: str,
+    elapsed_ms: int,
+) -> None:
+    cap_hit = _council_cap_hit_payload(
+        plan=plan,
+        caps=caps,
+        member_responses=member_responses,
+        synthesis=synthesis,
+        stage=stage,
+        model=model,
+        elapsed_ms=elapsed_ms,
+    )
+    if cap_hit is None:
+        return
+
+    raw, usage, cost_usd = _council_response_metadata(
+        plan=plan,
+        caps=caps,
+        effort=effort,
+        rounds=rounds,
+        member_responses=member_responses,
+        synthesis=synthesis,
+        synthesis_models=synthesis_models,
+        elapsed_ms=elapsed_ms,
+        cap_hit=cap_hit,
+    )
+    response = CallResponse(
+        text=_council_partial_text(member_responses, cap_hit),
+        provider="openrouter",
+        model=_council_partial_model(member_responses, model),
+        duration_ms=elapsed_ms,
+        usage=usage,
+        cost_usd=cost_usd,
+        raw=raw,
+    )
+    raise CouncilCapError(response)
+
+
+def _council_cap_hit_payload(
+    *,
+    plan: SemanticPlan,
+    caps: CouncilCaps,
+    member_responses: list[CallResponse],
+    synthesis: CallResponse | None,
+    stage: str,
+    model: str,
+    elapsed_ms: int,
+) -> dict[str, object] | None:
+    if caps.timeout_sec is not None and elapsed_ms >= caps.timeout_sec * 1000:
+        return _council_cap_payload(
+            "wall_clock",
+            limit=caps.timeout_sec,
+            observed=elapsed_ms / 1000,
+            plan=plan,
+            member_responses=member_responses,
+            stage=stage,
+            model=model,
+            elapsed_ms=elapsed_ms,
+        )
+
+    if caps.max_output_tokens is not None:
+        known_output_tokens, output_complete, _missing, _member_tokens, _synthesis_tokens = (
+            _council_output_token_accounting(member_responses, synthesis)
+        )
+        if not output_complete:
+            return _council_cap_payload(
+                "output_tokens_unknown",
+                limit=caps.max_output_tokens,
+                observed=known_output_tokens,
+                plan=plan,
+                member_responses=member_responses,
+                stage=stage,
+                model=model,
+                elapsed_ms=elapsed_ms,
+            )
+        if known_output_tokens >= caps.max_output_tokens:
+            return _council_cap_payload(
+                "output_tokens",
+                limit=caps.max_output_tokens,
+                observed=known_output_tokens,
+                plan=plan,
+                member_responses=member_responses,
+                stage=stage,
+                model=model,
+                elapsed_ms=elapsed_ms,
+            )
+
+    if caps.max_cost_usd is not None:
+        known_cost_usd = _council_known_cost_value(member_responses, synthesis)
+        if known_cost_usd >= caps.max_cost_usd:
+            return _council_cap_payload(
+                "known_cost_usd",
+                limit=caps.max_cost_usd,
+                observed=known_cost_usd,
+                plan=plan,
+                member_responses=member_responses,
+                stage=stage,
+                model=model,
+                elapsed_ms=elapsed_ms,
+            )
+    return None
+
+
+def _council_cap_payload(
+    kind: str,
+    *,
+    limit: int | float,
+    observed: int | float,
+    plan: SemanticPlan,
+    member_responses: list[CallResponse],
+    stage: str,
+    model: str,
+    elapsed_ms: int,
+) -> dict[str, object]:
+    completed_member_calls = len(member_responses)
+    return {
+        "kind": kind,
+        "limit": limit,
+        "observed": observed,
+        "stage": stage,
+        "model": model,
+        "elapsed_ms": elapsed_ms,
+        "elapsed_sec": elapsed_ms / 1000,
+        "completed_member_calls": completed_member_calls,
+        "total_member_calls": len(plan.council_member_models),
+        "completed_member_models": [response.model for response in member_responses],
+        "requested_completed_member_models": list(
+            plan.council_member_models[:completed_member_calls]
+        ),
+        "skipped_member_models": list(
+            plan.council_member_models[completed_member_calls:]
+        ),
+        "synthesis_skipped": stage != "after_synthesis",
+    }
+
+
+def _council_response_metadata(
+    *,
+    plan: SemanticPlan,
+    caps: CouncilCaps,
+    effort: str | int,
+    rounds: int,
+    member_responses: list[CallResponse],
+    synthesis: CallResponse | None,
+    synthesis_models: tuple[str, ...],
+    elapsed_ms: int,
+    cap_hit: dict[str, object] | None,
+) -> tuple[dict[str, object], dict[str, object], float | None]:
+    (
+        known_cost_usd,
+        cost_accounting_complete,
+        missing_costs,
+        member_costs,
+        synthesis_cost_usd,
+    ) = _council_cost_accounting(member_responses, synthesis)
+    (
+        known_output_tokens,
+        output_accounting_complete,
+        missing_output_tokens,
+        member_output_tokens,
+        synthesis_output_tokens,
+    ) = _council_output_token_accounting(member_responses, synthesis)
+    council_raw = {
+        "member_models": [response.model for response in member_responses],
+        "requested_member_models": list(plan.council_member_models),
+        "requested_synthesis_models": list(synthesis_models),
+        "rounds": rounds,
+        "member_usage": [response.usage for response in member_responses],
+        "member_cost_usd": member_costs,
+        "synthesis_cost_usd": synthesis_cost_usd,
+        "known_cost_usd": known_cost_usd,
+        "cost_accounting_complete": cost_accounting_complete,
+        "missing_costs": missing_costs,
+        "member_duration_ms": [response.duration_ms for response in member_responses],
+        "elapsed_ms": elapsed_ms,
+        "caps": _council_caps_payload(caps),
+        "cap_hit": cap_hit,
+        "complete": cap_hit is None and synthesis is not None,
+        "known_output_tokens": known_output_tokens,
+        "output_accounting_complete": output_accounting_complete,
+        "missing_output_tokens": missing_output_tokens,
+        "member_output_tokens": member_output_tokens,
+        "synthesis_output_tokens": synthesis_output_tokens,
+    }
+    usage = _council_usage_payload(
+        effort=effort,
+        rounds=rounds,
+        member_responses=member_responses,
+        synthesis=synthesis,
+        cap_hit=cap_hit,
+        known_cost_usd=known_cost_usd,
+        cost_accounting_complete=cost_accounting_complete,
+        missing_costs=missing_costs,
+        known_output_tokens=known_output_tokens,
+        output_accounting_complete=output_accounting_complete,
+        missing_output_tokens=missing_output_tokens,
+        caps=caps,
+    )
+    cost_usd = known_cost_usd if cost_accounting_complete else None
+    return {"conductor_council": council_raw}, usage, cost_usd
+
+
+def _council_usage_payload(
+    *,
+    effort: str | int,
+    rounds: int,
+    member_responses: list[CallResponse],
+    synthesis: CallResponse | None,
+    cap_hit: dict[str, object] | None,
+    known_cost_usd: float | None,
+    cost_accounting_complete: bool,
+    missing_costs: list[str],
+    known_output_tokens: int,
+    output_accounting_complete: bool,
+    missing_output_tokens: list[str],
+    caps: CouncilCaps,
+) -> dict[str, object]:
+    if synthesis is not None:
+        usage: dict[str, object] = dict(synthesis.usage)
+    else:
+        usage = {
+            "input_tokens": _council_known_usage_sum(member_responses, "input_tokens"),
+            "output_tokens": (
+                known_output_tokens if output_accounting_complete else None
+            ),
+            "cached_tokens": _council_known_usage_sum(member_responses, "cached_tokens"),
+            "thinking_tokens": _council_known_usage_sum(
+                member_responses,
+                "thinking_tokens",
+            ),
+            "effort": effort if isinstance(effort, str) else None,
+            "thinking_budget": None,
+        }
+    usage.update(
+        {
+            "council_members": len(member_responses),
+            "council_rounds": rounds,
+            "council_complete": cap_hit is None and synthesis is not None,
+            "council_cap_hit": cap_hit,
+            "council_caps": _council_caps_payload(caps),
+            "cost_accounting_complete": cost_accounting_complete,
+            "known_cost_usd": known_cost_usd,
+            "missing_costs": missing_costs,
+            "council_known_output_tokens": known_output_tokens,
+            "council_output_accounting_complete": output_accounting_complete,
+            "council_missing_output_tokens": missing_output_tokens,
+        }
+    )
+    return usage
+
+
+def _council_cost_accounting(
+    member_responses: list[CallResponse],
+    synthesis: CallResponse | None,
+) -> tuple[float | None, bool, list[str], list[float | None], float | None]:
     member_costs = [response.cost_usd for response in member_responses]
-    all_costs = [*member_costs, synthesis.cost_usd]
     missing_costs = [
         f"member[{idx}]"
         for idx, cost in enumerate(member_costs, start=1)
         if cost is None
     ]
-    if synthesis.cost_usd is None:
+    synthesis_cost = synthesis.cost_usd if synthesis is not None else None
+    if synthesis is not None and synthesis_cost is None:
         missing_costs.append("synthesis")
-    known_costs = [cost for cost in all_costs if cost is not None]
+    known_costs = [cost for cost in [*member_costs, synthesis_cost] if cost is not None]
     known_cost_usd = sum(known_costs) if known_costs else None
-    cost_accounting_complete = not missing_costs
+    return (
+        known_cost_usd,
+        not missing_costs,
+        missing_costs,
+        member_costs,
+        synthesis_cost,
+    )
 
-    raw = {
-        **(synthesis.raw or {}),
-        "conductor_council": {
-            "member_models": [response.model for response in member_responses],
-            "requested_member_models": list(plan.council_member_models),
-            "requested_synthesis_models": list(synthesis_models),
-            "rounds": rounds,
-            "member_usage": [response.usage for response in member_responses],
-            "member_cost_usd": member_costs,
-            "synthesis_cost_usd": synthesis.cost_usd,
-            "known_cost_usd": known_cost_usd,
-            "cost_accounting_complete": cost_accounting_complete,
-            "missing_costs": missing_costs,
-            "member_duration_ms": [response.duration_ms for response in member_responses],
-        },
+
+def _council_known_cost_value(
+    member_responses: list[CallResponse],
+    synthesis: CallResponse | None,
+) -> float:
+    known_cost_usd, _complete, _missing, _member_costs, _synthesis_cost = (
+        _council_cost_accounting(member_responses, synthesis)
+    )
+    return known_cost_usd or 0.0
+
+
+def _council_output_token_accounting(
+    member_responses: list[CallResponse],
+    synthesis: CallResponse | None,
+) -> tuple[int, bool, list[str], list[int | None], int | None]:
+    known_output_tokens = 0
+    missing_output_tokens: list[str] = []
+    member_output_tokens: list[int | None] = []
+    for idx, response in enumerate(member_responses, start=1):
+        output_tokens = _response_output_tokens(response)
+        member_output_tokens.append(output_tokens)
+        if output_tokens is None:
+            missing_output_tokens.append(f"member[{idx}]")
+        else:
+            known_output_tokens += output_tokens
+
+    synthesis_output_tokens = None
+    if synthesis is not None:
+        synthesis_output_tokens = _response_output_tokens(synthesis)
+        if synthesis_output_tokens is None:
+            missing_output_tokens.append("synthesis")
+        else:
+            known_output_tokens += synthesis_output_tokens
+
+    return (
+        known_output_tokens,
+        not missing_output_tokens,
+        missing_output_tokens,
+        member_output_tokens,
+        synthesis_output_tokens,
+    )
+
+
+def _response_output_tokens(response: CallResponse) -> int | None:
+    output_tokens = (response.usage or {}).get("output_tokens")
+    if isinstance(output_tokens, int) and not isinstance(output_tokens, bool):
+        return max(0, output_tokens)
+    return None
+
+
+def _council_known_usage_sum(
+    responses: list[CallResponse],
+    key: str,
+) -> int | None:
+    values: list[int] = []
+    for response in responses:
+        value = (response.usage or {}).get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            values.append(value)
+    return sum(values) if values else None
+
+
+def _council_caps_payload(caps: CouncilCaps) -> dict[str, int | float | None]:
+    return {
+        "timeout_sec": caps.timeout_sec,
+        "max_output_tokens": caps.max_output_tokens,
+        "max_cost_usd": caps.max_cost_usd,
     }
-    usage = {
-        **synthesis.usage,
-        "council_members": len(member_responses),
-        "council_rounds": rounds,
-        "cost_accounting_complete": cost_accounting_complete,
-        "known_cost_usd": known_cost_usd,
-        "missing_costs": missing_costs,
+
+
+def _council_partial_model(member_responses: list[CallResponse], model: str) -> str:
+    if member_responses:
+        return member_responses[-1].model
+    return model or "council-partial"
+
+
+def _council_partial_text(
+    member_responses: list[CallResponse],
+    cap_hit: dict[str, object],
+) -> str:
+    lines = [
+        _format_council_cap_hit(cap_hit) + ".",
+        (
+            "Completed member calls: "
+            f"{cap_hit.get('completed_member_calls', 0)}/"
+            f"{cap_hit.get('total_member_calls', 0)}."
+        ),
+    ]
+    if not member_responses:
+        lines.append("No member calls completed before the cap was reached.")
+        return "\n".join(lines)
+
+    lines.append("Partial member responses:")
+    for idx, response in enumerate(member_responses, start=1):
+        lines.append(
+            f"\n## Member {idx}: {response.model}\n\n"
+            f"{_council_member_response_text(response)}"
+        )
+    return "\n".join(lines)
+
+
+def _format_council_cap_hit(cap_hit: dict[str, object]) -> str:
+    kind = str(cap_hit.get("kind", "unknown"))
+    labels = {
+        "wall_clock": "wall-clock cap",
+        "output_tokens": "output-token cap",
+        "output_tokens_unknown": "output-token accounting cap",
+        "known_cost_usd": "known cost cap",
     }
-    cost_usd = known_cost_usd if cost_accounting_complete else None
-    return replace(synthesis, usage=usage, cost_usd=cost_usd, raw=raw)
+    label = labels.get(kind, "cap")
+    elapsed_raw = cap_hit.get("elapsed_sec")
+    elapsed_sec = (
+        float(elapsed_raw)
+        if isinstance(elapsed_raw, int | float) and not isinstance(elapsed_raw, bool)
+        else 0.0
+    )
+    stage = str(cap_hit.get("stage") or "council")
+    model = str(cap_hit.get("model") or "unknown model")
+    completed_raw = cap_hit.get("completed_member_calls")
+    total_raw = cap_hit.get("total_member_calls")
+    completed = (
+        int(completed_raw)
+        if isinstance(completed_raw, int | float) and not isinstance(completed_raw, bool)
+        else 0
+    )
+    total = (
+        int(total_raw)
+        if isinstance(total_raw, int | float) and not isinstance(total_raw, bool)
+        else 0
+    )
+    return (
+        f"council {label} hit at {elapsed_sec:.1f}s during {stage} ({model}); "
+        f"completed {completed}/{total} member calls"
+    )
 
 
 def _council_member_prompt(task: str, *, rounds: int) -> str:
@@ -1876,7 +2384,10 @@ def main(ctx: click.Context) -> None:
     "--kind",
     required=True,
     type=click.Choice(SEMANTIC_KINDS),
-    help="Semantic work category: research, code, review, or council.",
+    help=(
+        "Semantic work category. research/code are cheap single-model defaults; "
+        "council is capped OpenRouter multi-model fan-out."
+    ),
 )
 @click.option(
     "--effort",
@@ -1897,6 +2408,34 @@ def main(ctx: click.Context) -> None:
     default=DEFAULT_EXEC_MAX_STALL_SEC,
     type=int,
     help="Kill streaming exec/review providers after this many silent seconds. Set 0 to disable.",
+)
+@click.option(
+    "--council-timeout",
+    "council_timeout_sec",
+    default=DEFAULT_COUNCIL_TIMEOUT_SEC,
+    type=click.IntRange(min=1),
+    show_default=True,
+    help=(
+        "For council: total wall-clock cap in seconds across members and synthesis. "
+        "--timeout remains the per-call provider timeout."
+    ),
+)
+@click.option(
+    "--council-max-output-tokens",
+    default=DEFAULT_COUNCIL_MAX_OUTPUT_TOKENS,
+    type=click.IntRange(min=1),
+    show_default=True,
+    help="For council: stop before more calls once reported output tokens reach this total.",
+)
+@click.option(
+    "--council-max-cost-usd",
+    default=DEFAULT_COUNCIL_MAX_COST_USD,
+    type=click.FloatRange(min=0.0),
+    show_default=True,
+    help=(
+        "For council: stop before more calls once total known OpenRouter cost "
+        "reaches this USD budget."
+    ),
 )
 @click.option("--base", default=None, help="For review: compare changes against this ref.")
 @click.option("--commit", default=None, help="For review: review one commit.")
@@ -1957,6 +2496,9 @@ def ask(
     cwd: str | None,
     timeout_sec: int | None,
     max_stall_sec: int | None,
+    council_timeout_sec: int,
+    council_max_output_tokens: int,
+    council_max_cost_usd: float,
     base: str | None,
     commit: str | None,
     uncommitted: bool,
@@ -1978,6 +2520,11 @@ def ask(
     effort_value = _parse_effort(effort)
     plan = plan_for(kind, effort_value)
     max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
+    council_caps = CouncilCaps(
+        timeout_sec=council_timeout_sec,
+        max_output_tokens=council_max_output_tokens,
+        max_cost_usd=council_max_cost_usd,
+    )
 
     if offline is False:
         offline_mode.clear()
@@ -2027,9 +2574,15 @@ def ask(
                 task=body,
                 effort=effort_value,
                 timeout_sec=timeout_sec,
+                caps=council_caps,
                 rounds=DEFAULT_COUNCIL_ROUNDS,
                 silent=silent_route or as_json,
             )
+        except CouncilCapError as e:
+            click.echo(f"conductor: {e}", err=True)
+            _emit_usage_log(e.response, silent=silent_route or as_json)
+            _emit_call(e.response, as_json=as_json, semantic_plan=plan)
+            sys.exit(1)
         except ProviderConfigError as e:
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)

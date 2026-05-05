@@ -62,7 +62,11 @@ Use `conductor review` for code review. It only routes to providers with native 
 | `council` | `medium` | `council` | OpenRouter fan-out: `~google/gemini-pro-latest`, `~moonshotai/kimi-latest`, `deepseek/deepseek-v4-pro`; synthesize with `~google/gemini-pro-latest` → `~openai/gpt-latest` |
 | `council` | `high`, `max` | `council` | OpenRouter fan-out: `~google/gemini-pro-latest`, `~anthropic/claude-sonnet-latest`, `~openai/gpt-latest`, `deepseek/deepseek-v4-pro`, `qwen/qwen3.6-max-preview`; synthesize with `~openai/gpt-latest` → `~anthropic/claude-sonnet-latest` |
 
-`council` is intentionally OpenRouter-only. It runs independent member calls through OpenRouter, then sends those outputs to an OpenRouter synthesis model. `--offline` is rejected for council because it violates that invariant.
+`council` is intentionally OpenRouter-only and is not the cheap default delegation path. It runs independent member calls through OpenRouter, then sends those outputs to an OpenRouter synthesis model. Use `research` or `code` for routine single-model delegation; reserve `council` for explicit multi-model judgment.
+
+Council has conservative default caps: 180 seconds total wall-clock, 6,000 reported output tokens across members plus synthesis, and $0.25 total known OpenRouter cost. Override them with `--council-timeout`, `--council-max-output-tokens`, and `--council-max-cost-usd`. When a cap stops the council before synthesis, the command exits nonzero and emits a partial `CallResponse`; `raw.conductor_council.cap_hit` includes the cap kind, requested/observed limit, elapsed time, completed member count, completed member models, and skipped member models. `--timeout` remains the per-call provider timeout and is bounded by the remaining council wall-clock cap.
+
+`--offline` is rejected for council because it violates the OpenRouter-only invariant.
 
 ## Input
 
@@ -127,7 +131,7 @@ The canonical reference is `conductor call --help`. The contract-level commitmen
 | `--offline` / `--no-offline` | bool | stable | Force/clear local-only routing |
 | `--profile <name>` | string | stable | Apply named profile defaults |
 
-`conductor ask --help` is the canonical reference for the semantic API. Its stable flags are: --kind, --effort, --cwd, --timeout, --max-stall-seconds, --base, --commit, --uncommitted, --title, --brief, --brief-file, --task, --task-file, --log-file, --json, --verbose-route, --silent-route, --offline, --no-offline, --preflight, --no-preflight, and --allow-short-brief.
+`conductor ask --help` is the canonical reference for the semantic API. Its stable flags are: --kind, --effort, --cwd, --timeout, --max-stall-seconds, --council-timeout, --council-max-output-tokens, --council-max-cost-usd, --base, --commit, --uncommitted, --title, --brief, --brief-file, --task, --task-file, --log-file, --json, --verbose-route, --silent-route, --offline, --no-offline, --preflight, --no-preflight, and --allow-short-brief.
 
 ## Output (`--json`)
 
@@ -257,6 +261,14 @@ Agents that do not need provider-level control should prefer `ask`:
 conductor ask --kind research --effort medium --brief-file /tmp/brief.md --json
 conductor ask --kind code --effort high --brief-file /tmp/brief.md --json
 conductor ask --kind council --effort medium --brief-file /tmp/brief.md --json
+```
+
+`council` is multi-call OpenRouter fan-out. For budget-sensitive routine delegation, use `research` or `code`; when using `council`, set tighter caps explicitly if the caller owns a smaller budget:
+
+```bash
+conductor ask --kind council --effort medium --brief-file /tmp/brief.md \
+  --council-timeout 90 --council-max-output-tokens 3000 \
+  --council-max-cost-usd 0.10 --json
 ```
 
 For merge review, Touchstone should continue to use `conductor review` or `conductor ask --kind review`; both must trigger native review mode, not generic code chat.
