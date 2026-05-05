@@ -7,6 +7,8 @@ pointed at ``tmp_path`` so nothing leaks onto the developer's real home.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from conductor import agent_wiring as aw
@@ -381,7 +383,7 @@ def test_wire_then_unwire_then_wire_round_trip():
 def test_version_extraction_handles_prerelease(tmp_path):
     path = tmp_path / "notes.md"
     aw.write_managed_markdown(path, "body", version="0.4.0.dev1+g1234abc")
-    assert aw.read_managed_version(path) == "0.4.0.dev1+g1234abc"
+    assert aw.read_managed_version(path) == "0.4.0.dev1"
 
 
 def test_managed_path_stays_out_of_arbitrary_dirs(tmp_path):
@@ -494,6 +496,42 @@ def test_agent_wiring_notice_treats_local_build_metadata_as_current():
     aw.wire_cursor(version="0.8.1")
 
     assert aw.agent_wiring_notice(current_version="0.8.1+2.gabc123") is None
+
+
+def test_wire_repo_artifacts_strip_local_build_metadata_from_markers():
+    aw.wire_agents_md(version="0.8.1+2.gabc123")
+    aw.wire_gemini_md(version="0.8.1+2.gabc123")
+    aw.wire_claude_md_repo(version="0.8.1+2.gabc123")
+    cursor_path = aw.wire_cursor(version="0.8.1+2.gabc123").path
+
+    for filename in ("AGENTS.md", "GEMINI.md", "CLAUDE.md"):
+        text = (Path.cwd() / filename).read_text(encoding="utf-8")
+        assert "<!-- conductor:begin v0.8.1 -->" in text
+        assert "gabc123" not in text
+
+    cursor_text = cursor_path.read_text(encoding="utf-8")
+    assert "managed-by: conductor v0.8.1" in cursor_text
+    assert "gabc123" not in cursor_text
+
+
+def test_wire_repo_artifacts_refresh_existing_markers_to_canonical_version():
+    old_block = (
+        "<!-- conductor:begin v0.8.3 -->\n"
+        "old delegation\n"
+        "<!-- conductor:end -->\n"
+    )
+    for filename in ("AGENTS.md", "GEMINI.md", "CLAUDE.md"):
+        (Path.cwd() / filename).write_text(old_block, encoding="utf-8")
+
+    aw.wire_agents_md(version="0.8.8+2.g9833bc3")
+    aw.wire_gemini_md(version="0.8.8+2.g9833bc3")
+    aw.wire_claude_md_repo(version="0.8.8+2.g9833bc3")
+
+    for filename in ("AGENTS.md", "GEMINI.md", "CLAUDE.md"):
+        text = (Path.cwd() / filename).read_text(encoding="utf-8")
+        assert "<!-- conductor:begin v0.8.8 -->" in text
+        assert "v0.8.3" not in text
+        assert "g9833bc3" not in text
 
 
 def test_agent_wiring_notice_reports_missing_when_requested():
