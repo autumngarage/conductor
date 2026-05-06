@@ -24,6 +24,14 @@ class SessionLogError(RuntimeError):
     """Raised when conductor cannot create or update a session log."""
 
 
+SESSION_EVENT_TOOL_CALL = "tool_call"
+SESSION_EVENT_SUBAGENT_MESSAGE = "subagent_message"
+SESSION_EVENT_USAGE = "usage"
+SESSION_DATA_TOKEN_COUNT = "token_count"
+SESSION_DATA_USAGE = "usage"
+SESSION_USAGE_OUTPUT_TOKENS = "output_tokens"
+
+
 def _iso8601_now() -> str:
     return datetime.now(UTC).isoformat()
 

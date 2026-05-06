@@ -34,7 +34,15 @@ from conductor.providers.interface import (
     ProviderStalledError,
     ProviderStartupStalledError,
 )
-from conductor.session_log import SessionLog
+from conductor.session_log import (
+    SESSION_DATA_TOKEN_COUNT,
+    SESSION_DATA_USAGE,
+    SESSION_EVENT_SUBAGENT_MESSAGE,
+    SESSION_EVENT_TOOL_CALL,
+    SESSION_EVENT_USAGE,
+    SESSION_USAGE_OUTPUT_TOKENS,
+    SessionLog,
+)
 
 
 def _strip_gemini_auth_env(monkeypatch) -> None:
@@ -1851,6 +1859,72 @@ def test_codex_exec_heartbeat_reports_subagent_tokens_from_session_log(
 
     err = capsys.readouterr().err
     assert "1.2k tokens received since last heartbeat" in err
+
+
+def test_codex_heartbeat_reader_matches_canonical_session_log_shape(tmp_path):
+    session_log = SessionLog(path=tmp_path / "heartbeat-canonical.ndjson")
+    session_log.emit(
+        SESSION_EVENT_TOOL_CALL,
+        {"provider": "codex", "item_type": "function_call", "name": "Read"},
+    )
+    session_log.emit(
+        SESSION_EVENT_SUBAGENT_MESSAGE,
+        {"provider": "codex", "text": "working"},
+    )
+    session_log.emit(
+        SESSION_EVENT_USAGE,
+        {
+            "provider": "codex",
+            SESSION_DATA_USAGE: {SESSION_USAGE_OUTPUT_TOKENS: 1200},
+        },
+    )
+
+    template, offset = CodexProvider()._read_session_log_progress(
+        session_log=session_log,
+        offset=0,
+    )
+
+    assert offset == session_log.log_path.stat().st_size
+    assert template is not None
+    assert "1 tool call" in template
+    assert "1 subagent message" in template
+    assert "1.2k tokens received since last heartbeat" in template
+
+
+def test_codex_stream_writer_emits_usage_shape_heartbeat_reader_counts(tmp_path):
+    session_log = SessionLog(path=tmp_path / "heartbeat-stream-usage.ndjson")
+    provider = CodexProvider()
+
+    provider._emit_stream_event(
+        (
+            '{"type":"item.completed","item":{"type":"agent_message",'
+            '"text":"working"}}\n'
+        ),
+        session_log=session_log,
+    )
+    provider._emit_stream_event(
+        '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1200}}\n',
+        session_log=session_log,
+    )
+
+    events = [
+        json.loads(line)
+        for line in session_log.log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert events[0]["event"] == SESSION_EVENT_SUBAGENT_MESSAGE
+    assert events[0]["data"][SESSION_DATA_TOKEN_COUNT] is None
+    assert events[1]["event"] == SESSION_EVENT_USAGE
+    assert events[1]["data"][SESSION_DATA_USAGE][SESSION_USAGE_OUTPUT_TOKENS] == 1200
+
+    template, _offset = provider._read_session_log_progress(
+        session_log=session_log,
+        offset=0,
+    )
+
+    assert template is not None
+    assert "1 subagent message" in template
+    assert "1.2k tokens received since last heartbeat" in template
+    assert "0 tool calls, 0 tokens" not in template
 
 
 def test_codex_exec_heartbeat_marks_zero_progress_as_possibly_stalled(
