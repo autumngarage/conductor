@@ -7,6 +7,7 @@ import json
 import pytest
 from click.testing import CliRunner
 
+import conductor.cli as cli_mod
 from conductor.cli import main
 
 
@@ -682,6 +683,113 @@ def test_doctor_reports_agent_integration_wired(mocker, monkeypatch, tmp_path):
     assert "guidance" in result.output.lower()
     assert "slash-command" in result.output.lower()
     assert "subagent" in result.output.lower()
+
+
+def test_doctor_no_integration_skew_warning_when_versions_match(
+    mocker, monkeypatch, tmp_path
+):
+    _stub_all_unconfigured(mocker)
+    monkeypatch.setattr(cli_mod, "__version__", "0.9.0")
+    for var in ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "OLLAMA_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+
+    from conductor import agent_wiring
+
+    agent_wiring.wire_agents_md(version="0.9.0")
+
+    result = CliRunner().invoke(main, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "Integration files behind binary" not in result.output
+
+
+def test_doctor_warns_before_next_steps_when_one_integration_file_is_behind(
+    mocker, monkeypatch, tmp_path
+):
+    _stub_all_unconfigured(mocker)
+    monkeypatch.setattr(cli_mod, "__version__", "0.9.0")
+    for var in ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "OLLAMA_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+
+    from conductor import agent_wiring
+
+    agent_wiring.wire_agents_md(version="0.8.9")
+
+    result = CliRunner().invoke(main, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "⚠ Integration files behind binary (v0.9.0). Refresh with:" in result.output
+    assert "    conductor init -y --remaining" in result.output
+    assert (
+        result.output.index("Integration files behind binary")
+        < result.output.index("Next steps:")
+    )
+
+
+def test_doctor_emits_single_skew_warning_when_all_integration_files_are_behind(
+    mocker, monkeypatch, tmp_path
+):
+    _stub_all_unconfigured(mocker)
+    monkeypatch.setattr(cli_mod, "__version__", "0.9.0")
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / "repo" / "GEMINI.md").write_text("# mine\n", encoding="utf-8")
+    (tmp_path / "repo" / "CLAUDE.md").write_text("# mine\n", encoding="utf-8")
+    (tmp_path / "repo" / ".cursor" / "rules").mkdir(parents=True)
+    for var in ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "OLLAMA_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+
+    from conductor import agent_wiring
+
+    agent_wiring.wire_claude_code("0.8.9", patch_claude_md=True)
+    agent_wiring.wire_agents_md(version="0.8.9")
+    agent_wiring.wire_gemini_md(version="0.8.9")
+    agent_wiring.wire_claude_md_repo(version="0.8.9")
+    agent_wiring.wire_cursor(version="0.8.9")
+
+    result = CliRunner().invoke(main, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert result.output.count("Integration files behind binary") == 1
+
+
+def test_doctor_integration_skew_skips_unknown_versions():
+    files = [
+        {"path": "/tmp/legacy", "kind": "cursor-rule", "version": None},
+        {"path": "/tmp/current", "kind": "agents-md-import", "version": "0.9.0"},
+    ]
+
+    assert cli_mod._integration_version_skew_files(
+        files,
+        binary_version="0.9.0",
+    ) == []
+
+
+def test_doctor_integration_skew_ignores_binary_local_version_metadata():
+    files = [
+        {"path": "/tmp/current", "kind": "agents-md-import", "version": "0.9.0"},
+    ]
+
+    assert cli_mod._integration_version_skew_files(
+        files,
+        binary_version="0.9.0+1.gabc123.dirty",
+    ) == []
+
+
+def test_doctor_json_includes_agent_integration_version_skew(
+    mocker, monkeypatch, tmp_path
+):
+    _stub_all_unconfigured(mocker)
+    monkeypatch.setattr(cli_mod, "__version__", "0.9.0")
+    for var in ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "OLLAMA_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+
+    from conductor import agent_wiring
+
+    agent_wiring.wire_agents_md(version="0.8.10")
+
+    result = CliRunner().invoke(main, ["doctor", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    ai = payload["agent_integration"]
+    assert ai["version_skew"] is True
+    assert ai["version_skew_files"] == [str(tmp_path / "repo" / "AGENTS.md")]
 
 
 def test_doctor_reports_agents_md_when_present(mocker, monkeypatch, tmp_path):

@@ -31,6 +31,8 @@ from urllib.parse import urlparse
 
 import click
 from click.core import ParameterSource
+from packaging.version import InvalidVersion
+from packaging.version import parse as parse_version
 
 import conductor.providers.openrouter_catalog as openrouter_catalog
 from conductor import __version__, credentials, offline_mode
@@ -5233,6 +5235,14 @@ def _agent_integration_payload() -> dict:
 
     detection = detect()
     kinds = {a.kind for a in detection.managed}
+    managed_files = [
+        {"path": str(a.path), "kind": a.kind, "version": a.version}
+        for a in detection.managed
+    ]
+    version_skew_files = _integration_version_skew_files(
+        managed_files,
+        binary_version=__version__,
+    )
     return {
         "claude_detected": detection.claude_detected,
         "claude_cli_on_path": detection.claude_cli_on_path,
@@ -5251,11 +5261,40 @@ def _agent_integration_payload() -> dict:
         "cursor_rules_dir": str(detection.cursor_rules_dir),
         "cursor_rules_dir_exists": detection.cursor_rules_dir_exists,
         "cursor_rule_wired": "cursor-rule" in kinds,
-        "managed_files": [
-            {"path": str(a.path), "kind": a.kind, "version": a.version}
-            for a in detection.managed
-        ],
+        "managed_files": managed_files,
+        "version_skew": bool(version_skew_files),
+        "version_skew_files": version_skew_files,
     }
+
+
+def _integration_version_skew_files(
+    managed_files: list[dict],
+    *,
+    binary_version: str,
+) -> list[str]:
+    """Return managed integration files older than the running binary version.
+
+    Invariant: only versioned managed files participate in skew detection.
+    Legacy entries without a version are skipped because their version
+    boundary is unknown; malformed versions are treated as refresh-worthy.
+    """
+    # Agent artifacts intentionally persist the public release version, not
+    # local build metadata such as `+dirty`, so compare the same boundary that
+    # the artifact writer can reproduce.
+    current = parse_version(str(binary_version).split("+", 1)[0])
+    skewed: list[str] = []
+    for entry in managed_files:
+        version = entry.get("version")
+        if version is None:
+            continue
+        try:
+            parsed = parse_version(str(version))
+        except InvalidVersion:
+            skewed.append(str(entry["path"]))
+            continue
+        if parsed < current:
+            skewed.append(str(entry["path"]))
+    return skewed
 
 
 @main.command()
@@ -5424,6 +5463,13 @@ def doctor(as_json: bool) -> None:
             "  Cursor:       no Conductor rule in .cursor/rules/ "
             "(run `conductor init` to add one)"
         )
+
+    if ai["version_skew"]:
+        click.echo("")
+        click.echo(
+            f"⚠ Integration files behind binary (v{payload['version']}). Refresh with:"
+        )
+        click.echo("    conductor init -y --remaining")
 
     click.echo("")
     click.echo("Next steps:")
