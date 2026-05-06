@@ -52,9 +52,7 @@ CODEX_REVIEW_MODEL = "codex-review"
 CODEX_REQUEST_TIMEOUT_SEC = 180.0
 CODEX_STARTUP_PROBE_TIMEOUT_SEC = 8.0
 CODEX_STARTUP_PROBE_CONFIG = (
-    "model_reasoning_effort=minimal",
-    "features.image_gen=false",
-    "features.web_search=false",
+    "model_reasoning_effort=low",
 )
 CODEX_STREAM_POLL_INTERVAL_SEC = 0.05
 CODEX_STREAM_EXIT_READER_JOIN_SEC = 0.2
