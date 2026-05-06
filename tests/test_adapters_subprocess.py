@@ -1095,13 +1095,49 @@ def test_codex_configured_false_when_exec_startup_probe_times_out(mocker):
     assert startup_call.kwargs["input"] == "Reply with OK."
 
 
-def test_codex_startup_probe_disables_minimal_reasoning_tool_conflicts(mocker):
+def test_codex_startup_probe_avoids_minimal_reasoning_tool_conflicts(mocker):
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
 
     def run(args, **kwargs):
         if args == ["codex", "login", "status"]:
             return _fake_completed(stdout="Logged in using ChatGPT")
         if args[:3] == ["codex", "exec", "-"]:
+            config_values = [
+                args[idx + 1] for idx, value in enumerate(args) if value == "-c"
+            ]
+            if "model_reasoning_effort=minimal" in config_values:
+                web_search_disabled = (
+                    "web_search='disabled'" in config_values
+                    or 'web_search="disabled"' in config_values
+                )
+                tools_disabled = (
+                    web_search_disabled
+                    and "features.image_generation=false" in config_values
+                )
+                if not tools_disabled:
+                    return _fake_completed(
+                        stdout=json.dumps(
+                            {
+                                "type": "error",
+                                "message": json.dumps(
+                                    {
+                                        "type": "error",
+                                        "error": {
+                                            "type": "invalid_request_error",
+                                            "message": (
+                                                "The following tools cannot be used with "
+                                                "reasoning.effort 'minimal': "
+                                                "image_gen, web_search."
+                                            ),
+                                            "param": "tools",
+                                        },
+                                        "status": 400,
+                                    },
+                                ),
+                            },
+                        ),
+                        returncode=1,
+                    )
             return _fake_completed(stdout='{"type":"turn.completed"}\n')
         raise AssertionError(f"unexpected command: {args!r}")
 
@@ -1117,6 +1153,10 @@ def test_codex_startup_probe_disables_minimal_reasoning_tool_conflicts(mocker):
         if value == "-c"
     ]
     assert config_values == list(CODEX_STARTUP_PROBE_CONFIG)
+    assert "model_reasoning_effort=low" in config_values
+    assert "model_reasoning_effort=minimal" not in config_values
+    assert "features.web_search=false" not in config_values
+    assert "features.image_gen=false" not in config_values
 
 
 def test_codex_startup_probe_reports_api_error_instead_of_first_event(mocker):
