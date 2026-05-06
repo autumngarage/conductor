@@ -38,6 +38,7 @@ import conductor.providers.openrouter_catalog as openrouter_catalog
 from conductor import __version__, credentials, offline_mode
 from conductor._time_filter import parse_timestamp, since_cutoff
 from conductor.banner import print_caller_banner
+from conductor.brief_preprocessor import inject_auto_close
 from conductor.delegation_ledger import (
     DelegationEvent,
     DelegationStatus,
@@ -307,6 +308,20 @@ def _read_task(
             resolved.append(path.resolve())
         attachments = tuple(resolved)
     return BriefInput(body=body, source=source, attachments=attachments)
+
+
+def _with_auto_close_instructions(brief_input: BriefInput) -> BriefInput:
+    try:
+        body = inject_auto_close(brief_input.body)
+    except Exception as e:
+        click.echo(
+            f"[conductor] warning: could not preprocess auto-close instructions: {e}",
+            err=True,
+        )
+        return brief_input
+    if body == brief_input.body:
+        return brief_input
+    return replace(brief_input, body=body)
 
 
 def _warn_if_short_exec_brief(
@@ -2897,6 +2912,8 @@ def ask(
     )
     if plan.mode == "exec":
         _warn_if_short_exec_brief(brief_input, allow_short_brief=allow_short_brief)
+    if plan.mode not in {"review", "council"}:
+        brief_input = _with_auto_close_instructions(brief_input)
     body = brief_input.body
     attachments = brief_input.attachments
     estimated_input_tokens = _estimate_text_tokens(body)
@@ -4206,6 +4223,7 @@ def exec_cmd(
         brief_input,
         allow_short_brief=allow_short_brief,
     )
+    brief_input = _with_auto_close_instructions(brief_input)
     body = brief_input.body
     attachments = brief_input.attachments
     estimated_input_tokens = _estimate_text_tokens(body)

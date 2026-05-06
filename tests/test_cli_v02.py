@@ -1497,6 +1497,31 @@ def test_exec_brief_file_reads_file(mocker, tmp_path):
     assert exec_mock.call_args.args[0].startswith("# Goal")
 
 
+def test_exec_injects_auto_close_instructions_into_provider_task(mocker):
+    _stub_all_configured(mocker, {"codex"})
+    exec_mock = mocker.patch.object(
+        CodexProvider, "exec", return_value=_fake_response("codex")
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "codex",
+            "--no-preflight",
+            "--allow-short-brief",
+            "--brief",
+            "Fixes #5. Do X.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    task = exec_mock.call_args.args[0]
+    assert "## Auto-close" in task
+    assert "Closes #5" in task
+
+
 def test_exec_short_brief_warns_by_default(mocker):
     _stub_all_configured(mocker, {"codex"})
     mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
@@ -1997,6 +2022,34 @@ def test_ask_call_mode_routes_with_prompt_size_estimate(mocker):
     payload = json.loads(result.stdout)
     assert payload["route"]["estimated_input_tokens"] == 500
     assert payload["route"]["estimated_output_tokens"] == 500
+
+
+def test_ask_exec_mode_injects_auto_close_instructions_into_provider_task(mocker):
+    _stub_all_configured(mocker, {"codex"})
+    exec_mock = mocker.patch.object(
+        CodexProvider, "exec", return_value=_fake_response("codex")
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "code",
+            "--effort",
+            "high",
+            "--no-preflight",
+            "--allow-short-brief",
+            "--brief",
+            "Fixes #5. Do X.",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    task = exec_mock.call_args.args[0]
+    assert "## Auto-close" in task
+    assert "Closes #5" in task
 
 
 def test_review_auto_route_includes_patch_size_estimate(mocker, tmp_path):
