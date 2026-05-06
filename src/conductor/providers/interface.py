@@ -106,7 +106,14 @@ class ProviderStalledError(ProviderError):
 class ProviderStartupStalledError(ProviderStalledError):
     """Raised when a CLI provider produces no initial output after launch."""
 
-    def __init__(self, *, provider: str, timeout_sec: float) -> None:
+    def __init__(
+        self,
+        *,
+        provider: str,
+        timeout_sec: float,
+        message: str | None = None,
+        diagnostic: dict | None = None,
+    ) -> None:
         self.provider = provider
         self.timeout_sec = timeout_sec
         self.phase = "startup"
@@ -115,12 +122,14 @@ class ProviderStartupStalledError(ProviderStalledError):
             if float(timeout_sec).is_integer()
             else f"{timeout_sec:g}"
         )
+        self.diagnostic = diagnostic
         self.error_response = {
             "error": "provider_startup_stalled",
             "provider": provider,
             "timeout_sec": timeout_sec,
             "phase": self.phase,
-            "message": (
+            "message": message
+            or (
                 f"{provider} CLI startup stalled: produced no output within "
                 f"{formatted_timeout}s after start"
             ),
