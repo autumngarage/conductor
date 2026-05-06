@@ -857,15 +857,73 @@ def _requires_strong_code_provider(plan: SemanticPlan) -> bool:
     return plan.kind == "code" and plan.effort_bucket in {"high", "max"}
 
 
-def _exclude_ollama_from_strong_code_plan(plan: SemanticPlan) -> tuple[SemanticPlan, bool]:
-    if not _requires_strong_code_provider(plan):
-        return plan, False
+OLLAMA_ONLINE_EXCLUSION_MESSAGE = (
+    "[conductor] excluding ollama from fallback chain "
+    "(online; ollama is offline-only — pass --offline to override)"
+)
+OLLAMA_PROBE_OFFLINE_INCLUSION_MESSAGE = (
+    "[conductor] including ollama as local fallback "
+    "(network probe found no reachable target; assuming offline)"
+)
+
+
+def _with_user_semantic_tags(
+    plan: SemanticPlan,
+    user_tags: tuple[str, ...],
+) -> SemanticPlan:
+    if not user_tags:
+        return plan
+    tags = list(plan.tags)
+    for tag in user_tags:
+        if tag not in tags:
+            tags.append(tag)
+    return replace(plan, tags=tuple(tags))
+
+
+def _semantic_plan_contains_ollama(plan: SemanticPlan) -> bool:
+    return any(candidate.provider == "ollama" for candidate in plan.candidates)
+
+
+def _first_online_candidate_provider(plan: SemanticPlan) -> str | None:
+    for candidate in plan.candidates:
+        if candidate.provider != "ollama":
+            return candidate.provider
+    return None
+
+
+def _apply_ollama_offline_only_policy(
+    plan: SemanticPlan,
+    *,
+    user_tags: tuple[str, ...],
+    offline_requested: bool,
+) -> tuple[SemanticPlan, str | None]:
+    """Keep ollama in semantic fallback chains only for explicit offline intent.
+
+    Invariant: an online semantic plan must not retain ollama as an implicit
+    fallback. Local routing remains available through --offline, sticky offline
+    mode, explicit ollama tags, and when the network probe cannot reach any
+    target.
+    """
+    if not _semantic_plan_contains_ollama(plan):
+        return plan, None
+    if offline_requested or offline_mode.is_active():
+        return plan, None
+    if "ollama" in user_tags:
+        return plan, None
+
+    profile = get_network_profile(
+        _network_target_for_provider(_first_online_candidate_provider(plan)),
+        warn=None,
+    )
+    if profile.rtt_ms is None:
+        return plan, OLLAMA_PROBE_OFFLINE_INCLUSION_MESSAGE
+
     candidates = tuple(
         candidate for candidate in plan.candidates if candidate.provider != "ollama"
     )
     if len(candidates) == len(plan.candidates):
-        return plan, False
-    return replace(plan, candidates=candidates), True
+        return plan, None
+    return replace(plan, candidates=candidates), OLLAMA_ONLINE_EXCLUSION_MESSAGE
 
 
 def _format_strong_code_no_fallback_error(
@@ -2750,6 +2808,11 @@ def main(ctx: click.Context) -> None:
     default=None,
     help=f"Thinking depth: {' | '.join(VALID_EFFORT_LEVELS)} or integer budget.",
 )
+@click.option(
+    "--tags",
+    default=None,
+    help="Comma-separated task tags to add to the semantic route.",
+)
 @click.option("--cwd", default=None, help="Repository working directory for code/review.")
 @click.option(
     "--timeout",
@@ -2852,6 +2915,7 @@ def main(ctx: click.Context) -> None:
 def ask(
     kind: str,
     effort: str | None,
+    tags: str | None,
     cwd: str | None,
     timeout_sec: int | None,
     max_stall_sec: int | None,
@@ -2880,6 +2944,8 @@ def ask(
     max_stall_is_default = _parameter_is_default("max_stall_sec")
     effort_value = _parse_effort(effort)
     plan = plan_for(kind, effort_value)
+    user_tags = tuple(_parse_csv(tags))
+    plan = _with_user_semantic_tags(plan, user_tags)
     council_caps = CouncilCaps(
         timeout_sec=council_timeout_sec,
         max_output_tokens=council_max_output_tokens,
@@ -2898,9 +2964,11 @@ def ask(
         offline_mode.set_active()
         plan = with_candidate_override(plan, provider="ollama")
 
-    excluded_ollama = False
-    if offline is not True:
-        plan, excluded_ollama = _exclude_ollama_from_strong_code_plan(plan)
+    plan, ollama_policy_message = _apply_ollama_offline_only_policy(
+        plan,
+        user_tags=user_tags,
+        offline_requested=offline is True,
+    )
 
     if kind == "council" and plan.candidates[0].provider != "openrouter":
         raise click.UsageError("council always routes through OpenRouter.")
@@ -2930,12 +2998,8 @@ def ask(
             "use `conductor exec --with codex --attach ...` instead."
         )
 
-    if excluded_ollama and not silent_route:
-        click.echo(
-            "[conductor] excluding ollama from fallback chain "
-            f"(--kind code --effort {plan.effort_bucket} requires strong reasoning)",
-            err=True,
-        )
+    if ollama_policy_message and not silent_route:
+        click.echo(ollama_policy_message, err=True)
     if not (silent_route or as_json):
         click.echo(_format_semantic_plan_line(plan), err=True)
 

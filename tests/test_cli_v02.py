@@ -23,6 +23,7 @@ import pytest
 import respx
 from click.testing import CliRunner
 
+from conductor import offline_mode
 from conductor.cli import SANDBOX_DEPRECATION_WARNING, main
 from conductor.network_profile import NetworkProfile
 from conductor.openrouter_model_stacks import OPENROUTER_CODING_HIGH
@@ -615,17 +616,12 @@ def test_ask_code_high_without_frontier_fallback_refuses_ollama(mocker):
     assert "falling through to ollama" not in result.stderr
 
 
-def test_ask_code_medium_falls_through_from_openrouter_404_to_ollama(mocker):
-    from conductor.providers.interface import ProviderHTTPError
-
+def test_ask_code_medium_online_excludes_ollama_from_fallback(mocker):
     _stub_all_configured(mocker, {"openrouter", "ollama"})
-    mocker.patch.object(
+    openrouter_call = mocker.patch.object(
         OpenRouterProvider,
         "call",
-        side_effect=ProviderHTTPError(
-            "OpenRouter provider failed locally after upstream HTTP 404. "
-            "request restrictions/models tried: ['openrouter/auto', 'qwen/qwen3.6-flash']"
-        ),
+        return_value=_fake_response("openrouter", "openrouter/auto"),
     )
     ollama_call = mocker.patch.object(
         OllamaProvider,
@@ -644,21 +640,96 @@ def test_ask_code_medium_falls_through_from_openrouter_404_to_ollama(mocker):
             "--allow-short-brief",
             "--brief",
             "Explain the small code change.",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert openrouter_call.called
+    assert not ollama_call.called
+    assert "excluding ollama from fallback chain" in result.stderr
+    assert "online; ollama is offline-only" in result.stderr
+    assert "falling through to ollama" not in result.stderr
+    payload = json.loads(result.stdout)
+    assert [candidate["provider"] for candidate in payload["semantic"]["candidates"]] == [
+        "openrouter",
+    ]
+
+
+def test_ask_offline_keeps_ollama_in_semantic_candidates(mocker):
+    _stub_all_configured(mocker, {"openrouter", "ollama"})
+    ollama_call = mocker.patch.object(
+        OllamaProvider,
+        "call",
+        return_value=_fake_response("ollama", "llama3.2"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "research",
+            "--effort",
+            "low",
+            "--offline",
+            "--brief",
+            "Use local model.",
+            "--json",
         ],
     )
 
     assert result.exit_code == 0, result.output
     assert ollama_call.called
-    assert "openrouter failed (provider-error)" in result.stderr
-    assert "falling through to ollama" in result.stderr
-    assert "falling back" in result.stderr
-    assert "→ ollama" in result.stderr
+    assert "excluding ollama from fallback chain" not in result.stderr
+    payload = json.loads(result.stdout)
+    assert [candidate["provider"] for candidate in payload["semantic"]["candidates"]] == [
+        "ollama",
+    ]
 
 
-def test_ask_research_high_keeps_ollama_fallback(mocker):
+def test_ask_sticky_offline_keeps_ollama_without_policy_message(mocker):
+    _stub_all_configured(mocker, {"openrouter", "ollama"})
+    offline_mode.set_active(ttl_sec=600)
+    ollama_call = mocker.patch.object(
+        OllamaProvider,
+        "call",
+        return_value=_fake_response("ollama", "llama3.2"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "research",
+            "--effort",
+            "low",
+            "--brief",
+            "Use sticky local model.",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert ollama_call.called
+    assert "excluding ollama from fallback chain" not in result.stderr
+    assert "including ollama as local fallback" not in result.stderr
+    payload = json.loads(result.stdout)
+    assert [candidate["provider"] for candidate in payload["semantic"]["candidates"]] == [
+        "openrouter",
+        "ollama",
+    ]
+
+
+def test_ask_network_probe_offline_keeps_ollama_fallback(mocker):
     from conductor.providers.interface import ProviderHTTPError
 
     _stub_all_configured(mocker, {"openrouter", "ollama"})
+    mocker.patch(
+        "conductor.cli.get_network_profile",
+        return_value=NetworkProfile(None, "https://1.1.1.1", 1_000),
+    )
     mocker.patch.object(
         OpenRouterProvider,
         "call",
@@ -685,10 +756,76 @@ def test_ask_research_high_keeps_ollama_fallback(mocker):
 
     assert result.exit_code == 0, result.output
     assert ollama_call.called
+    assert "including ollama as local fallback" in result.stderr
+    assert "network probe found no reachable target" in result.stderr
     assert "excluding ollama from fallback chain" not in result.stderr
     assert "openrouter failed (5xx)" in result.stderr
     assert "falling through to ollama" in result.stderr
     assert "→ ollama" in result.stderr
+
+
+def test_ask_explicit_ollama_tag_keeps_ollama_fallback(mocker):
+    _stub_all_configured(mocker, {"openrouter", "ollama"})
+    openrouter_call = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response("openrouter", "openrouter/auto"),
+    )
+    ollama_call = mocker.patch.object(
+        OllamaProvider,
+        "call",
+        return_value=_fake_response("ollama", "llama3.2"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "research",
+            "--effort",
+            "low",
+            "--tags",
+            "ollama,cheap",
+            "--brief",
+            "Keep local fallback available.",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert openrouter_call.called
+    assert not ollama_call.called
+    assert "excluding ollama from fallback chain" not in result.stderr
+    payload = json.loads(result.stdout)
+    assert [candidate["provider"] for candidate in payload["semantic"]["candidates"]] == [
+        "openrouter",
+        "ollama",
+    ]
+    assert "ollama" in payload["semantic"]["tags"]
+
+
+def test_call_with_ollama_bypasses_semantic_ollama_policy(mocker):
+    _stub_all_configured(mocker, {"ollama"})
+    profile_mock = mocker.patch(
+        "conductor.cli.get_network_profile",
+        return_value=NetworkProfile(50, "http://localhost:11434", 1_000),
+    )
+    ollama_call = mocker.patch.object(
+        OllamaProvider,
+        "call",
+        return_value=_fake_response("ollama", "llama3.2"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["call", "--with", "ollama", "--brief", "Use the local provider."],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert ollama_call.called
+    assert profile_mock.called
+    assert "excluding ollama from fallback chain" not in result.stderr
 
 
 def test_ask_review_uses_native_review_route(mocker):
@@ -2009,8 +2146,12 @@ def test_route_json_accepts_explicit_size_estimate(mocker):
 
 
 def test_ask_call_mode_routes_with_prompt_size_estimate(mocker):
-    _stub_all_configured(mocker, {"ollama"})
-    mocker.patch.object(OllamaProvider, "call", return_value=_fake_response("ollama"))
+    _stub_all_configured(mocker, {"openrouter"})
+    mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response("openrouter", "openrouter/auto"),
+    )
     prompt = "x" * 2000
 
     result = CliRunner().invoke(
