@@ -41,6 +41,9 @@ class FakeProvider:
     def health_probe(self, timeout_sec: float = 30.0):
         return True, None
 
+    def endpoint_url(self):
+        return None
+
 
 class FakeCouncilProvider:
     def __init__(self):

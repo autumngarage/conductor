@@ -203,6 +203,9 @@ class CodexProvider:
         self._timeout_sec = timeout_sec
         self._startup_probe_timeout_sec = startup_probe_timeout_sec
 
+    def endpoint_url(self) -> str | None:
+        return "https://api.openai.com"
+
     def _check_cli_path(self) -> tuple[bool, str | None]:
         """Cheap PATH-only check (no subprocess) for the call/exec hot path."""
         if not shutil.which(self._cli):

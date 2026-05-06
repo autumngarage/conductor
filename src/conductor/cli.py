@@ -151,17 +151,6 @@ DEFAULT_COUNCIL_TIMEOUT_SEC = 180
 DEFAULT_COUNCIL_MAX_OUTPUT_TOKENS = 6_000
 DEFAULT_COUNCIL_MAX_COST_USD = 0.25
 ESTIMATED_CHARS_PER_TOKEN = 4
-PROVIDER_NETWORK_TARGETS: dict[str, str] = {
-    # TODO(#147 follow-up): move these into provider-owned helpers once the
-    # endpoint contract settles; keep the Provider Protocol narrow for now.
-    "claude": "https://api.anthropic.com",
-    "codex": "https://api.openai.com",
-    "deepseek-chat": "https://openrouter.ai/api/v1/models",
-    "deepseek-reasoner": "https://openrouter.ai/api/v1/models",
-    "gemini": "https://generativelanguage.googleapis.com",
-    "kimi": "https://openrouter.ai/api/v1/models",
-    "openrouter": "https://openrouter.ai/api/v1/models",
-}
 
 
 @dataclass(frozen=True)
@@ -195,7 +184,7 @@ def _network_target_for_provider(provider_id: str | None) -> str | None:
         return os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434"
     if provider_id is None:
         return NETWORK_PROFILE_FALLBACK_TARGET
-    return PROVIDER_NETWORK_TARGETS.get(provider_id)
+    return get_provider(provider_id).endpoint_url()
 
 
 def _network_profile_warning(message: str) -> None:

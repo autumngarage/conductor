@@ -239,6 +239,9 @@ class OllamaProvider:
             or OLLAMA_DEFAULT_BASE_URL
         ).rstrip("/")
 
+    def endpoint_url(self) -> str | None:
+        return None
+
     def resolved_default_model(self) -> str:
         """Return the host-local default model Conductor will send to Ollama."""
         return _clean_model_name(os.environ.get(OLLAMA_MODEL_ENV)) or self.default_model

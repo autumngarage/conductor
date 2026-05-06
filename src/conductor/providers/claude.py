@@ -115,6 +115,9 @@ class ClaudeProvider:
         )
         self._exec_first_output_timeout_sec = exec_first_output_timeout_sec
 
+    def endpoint_url(self) -> str | None:
+        return "https://api.anthropic.com"
+
     def _check_cli_path(self) -> tuple[bool, str | None]:
         """Cheap PATH-only check (no subprocess). Used by call()/exec()
         for the defensive guard so the hot path doesn't take an auth-probe

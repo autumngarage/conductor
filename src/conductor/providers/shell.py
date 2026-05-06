@@ -139,6 +139,9 @@ class ShellProvider:
     def typical_p50_ms(self) -> int:
         return self._spec.typical_p50_ms
 
+    def endpoint_url(self) -> str | None:
+        return None
+
     # --- liveness checks --------------------------------------------------- #
 
     def configured(self) -> tuple[bool, str | None]:
