@@ -43,6 +43,14 @@ from conductor.providers.terminal_signals import (
     append_recent_text,
     detect_retriable_provider_failure,
 )
+from conductor.session_log import (
+    SESSION_DATA_TOKEN_COUNT,
+    SESSION_DATA_USAGE,
+    SESSION_EVENT_SUBAGENT_MESSAGE,
+    SESSION_EVENT_TOOL_CALL,
+    SESSION_EVENT_USAGE,
+    SESSION_USAGE_OUTPUT_TOKENS,
+)
 
 if TYPE_CHECKING:
     from conductor.session_log import SessionLog
@@ -88,6 +96,12 @@ def _format_compact_count(value: int) -> str:
     if value < 10_000:
         return f"{value / 1_000:.1f}k"
     return f"{value // 1_000}k"
+
+
+def _as_token_count(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return max(0, value)
+    return None
 
 
 def _codex_error_dict_message(error: dict[str, object]) -> str | None:
@@ -536,20 +550,32 @@ class CodexProvider:
                 or event.get("output_tokens")
             )
             session_log.emit(
-                "subagent_message",
+                SESSION_EVENT_SUBAGENT_MESSAGE,
                 {
                     "provider": self.name,
-                    "token_count": token_count,
+                    SESSION_DATA_TOKEN_COUNT: _as_token_count(token_count),
                     "text": item.get("text", ""),
                 },
             )
+            return
+
+        if kind == "turn.completed":
+            usage = event.get("usage") or {}
+            if isinstance(usage, dict):
+                session_log.emit(
+                    SESSION_EVENT_USAGE,
+                    {
+                        "provider": self.name,
+                        SESSION_DATA_USAGE: usage,
+                    },
+                )
             return
 
         if item_type and (
             "tool" in str(item_type) or str(item_type) in {"function_call", "tool_use"}
         ):
             session_log.emit(
-                "tool_call",
+                SESSION_EVENT_TOOL_CALL,
                 {
                     "provider": self.name,
                     "item_type": item_type,
@@ -590,6 +616,7 @@ class CodexProvider:
             end_offset -= len(incomplete)
 
         tool_calls = 0
+        subagent_messages = 0
         tokens_received = 0
         for line in lines:
             try:
@@ -597,18 +624,32 @@ class CodexProvider:
             except json.JSONDecodeError:
                 continue
 
-            if event.get("event") == "tool_call":
+            event_name = event.get("event")
+            data = event.get("data") or {}
+            if not isinstance(data, dict):
+                data = {}
+            if event_name == SESSION_EVENT_TOOL_CALL:
                 tool_calls += 1
                 continue
 
-            if event.get("event") != "subagent_message":
+            if event_name == SESSION_EVENT_SUBAGENT_MESSAGE:
+                subagent_messages += 1
+                token_count = _as_token_count(data.get(SESSION_DATA_TOKEN_COUNT))
+                if token_count is not None:
+                    tokens_received += token_count
                 continue
 
-            token_count = (event.get("data") or {}).get("token_count")
-            if isinstance(token_count, int):
+            if event_name != SESSION_EVENT_USAGE:
+                continue
+
+            usage = data.get(SESSION_DATA_USAGE) or {}
+            if not isinstance(usage, dict):
+                continue
+            token_count = _as_token_count(usage.get(SESSION_USAGE_OUTPUT_TOKENS))
+            if token_count is not None:
                 tokens_received += token_count
 
-        if tool_calls == 0 and tokens_received == 0:
+        if tool_calls == 0 and subagent_messages == 0 and tokens_received == 0:
             return (
                 "[conductor] no output from codex for {silent_sec:.0f}s"
                 " · 0 tool calls, 0 tokens — possibly stalled",
@@ -616,9 +657,13 @@ class CodexProvider:
             )
 
         tool_label = "tool call" if tool_calls == 1 else "tool calls"
+        message_label = (
+            "subagent message" if subagent_messages == 1 else "subagent messages"
+        )
         return (
             "[conductor] no output from codex for {silent_sec:.0f}s"
             f" · {tool_calls} {tool_label}"
+            f" · {subagent_messages} {message_label}"
             f" · {_format_compact_count(tokens_received)} tokens received since last heartbeat",
             end_offset,
         )
