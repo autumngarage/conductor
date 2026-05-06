@@ -399,6 +399,8 @@ class ClaudeProvider:
         model: str | None = None,
         *,
         effort: str | int = "medium",
+        timeout_sec: int | None = None,
+        max_stall_sec: int | None = None,
         resume_session_id: str | None = None,
     ) -> CallResponse:
         return self._run(
@@ -407,6 +409,10 @@ class ClaudeProvider:
             effort=effort,
             allowed_tools=None,
             permission_mode=None,
+            timeout_sec_override=(
+                timeout_sec if timeout_sec is not None else _USE_DEFAULT
+            ),
+            max_stall_sec=max_stall_sec,
             resume_session_id=resume_session_id,
         )
 

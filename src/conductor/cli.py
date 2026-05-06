@@ -19,14 +19,17 @@ v0.2 additions:
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from urllib.parse import urlparse
 
 import click
+from click.core import ParameterSource
 
 import conductor.providers.openrouter_catalog as openrouter_catalog
 from conductor import __version__, credentials, offline_mode
@@ -37,6 +40,13 @@ from conductor.muted_providers import (
     mute_provider_ids,
     muted_providers_file_path,
     unmute_provider_ids,
+)
+from conductor.network_profile import (
+    NETWORK_PROFILE_FALLBACK_TARGET,
+    NetworkProfile,
+    apply_scaling,
+    get_network_profile,
+    scaling_multiplier,
 )
 from conductor.openrouter_stack_audit import (
     StackAuditReport,
@@ -116,7 +126,8 @@ VALID_EFFORT_LEVELS = ("minimal", "low", "medium", "high", "max")
 PROFILE_PRECEDENCE_TEXT = (
     "Resolution order: profile defaults < CONDUCTOR_* env vars < explicit CLI flags."
 )
-DEFAULT_EXEC_MAX_STALL_SEC = 360
+DEFAULT_DISPATCH_TIMEOUT_SEC = 1800
+DEFAULT_EXEC_MAX_STALL_SEC = 600
 MIN_EXEC_BRIEF_CHARS = 300
 GIT_RECOVERY_COMMAND_TIMEOUT_SEC = 2.0
 GIT_RECOVERY_MAX_COMMITS = 5
@@ -128,6 +139,17 @@ DEFAULT_COUNCIL_TIMEOUT_SEC = 180
 DEFAULT_COUNCIL_MAX_OUTPUT_TOKENS = 6_000
 DEFAULT_COUNCIL_MAX_COST_USD = 0.25
 ESTIMATED_CHARS_PER_TOKEN = 4
+PROVIDER_NETWORK_TARGETS: dict[str, str] = {
+    # TODO(#147 follow-up): move these into provider-owned helpers once the
+    # endpoint contract settles; keep the Provider Protocol narrow for now.
+    "claude": "https://api.anthropic.com",
+    "codex": "https://api.openai.com",
+    "deepseek-chat": "https://openrouter.ai/api/v1/models",
+    "deepseek-reasoner": "https://openrouter.ai/api/v1/models",
+    "gemini": "https://generativelanguage.googleapis.com",
+    "kimi": "https://openrouter.ai/api/v1/models",
+    "openrouter": "https://openrouter.ai/api/v1/models",
+}
 
 
 @dataclass(frozen=True)
@@ -147,6 +169,72 @@ class CouncilCaps:
 # --------------------------------------------------------------------------- #
 # Shared helpers
 # --------------------------------------------------------------------------- #
+
+
+def _parameter_is_default(name: str) -> bool:
+    ctx = click.get_current_context(silent=True)
+    if ctx is None:
+        return True
+    return ctx.get_parameter_source(name) == ParameterSource.DEFAULT
+
+
+def _network_target_for_provider(provider_id: str | None) -> str | None:
+    if provider_id == "ollama":
+        return os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434"
+    if provider_id is None:
+        return NETWORK_PROFILE_FALLBACK_TARGET
+    return PROVIDER_NETWORK_TARGETS.get(provider_id)
+
+
+def _network_profile_warning(message: str) -> None:
+    click.echo(message, err=True)
+
+
+def _target_label(target: str) -> str:
+    parsed = urlparse(target)
+    return parsed.netloc or parsed.path or target
+
+
+def _emit_network_scaling_notice(profile: NetworkProfile) -> None:
+    multiplier = scaling_multiplier(profile)
+    if multiplier == 1 or profile.rtt_ms is None:
+        return
+    click.echo(
+        "[conductor] network: "
+        f"{profile.rtt_ms:.0f}ms RTT to {_target_label(profile.target)} "
+        f"→ timeouts scaled {multiplier}× (override with --timeout)",
+        err=True,
+    )
+
+
+def _scale_dispatch_defaults(
+    *,
+    provider_id: str | None,
+    timeout_sec: int | None,
+    max_stall_sec: int | None,
+    timeout_is_default: bool,
+    max_stall_is_default: bool,
+) -> tuple[int | None, int | None]:
+    if not (timeout_is_default or max_stall_is_default):
+        return timeout_sec, max_stall_sec
+
+    profile = get_network_profile(
+        _network_target_for_provider(provider_id),
+        warn=_network_profile_warning,
+    )
+    _emit_network_scaling_notice(profile)
+
+    resolved_timeout: int | None = timeout_sec
+    if timeout_is_default:
+        scaled_timeout = apply_scaling(DEFAULT_DISPATCH_TIMEOUT_SEC, profile)
+        resolved_timeout = None if scaled_timeout is None else math.ceil(scaled_timeout)
+
+    resolved_max_stall: int | None = max_stall_sec
+    if max_stall_is_default:
+        scaled_stall = apply_scaling(DEFAULT_EXEC_MAX_STALL_SEC, profile)
+        resolved_max_stall = None if scaled_stall is None else math.ceil(scaled_stall)
+
+    return resolved_timeout, resolved_max_stall
 
 
 def _read_task(
@@ -1080,6 +1168,8 @@ def _invoke_with_fallback(
                         task_tags=list(decision.task_tags),
                         prefer=decision.prefer,
                         log_selection=not silent,
+                        timeout_sec=timeout_sec,
+                        max_stall_sec=max_stall_sec,
                         resume_session_id=resume_session_id,
                     )
                 elif isinstance(provider, CodexProvider):
@@ -1087,6 +1177,8 @@ def _invoke_with_fallback(
                         task,
                         model=model,
                         effort=effort,
+                        timeout_sec=timeout_sec,
+                        max_stall_sec=max_stall_sec,
                         resume_session_id=resume_session_id,
                         attachments=attachments,
                     )
@@ -1096,6 +1188,8 @@ def _invoke_with_fallback(
                         task,
                         model=model,
                         effort=effort,
+                        timeout_sec=timeout_sec,
+                        max_stall_sec=max_stall_sec,
                         resume_session_id=resume_session_id,
                     )
             mark_outcome(candidate.name, "success")
@@ -2434,9 +2528,13 @@ def main(ctx: click.Context) -> None:
 @click.option(
     "--timeout",
     "timeout_sec",
-    default=None,
+    default=DEFAULT_DISPATCH_TIMEOUT_SEC,
     type=int,
-    help="Wall-clock timeout in seconds for review/exec/council provider calls.",
+    help=(
+        "Wall-clock timeout in seconds for review/exec provider calls. "
+        "Default: 1800, scaled up on slow networks. Council uses "
+        "--council-timeout for its total cap."
+    ),
 )
 @click.option(
     "--max-stall-seconds",
@@ -2553,9 +2651,10 @@ def ask(
     allow_short_brief: bool,
 ) -> None:
     """Run a task through Conductor's deterministic semantic routing matrix."""
+    timeout_is_default = _parameter_is_default("timeout_sec")
+    max_stall_is_default = _parameter_is_default("max_stall_sec")
     effort_value = _parse_effort(effort)
     plan = plan_for(kind, effort_value)
-    max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
     council_caps = CouncilCaps(
         timeout_sec=council_timeout_sec,
         max_output_tokens=council_max_output_tokens,
@@ -2656,6 +2755,14 @@ def ask(
             sys.exit(2)
         print_caller_banner(decision.provider, silent=silent_route or as_json)
         _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
+        timeout_sec, max_stall_sec = _scale_dispatch_defaults(
+            provider_id=decision.provider,
+            timeout_sec=timeout_sec,
+            max_stall_sec=max_stall_sec,
+            timeout_is_default=timeout_is_default,
+            max_stall_is_default=max_stall_is_default,
+        )
+        max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
         try:
             response, _fallbacks = _invoke_review_with_fallback(
                 decision,
@@ -2704,6 +2811,15 @@ def ask(
     except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
         click.echo(f"conductor: {e}", err=True)
         sys.exit(2)
+
+    timeout_sec, max_stall_sec = _scale_dispatch_defaults(
+        provider_id=decision.provider,
+        timeout_sec=timeout_sec,
+        max_stall_sec=max_stall_sec,
+        timeout_is_default=timeout_is_default,
+        max_stall_is_default=max_stall_is_default,
+    )
+    max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
 
     session_log: SessionLog | None = None
     if plan.mode == "exec":
@@ -2827,6 +2943,26 @@ def ask(
     "(default: medium).",
 )
 @click.option(
+    "--timeout",
+    "timeout_sec",
+    default=DEFAULT_DISPATCH_TIMEOUT_SEC,
+    type=int,
+    help=(
+        "Wall-clock timeout in seconds. Default: 1800, scaled up on slow "
+        "networks."
+    ),
+)
+@click.option(
+    "--max-stall-seconds",
+    "max_stall_sec",
+    default=DEFAULT_EXEC_MAX_STALL_SEC,
+    type=int,
+    help=(
+        "Kill streaming CLI-backed calls after this many silent seconds. "
+        "Default: 600, scaled up on slow networks. Set 0 to disable."
+    ),
+)
+@click.option(
     "--exclude",
     default=None,
     help="Comma-separated providers to exclude from --auto routing.",
@@ -2909,6 +3045,8 @@ def call(
     tags: str | None,
     prefer: str | None,
     effort: str | None,
+    timeout_sec: int | None,
+    max_stall_sec: int | None,
     exclude: str | None,
     task: str | None,
     task_file: str | None,
@@ -2923,6 +3061,8 @@ def call(
     offline: bool | None,
 ) -> None:
     """Send a task to a provider and print the response."""
+    timeout_is_default = _parameter_is_default("timeout_sec")
+    max_stall_is_default = _parameter_is_default("max_stall_sec")
     explicit_prefer = prefer
     profile_spec = _load_named_profile(profile)
     provider_id = _resolve_layered_value(provider_id, env_key="CONDUCTOR_WITH")
@@ -2989,6 +3129,14 @@ def call(
             sys.exit(2)
         print_caller_banner(decision.provider, silent=silent_route or as_json)
         _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
+        timeout_sec, max_stall_sec = _scale_dispatch_defaults(
+            provider_id=decision.provider,
+            timeout_sec=timeout_sec,
+            max_stall_sec=max_stall_sec,
+            timeout_is_default=timeout_is_default,
+            max_stall_is_default=max_stall_is_default,
+        )
+        max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
 
         try:
             response, _fallbacks = _invoke_with_fallback(
@@ -3000,8 +3148,8 @@ def call(
                 tools=frozenset(),
                 sandbox="none",
                 cwd=None,
-                timeout_sec=None,
-                max_stall_sec=None,
+                timeout_sec=timeout_sec,
+                max_stall_sec=max_stall_sec,
                 start_timeout_sec=None,
                 silent=silent_route or as_json,
                 attachments=attachments,
@@ -3028,6 +3176,14 @@ def call(
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
         print_caller_banner(provider_id, silent=silent_route or as_json)
+        timeout_sec, max_stall_sec = _scale_dispatch_defaults(
+            provider_id=provider_id,
+            timeout_sec=timeout_sec,
+            max_stall_sec=max_stall_sec,
+            timeout_is_default=timeout_is_default,
+            max_stall_is_default=max_stall_is_default,
+        )
+        max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
         try:
             if isinstance(provider, OpenRouterProvider):
                 response = provider.call(
@@ -3037,6 +3193,8 @@ def call(
                     task_tags=_parse_csv(tags),
                     prefer=_validate_prefer(prefer),
                     log_selection=not (silent_route or as_json),
+                    timeout_sec=timeout_sec,
+                    max_stall_sec=max_stall_sec,
                     resume_session_id=resume_session_id,
                 )
             elif isinstance(provider, CodexProvider):
@@ -3044,6 +3202,8 @@ def call(
                     body,
                     model=model,
                     effort=effort_value,
+                    timeout_sec=timeout_sec,
+                    max_stall_sec=max_stall_sec,
                     resume_session_id=resume_session_id,
                     attachments=attachments,
                 )
@@ -3052,6 +3212,8 @@ def call(
                     body,
                     model=model,
                     effort=effort_value,
+                    timeout_sec=timeout_sec,
+                    max_stall_sec=max_stall_sec,
                     resume_session_id=resume_session_id,
                 )
         except ProviderConfigError as e:
@@ -3123,9 +3285,12 @@ def call(
 @click.option(
     "--timeout",
     "timeout_sec",
-    default=None,
+    default=DEFAULT_DISPATCH_TIMEOUT_SEC,
     type=int,
-    help="Wall-clock timeout in seconds for the native review command.",
+    help=(
+        "Wall-clock timeout in seconds for the native review command. "
+        "Default: 1800, scaled up on slow networks."
+    ),
 )
 @click.option(
     "--max-stall-seconds",
@@ -3231,6 +3396,8 @@ def review(
     silent_route: bool,
 ) -> None:
     """Run a read-only code review through a provider's native review mode."""
+    timeout_is_default = _parameter_is_default("timeout_sec")
+    max_stall_is_default = _parameter_is_default("max_stall_sec")
     profile_spec = _load_named_profile(profile)
     provider_id = _resolve_layered_value(provider_id, env_key="CONDUCTOR_WITH")
     tags = _resolve_layered_value(
@@ -3277,7 +3444,6 @@ def review(
         uncommitted=uncommitted,
         cwd=cwd,
     )
-    max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
     max_fallbacks = _validate_max_fallbacks(max_fallbacks)
     prefer_value = _validate_prefer(prefer) if prefer is not None else "best"
 
@@ -3300,6 +3466,14 @@ def review(
             sys.exit(2)
         print_caller_banner(decision.provider, silent=silent_route or as_json)
         _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
+        timeout_sec, max_stall_sec = _scale_dispatch_defaults(
+            provider_id=decision.provider,
+            timeout_sec=timeout_sec,
+            max_stall_sec=max_stall_sec,
+            timeout_is_default=timeout_is_default,
+            max_stall_is_default=max_stall_is_default,
+        )
+        max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
         try:
             response, _fallbacks = _invoke_review_with_fallback(
                 decision,
@@ -3337,6 +3511,14 @@ def review(
         if not ok:
             click.echo(f"conductor: {reason or 'native review is not configured'}", err=True)
             sys.exit(2)
+        timeout_sec, max_stall_sec = _scale_dispatch_defaults(
+            provider_id=provider_id,
+            timeout_sec=timeout_sec,
+            max_stall_sec=max_stall_sec,
+            timeout_is_default=timeout_is_default,
+            max_stall_is_default=max_stall_is_default,
+        )
+        max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
         try:
             response = review_provider.review(
                 body,
@@ -3430,12 +3612,12 @@ def review(
 @click.option(
     "--timeout",
     "timeout_sec",
-    default=None,
+    default=DEFAULT_DISPATCH_TIMEOUT_SEC,
     type=int,
     help=(
-        "Wall-clock timeout in seconds. Default: no timeout — agent sessions "
-        "can run as long as they need. Set explicitly (e.g. --timeout 600) "
-        "for CI or unattended runs that must bound runtime."
+        "Wall-clock timeout in seconds. Default: 1800, scaled up on slow "
+        "networks. Set explicitly (e.g. --timeout 600) for CI or unattended "
+        "runs that need a fixed bound."
     ),
 )
 @click.option(
@@ -3571,6 +3753,8 @@ def exec_cmd(
     allow_short_brief: bool,
 ) -> None:
     """Run a task as an agent session with tool access (exec mode)."""
+    timeout_is_default = _parameter_is_default("timeout_sec")
+    max_stall_is_default = _parameter_is_default("max_stall_sec")
     profile_spec = _load_named_profile(profile)
     provider_id = _resolve_layered_value(provider_id, env_key="CONDUCTOR_WITH")
     tags = _resolve_layered_value(
@@ -3631,7 +3815,6 @@ def exec_cmd(
     )
     sandbox_value = _validate_sandbox(sandbox, warn=sandbox is not None)
     effort_value = _parse_effort(effort)
-    max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
     start_timeout_sec = _normalize_start_timeout_sec(start_timeout_sec)
 
     decision: RouteDecision | None = None
@@ -3668,6 +3851,14 @@ def exec_cmd(
         _emit_session_route_decision(session_log, decision)
         print_caller_banner(decision.provider, silent=silent_route or as_json)
         _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
+        timeout_sec, max_stall_sec = _scale_dispatch_defaults(
+            provider_id=decision.provider,
+            timeout_sec=timeout_sec,
+            max_stall_sec=max_stall_sec,
+            timeout_is_default=timeout_is_default,
+            max_stall_is_default=max_stall_is_default,
+        )
+        max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
         if preflight:
             # `provider` may arrive as a Provider object (real `pick()` return)
             # or as a string (test fixtures, and any caller passing the name).
@@ -3748,6 +3939,14 @@ def exec_cmd(
         )
         session_log.bind_provider(provider_id)
         print_caller_banner(provider_id, silent=silent_route or as_json)
+        timeout_sec, max_stall_sec = _scale_dispatch_defaults(
+            provider_id=provider_id,
+            timeout_sec=timeout_sec,
+            max_stall_sec=max_stall_sec,
+            timeout_is_default=timeout_is_default,
+            max_stall_is_default=max_stall_is_default,
+        )
+        max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
         if preflight:
             ok, reason = _run_exec_preflight(provider)
             if not ok:

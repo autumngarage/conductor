@@ -413,8 +413,11 @@ class OllamaProvider:
         model: str | None = None,
         *,
         effort: str | int = "medium",
+        timeout_sec: int | None = None,
+        max_stall_sec: int | None = None,
         resume_session_id: str | None = None,
     ) -> CallResponse:
+        _ = max_stall_sec
         if resume_session_id:
             raise UnsupportedCapability(
                 "ollama has no session model — each /api/chat call is stateless. "
@@ -433,7 +436,8 @@ class OllamaProvider:
 
         start = time.monotonic()
         try:
-            with httpx.Client(timeout=self._timeout_sec) as client:
+            timeout = self._timeout_sec if timeout_sec is None else timeout_sec
+            with httpx.Client(timeout=timeout) as client:
                 resp = self._post_chat_with_model_fallback(
                     client,
                     url,

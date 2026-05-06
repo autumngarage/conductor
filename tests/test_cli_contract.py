@@ -30,6 +30,8 @@ DOCUMENTED_STABLE_FLAGS: frozenset[str] = frozenset(
         "--tags",
         "--prefer",
         "--effort",
+        "--timeout",
+        "--max-stall-seconds",
         "--exclude",
         "--brief",
         "--brief-file",
