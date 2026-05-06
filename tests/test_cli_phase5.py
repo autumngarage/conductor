@@ -3,12 +3,23 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 from click.testing import CliRunner
 
 import conductor.cli as cli_mod
 from conductor.cli import main
+
+
+def _git(repo, *args):
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -716,10 +727,11 @@ def test_doctor_warns_before_next_steps_when_one_integration_file_is_behind(
 
     result = CliRunner().invoke(main, ["doctor"])
     assert result.exit_code == 0, result.output
-    assert "⚠ Integration files behind binary (v0.9.0). Refresh with:" in result.output
+    assert "⚠ Repo integration files behind binary (v0.9.0):" in result.output
+    assert "    AGENTS.md (v0.8.9)" in result.output
     assert "    conductor init -y --remaining" in result.output
     assert (
-        result.output.index("Integration files behind binary")
+        result.output.index("Repo integration files behind binary")
         < result.output.index("Next steps:")
     )
 
@@ -790,6 +802,7 @@ def test_doctor_json_includes_agent_integration_version_skew(
     ai = payload["agent_integration"]
     assert ai["version_skew"] is True
     assert ai["version_skew_files"] == [str(tmp_path / "repo" / "AGENTS.md")]
+    assert ai["repo_version_skew_files"] == [str(tmp_path / "repo" / "AGENTS.md")]
 
 
 def test_doctor_reports_agents_md_when_present(mocker, monkeypatch, tmp_path):
@@ -904,6 +917,79 @@ def test_doctor_json_includes_agent_integration(mocker, monkeypatch, tmp_path):
     assert ai["claude_detected"] is True
     assert ai["claude_home_exists"] is True
     assert ai["managed_files"] == []
+
+
+def test_refresh_consumers_defaults_to_empty():
+    result = CliRunner().invoke(main, ["refresh-consumers"])
+    assert result.exit_code == 0, result.output
+    assert "No consumer repos configured." in result.output
+
+
+def test_refresh_consumers_commits_updated_repo_integration(mocker, tmp_path):
+    _stub_all_unconfigured(mocker)
+    version = cli_mod.__version__.split("+", 1)[0]
+
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    _git(consumer, "init", "-q", "-b", "main")
+    _git(consumer, "config", "user.email", "conductor-test@example.com")
+    _git(consumer, "config", "user.name", "Conductor Test")
+
+    from conductor import agent_wiring
+
+    agent_wiring.wire_agents_md(cwd=consumer, version="0.8.0")
+    _git(consumer, "add", "AGENTS.md")
+    _git(consumer, "commit", "-m", "Initial conductor integration")
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "refresh-consumers",
+            "--paths",
+            str(consumer),
+            "--branch",
+            "conductor-refresh-test",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "committed" in result.output
+    assert "branch: conductor-refresh-test" in result.output
+    assert f"v{version}" in (consumer / "AGENTS.md").read_text(encoding="utf-8")
+    assert _git(consumer, "branch", "--show-current").stdout.strip() == (
+        "conductor-refresh-test"
+    )
+    assert f"Refresh conductor integrations to v{version}" in _git(
+        consumer, "log", "-1", "--pretty=%s"
+    ).stdout
+
+
+def test_refresh_consumers_reads_config_file(mocker, tmp_path):
+    _stub_all_unconfigured(mocker)
+    consumer = tmp_path / "consumer-from-config"
+    consumer.mkdir()
+    _git(consumer, "init", "-q", "-b", "main")
+    _git(consumer, "config", "user.email", "conductor-test@example.com")
+    _git(consumer, "config", "user.name", "Conductor Test")
+    _git(consumer, "commit", "--allow-empty", "-m", "Initial")
+
+    config = tmp_path / "consumers.toml"
+    config.write_text(f'paths = ["{consumer}"]\n', encoding="utf-8")
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "refresh-consumers",
+            "--config-file",
+            str(config),
+            "--branch",
+            "conductor-refresh-config-test",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "committed" in result.output
+    assert (consumer / "AGENTS.md").exists()
 
 
 def test_doctor_warns_when_ollama_default_model_missing(mocker, monkeypatch):
