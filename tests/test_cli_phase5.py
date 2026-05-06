@@ -209,6 +209,31 @@ def test_list_no_fix_line_for_configured_provider(mocker):
     assert rows["codex"]["fix_command"] is not None
 
 
+def test_list_json_includes_tools_field(mocker):
+    """conductor list --json exposes tool-support info per provider (#143)."""
+    _stub_all_unconfigured(mocker)
+    result = CliRunner().invoke(main, ["list", "--json"])
+    assert result.exit_code == 0
+    rows = {r["provider"]: r for r in json.loads(result.output)}
+    # CLI-backed exec providers support all conductor tools.
+    for name in ("claude", "codex", "gemini", "ollama", "openrouter"):
+        assert rows[name]["tools"] == "all", f"{name}: expected tools=all"
+    # HTTP-only providers have no exec tool loop.
+    for name in ("kimi", "deepseek-chat", "deepseek-reasoner"):
+        assert rows[name]["tools"] == "none", f"{name}: expected tools=none"
+
+
+def test_list_text_output_shows_tools_column(mocker):
+    """conductor list text output includes a TOOLS column (#143)."""
+    _stub_all_unconfigured(mocker)
+    result = CliRunner().invoke(main, ["list"])
+    assert result.exit_code == 0
+    assert "TOOLS" in result.output
+    # At least one provider shows "all" and at least one shows "none".
+    assert "all" in result.output
+    assert "none" in result.output
+
+
 # ---------------------------------------------------------------------------
 # smoke
 # ---------------------------------------------------------------------------
