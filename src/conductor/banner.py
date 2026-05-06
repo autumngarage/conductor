@@ -135,10 +135,10 @@ _CALLER_REGISTRY: tuple[tuple[str, str], ...] = (
     ("CLAUDECODE", "Claude Code"),     # verified
     ("SENTINEL", "Sentinel"),          # convention (autumn-garage peer)
     ("TOUCHSTONE", "Touchstone"),      # convention (autumn-garage peer)
-    # ("CURSOR_AGENT", "Cursor"),      # TODO: verify env footprint
-    # ("AIDER_AGENT", "Aider"),        # TODO: verify env footprint
-    # ("CODEX_CLI", "Codex CLI"),      # TODO: verify env footprint
-    # ("GEMINI_CLI", "Gemini CLI"),    # TODO: verify env footprint
+    ("CURSOR_AGENT", "Cursor"),        # verified — Cursor docs: Agent shell marker
+    ("CODEX_THREAD_ID", "Codex CLI"),  # verified — openai/codex injects it into shell tool env
+    ("GEMINI_CLI", "Gemini CLI"),      # verified — gemini-cli sets GEMINI_CLI=1 for shell
+    # ("AIDER_AGENT", "Aider"),        # not verified — shell commands inherit env only
 )
 
 

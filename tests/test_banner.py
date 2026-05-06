@@ -119,6 +119,17 @@ def test_detect_caller_returns_claude_code_when_claudecode_set(monkeypatch):
     assert detect_caller() == "Claude Code"
 
 
+def test_detect_caller_returns_verified_external_callers(monkeypatch):
+    for env_var, caller_name in (
+        ("CURSOR_AGENT", "Cursor"),
+        ("CODEX_THREAD_ID", "Codex CLI"),
+        ("GEMINI_CLI", "Gemini CLI"),
+    ):
+        _strip_caller_env(monkeypatch)
+        monkeypatch.setenv(env_var, "1")
+        assert detect_caller() == caller_name
+
+
 def test_detect_caller_first_match_wins(monkeypatch):
     """When multiple markers are set, the registry's order decides."""
     _strip_caller_env(monkeypatch)
@@ -126,6 +137,14 @@ def test_detect_caller_first_match_wins(monkeypatch):
     monkeypatch.setenv("SENTINEL", "1")
     # Registry orders Claude Code before Sentinel; verify that holds.
     assert detect_caller() == "Claude Code"
+
+
+def test_detect_caller_first_match_wins_for_external_callers(monkeypatch):
+    _strip_caller_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_CLI", "1")
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-id")
+    monkeypatch.setenv("CURSOR_AGENT", "1")
+    assert detect_caller() == "Cursor"
 
 
 def test_print_caller_banner_named_caller_is_attributed(monkeypatch):
