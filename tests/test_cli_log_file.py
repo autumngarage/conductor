@@ -89,6 +89,33 @@ def _write_session_meta(
     )
 
 
+def _write_session_record(
+    root: Path,
+    *,
+    session_id: str,
+    updated_at: datetime,
+    status: str = "finished",
+    provider: str | None = "claude",
+    write_log: bool = True,
+) -> tuple[Path, Path]:
+    _write_session_meta(
+        root,
+        session_id=session_id,
+        updated_at=updated_at,
+        status=status,
+        provider=provider,
+    )
+    sessions_root = root / "conductor" / "sessions"
+    meta_path = sessions_root / f"run-{session_id}.meta.json"
+    log_path = sessions_root / f"{session_id}.ndjson"
+    if write_log:
+        log_path.write_text(
+            json.dumps({"ts": updated_at.isoformat(), "event": "test"}) + "\n",
+            encoding="utf-8",
+        )
+    return meta_path, log_path
+
+
 def _seed_session_filter_records(root: Path) -> datetime:
     now = datetime.now(UTC)
     for index in range(32):
@@ -406,6 +433,154 @@ def test_sessions_list_json_returns_parseable_array(
         "provider",
         "explicit_log_path",
     }
+
+
+def test_sessions_prune_defaults_to_dry_run_older_than_thirty_days(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    base = datetime.now(UTC) - timedelta(days=40)
+    for index in range(52):
+        _write_session_record(
+            tmp_path,
+            session_id=f"old-sess-{index:02d}",
+            updated_at=base + timedelta(minutes=index),
+        )
+
+    result = CliRunner().invoke(main, ["sessions", "prune"])
+
+    assert result.exit_code == 0, result.output
+    assert "session prune (dry-run): would delete 4 paths across 2 items" in result.output
+    assert "criteria: older-than=30d, protect-last=50, never status=running" in result.output
+    assert "old-sess-00" in result.output
+    assert "old-sess-01" in result.output
+    assert (tmp_path / "conductor" / "sessions" / "old-sess-00.ndjson").exists()
+
+
+def test_sessions_prune_execute_deletes_only_matching_old_finished_records(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    now = datetime.now(UTC)
+    old_meta, old_log = _write_session_record(
+        tmp_path,
+        session_id="old-finished",
+        updated_at=now - timedelta(days=8),
+    )
+    recent_meta, recent_log = _write_session_record(
+        tmp_path,
+        session_id="recent-finished",
+        updated_at=now - timedelta(hours=1),
+    )
+    running_meta, running_log = _write_session_record(
+        tmp_path,
+        session_id="old-running",
+        updated_at=now - timedelta(days=8),
+        status="running",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["sessions", "prune", "--older-than", "7d", "--protect-last", "0", "--execute"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert not old_meta.exists()
+    assert not old_log.exists()
+    assert recent_meta.exists()
+    assert recent_log.exists()
+    assert running_meta.exists()
+    assert running_log.exists()
+
+
+def test_sessions_prune_protects_running_and_latest_records_by_default(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    base = datetime.now(UTC) - timedelta(days=40)
+    for index in range(52):
+        _write_session_record(
+            tmp_path,
+            session_id=f"protected-sess-{index:02d}",
+            updated_at=base + timedelta(minutes=index),
+        )
+    running_meta, running_log = _write_session_record(
+        tmp_path,
+        session_id="very-old-running",
+        updated_at=base - timedelta(days=1),
+        status="running",
+    )
+
+    result = CliRunner().invoke(main, ["sessions", "prune", "--execute"])
+
+    assert result.exit_code == 0, result.output
+    sessions_root = tmp_path / "conductor" / "sessions"
+    assert not (sessions_root / "protected-sess-00.ndjson").exists()
+    assert not (sessions_root / "run-protected-sess-00.meta.json").exists()
+    assert not (sessions_root / "protected-sess-01.ndjson").exists()
+    assert (sessions_root / "protected-sess-02.ndjson").exists()
+    assert (sessions_root / "run-protected-sess-02.meta.json").exists()
+    assert running_meta.exists()
+    assert running_log.exists()
+
+
+def test_sessions_prune_json_reports_summary_and_done_status_alias(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _write_session_record(
+        tmp_path,
+        session_id="old-done",
+        updated_at=datetime.now(UTC) - timedelta(days=2),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "sessions",
+            "prune",
+            "--status",
+            "done",
+            "--older-than",
+            "1d",
+            "--protect-last",
+            "0",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["dry_run"] is True
+    assert payload["total_items"] == 1
+    assert payload["items"][0]["session_id"] == "old-done"
+    assert payload["items"][0]["status"] == "finished"
+
+
+def test_sessions_prune_execute_tolerates_missing_log_files(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    meta_path, log_path = _write_session_record(
+        tmp_path,
+        session_id="missing-log",
+        updated_at=datetime.now(UTC) - timedelta(days=2),
+        write_log=False,
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["sessions", "prune", "--older-than", "1d", "--protect-last", "0", "--execute"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert not meta_path.exists()
+    assert not log_path.exists()
 
 
 def test_exec_provider_stall_records_terminal_session_metadata(

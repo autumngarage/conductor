@@ -25,8 +25,8 @@ import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 import click
@@ -119,6 +119,7 @@ from conductor.session_log import (
     find_session_record,
     latest_active_session,
     list_session_records,
+    sessions_dir,
 )
 from conductor.wizard import run_init_wizard
 
@@ -143,9 +144,9 @@ GIT_RECOVERY_COMMAND_TIMEOUT_SEC = 2.0
 GIT_RECOVERY_MAX_COMMITS = 5
 GIT_RECOVERY_MAX_STATUS_PATHS = 8
 NATIVE_REVIEW_TAG = "code-review"
+DEFAULT_SESSION_PRUNE_OLDER_THAN = "30d"
+DEFAULT_SESSION_PRUNE_PROTECT_LAST = 50
 
-if TYPE_CHECKING:
-    from datetime import datetime
 DEFAULT_REVIEW_MAX_FALLBACKS = 3
 DEFAULT_COUNCIL_ROUNDS = 1
 DEFAULT_COUNCIL_TIMEOUT_SEC = 180
@@ -166,6 +167,35 @@ class CouncilCaps:
     timeout_sec: int | None
     max_output_tokens: int | None
     max_cost_usd: float | None
+
+
+@dataclass(frozen=True)
+class SessionPrunePath:
+    path: Path
+    size_bytes: int
+    deleted: bool = False
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class SessionPruneItem:
+    kind: str
+    session_id: str | None
+    status: str | None
+    updated_at: str
+    paths: tuple[SessionPrunePath, ...]
+
+
+@dataclass(frozen=True)
+class SessionPrunePlan:
+    dry_run: bool
+    older_than: str | None
+    keep_last: int | None
+    protect_last: int
+    total_items: int
+    total_paths: int
+    total_bytes: int
+    items: tuple[SessionPruneItem, ...]
 
 
 # --------------------------------------------------------------------------- #
@@ -5948,6 +5978,69 @@ def sessions_list(
         )
 
 
+@sessions.command("prune")
+@click.option(
+    "--older-than",
+    default=DEFAULT_SESSION_PRUNE_OLDER_THAN,
+    show_default=True,
+    help="Prune sessions older than a relative age like 1d, 7d, or 24h.",
+)
+@click.option(
+    "--keep-last",
+    type=click.IntRange(min=0),
+    default=None,
+    help="Keep the N most recent sessions and prune older sessions regardless of age.",
+)
+@click.option(
+    "--protect-last",
+    type=click.IntRange(min=0),
+    default=DEFAULT_SESSION_PRUNE_PROTECT_LAST,
+    show_default=True,
+    help="Never prune the N most recent sessions unless --keep-last is set.",
+)
+@click.option(
+    "--status",
+    "status_filter",
+    default=None,
+    help="Only prune sessions with this status. 'done' is accepted as 'finished'.",
+)
+@click.option(
+    "--execute",
+    is_flag=True,
+    default=False,
+    help="Delete files. Without this flag, prune is a dry-run.",
+)
+@click.option("--json", "as_json", is_flag=True, default=False)
+def sessions_prune(
+    older_than: str,
+    keep_last: int | None,
+    protect_last: int,
+    status_filter: str | None,
+    execute: bool,
+    as_json: bool,
+) -> None:
+    """Delete old session logs and related cache artifacts."""
+    try:
+        plan = _build_session_prune_plan(
+            older_than=older_than,
+            keep_last=keep_last,
+            protect_last=protect_last,
+            status_filter=status_filter,
+            dry_run=not execute,
+        )
+    except ValueError as e:
+        raise click.UsageError(str(e)) from e
+
+    if execute:
+        plan = _execute_session_prune_plan(plan)
+
+    if as_json:
+        click.echo(json.dumps(asdict(plan), default=str, indent=2))
+        return
+
+    _print_session_prune_plan(plan)
+
+
 def _validate_session_filter(
     name: str,
     value: str | None,
@@ -5976,6 +6069,273 @@ def _filter_session_records(
             continue
         filtered.append(record)
     return filtered
+
+
+def _build_session_prune_plan(
+    *,
+    older_than: str,
+    keep_last: int | None,
+    protect_last: int,
+    status_filter: str | None,
+    dry_run: bool,
+) -> SessionPrunePlan:
+    records = list_session_records()
+    normalized_status = _normalize_session_prune_status(status_filter)
+    cutoff = None if keep_last is not None else since_cutoff(older_than)
+    protected_records = set(_protected_session_record_keys(records, keep_last, protect_last))
+    seen_paths: set[Path] = set()
+    items: list[SessionPruneItem] = []
+
+    for record in records:
+        if record.status == "running":
+            continue
+        if normalized_status is not None and record.status != normalized_status:
+            continue
+        if record.run_id in protected_records or record.session_id in protected_records:
+            continue
+        if (
+            keep_last is None
+            and cutoff is not None
+            and parse_timestamp(record.updated_at) >= cutoff
+        ):
+            continue
+        paths = _session_prune_record_paths(record, seen_paths)
+        if not paths:
+            continue
+        items.append(
+            SessionPruneItem(
+                kind="session",
+                session_id=record.session_id,
+                status=record.status,
+                updated_at=record.updated_at,
+                paths=paths,
+            )
+        )
+
+    if normalized_status is None:
+        items.extend(
+            _session_prune_artifact_items(
+                cutoff=cutoff,
+                keep_last=keep_last,
+                protect_last=protect_last,
+                seen_paths=seen_paths,
+            )
+        )
+
+    return _session_prune_plan(
+        dry_run=dry_run,
+        older_than=None if keep_last is not None else older_than,
+        keep_last=keep_last,
+        protect_last=keep_last if keep_last is not None else protect_last,
+        items=items,
+    )
+
+
+def _normalize_session_prune_status(status: str | None) -> str | None:
+    if status is None:
+        return None
+    if status == "done":
+        return "finished"
+    return status
+
+
+def _protected_session_record_keys(
+    records: list[SessionRecord],
+    keep_last: int | None,
+    protect_last: int,
+) -> set[str]:
+    protected_count = keep_last if keep_last is not None else protect_last
+    if protected_count <= 0:
+        return set()
+    protected: set[str] = set()
+    for record in records[-protected_count:]:
+        protected.add(record.run_id)
+        protected.add(record.session_id)
+    return protected
+
+
+def _session_prune_record_paths(
+    record: SessionRecord,
+    seen_paths: set[Path],
+) -> tuple[SessionPrunePath, ...]:
+    cache_dir = offline_mode._cache_dir()
+    codex_artifacts = [
+        path
+        for path in (
+            cache_dir / f"codex-exec-{record.session_id}.json",
+            cache_dir / f"codex-exec-{record.run_id}.json",
+        )
+        if path.exists()
+    ]
+    candidates = [
+        sessions_dir() / f"{record.run_id}.meta.json",
+        record.log_path,
+        *codex_artifacts,
+    ]
+    return _session_prune_paths(candidates, seen_paths=seen_paths)
+
+
+def _session_prune_artifact_items(
+    *,
+    cutoff: datetime | None,
+    keep_last: int | None,
+    protect_last: int,
+    seen_paths: set[Path],
+) -> list[SessionPruneItem]:
+    artifacts = _session_prune_cache_artifacts(seen_paths)
+    protected_count = keep_last if keep_last is not None else protect_last
+    protected = {path for path, _ in artifacts[-protected_count:]} if protected_count else set()
+    items: list[SessionPruneItem] = []
+    for path, updated_at in artifacts:
+        if path in protected:
+            continue
+        if keep_last is None and cutoff is not None and parse_timestamp(updated_at) >= cutoff:
+            continue
+        paths = _session_prune_paths([path], seen_paths=seen_paths)
+        if not paths:
+            continue
+        items.append(
+            SessionPruneItem(
+                kind="artifact",
+                session_id=None,
+                status=None,
+                updated_at=updated_at,
+                paths=paths,
+            )
+        )
+    return items
+
+
+def _session_prune_cache_artifacts(seen_paths: set[Path]) -> list[tuple[Path, str]]:
+    cache_dir = offline_mode._cache_dir()
+    candidates: set[Path] = set()
+    for pattern in ("codex-exec-*.json", "codex-*.json"):
+        candidates.update(cache_dir.glob(pattern))
+    artifacts: list[tuple[Path, str]] = []
+    for path in candidates:
+        if path in seen_paths or not path.is_file():
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except OSError as e:
+            click.echo(f"[conductor] prune: could not stat {path}: {e}", err=True)
+            continue
+        artifacts.append((path, datetime.fromtimestamp(mtime, UTC).isoformat()))
+    return sorted(artifacts, key=lambda item: (item[1], str(item[0])))
+
+
+def _session_prune_paths(
+    paths: list[Path],
+    *,
+    seen_paths: set[Path],
+) -> tuple[SessionPrunePath, ...]:
+    planned: list[SessionPrunePath] = []
+    for path in paths:
+        resolved = path.expanduser()
+        if resolved in seen_paths:
+            continue
+        seen_paths.add(resolved)
+        planned.append(SessionPrunePath(path=resolved, size_bytes=_path_size(resolved)))
+    return tuple(planned)
+
+
+def _path_size(path: Path) -> int:
+    try:
+        if not path.is_file():
+            return 0
+        return path.stat().st_size
+    except OSError as e:
+        click.echo(f"[conductor] prune: could not stat {path}: {e}", err=True)
+        return 0
+
+
+def _session_prune_plan(
+    *,
+    dry_run: bool,
+    older_than: str | None,
+    keep_last: int | None,
+    protect_last: int,
+    items: list[SessionPruneItem],
+) -> SessionPrunePlan:
+    total_paths = sum(len(item.paths) for item in items)
+    total_bytes = sum(path.size_bytes for item in items for path in item.paths)
+    return SessionPrunePlan(
+        dry_run=dry_run,
+        older_than=older_than,
+        keep_last=keep_last,
+        protect_last=protect_last,
+        total_items=len(items),
+        total_paths=total_paths,
+        total_bytes=total_bytes,
+        items=tuple(items),
+    )
+
+
+def _execute_session_prune_plan(plan: SessionPrunePlan) -> SessionPrunePlan:
+    executed_items: list[SessionPruneItem] = []
+    for item in plan.items:
+        executed_paths: list[SessionPrunePath] = []
+        for planned_path in item.paths:
+            try:
+                planned_path.path.unlink(missing_ok=True)
+                click.echo(f"[conductor] prune deleted {planned_path.path}", err=True)
+                executed_paths.append(replace(planned_path, deleted=True))
+            except OSError as e:
+                click.echo(
+                    f"[conductor] prune could not delete {planned_path.path}: {e}",
+                    err=True,
+                )
+                executed_paths.append(replace(planned_path, error=str(e)))
+        executed_items.append(replace(item, paths=tuple(executed_paths)))
+    return _session_prune_plan(
+        dry_run=False,
+        older_than=plan.older_than,
+        keep_last=plan.keep_last,
+        protect_last=plan.protect_last,
+        items=executed_items,
+    )
+
+
+def _print_session_prune_plan(plan: SessionPrunePlan) -> None:
+    mode = "would delete" if plan.dry_run else "deleted"
+    click.echo(
+        f"session prune ({'dry-run' if plan.dry_run else 'execute'}): "
+        f"{mode} {plan.total_paths} paths across {plan.total_items} items "
+        f"({_format_bytes(plan.total_bytes)})"
+    )
+    if plan.keep_last is not None:
+        click.echo(f"criteria: keep-last={plan.keep_last}")
+    else:
+        click.echo(
+            f"criteria: older-than={plan.older_than}, "
+            f"protect-last={plan.protect_last}, never status=running"
+        )
+    if not plan.items:
+        return
+    for item in plan.items:
+        label = item.session_id or item.kind
+        status = item.status or "-"
+        click.echo(f"{label}  {status}  updated={item.updated_at}")
+        for planned_path in item.paths:
+            state = ""
+            if planned_path.error is not None:
+                state = f" error={planned_path.error}"
+            elif planned_path.deleted:
+                state = " deleted"
+            click.echo(
+                f"  {_format_bytes(planned_path.size_bytes):>9}  "
+                f"{planned_path.path}{state}"
+            )
+
+
+def _format_bytes(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KiB"
+    if size < 1024 * 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MiB"
+    return f"{size / (1024 * 1024 * 1024):.1f} GiB"
 
 
 @sessions.command("tail")
