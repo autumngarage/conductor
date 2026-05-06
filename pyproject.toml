@@ -11,6 +11,7 @@ keywords = ["ai", "llm", "router", "cli", "moonshot", "kimi", "claude", "codex",
 dependencies = [
     "click>=8.1.0",
     "httpx>=0.28.0",
+    "packaging>=24.0",
     "rich>=13.9.0",
     "tomli>=2.0.0; python_version<'3.11'",
 ]
