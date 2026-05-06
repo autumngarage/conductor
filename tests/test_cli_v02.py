@@ -24,6 +24,7 @@ import respx
 from click.testing import CliRunner
 
 from conductor.cli import SANDBOX_DEPRECATION_WARNING, main
+from conductor.network_profile import NetworkProfile
 from conductor.openrouter_model_stacks import OPENROUTER_CODING_HIGH
 from conductor.providers import (
     CallResponse,
@@ -1515,8 +1516,15 @@ def test_exec_cli_default_passes_no_timeout_to_provider(mocker):
     """`conductor exec --with codex --task ...` (no --timeout) must hand
     the provider `timeout_sec=None` so subprocess.run runs unbounded.
     Regression for the 22-minute lost-work bug where the CLI silently
-    capped exec at 300s and the partial session_id was never recoverable."""
+    capped exec at 300s and the partial session_id was never recoverable.
+    Network scaling must NOT materialize a timeout where there wasn't one
+    — apply_scaling(None, profile) returns None.
+    """
     _stub_all_configured(mocker, {"codex"})
+    mocker.patch(
+        "conductor.cli.get_network_profile",
+        return_value=NetworkProfile(310, "https://api.openai.com", 1_000),
+    )
     exec_mock = mocker.patch.object(
         CodexProvider, "exec", return_value=_fake_response("codex")
     )

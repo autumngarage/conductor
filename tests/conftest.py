@@ -16,6 +16,9 @@ git-environment``).
 from __future__ import annotations
 
 import os
+import time
+
+import pytest
 
 for _var in (
     "GIT_DIR",
@@ -26,3 +29,19 @@ for _var in (
     "GIT_NAMESPACE",
 ):
     os.environ.pop(_var, None)
+
+
+@pytest.fixture(autouse=True)
+def _fast_cli_network_profile(monkeypatch):
+    """Keep CLI tests off the real network unless they patch this explicitly."""
+    from conductor import cli
+    from conductor.network_profile import NETWORK_PROFILE_FALLBACK_TARGET, NetworkProfile
+
+    def _profile(target: str | None, *, warn=None):
+        return NetworkProfile(
+            rtt_ms=50,
+            target=target or NETWORK_PROFILE_FALLBACK_TARGET,
+            timestamp=time.time(),
+        )
+
+    monkeypatch.setattr(cli, "get_network_profile", _profile)

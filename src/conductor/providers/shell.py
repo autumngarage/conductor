@@ -177,8 +177,11 @@ class ShellProvider:
         model: str | None = None,
         *,
         effort: str | int = "medium",
+        timeout_sec: int | None = None,
+        max_stall_sec: int | None = None,
         resume_session_id: str | None = None,
     ) -> CallResponse:
+        _ = max_stall_sec
         if resume_session_id:
             raise UnsupportedCapability(
                 f"custom provider `{self._spec.name}` is stateless — no session "
@@ -188,7 +191,11 @@ class ShellProvider:
         if not ok:
             raise ProviderConfigError(reason or f"{self._spec.name} not configured")
 
-        return self._invoke(task, effort=effort)
+        return self._invoke(
+            task,
+            effort=effort,
+            timeout_override=timeout_sec if timeout_sec is not None else _USE_DEFAULT,
+        )
 
     def exec(
         self,

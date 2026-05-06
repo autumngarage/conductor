@@ -171,9 +171,10 @@ class OpenRouterProvider:
             return False, f"OpenRouter returned HTTP {resp.status_code}: {resp.text[:200]}"
         return True, None
 
-    def _post_chat(self, payload: dict) -> dict:
+    def _post_chat(self, payload: dict, *, timeout_sec: int | None = None) -> dict:
         try:
-            with httpx.Client(timeout=self._timeout_sec) as client:
+            timeout = self._timeout_sec if timeout_sec is None else timeout_sec
+            with httpx.Client(timeout=timeout) as client:
                 resp = client.post(
                     f"{self._base_url}/chat/completions",
                     headers=self._headers(),
@@ -268,8 +269,11 @@ class OpenRouterProvider:
         exclude: set[str] | frozenset[str] | None = None,
         log_selection: bool = True,
         max_tokens: int | None = None,
+        timeout_sec: int | None = None,
+        max_stall_sec: int | None = None,
         resume_session_id: str | None = None,
     ) -> CallResponse:
+        _ = max_stall_sec
         if resume_session_id:
             raise UnsupportedCapability(
                 "openrouter has no session model — each OpenRouter API call is "
@@ -298,7 +302,7 @@ class OpenRouterProvider:
             payload["max_tokens"] = max(1, max_tokens)
 
         start = time.monotonic()
-        body = self._post_chat(payload)
+        body = self._post_chat(payload, timeout_sec=timeout_sec)
         duration_ms = int((time.monotonic() - start) * 1000)
 
         try:

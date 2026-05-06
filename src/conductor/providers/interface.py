@@ -220,6 +220,8 @@ class Provider(Protocol):
         model: str | None = None,
         *,
         effort: str | int = "medium",
+        timeout_sec: int | None = None,
+        max_stall_sec: int | None = None,
         resume_session_id: str | None = None,
     ) -> CallResponse:
         """Single-turn call. `effort` is a symbolic dial (see EFFORT_LEVELS)
