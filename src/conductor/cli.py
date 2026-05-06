@@ -36,6 +36,7 @@ from conductor import __version__, credentials, offline_mode
 from conductor.banner import print_caller_banner
 from conductor.delegation_ledger import (
     DelegationEvent,
+    DelegationStatus,
     read_delegations,
     record_delegation,
 )
@@ -839,6 +840,33 @@ def _semantic_candidate_exclude_set(
 
 def _semantic_priority(plan: SemanticPlan) -> tuple[str, ...]:
     return tuple(candidate.provider for candidate in plan.candidates)
+
+
+def _requires_strong_code_provider(plan: SemanticPlan) -> bool:
+    return plan.kind == "code" and plan.effort_bucket in {"high", "max"}
+
+
+def _exclude_ollama_from_strong_code_plan(plan: SemanticPlan) -> tuple[SemanticPlan, bool]:
+    if not _requires_strong_code_provider(plan):
+        return plan, False
+    candidates = tuple(
+        candidate for candidate in plan.candidates if candidate.provider != "ollama"
+    )
+    if len(candidates) == len(plan.candidates):
+        return plan, False
+    return replace(plan, candidates=candidates), True
+
+
+def _format_strong_code_no_fallback_error(
+    plan: SemanticPlan,
+    provider: str,
+    err: Exception,
+) -> str:
+    return (
+        f"conductor: no usable fallback for --kind code --effort {plan.effort_bucket} "
+        f"after primary {provider} failed ({err}).\n"
+        "           Configure another frontier provider, or relax --effort to medium."
+    )
 
 
 def _format_semantic_plan_line(plan: SemanticPlan) -> str:
@@ -2219,7 +2247,7 @@ def _delegation_tags(
     return []
 
 
-def _delegation_status_from_error(error: Exception | str) -> str:
+def _delegation_status_from_error(error: Exception | str) -> DelegationStatus:
     if isinstance(error, ProviderStalledError):
         text = str(error).lower()
         if "timed out" in text or "timeout" in text:
@@ -2857,6 +2885,10 @@ def ask(
         offline_mode.set_active()
         plan = with_candidate_override(plan, provider="ollama")
 
+    excluded_ollama = False
+    if offline is not True:
+        plan, excluded_ollama = _exclude_ollama_from_strong_code_plan(plan)
+
     if kind == "council" and plan.candidates[0].provider != "openrouter":
         raise click.UsageError("council always routes through OpenRouter.")
 
@@ -2883,6 +2915,12 @@ def ask(
             "use `conductor exec --with codex --attach ...` instead."
         )
 
+    if excluded_ollama and not silent_route:
+        click.echo(
+            "[conductor] excluding ollama from fallback chain "
+            f"(--kind code --effort {plan.effort_bucket} requires strong reasoning)",
+            err=True,
+        )
     if not (silent_route or as_json):
         click.echo(_format_semantic_plan_line(plan), err=True)
 
@@ -3142,7 +3180,17 @@ def ask(
             semantic_plan=plan,
             session_log=session_log,
         )
-        click.echo(f"conductor: {e}", err=True)
+        if (
+            _requires_strong_code_provider(plan)
+            and len(decision.ranked) == 1
+            and decision.provider == decision.ranked[0].name
+        ):
+            click.echo(
+                _format_strong_code_no_fallback_error(plan, decision.provider, e),
+                err=True,
+            )
+        else:
+            click.echo(f"conductor: {e}", err=True)
         _maybe_echo_stall_recovery_hint(e, cwd=cwd)
         sys.exit(1)
 
