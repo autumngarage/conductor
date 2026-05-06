@@ -41,6 +41,9 @@ OPENROUTER_DEFAULT_MODEL = "openrouter/auto"
 OPENROUTER_REQUEST_TIMEOUT_SEC = 120.0
 OPENROUTER_HEALTH_PROBE_TIMEOUT_SEC = 10.0
 OPENROUTER_MAX_TOOL_ITERATIONS = 10
+# OpenRouter's chat completions API accepts at most three entries in the
+# request-level `models` array.
+OPENROUTER_MODELS_ARRAY_MAX = 3
 OPENROUTER_HTTP_REFERER = "https://github.com/autumngarage/conductor"
 OPENROUTER_X_TITLE = "conductor"
 
@@ -221,7 +224,7 @@ class OpenRouterProvider:
         )
         payload: dict = {}
         if ordered_models:
-            payload["models"] = list(ordered_models)
+            payload["models"] = _openrouter_models_wire_list(ordered_models)
             selected_model = ordered_models[0]
             reasoning = self._reasoning_payload(effort)
             if reasoning is not None:
@@ -241,6 +244,7 @@ class OpenRouterProvider:
             )
             payload.update(selector_payload)
             if "models" in payload:
+                payload["models"] = _openrouter_models_wire_list(payload["models"])
                 selected_model = str(payload["models"][0])
             else:
                 selected_model = str(payload["model"])
@@ -250,7 +254,7 @@ class OpenRouterProvider:
                 _log_selector_choice(
                     task_tags=task_tags,
                     prefer=prefer,
-                    payload=selector_payload,
+                    payload=payload,
                 )
         else:
             payload["model"] = selected_model
@@ -926,6 +930,10 @@ def _reasoning_payload(effort: str | int) -> dict[str, str] | None:
     if mapped is None:
         return None
     return {"effort": mapped}
+
+
+def _openrouter_models_wire_list(models: tuple[str, ...] | list[str]) -> list[str]:
+    return list(models[:OPENROUTER_MODELS_ARRAY_MAX])
 
 
 def _log_selector_choice(

@@ -10,7 +10,11 @@ from conductor.openrouter_model_stacks import (
     OPENROUTER_CODING_MAX,
 )
 from conductor.providers.interface import ProviderError
-from conductor.providers.openrouter import OPENROUTER_DEFAULT_MODEL, select_model_for_task
+from conductor.providers.openrouter import (
+    OPENROUTER_DEFAULT_MODEL,
+    OPENROUTER_MODELS_ARRAY_MAX,
+    select_model_for_task,
+)
 
 
 @pytest.fixture
@@ -151,6 +155,9 @@ def test_tool_use_best_and_balanced_use_curated_coding_stack_without_catalog(
     payload = select_model_for_task(["tool-use", "strong-reasoning"], prefer, effort)
 
     assert payload["models"] == list(expected_stack)
+    assert payload["models"][:OPENROUTER_MODELS_ARRAY_MAX] == list(
+        expected_stack[:OPENROUTER_MODELS_ARRAY_MAX]
+    )
     assert payload["models"][0] == "openai/gpt-5.3-codex"
     assert any(model.startswith("openai/") for model in payload["models"])
     assert any(model.startswith("anthropic/") for model in payload["models"])

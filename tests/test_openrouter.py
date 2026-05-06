@@ -17,6 +17,7 @@ from conductor.providers.interface import (
     ProviderConfigError,
     ProviderError,
     ProviderExecutionError,
+    ProviderHTTPError,
     UnsupportedCapability,
 )
 from conductor.providers.kimi import KimiProvider
@@ -24,6 +25,7 @@ from conductor.providers.openrouter import (
     OPENROUTER_API_KEY_ENV,
     OPENROUTER_DEFAULT_MODEL,
     OPENROUTER_MAX_TOOL_ITERATIONS,
+    OPENROUTER_MODELS_ARRAY_MAX,
     OpenRouterProvider,
 )
 
@@ -263,15 +265,25 @@ def test_call_sends_ordered_models_stack(configured):
         router.post("/chat/completions").mock(side_effect=_record)
         OpenRouterProvider().call(
             "hi",
-            models=("google/gemini-flash-latest", "moonshotai/kimi-k2.6"),
+            models=(
+                "google/gemini-flash-latest",
+                "moonshotai/kimi-k2.6",
+                "openai/gpt-5.5",
+                "anthropic/claude-sonnet-4.6",
+            ),
             effort="low",
         )
 
     assert captured["payload"] == {
-        "models": ["google/gemini-flash-latest", "moonshotai/kimi-k2.6"],
+        "models": [
+            "google/gemini-flash-latest",
+            "moonshotai/kimi-k2.6",
+            "openai/gpt-5.5",
+        ],
         "messages": [{"role": "user", "content": "hi"}],
         "reasoning": {"effort": "low"},
     }
+    assert len(captured["payload"]["models"]) <= OPENROUTER_MODELS_ARRAY_MAX
 
 
 def test_call_rejects_model_and_models_together(configured):
@@ -508,7 +520,10 @@ def test_exec_with_tools_uses_curated_coding_stack_by_default(configured, tmp_pa
         )
 
     assert response.model == OPENROUTER_CODING_HIGH[0]
-    assert captured["payload"]["models"] == list(OPENROUTER_CODING_HIGH)
+    assert captured["payload"]["models"] == list(
+        OPENROUTER_CODING_HIGH[:OPENROUTER_MODELS_ARRAY_MAX]
+    )
+    assert len(captured["payload"]["models"]) <= OPENROUTER_MODELS_ARRAY_MAX
     assert "model" not in captured["payload"]
     assert "openrouter/auto" not in captured["payload"]["models"]
     assert "google/gemini-2.5-flash-lite" not in captured["payload"]["models"]
@@ -550,8 +565,41 @@ def test_exec_with_tools_and_balanced_prefer_uses_curated_coding_stack(
         )
 
     assert response.model == OPENROUTER_CODING_HIGH[0]
-    assert captured["payload"]["models"] == list(OPENROUTER_CODING_HIGH)
+    assert captured["payload"]["models"] == list(
+        OPENROUTER_CODING_HIGH[:OPENROUTER_MODELS_ARRAY_MAX]
+    )
     assert "model" not in captured["payload"]
+
+
+def test_openrouter_models_array_cap_error_is_clear(configured):
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(
+            return_value=httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "message": "'models' array must have 3 items or fewer.",
+                        "code": 400,
+                    }
+                },
+            )
+        )
+        with pytest.raises(ProviderHTTPError) as excinfo:
+            OpenRouterProvider().call(
+                "hi",
+                models=(
+                    "openai/gpt-5.3-codex",
+                    "openai/gpt-5.5",
+                    "anthropic/claude-sonnet-4.6",
+                    "google/gemini-3.1-pro-preview",
+                ),
+            )
+
+    message = str(excinfo.value)
+    assert "OpenRouter provider failed locally after upstream HTTP 400" in message
+    assert "'models' array must have 3 items or fewer" in message
+    assert "request restrictions/models tried" in message
+    assert "openai/gpt-5.3-codex" in message
 
 
 def test_exec_code_task_no_tool_calls_raises_noop_status(configured, tmp_path):
