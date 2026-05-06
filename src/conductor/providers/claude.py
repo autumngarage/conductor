@@ -16,6 +16,7 @@ import os
 import shutil
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -29,6 +30,7 @@ from conductor.providers.interface import (
     ProviderConfigError,
     ProviderError,
     ProviderHTTPError,
+    ProviderStartupStalledError,
     resolve_effort_tokens,
 )
 from conductor.providers.review_contract import ensure_requested_review_sentinel
@@ -43,6 +45,7 @@ CLAUDE_REQUEST_TIMEOUT_SEC = 180.0
 CLAUDE_AUTH_PROBE_TIMEOUT_SEC = 15.0
 CLAUDE_CALL_FIRST_OUTPUT_TIMEOUT_SEC = 60.0
 CLAUDE_EXEC_FIRST_OUTPUT_TIMEOUT_SEC = 300.0
+CLAUDE_RETRY_ON_STALL_DELAY_SEC = 7.0
 CLAUDE_SETTING_SOURCES = "user,project,local"
 CLAUDE_CLI_ENV = "CONDUCTOR_CLAUDE_CLI"
 CLAUDE_LINKED_WORKTREE_ERROR = (
@@ -53,6 +56,112 @@ CLAUDE_LINKED_WORKTREE_ERROR = (
 # Sentinel: "caller didn't specify a timeout" vs "caller explicitly passed
 # None". The constructor default applies only in the first case.
 _USE_DEFAULT: object = object()
+
+
+@dataclass(frozen=True)
+class ClaudeProcessInfo:
+    pid: int
+    ppid: int | None
+    command: str
+
+
+@dataclass(frozen=True)
+class ClaudeStateProbe:
+    live_processes: tuple[ClaudeProcessInfo, ...]
+    lock_files: tuple[Path, ...]
+    probe_errors: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict:
+        return {
+            "live_process_count": len(self.live_processes),
+            "live_processes": [
+                {"pid": proc.pid, "ppid": proc.ppid, "command": proc.command}
+                for proc in self.live_processes
+            ],
+            "lock_files": [str(path) for path in self.lock_files],
+            "probe_errors": list(self.probe_errors),
+        }
+
+
+def probe_claude_state() -> ClaudeStateProbe:
+    """Inspect shallow Claude CLI state used to diagnose startup stalls."""
+    errors: list[str] = []
+    processes = _probe_live_claude_processes(errors)
+    lock_files = _probe_claude_lock_files(errors)
+    return ClaudeStateProbe(
+        live_processes=tuple(processes),
+        lock_files=tuple(lock_files),
+        probe_errors=tuple(errors),
+    )
+
+
+def _probe_live_claude_processes(errors: list[str]) -> list[ClaudeProcessInfo]:
+    user = os.environ.get("USER")
+    if not user:
+        errors.append("USER is not set; skipped claude process probe")
+        return []
+    try:
+        returncode, stdout, stderr = _run_ps_for_claude_probe(user)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        errors.append(f"claude process probe failed: {e}")
+        return []
+    if returncode != 0:
+        detail = (stderr or stdout).strip()
+        errors.append(f"claude process probe exited {returncode}: {detail[:200]}")
+        return []
+
+    current_pid = os.getpid()
+    processes: list[ClaudeProcessInfo] = []
+    for line in stdout.splitlines():
+        parsed = _parse_ps_line(line)
+        if parsed is None:
+            continue
+        pid, ppid, command = parsed
+        if pid == current_pid or not _is_claude_command(command):
+            continue
+        processes.append(ClaudeProcessInfo(pid=pid, ppid=ppid, command=command))
+    return processes
+
+
+def _run_ps_for_claude_probe(user: str) -> tuple[int, str, str]:
+    process = _ORIGINAL_POPEN(
+        ["ps", "-u", user, "-o", "pid=,ppid=,command="],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    stdout, stderr = process.communicate(timeout=2)
+    return process.returncode or 0, stdout, stderr
+
+
+def _parse_ps_line(line: str) -> tuple[int, int | None, str] | None:
+    parts = line.strip().split(maxsplit=2)
+    if len(parts) < 3:
+        return None
+    try:
+        pid = int(parts[0])
+    except ValueError:
+        return None
+    try:
+        ppid = int(parts[1])
+    except ValueError:
+        ppid = None
+    return pid, ppid, parts[2]
+
+
+def _is_claude_command(command: str) -> bool:
+    executable = command.split(maxsplit=1)[0]
+    return Path(executable).name == "claude"
+
+
+def _probe_claude_lock_files(errors: list[str]) -> list[Path]:
+    claude_dir = Path.home() / ".claude"
+    try:
+        candidates = [*claude_dir.glob("*.lock"), *claude_dir.glob("*.tmp")]
+    except OSError as e:
+        errors.append(f"claude lock-file probe failed: {e}")
+        return []
+    return sorted(path for path in candidates if path.is_file())
 
 
 class ClaudeProvider:
@@ -433,6 +542,7 @@ class ClaudeProvider:
         start_timeout_sec: float | None = None,
         resume_session_id: str | None = None,
         session_log: SessionLog | None = None,
+        retry_on_stall: int = 0,
     ) -> CallResponse:
         # Claude's `--allowedTools` is fine-grained; passing an empty set
         # is effectively "no tools permitted" (single-turn).
@@ -450,6 +560,7 @@ class ClaudeProvider:
             resume_session_id=resume_session_id,
             live_auth_capture=True,
             session_log=session_log,
+            retry_on_stall=retry_on_stall,
         )
 
     def _run(
@@ -467,6 +578,7 @@ class ClaudeProvider:
         resume_session_id: str | None = None,
         live_auth_capture: bool = False,
         session_log: SessionLog | None = None,
+        retry_on_stall: int = 0,
     ) -> CallResponse:
         # Cheap PATH check only on the hot path — auth state surfaces as a
         # CLI exit failure below if the user installed but didn't log in.
@@ -514,59 +626,19 @@ class ClaudeProvider:
         start = time.monotonic()
         tracker = AuthPromptTracker(self.name, session_log=session_log)
         try:
-            effective_cwd = self._effective_cwd(cwd)
-            proc_env = self._build_proc_env(env_overrides, effective_cwd=effective_cwd)
-            first_output_timeout_sec = self._effective_first_output_timeout(
-                start_timeout_sec
-            )
-            if session_log is not None:
-                session_log.emit(
-                    "provider_diagnostic",
-                    {
-                        "provider": self.name,
-                        "check": "claude_exec_watchdogs",
-                        "first_output_timeout_sec": first_output_timeout_sec,
-                        "max_stall_sec": max_stall_sec,
-                    },
-                )
-            self._emit_project_settings_diagnostic(
-                effective_cwd=effective_cwd,
-                sandbox_permission_mode=permission_mode,
-                session_log=session_log,
-            )
-            self._reject_mutating_linked_worktree(
-                effective_cwd=effective_cwd,
+            result = self._run_with_optional_startup_retry(
+                args=args,
+                cwd=cwd,
+                env_overrides=env_overrides,
                 permission_mode=permission_mode,
+                timeout=timeout,
+                max_stall_sec=max_stall_sec,
+                start_timeout_sec=start_timeout_sec,
+                live_auth_capture=live_auth_capture,
                 session_log=session_log,
+                tracker=tracker,
+                retry_on_stall=retry_on_stall,
             )
-            if live_auth_capture:
-                result = run_subprocess_with_live_stderr(
-                    args=args,
-                    cwd=str(effective_cwd) if effective_cwd is not None else None,
-                    env=proc_env,
-                    timeout=timeout,
-                    max_stall_sec=max_stall_sec,
-                    first_output_timeout_sec=first_output_timeout_sec,
-                    provider_name=self.name,
-                    session_log=session_log,
-                    tracker=tracker,
-                    popen_factory=subprocess.Popen,
-                )
-            else:
-                completed = subprocess.run(
-                    args,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    cwd=str(effective_cwd) if effective_cwd is not None else None,
-                    env=proc_env,
-                )
-                result = CapturedProcessResult(
-                    returncode=completed.returncode,
-                    stdout=completed.stdout,
-                    stderr=completed.stderr,
-                    duration_ms=int((time.monotonic() - start) * 1000),
-                )
         except subprocess.TimeoutExpired as e:
             elapsed = time.monotonic() - start
             raise ProviderError(
@@ -610,6 +682,182 @@ class ClaudeProvider:
             session_id=data.get("session_id"),
             raw=data,
             auth_prompts=tracker.prompts or None,
+        )
+
+    def _run_with_optional_startup_retry(
+        self,
+        *,
+        args: list[str],
+        cwd: str | None,
+        env_overrides: dict[str, str],
+        permission_mode: str | None,
+        timeout: float | None,
+        max_stall_sec: int | None,
+        start_timeout_sec: float | None,
+        live_auth_capture: bool,
+        session_log: SessionLog | None,
+        tracker: AuthPromptTracker,
+        retry_on_stall: int,
+    ) -> CapturedProcessResult:
+        effective_cwd = self._effective_cwd(cwd)
+        proc_env = self._build_proc_env(env_overrides, effective_cwd=effective_cwd)
+        first_output_timeout_sec = self._effective_first_output_timeout(
+            start_timeout_sec
+        )
+        if session_log is not None:
+            session_log.emit(
+                "provider_diagnostic",
+                {
+                    "provider": self.name,
+                    "check": "claude_exec_watchdogs",
+                    "first_output_timeout_sec": first_output_timeout_sec,
+                    "max_stall_sec": max_stall_sec,
+                    "retry_on_stall": retry_on_stall,
+                },
+            )
+        self._emit_project_settings_diagnostic(
+            effective_cwd=effective_cwd,
+            sandbox_permission_mode=permission_mode,
+            session_log=session_log,
+        )
+        self._reject_mutating_linked_worktree(
+            effective_cwd=effective_cwd,
+            permission_mode=permission_mode,
+            session_log=session_log,
+        )
+        if not live_auth_capture:
+            start = time.monotonic()
+            completed = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=str(effective_cwd) if effective_cwd is not None else None,
+                env=proc_env,
+            )
+            return CapturedProcessResult(
+                returncode=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+                duration_ms=int((time.monotonic() - start) * 1000),
+            )
+
+        max_attempts = 1 + max(0, retry_on_stall)
+        attempt = 1
+        overall_start = time.monotonic()
+        while True:
+            attempt_timeout = self._remaining_timeout(
+                timeout,
+                start=overall_start,
+                args=args,
+            )
+            try:
+                return run_subprocess_with_live_stderr(
+                    args=args,
+                    cwd=str(effective_cwd) if effective_cwd is not None else None,
+                    env=proc_env,
+                    timeout=attempt_timeout,
+                    max_stall_sec=max_stall_sec,
+                    first_output_timeout_sec=first_output_timeout_sec,
+                    provider_name=self.name,
+                    session_log=session_log,
+                    tracker=tracker,
+                    popen_factory=subprocess.Popen,
+                )
+            except ProviderStartupStalledError as e:
+                probe = probe_claude_state()
+                if attempt >= max_attempts:
+                    raise self._startup_stall_with_diagnostic(
+                        e,
+                        probe=probe,
+                        attempts=attempt,
+                        retry_on_stall=retry_on_stall,
+                    ) from e
+                if session_log is not None:
+                    session_log.emit(
+                        "provider_diagnostic",
+                        {
+                            "provider": self.name,
+                            "check": "claude_startup_stall_retry",
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            "delay_sec": CLAUDE_RETRY_ON_STALL_DELAY_SEC,
+                            "probe": probe.as_dict(),
+                        },
+                    )
+                self._sleep_before_startup_retry(
+                    timeout,
+                    start=overall_start,
+                    args=args,
+                )
+                attempt += 1
+
+    def _remaining_timeout(
+        self,
+        timeout: float | None,
+        *,
+        start: float,
+        args: list[str],
+    ) -> float | None:
+        if timeout is None:
+            return None
+        remaining = timeout - (time.monotonic() - start)
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(cmd=args, timeout=timeout)
+        return remaining
+
+    def _sleep_before_startup_retry(
+        self,
+        timeout: float | None,
+        *,
+        start: float,
+        args: list[str],
+    ) -> None:
+        if timeout is None:
+            time.sleep(CLAUDE_RETRY_ON_STALL_DELAY_SEC)
+            return
+        remaining = timeout - (time.monotonic() - start)
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(cmd=args, timeout=timeout)
+        time.sleep(min(CLAUDE_RETRY_ON_STALL_DELAY_SEC, remaining))
+
+    def _startup_stall_with_diagnostic(
+        self,
+        error: ProviderStartupStalledError,
+        *,
+        probe: ClaudeStateProbe,
+        attempts: int,
+        retry_on_stall: int,
+    ) -> ProviderStartupStalledError:
+        diagnostic = probe.as_dict()
+        diagnostic["attempts"] = attempts
+        diagnostic["retry_on_stall"] = retry_on_stall
+        process_count = len(probe.live_processes)
+        pids = [str(proc.pid) for proc in probe.live_processes[:8]]
+        pid_text = f" (PIDs: {', '.join(pids)})" if pids else ""
+        lock_text = (
+            f" Lock/tmp files in ~/.claude: {', '.join(diagnostic['lock_files'])}."
+            if diagnostic["lock_files"]
+            else " No *.lock or *.tmp files found directly under ~/.claude."
+        )
+        recovery_text = (
+            " Retry attempts were exhausted."
+            if retry_on_stall
+            else " Or add `--retry-on-stall 1` to allow conductor to re-spawn."
+        )
+        message = (
+            f"conductor: claude exec stalled at first_output "
+            f"({error.timeout_sec:g}s). Detected {process_count} other live "
+            f"`claude` processes{pid_text}. Likely cause: claude CLI auth-lock "
+            "or session-state contention during startup."
+            f"{lock_text} Reduce parallel claude exec sessions to <= 2."
+            f"{recovery_text}"
+        )
+        return ProviderStartupStalledError(
+            provider=error.provider,
+            timeout_sec=error.timeout_sec,
+            message=message,
+            diagnostic=diagnostic,
         )
 
     def _effective_cwd(self, cwd: str | None) -> Path | None:

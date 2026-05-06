@@ -1028,6 +1028,7 @@ def _invoke_with_fallback(
     max_stall_sec: int | None,
     start_timeout_sec: float | None,
     silent: bool,
+    retry_on_stall: int = 0,
     resume_session_id: str | None = None,
     session_log: SessionLog | None = None,
     models_by_provider: dict[str, tuple[str, ...]] | None = None,
@@ -1156,6 +1157,7 @@ def _invoke_with_fallback(
                         start_timeout_sec=start_timeout_sec,
                         resume_session_id=resume_session_id,
                         session_log=session_log,
+                        retry_on_stall=retry_on_stall,
                     )
                 elif isinstance(provider, CodexProvider):
                     response = provider.exec(
@@ -3120,13 +3122,14 @@ def ask(
             tools=tools_set,
             sandbox=sandbox_value,
             cwd=cwd,
-                timeout_sec=timeout_sec,
-                max_stall_sec=max_stall_sec,
-                start_timeout_sec=None,
-                silent=silent_route or as_json,
-                session_log=session_log,
-                models_by_provider=models_by_provider,
-                attachments=attachments,
+            timeout_sec=timeout_sec,
+            max_stall_sec=max_stall_sec,
+            start_timeout_sec=None,
+            retry_on_stall=0,
+            silent=silent_route or as_json,
+            session_log=session_log,
+            models_by_provider=models_by_provider,
+            attachments=attachments,
         )
     except UnsupportedCapability as e:
         if session_log is not None:
@@ -3464,6 +3467,7 @@ def call(
                 timeout_sec=timeout_sec,
                 max_stall_sec=max_stall_sec,
                 start_timeout_sec=None,
+                retry_on_stall=0,
                 silent=silent_route or as_json,
                 attachments=attachments,
             )
@@ -4045,6 +4049,16 @@ def review(
     ),
 )
 @click.option(
+    "--retry-on-stall",
+    default=0,
+    type=click.IntRange(min=0),
+    help=(
+        "Claude exec only: retry this many times if the provider stalls before "
+        "its first output byte. Never retries after first output, to avoid "
+        "duplicating side effects."
+    ),
+)
+@click.option(
     "--task",
     default=None,
     help="The task / prompt. Reads stdin if omitted.\n"
@@ -4138,6 +4152,7 @@ def exec_cmd(
     timeout_sec: int | None,
     max_stall_sec: int | None,
     start_timeout_sec: float | None,
+    retry_on_stall: int,
     task: str | None,
     task_file: str | None,
     brief: str | None,
@@ -4301,6 +4316,7 @@ def exec_cmd(
                 timeout_sec=timeout_sec,
                 max_stall_sec=max_stall_sec,
                 start_timeout_sec=start_timeout_sec,
+                retry_on_stall=retry_on_stall,
                 silent=silent_route or as_json,
                 resume_session_id=resume_session_id,
                 session_log=session_log,
@@ -4450,6 +4466,7 @@ def exec_cmd(
                     start_timeout_sec=start_timeout_sec,
                     resume_session_id=resume_session_id,
                     session_log=session_log,
+                    retry_on_stall=retry_on_stall,
                 )
             elif isinstance(provider, CodexProvider):
                 response = provider.exec(
