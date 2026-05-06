@@ -938,6 +938,7 @@ class _FakePopen:
         stderr_reader_error: BaseException | None = None,
     ) -> None:
         self.args: list[str] | None = None
+        self.cwd: str | Path | None = None
         self.env: dict[str, str] | None = None
         self.returncode: int | None = None
         self.terminated = False
@@ -995,6 +996,7 @@ class _FakePopen:
 def _patch_codex_popen(mocker, fake: _FakePopen):
     def factory(args, **kwargs):
         fake.args = args
+        fake.cwd = kwargs.get("cwd")
         fake.env = kwargs.get("env")
         return fake
 
@@ -1486,6 +1488,45 @@ def test_codex_exec_ignores_conductor_sandbox_modes(mocker, conductor_sandbox):
     assert fake.args is not None
     assert "--sandbox" in fake.args
     assert fake.args[fake.args.index("--sandbox") + 1] == "danger-full-access"
+
+
+def test_codex_exec_worktree_cwd_allows_git_add_and_commit(mocker, tmp_path: Path):
+    _repo, worktree = _repo_with_linked_worktree(tmp_path)
+    git_pointer = worktree / ".git"
+    assert git_pointer.is_file()
+    gitdir = Path(git_pointer.read_text(encoding="utf-8").split(":", 1)[1].strip())
+    assert gitdir.is_dir()
+    assert "worktrees" in gitdir.parts
+
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    fake = _FakePopen(
+        stdout_schedule=[(0, line) for line in CODEX_NDJSON.splitlines(keepends=True)]
+    )
+    real_popen = subprocess.Popen
+
+    def factory(args, **kwargs):
+        if args[0] == "git":
+            return real_popen(args, **kwargs)
+        fake.args = args
+        fake.cwd = kwargs.get("cwd")
+        fake.env = kwargs.get("env")
+        assert fake.cwd == str(worktree)
+
+        changed = worktree / "codex-change.txt"
+        changed.write_text("changed by codex\n", encoding="utf-8")
+        _git(worktree, "add", "codex-change.txt")
+        _git(worktree, "commit", "-m", "codex worktree change")
+        return fake
+
+    mocker.patch("conductor.providers.codex.subprocess.Popen", side_effect=factory)
+
+    CodexProvider().exec("hi", sandbox="workspace-write", cwd=str(worktree))
+
+    assert fake.args is not None
+    assert fake.args[fake.args.index("--sandbox") + 1] == "danger-full-access"
+    assert fake.cwd == str(worktree)
+    head_subject = _git(worktree, "log", "-1", "--pretty=%s").stdout.strip()
+    assert head_subject == "codex worktree change"
 
 
 def test_codex_exec_inherits_auth_and_home_env(monkeypatch, mocker):
