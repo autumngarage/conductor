@@ -520,13 +520,22 @@ def test_ask_code_high_falls_back_immediately_to_openrouter_on_quota(mocker):
 
 
 def test_ask_code_high_falls_back_to_openrouter_exec_before_ollama(mocker):
-    _stub_all_configured(mocker, {"openrouter", "ollama"})
+    from conductor.providers.interface import ProviderHTTPError
+
+    _stub_all_configured(mocker, {"codex", "openrouter", "ollama"})
+    codex_exec = mocker.patch.object(
+        CodexProvider,
+        "exec",
+        side_effect=ProviderHTTPError("codex reported rate limit: out of tokens"),
+    )
     exec_mock = mocker.patch.object(
         OpenRouterProvider,
         "exec",
         return_value=_fake_response("openrouter", "openrouter/auto"),
     )
-    mocker.patch.object(OllamaProvider, "exec", return_value=_fake_response("ollama"))
+    ollama_exec = mocker.patch.object(
+        OllamaProvider, "exec", return_value=_fake_response("ollama")
+    )
 
     result = CliRunner().invoke(
         main,
@@ -544,30 +553,33 @@ def test_ask_code_high_falls_back_to_openrouter_exec_before_ollama(mocker):
     )
 
     assert result.exit_code == 0, result.output
+    assert codex_exec.called
     assert exec_mock.called
+    assert not ollama_exec.called
     assert exec_mock.call_args.kwargs["tools"] == frozenset(
         {"Read", "Grep", "Glob", "Edit", "Write", "Bash"}
     )
     assert exec_mock.call_args.kwargs["models"] == OPENROUTER_CODING_HIGH
+    assert "excluding ollama from fallback chain" in result.stderr
+    assert "falling through to ollama" not in result.stderr
     payload = json.loads(result.stdout)
     assert [candidate["provider"] for candidate in payload["semantic"]["candidates"]] == [
         "codex",
         "openrouter",
-        "ollama",
     ]
     assert payload["semantic"]["candidates"][1]["models"] == list(
         OPENROUTER_CODING_HIGH
     )
 
 
-def test_ask_code_high_falls_back_after_openrouter_execution_failure(mocker):
-    _stub_all_configured(mocker, {"openrouter", "ollama"})
-    openrouter_exec = mocker.patch.object(
-        OpenRouterProvider,
+def test_ask_code_high_without_frontier_fallback_refuses_ollama(mocker):
+    _stub_all_configured(mocker, {"codex", "ollama"})
+    codex_exec = mocker.patch.object(
+        CodexProvider,
         "exec",
         side_effect=ProviderExecutionError(
-            "OpenRouter code execution failed: no-op",
-            provider="openrouter",
+            "codex execution failed: no-op",
+            provider="codex",
             status={"state": "no-op", "repo_changing": True},
         ),
     )
@@ -591,12 +603,16 @@ def test_ask_code_high_falls_back_after_openrouter_execution_failure(mocker):
         ],
     )
 
-    assert result.exit_code == 0, result.output
-    assert openrouter_exec.called
-    assert ollama_exec.called
-    assert "openrouter failed (provider-error)" in result.stderr
-    assert "falling back" in result.stderr
-    assert "→ ollama" in result.stderr
+    assert result.exit_code == 1, result.output
+    assert codex_exec.called
+    assert not ollama_exec.called
+    assert "excluding ollama from fallback chain" in result.stderr
+    assert (
+        "conductor: no usable fallback for --kind code --effort high "
+        "after primary codex failed (codex execution failed: no-op)."
+    ) in result.stderr
+    assert "Configure another frontier provider, or relax --effort to medium." in result.stderr
+    assert "falling through to ollama" not in result.stderr
 
 
 def test_ask_code_medium_falls_through_from_openrouter_404_to_ollama(mocker):
@@ -636,6 +652,42 @@ def test_ask_code_medium_falls_through_from_openrouter_404_to_ollama(mocker):
     assert "openrouter failed (provider-error)" in result.stderr
     assert "falling through to ollama" in result.stderr
     assert "falling back" in result.stderr
+    assert "→ ollama" in result.stderr
+
+
+def test_ask_research_high_keeps_ollama_fallback(mocker):
+    from conductor.providers.interface import ProviderHTTPError
+
+    _stub_all_configured(mocker, {"openrouter", "ollama"})
+    mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        side_effect=ProviderHTTPError("OpenRouter provider failed with HTTP 503"),
+    )
+    ollama_call = mocker.patch.object(
+        OllamaProvider,
+        "call",
+        return_value=_fake_response("ollama", "llama3.2"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "research",
+            "--effort",
+            "high",
+            "--brief",
+            "Find the relevant background and summarize it.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert ollama_call.called
+    assert "excluding ollama from fallback chain" not in result.stderr
+    assert "openrouter failed (5xx)" in result.stderr
+    assert "falling through to ollama" in result.stderr
     assert "→ ollama" in result.stderr
 
 
