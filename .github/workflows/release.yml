@@ -86,13 +86,69 @@ jobs:
         timeout-minutes: 5
         run: brew install autumngarage/conductor/conductor
 
-      - name: Smoke released conductor
+      - name: Prepare local Ollama smoke provider
         timeout-minutes: 5
         shell: bash
         run: |
           set -euo pipefail
 
+          brew install ollama
+          ollama serve >ollama.log 2>&1 &
+          echo "$!" >ollama.pid
+
+          for _ in {1..30}; do
+            if ollama list >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+
+          if ! ollama list >/dev/null 2>&1; then
+            echo "::error::ollama serve did not become ready within 30s"
+            cat ollama.log >&2 || true
+            exit 1
+          fi
+
+          ollama pull qwen2.5-coder:1.5b
+
+      - name: Smoke released conductor
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+
           expected_version="${RELEASE_TAG#v}"
+          export CONDUCTOR_OLLAMA_MODEL="qwen2.5-coder:1.5b"
+
+          assert_no_traceback() {
+            local file="$1"
+            local step="$2"
+            if grep -qiE 'traceback \(most recent call last\)|ModuleNotFoundError|^[[:space:]]*File ".*", line [0-9]+' "$file"; then
+              echo "::error::${step} printed a Python traceback; expected a clean CLI error"
+              cat "$file" >&2 || true
+              exit 1
+            fi
+          }
+
+          assert_json_array() {
+            local file="$1"
+            local step="$2"
+            python3 - "$file" "$step" <<'PY'
+          import json
+          import sys
+
+          path, step = sys.argv[1], sys.argv[2]
+          raw = open(path, encoding="utf-8").read().strip()
+          if not raw:
+              raise SystemExit(f"::error::{step} produced no output; expected a JSON array")
+          try:
+              payload = json.loads(raw)
+          except json.JSONDecodeError as exc:
+              raise SystemExit(f"::error::{step} output was not valid JSON: {exc}")
+          if not isinstance(payload, list):
+              raise SystemExit(f"::error::{step} output was {type(payload).__name__}; expected a JSON array")
+          PY
+          }
 
           set +e
           version_output="$(conductor --version 2>conductor-version.err)"
@@ -127,4 +183,103 @@ jobs:
           if [[ "$doctor_status" -ne 0 ]]; then
             echo "::error::conductor doctor exited ${doctor_status}"
             exit "$doctor_status"
+          fi
+
+          dispatch_cache="$(mktemp -d)"
+          set +e
+          XDG_CACHE_HOME="$dispatch_cache" conductor ask \
+            --kind research \
+            --effort minimal \
+            --offline \
+            --task "Reply OK." \
+            >conductor-ask.out \
+            2>conductor-ask.err
+          ask_status=$?
+          set -e
+          cat conductor-ask.err >&2
+          assert_no_traceback conductor-ask.err "conductor ask --kind research --effort minimal --offline"
+          if [[ "$ask_status" -ne 0 ]]; then
+            echo "::error::conductor ask --kind research --effort minimal --offline exited ${ask_status}; expected exit 0"
+            cat conductor-ask.out
+            exit "$ask_status"
+          fi
+          if [[ ! -s conductor-ask.out ]]; then
+            echo "::error::conductor ask --kind research --effort minimal --offline produced empty stdout; expected provider response text"
+            exit 1
+          fi
+          cat conductor-ask.out
+
+          set +e
+          conductor exec \
+            --with codex \
+            --tools Read \
+            --task "List one file." \
+            --json \
+            >conductor-exec-codex.out \
+            2>conductor-exec-codex.err
+          exec_status=$?
+          set -e
+          cat conductor-exec-codex.err >&2
+          assert_no_traceback conductor-exec-codex.err "conductor exec --with codex --json"
+          assert_no_traceback conductor-exec-codex.out "conductor exec --with codex --json"
+          if [[ "$exec_status" -eq 0 ]]; then
+            echo "::error::conductor exec --with codex --json exited 0; expected non-zero with codex unconfigured"
+            cat conductor-exec-codex.out
+            exit 1
+          fi
+          if [[ ! -s conductor-exec-codex.err && ! -s conductor-exec-codex.out ]]; then
+            echo "::error::conductor exec --with codex --json produced no error output; expected a clean structured error message"
+            exit 1
+          fi
+          if [[ -s conductor-exec-codex.out ]]; then
+            python3 -m json.tool conductor-exec-codex.out >/dev/null || {
+              echo "::error::conductor exec --with codex --json stdout was not valid JSON when stdout was present"
+              cat conductor-exec-codex.out
+              exit 1
+            }
+          elif ! grep -qE '^\[conductor\] preflight failed for codex:|^conductor:' conductor-exec-codex.err; then
+            echo "::error::conductor exec --with codex --json stderr did not contain conductor's clean error prefix"
+            cat conductor-exec-codex.err >&2
+            exit 1
+          fi
+
+          fresh_cache="$(mktemp -d)"
+          set +e
+          XDG_CACHE_HOME="$fresh_cache" conductor delegations list --json \
+            >conductor-delegations.out \
+            2>conductor-delegations.err
+          delegations_status=$?
+          set -e
+          cat conductor-delegations.err >&2
+          assert_no_traceback conductor-delegations.err "conductor delegations list --json"
+          if [[ "$delegations_status" -ne 0 ]]; then
+            echo "::error::conductor delegations list --json exited ${delegations_status}; expected exit 0 for a fresh ledger"
+            cat conductor-delegations.out
+            exit "$delegations_status"
+          fi
+          assert_json_array conductor-delegations.out "conductor delegations list --json"
+          python3 - <<'PY'
+          import json
+
+          with open("conductor-delegations.out", encoding="utf-8") as fh:
+              payload = json.load(fh)
+          if payload:
+              raise SystemExit(
+                  "::error::conductor delegations list --json returned entries for a fresh ledger; expected []"
+              )
+          PY
+
+          sessions_cache="$(mktemp -d)"
+          set +e
+          XDG_CACHE_HOME="$sessions_cache" conductor sessions list --since 1h \
+            >conductor-sessions.out \
+            2>conductor-sessions.err
+          sessions_status=$?
+          set -e
+          cat conductor-sessions.err >&2
+          assert_no_traceback conductor-sessions.err "conductor sessions list --since 1h"
+          if [[ "$sessions_status" -ne 0 ]]; then
+            echo "::error::conductor sessions list --since 1h exited ${sessions_status}; expected exit 0 for an empty cache"
+            cat conductor-sessions.out
+            exit "$sessions_status"
           fi
