@@ -80,11 +80,13 @@ def get_network_profile(
         profile = _probe_profile(normalized_target, current_time)
     except Exception as e:
         _warn(warn, f"[conductor] network: probe failed for {normalized_target}: {e}")
-        return NetworkProfile(
+        profile = NetworkProfile(
             rtt_ms=None,
             target=normalized_target,
             timestamp=current_time,
         )
+        _write_cache(profile, warn=warn)
+        return profile
 
     _write_cache(profile, warn=warn)
     return profile
@@ -117,8 +119,9 @@ def _read_cache(
 
     try:
         data = json.loads(raw)
+        raw_rtt_ms = data["rtt_ms"]
         profile = NetworkProfile(
-            rtt_ms=float(data["rtt_ms"]),
+            rtt_ms=None if raw_rtt_ms is None else float(raw_rtt_ms),
             target=str(data["target"]),
             timestamp=float(data["timestamp"]),
         )
@@ -130,15 +133,13 @@ def _read_cache(
         return None
     if now - profile.timestamp > NETWORK_PROFILE_TTL_SEC:
         return None
-    if profile.rtt_ms is None or profile.rtt_ms < 0:
+    if profile.rtt_ms is not None and profile.rtt_ms < 0:
         _delete_bad_cache(path, warn=warn, reason=ValueError("invalid rtt_ms"))
         return None
     return profile
 
 
 def _write_cache(profile: NetworkProfile, *, warn: Callable[[str], None] | None) -> None:
-    if profile.rtt_ms is None:
-        return
     path = _cache_path()
     payload = {
         "rtt_ms": profile.rtt_ms,

@@ -201,6 +201,34 @@ def test_fallback_target_when_provider_unreachable(monkeypatch, tmp_path):
     ]
 
 
+def test_no_rtt_profile_is_cached(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _FakeClient.calls = []
+    _FakeClient.failures = {
+        "https://api.example.test": 3,
+        NETWORK_PROFILE_FALLBACK_TARGET: 3,
+    }
+    _install_fake_probe(monkeypatch, [0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
+
+    profile = get_network_profile("https://api.example.test", now=3_000)
+
+    assert profile == NetworkProfile(
+        rtt_ms=None,
+        target="https://api.example.test",
+        timestamp=3_000,
+    )
+    cached = json.loads(_cache_file(tmp_path).read_text(encoding="utf-8"))
+    assert cached["rtt_ms"] is None
+
+    monkeypatch.setattr(
+        "conductor.network_profile.httpx.Client",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("probe should not run")),
+    )
+    cached_profile = get_network_profile("https://api.example.test", now=3_100)
+
+    assert cached_profile == profile
+
+
 def test_corrupt_cache_is_deleted_and_rebuilt(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     path = _cache_file(tmp_path)
