@@ -130,8 +130,8 @@ def _read_cache(
         return None
     if now - profile.timestamp > NETWORK_PROFILE_TTL_SEC:
         return None
-    if profile.rtt_ms < 0:
-        _delete_bad_cache(path, warn=warn, reason=ValueError("negative rtt_ms"))
+    if profile.rtt_ms is None or profile.rtt_ms < 0:
+        _delete_bad_cache(path, warn=warn, reason=ValueError("invalid rtt_ms"))
         return None
     return profile
 

@@ -118,8 +118,8 @@ The canonical reference is `conductor call --help`. The contract-level commitmen
 | `--tags <csv>` | string | stable | For `--auto` routing |
 | `--prefer <mode>` | string | stable | One of: best, cheapest, fastest, balanced. Default: balanced |
 | `--effort <level>` | string \| int | stable | One of: minimal, low, medium, high, max. Or integer token budget. Default: medium |
-| `--timeout <sec>` | int | stable | Wall-clock timeout. Default: 1800, scaled up on slow networks unless explicitly set |
-| `--max-stall-seconds <sec>` | int | stable | Streaming CLI stall watchdog. Default: 600, scaled up on slow networks unless explicitly set. `0` disables |
+| `--timeout <sec>` | int | stable | Wall-clock timeout. Unbounded by default. When set explicitly, value is honored as-is (no scaling) |
+| `--max-stall-seconds <sec>` | int | stable | Streaming CLI stall watchdog. Default: 360, scaled up on slow networks unless explicitly set. `0` disables |
 | `--exclude <csv>` | string | stable | Providers to skip in `--auto` |
 | `--brief <text>` | string | stable | Inline delegation brief / prompt |
 | `--brief-file <path>` | string | stable | File path, `-` for stdin |
