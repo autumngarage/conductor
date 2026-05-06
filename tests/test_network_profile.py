@@ -206,8 +206,10 @@ def test_exec_default_scaling_line_and_values(monkeypatch, mocker, tmp_path):
     assert result.exit_code == 0, result.output
     assert "310ms RTT to api.openai.com" in result.stderr
     assert "timeouts scaled 3×" in result.stderr
-    assert exec_mock.call_args.kwargs["timeout_sec"] == 5400
-    assert exec_mock.call_args.kwargs["max_stall_sec"] == 1800
+    # exec --timeout default is None (unbounded); scaling None stays None.
+    assert exec_mock.call_args.kwargs["timeout_sec"] is None
+    # max_stall_sec default 360 → 3× = 1080.
+    assert exec_mock.call_args.kwargs["max_stall_sec"] == 1080
 
 
 def test_call_default_scaling_line_and_values(monkeypatch, mocker, tmp_path):
@@ -238,8 +240,10 @@ def test_call_default_scaling_line_and_values(monkeypatch, mocker, tmp_path):
     assert result.exit_code == 0, result.output
     assert "180ms RTT to api.openai.com" in result.stderr
     assert "timeouts scaled 2×" in result.stderr
-    assert call_mock.call_args.kwargs["timeout_sec"] == 3600
-    assert call_mock.call_args.kwargs["max_stall_sec"] == 1200
+    # call --timeout default is None (unbounded); scaling None stays None.
+    assert call_mock.call_args.kwargs["timeout_sec"] is None
+    # max_stall_sec default 360 → 2× = 720.
+    assert call_mock.call_args.kwargs["max_stall_sec"] == 720
 
 
 def test_user_timeout_and_stall_overrides_win(monkeypatch, mocker, tmp_path):

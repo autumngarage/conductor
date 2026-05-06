@@ -126,8 +126,7 @@ VALID_EFFORT_LEVELS = ("minimal", "low", "medium", "high", "max")
 PROFILE_PRECEDENCE_TEXT = (
     "Resolution order: profile defaults < CONDUCTOR_* env vars < explicit CLI flags."
 )
-DEFAULT_DISPATCH_TIMEOUT_SEC = 1800
-DEFAULT_EXEC_MAX_STALL_SEC = 600
+DEFAULT_EXEC_MAX_STALL_SEC = 360
 MIN_EXEC_BRIEF_CHARS = 300
 GIT_RECOVERY_COMMAND_TIMEOUT_SEC = 2.0
 GIT_RECOVERY_MAX_COMMITS = 5
@@ -226,12 +225,12 @@ def _scale_dispatch_defaults(
 
     resolved_timeout: int | None = timeout_sec
     if timeout_is_default:
-        scaled_timeout = apply_scaling(DEFAULT_DISPATCH_TIMEOUT_SEC, profile)
+        scaled_timeout = apply_scaling(timeout_sec, profile)
         resolved_timeout = None if scaled_timeout is None else math.ceil(scaled_timeout)
 
     resolved_max_stall: int | None = max_stall_sec
     if max_stall_is_default:
-        scaled_stall = apply_scaling(DEFAULT_EXEC_MAX_STALL_SEC, profile)
+        scaled_stall = apply_scaling(max_stall_sec, profile)
         resolved_max_stall = None if scaled_stall is None else math.ceil(scaled_stall)
 
     return resolved_timeout, resolved_max_stall
@@ -2528,12 +2527,11 @@ def main(ctx: click.Context) -> None:
 @click.option(
     "--timeout",
     "timeout_sec",
-    default=DEFAULT_DISPATCH_TIMEOUT_SEC,
+    default=None,
     type=int,
     help=(
         "Wall-clock timeout in seconds for review/exec provider calls. "
-        "Default: 1800, scaled up on slow networks. Council uses "
-        "--council-timeout for its total cap."
+        "Unbounded by default. Council uses --council-timeout for its total cap."
     ),
 )
 @click.option(
@@ -2945,12 +2943,9 @@ def ask(
 @click.option(
     "--timeout",
     "timeout_sec",
-    default=DEFAULT_DISPATCH_TIMEOUT_SEC,
+    default=None,
     type=int,
-    help=(
-        "Wall-clock timeout in seconds. Default: 1800, scaled up on slow "
-        "networks."
-    ),
+    help="Wall-clock timeout in seconds. Unbounded by default.",
 )
 @click.option(
     "--max-stall-seconds",
@@ -2959,7 +2954,7 @@ def ask(
     type=int,
     help=(
         "Kill streaming CLI-backed calls after this many silent seconds. "
-        "Default: 600, scaled up on slow networks. Set 0 to disable."
+        "Default: 360, scaled up on slow networks. Set 0 to disable."
     ),
 )
 @click.option(
@@ -3285,11 +3280,11 @@ def call(
 @click.option(
     "--timeout",
     "timeout_sec",
-    default=DEFAULT_DISPATCH_TIMEOUT_SEC,
+    default=None,
     type=int,
     help=(
         "Wall-clock timeout in seconds for the native review command. "
-        "Default: 1800, scaled up on slow networks."
+        "Unbounded by default."
     ),
 )
 @click.option(
@@ -3612,12 +3607,11 @@ def review(
 @click.option(
     "--timeout",
     "timeout_sec",
-    default=DEFAULT_DISPATCH_TIMEOUT_SEC,
+    default=None,
     type=int,
     help=(
-        "Wall-clock timeout in seconds. Default: 1800, scaled up on slow "
-        "networks. Set explicitly (e.g. --timeout 600) for CI or unattended "
-        "runs that need a fixed bound."
+        "Wall-clock timeout in seconds. Unbounded by default. Set explicitly "
+        "(e.g. --timeout 600) for CI or unattended runs that need a fixed bound."
     ),
 )
 @click.option(

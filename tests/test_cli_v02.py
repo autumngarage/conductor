@@ -1512,16 +1512,18 @@ def test_exec_missing_task_file_errors(mocker, tmp_path):
     assert str(missing) in result.output
 
 
-def test_exec_cli_default_passes_network_scaled_timeout_to_provider(mocker):
-    """`conductor exec --with codex --task ...` applies the dispatch default.
-
-    Slow-network scaling may raise the default, but it must happen before the
-    provider starts so timeout/stall behavior is visible in one place.
+def test_exec_cli_default_passes_no_timeout_to_provider(mocker):
+    """`conductor exec --with codex --task ...` (no --timeout) must hand
+    the provider `timeout_sec=None` so subprocess.run runs unbounded.
+    Regression for the 22-minute lost-work bug where the CLI silently
+    capped exec at 300s and the partial session_id was never recoverable.
+    Network scaling must NOT materialize a timeout where there wasn't one
+    — apply_scaling(None, profile) returns None.
     """
     _stub_all_configured(mocker, {"codex"})
     mocker.patch(
         "conductor.cli.get_network_profile",
-        return_value=NetworkProfile(50, "https://api.openai.com", 1_000),
+        return_value=NetworkProfile(310, "https://api.openai.com", 1_000),
     )
     exec_mock = mocker.patch.object(
         CodexProvider, "exec", return_value=_fake_response("codex")
@@ -1534,7 +1536,10 @@ def test_exec_cli_default_passes_network_scaled_timeout_to_provider(mocker):
 
     assert result.exit_code == 0, result.output
     assert exec_mock.called
-    assert exec_mock.call_args.kwargs["timeout_sec"] == 1800
+    assert exec_mock.call_args.kwargs["timeout_sec"] is None, (
+        "exec without --timeout must pass None (unbounded). "
+        f"Got timeout_sec={exec_mock.call_args.kwargs['timeout_sec']!r}"
+    )
 
 
 def test_exec_cli_explicit_timeout_passes_through(mocker):
@@ -1573,7 +1578,7 @@ def test_exec_cli_max_stall_seconds_flag_propagates(mocker):
     assert exec_mock.call_args.kwargs["max_stall_sec"] == 60
 
 
-def test_exec_cli_no_max_stall_seconds_defaults_to_600(mocker):
+def test_exec_cli_no_max_stall_seconds_defaults_to_360(mocker):
     _stub_all_configured(mocker, {"codex"})
     exec_mock = mocker.patch.object(
         CodexProvider, "exec", return_value=_fake_response("codex")
@@ -1585,7 +1590,7 @@ def test_exec_cli_no_max_stall_seconds_defaults_to_600(mocker):
     )
 
     assert result.exit_code == 0, result.output
-    assert exec_mock.call_args.kwargs["max_stall_sec"] == 600
+    assert exec_mock.call_args.kwargs["max_stall_sec"] == 360
 
 
 def test_exec_cli_max_stall_seconds_zero_disables_watchdog(mocker):
