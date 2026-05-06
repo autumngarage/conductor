@@ -108,12 +108,12 @@ class ClaudeProvider:
         self._cli = cli_command or os.environ.get(CLAUDE_CLI_ENV) or "claude"
         self._timeout_sec = timeout_sec
         self._auth_probe_timeout_sec = auth_probe_timeout_sec
-        self._call_first_output_timeout_sec = call_first_output_timeout_sec
-        self._exec_first_output_timeout_sec = (
+        self._call_first_output_timeout_sec = (
             first_output_timeout_sec
             if first_output_timeout_sec is not None
-            else exec_first_output_timeout_sec
+            else call_first_output_timeout_sec
         )
+        self._exec_first_output_timeout_sec = exec_first_output_timeout_sec
 
     def _check_cli_path(self) -> tuple[bool, str | None]:
         """Cheap PATH-only check (no subprocess). Used by call()/exec()
