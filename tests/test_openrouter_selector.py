@@ -65,6 +65,18 @@ def fixture_catalog() -> list[openrouter_catalog.ModelEntry]:
             supports_vision=True,
         ),
         openrouter_catalog.ModelEntry(
+            id="free/tool-model:free",
+            name="Free Tool Model",
+            created=260,
+            context_length=64_000,
+            pricing_prompt=0.0,
+            pricing_completion=0.0,
+            pricing_thinking=None,
+            supports_thinking=False,
+            supports_tools=True,
+            supports_vision=False,
+        ),
+        openrouter_catalog.ModelEntry(
             id="long/context",
             name="Long Context",
             created=275,
@@ -140,6 +152,10 @@ def test_tool_use_best_and_balanced_use_curated_coding_stack_without_catalog(
 
     assert payload["models"] == list(expected_stack)
     assert payload["models"][0] == "openai/gpt-5.3-codex"
+    assert any(model.startswith("openai/") for model in payload["models"])
+    assert any(model.startswith("anthropic/") for model in payload["models"])
+    assert any(model.startswith("google/") for model in payload["models"])
+    assert all(":free" not in model for model in payload["models"])
     assert payload["reasoning"] == {"effort": "xhigh" if effort == "max" else effort}
     assert "model" not in payload
     assert OPENROUTER_DEFAULT_MODEL not in payload["models"]
@@ -181,6 +197,17 @@ def test_tool_use_coding_stack_errors_when_fully_excluded(mocker, fixture_catalo
     load_catalog.assert_not_called()
 
 
+def test_tool_use_cheap_can_pick_free_tier_model(mocker, fixture_catalog):
+    mocker.patch(
+        "conductor.providers.openrouter_catalog.load_catalog",
+        return_value=fixture_catalog,
+    )
+
+    payload = select_model_for_task(["tool-use"], "cheapest", "medium")
+
+    assert payload == {"model": "free/tool-model:free", "reasoning": None}
+
+
 def test_selector_drops_tilde_aliases_from_direct_selection(mocker, fixture_catalog):
     alias = openrouter_catalog.ModelEntry(
         id="~anthropic/claude-haiku-latest",
@@ -209,7 +236,7 @@ def test_selector_drops_tilde_aliases_from_direct_selection(mocker, fixture_cata
     ("tags", "expected"),
     [
         (["thinking"], {"cheap/thinker", "expensive/reasoner"}),
-        (["tool-use"], {"expensive/reasoner", "tool/vision"}),
+        (["tool-use"], {"expensive/reasoner", "free/tool-model:free", "tool/vision"}),
         (["vision"], {"tool/vision"}),
         (["long-context"], {"expensive/reasoner", "long/context"}),
     ],
