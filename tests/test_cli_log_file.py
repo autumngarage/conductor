@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from click.testing import CliRunner
@@ -59,6 +60,55 @@ def _stub_all_configured(mocker, configured_names: set[str]) -> None:
 
 def _read_events(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _write_session_meta(
+    root: Path,
+    *,
+    session_id: str,
+    updated_at: datetime,
+    status: str = "finished",
+    provider: str | None = "claude",
+) -> None:
+    sessions_root = root / "conductor" / "sessions"
+    sessions_root.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "run_id": f"run-{session_id}",
+        "session_id": session_id,
+        "log_path": str(sessions_root / f"{session_id}.ndjson"),
+        "status": status,
+        "started_at": (updated_at - timedelta(minutes=1)).isoformat(),
+        "updated_at": updated_at.isoformat(),
+        "finished_at": updated_at.isoformat() if status != "running" else None,
+        "provider": provider,
+        "explicit_log_path": False,
+    }
+    (sessions_root / f"run-{session_id}.meta.json").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+
+
+def _seed_session_filter_records(root: Path) -> datetime:
+    now = datetime.now(UTC)
+    for index in range(32):
+        age = (
+            timedelta(minutes=index)
+            if index < 18
+            else timedelta(hours=2, minutes=index)
+        )
+        _write_session_meta(
+            root,
+            session_id=f"sess-{index:02d}",
+            updated_at=now - age,
+            status="running" if index % 4 == 0 else "finished",
+            provider="codex" if index % 3 == 0 else "claude",
+        )
+    return now
+
+
+def _session_rows(output: str) -> list[str]:
+    return [line for line in output.splitlines() if line.startswith("sess-")]
 
 
 def test_exec_log_file_writes_structured_ndjson_for_auto_route(
@@ -200,6 +250,162 @@ def test_sessions_list_and_tail_use_cached_metadata(
     assert tail_result.exit_code == 0, tail_result.output
     tailed = [json.loads(line) for line in tail_result.output.splitlines()]
     assert tailed[0]["event"] == "provider_started"
+
+
+def test_sessions_list_defaults_to_twenty_most_recent(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _seed_session_filter_records(tmp_path)
+
+    result = CliRunner().invoke(main, ["sessions", "list"])
+
+    assert result.exit_code == 0, result.output
+    rows = _session_rows(result.output)
+    assert len(rows) == 20
+    assert rows[0].startswith("sess-00")
+    assert rows[-1].startswith("sess-19")
+    assert "sess-20" not in result.output
+
+
+def test_sessions_list_last_limits_most_recent(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _seed_session_filter_records(tmp_path)
+
+    result = CliRunner().invoke(main, ["sessions", "list", "--last", "5"])
+
+    assert result.exit_code == 0, result.output
+    rows = _session_rows(result.output)
+    assert len(rows) == 5
+    assert [row.split()[0] for row in rows] == [
+        "sess-00",
+        "sess-01",
+        "sess-02",
+        "sess-03",
+        "sess-04",
+    ]
+
+
+def test_sessions_list_since_filters_by_updated_at(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _seed_session_filter_records(tmp_path)
+
+    result = CliRunner().invoke(main, ["sessions", "list", "--since", "1h"])
+
+    assert result.exit_code == 0, result.output
+    rows = _session_rows(result.output)
+    assert len(rows) == 18
+    assert "sess-17" in result.output
+    assert "sess-18" not in result.output
+
+
+def test_sessions_list_status_filters_records(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _seed_session_filter_records(tmp_path)
+
+    result = CliRunner().invoke(main, ["sessions", "list", "--status", "running"])
+
+    assert result.exit_code == 0, result.output
+    rows = _session_rows(result.output)
+    assert len(rows) == 8
+    assert all("running" in row for row in rows)
+
+
+def test_sessions_list_provider_filters_records(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _seed_session_filter_records(tmp_path)
+
+    result = CliRunner().invoke(main, ["sessions", "list", "--provider", "codex"])
+
+    assert result.exit_code == 0, result.output
+    rows = _session_rows(result.output)
+    assert len(rows) == 11
+    assert all("codex" in row for row in rows)
+
+
+def test_sessions_list_filters_compose_with_and_semantics(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _seed_session_filter_records(tmp_path)
+
+    result = CliRunner().invoke(
+        main,
+        ["sessions", "list", "--since", "1h", "--status", "running", "--provider", "codex"],
+    )
+
+    assert result.exit_code == 0, result.output
+    rows = _session_rows(result.output)
+    assert [row.split()[0] for row in rows] == ["sess-00", "sess-12"]
+
+
+def test_sessions_list_all_returns_everything_and_ignores_last(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _seed_session_filter_records(tmp_path)
+
+    result = CliRunner().invoke(main, ["sessions", "list", "--all", "--last", "5"])
+
+    assert result.exit_code == 0, result.output
+    assert "[conductor] --all ignores --last" in result.stderr
+    assert len(_session_rows(result.output)) == 32
+
+
+def test_sessions_list_last_zero_returns_everything(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _seed_session_filter_records(tmp_path)
+
+    result = CliRunner().invoke(main, ["sessions", "list", "--last", "0"])
+
+    assert result.exit_code == 0, result.output
+    assert len(_session_rows(result.output)) == 32
+
+
+def test_sessions_list_json_returns_parseable_array(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _seed_session_filter_records(tmp_path)
+
+    result = CliRunner().invoke(main, ["sessions", "list", "--json", "--last", "5"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert isinstance(payload, list)
+    assert len(payload) == 5
+    assert payload[0]["session_id"] == "sess-04"
+    assert payload[-1]["session_id"] == "sess-00"
+    assert set(payload[-1]) == {
+        "run_id",
+        "session_id",
+        "log_path",
+        "status",
+        "started_at",
+        "updated_at",
+        "finished_at",
+        "provider",
+        "explicit_log_path",
+    }
 
 
 def test_exec_provider_stall_records_terminal_session_metadata(
