@@ -19,6 +19,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
 
+from conductor._time_filter import parse_timestamp, since_cutoff
 from conductor.offline_mode import _cache_dir
 
 if TYPE_CHECKING:
@@ -94,7 +95,7 @@ def read_delegations(
     path: Path | None = None,
 ) -> Iterable[dict]:
     events = list(_iter_events(path or ledger_path()))
-    cutoff = _since_cutoff(since)
+    cutoff = since_cutoff(since)
     filtered = []
     for event in events:
         if not include_members and event.get("parent_delegation_id"):
@@ -105,7 +106,7 @@ def read_delegations(
             continue
         if provider is not None and event.get("provider") != provider:
             continue
-        if cutoff is not None and _parse_timestamp(event.get("timestamp")) < cutoff:
+        if cutoff is not None and parse_timestamp(event.get("timestamp")) < cutoff:
             continue
         filtered.append(event)
     if last is not None:
@@ -144,39 +145,6 @@ def _iter_events(path: Path) -> Iterable[dict]:
             continue
         if isinstance(payload, dict):
             yield payload
-
-
-def _since_cutoff(since: str | timedelta | None) -> datetime | None:
-    if since is None:
-        return None
-    if isinstance(since, timedelta):
-        return datetime.now(UTC) - since
-    unit = since[-1:]
-    try:
-        amount = int(since[:-1])
-    except ValueError as e:
-        raise ValueError("since must be like 1h, 24h, or 7d") from e
-    if unit == "h":
-        delta = timedelta(hours=amount)
-    elif unit == "d":
-        delta = timedelta(days=amount)
-    elif unit == "m":
-        delta = timedelta(minutes=amount)
-    else:
-        raise ValueError("since must use m, h, or d")
-    return datetime.now(UTC) - delta
-
-
-def _parse_timestamp(value: object) -> datetime:
-    if not isinstance(value, str):
-        return datetime.min.replace(tzinfo=UTC)
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return datetime.min.replace(tzinfo=UTC)
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
 
 
 def _matches_delegation_id(event: dict, delegation_id: str) -> bool:

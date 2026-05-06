@@ -26,6 +26,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 import click
@@ -33,6 +34,7 @@ from click.core import ParameterSource
 
 import conductor.providers.openrouter_catalog as openrouter_catalog
 from conductor import __version__, credentials, offline_mode
+from conductor._time_filter import parse_timestamp, since_cutoff
 from conductor.banner import print_caller_banner
 from conductor.delegation_ledger import (
     DelegationEvent,
@@ -138,6 +140,9 @@ GIT_RECOVERY_COMMAND_TIMEOUT_SEC = 2.0
 GIT_RECOVERY_MAX_COMMITS = 5
 GIT_RECOVERY_MAX_STATUS_PATHS = 8
 NATIVE_REVIEW_TAG = "code-review"
+
+if TYPE_CHECKING:
+    from datetime import datetime
 DEFAULT_REVIEW_MAX_FALLBACKS = 3
 DEFAULT_COUNCIL_ROUNDS = 1
 DEFAULT_COUNCIL_TIMEOUT_SEC = 180
@@ -5723,9 +5728,74 @@ def sessions() -> None:
 
 
 @sessions.command("list")
-def sessions_list() -> None:
+@click.option(
+    "--last",
+    "last_n",
+    default=20,
+    type=click.IntRange(min=0),
+    show_default=True,
+    help="Show the N most recently updated sessions; 0 disables the cap.",
+)
+@click.option(
+    "--since",
+    default=None,
+    help="Only show sessions updated since 1h, 24h, 7d, etc.",
+)
+@click.option(
+    "--status",
+    "status_filter",
+    default=None,
+    help="Only show sessions with this status.",
+)
+@click.option(
+    "--provider",
+    "provider_filter",
+    default=None,
+    help="Only show sessions for this provider.",
+)
+@click.option("--all", "show_all", is_flag=True, default=False, help="Show all matching sessions.")
+@click.option("--json", "as_json", is_flag=True, default=False)
+@click.pass_context
+def sessions_list(
+    ctx: click.Context,
+    last_n: int,
+    since: str | None,
+    status_filter: str | None,
+    provider_filter: str | None,
+    show_all: bool,
+    as_json: bool,
+) -> None:
     """List known session logs with their latest status."""
     records = list_session_records()
+    if records:
+        _validate_session_filter("status", status_filter, {record.status for record in records})
+        _validate_session_filter(
+            "provider",
+            provider_filter,
+            {record.provider for record in records if record.provider is not None},
+        )
+
+    try:
+        cutoff = since_cutoff(since)
+    except ValueError as e:
+        raise click.UsageError(str(e)) from e
+
+    records = _filter_session_records(
+        records,
+        cutoff=cutoff,
+        status_filter=status_filter,
+        provider_filter=provider_filter,
+    )
+    if show_all:
+        if ctx.get_parameter_source("last_n") == ParameterSource.COMMANDLINE:
+            click.echo("[conductor] --all ignores --last", err=True)
+    elif last_n:
+        records = records[-last_n:]
+
+    if as_json:
+        click.echo(json.dumps([asdict(record) for record in records], default=str, indent=2))
+        return
+
     if not records:
         click.echo("(no session logs)")
         return
@@ -5742,6 +5812,36 @@ def sessions_list() -> None:
             f"{record.updated_at:<27}  "
             f"{provider}"
         )
+
+
+def _validate_session_filter(
+    name: str,
+    value: str | None,
+    known_values: set[str],
+) -> None:
+    if value is None or value in known_values:
+        return
+    choices = ", ".join(sorted(known_values)) or "none"
+    raise click.UsageError(f"unknown session {name} {value!r}; known values: {choices}")
+
+
+def _filter_session_records(
+    records: list[SessionRecord],
+    *,
+    cutoff: datetime | None,
+    status_filter: str | None,
+    provider_filter: str | None,
+) -> list[SessionRecord]:
+    filtered: list[SessionRecord] = []
+    for record in records:
+        if status_filter is not None and record.status != status_filter:
+            continue
+        if provider_filter is not None and record.provider != provider_filter:
+            continue
+        if cutoff is not None and parse_timestamp(record.updated_at) < cutoff:
+            continue
+        filtered.append(record)
+    return filtered
 
 
 @sessions.command("tail")
