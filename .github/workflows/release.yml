@@ -44,3 +44,87 @@ jobs:
       tag-name: ${{ inputs.tag_name || github.event.release.tag_name }}
     secrets:
       HOMEBREW_TAP_PAT: ${{ secrets.HOMEBREW_TAP_PAT }}
+
+  fresh-install-smoke:
+    # This runs only after the reusable workflow has committed the formula
+    # bump to the tap. It intentionally installs from Homebrew on a fresh
+    # macOS runner rather than reusing this repo's source checkout.
+    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
+    needs: bump-tap
+    runs-on: macos-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag_name || github.event.release.tag_name }}
+
+    steps:
+      - name: Tap conductor
+        timeout-minutes: 5
+        run: brew tap autumngarage/conductor
+
+      - name: Verify bumped formula is visible
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          expected_version="${RELEASE_TAG#v}"
+
+          brew update --force --quiet autumngarage/conductor
+
+          formula_version="$(
+            brew info --json=v2 autumngarage/conductor/conductor \
+              | python3 -c 'import json, sys; print(json.load(sys.stdin)["formulae"][0]["versions"]["stable"])'
+          )"
+
+          if [[ "$formula_version" != "$expected_version" ]]; then
+            echo "::error::Homebrew formula version mismatch after brew update: expected ${expected_version} from tag ${RELEASE_TAG}, found ${formula_version}. The tap bump may not have propagated to the runner yet."
+            brew tap-info autumngarage/conductor || true
+            brew cat autumngarage/conductor/conductor || true
+            exit 1
+          fi
+
+      - name: Install released conductor from Homebrew
+        timeout-minutes: 5
+        run: brew install autumngarage/conductor/conductor
+
+      - name: Smoke released conductor
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          expected_version="${RELEASE_TAG#v}"
+
+          set +e
+          version_output="$(conductor --version 2>conductor-version.err)"
+          version_status=$?
+          set -e
+          cat conductor-version.err >&2
+          if [[ "$version_status" -ne 0 ]]; then
+            echo "::error::conductor --version exited ${version_status}"
+            exit "$version_status"
+          fi
+          echo "$version_output"
+          if [[ "$version_output" != *"$expected_version"* ]]; then
+            echo "::error::conductor --version output did not contain expected version ${expected_version} from tag ${RELEASE_TAG}: ${version_output}"
+            exit 1
+          fi
+
+          set +e
+          conductor list 2>conductor-list.err
+          list_status=$?
+          set -e
+          cat conductor-list.err >&2
+          if [[ "$list_status" -ne 0 ]]; then
+            echo "::error::conductor list exited ${list_status}"
+            exit "$list_status"
+          fi
+
+          set +e
+          conductor doctor 2>conductor-doctor.err
+          doctor_status=$?
+          set -e
+          cat conductor-doctor.err >&2
+          if [[ "$doctor_status" -ne 0 ]]; then
+            echo "::error::conductor doctor exited ${doctor_status}"
+            exit "$doctor_status"
+          fi
