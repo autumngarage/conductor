@@ -20,6 +20,7 @@ Capability declarations (v0.2):
   - supports_effort         — whether the provider has a thinking/reasoning dial
   - supports_image_attachments — whether the provider can accept image file attachments
                                  alongside the brief (today: codex only)
+  - endpoint_url           — HTTPS URL whose RTT represents provider network path
   - effort_to_thinking      — mapping from symbolic effort level to expected thinking tokens
   - cost_per_1k_in/out/thinking — for prefer=cheapest scoring
   - typical_p50_ms          — for prefer=fastest scoring
@@ -213,6 +214,15 @@ class Provider(Protocol):
         their transport.
         """
         raise NotImplementedError
+
+    def endpoint_url(self) -> str | None:
+        """Return the HTTPS URL whose RTT represents this provider's
+        network path.
+
+        Used by the slow-network scaler. Return None if the provider has no
+        single canonical network endpoint, such as local-only providers.
+        """
+        return None
 
     def call(
         self,

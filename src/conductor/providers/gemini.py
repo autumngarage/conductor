@@ -148,6 +148,9 @@ class GeminiProvider:
             else GEMINI_DEFAULT_OAUTH_CREDS_PATH
         )
 
+    def endpoint_url(self) -> str | None:
+        return "https://generativelanguage.googleapis.com"
+
     def _check_cli_path(self) -> tuple[bool, str | None]:
         """Cheap PATH-only check (no subprocess) for the call/exec hot path."""
         if not shutil.which(self._cli):

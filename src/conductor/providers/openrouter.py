@@ -98,6 +98,9 @@ class OpenRouterProvider:
         self._base_url = base_url.rstrip("/")
         self._timeout_sec = timeout_sec
 
+    def endpoint_url(self) -> str | None:
+        return f"{self._base_url}/models"
+
     def _resolve_key(self) -> str:
         key = self._api_key or credentials.get(OPENROUTER_API_KEY_ENV)
         if not key:

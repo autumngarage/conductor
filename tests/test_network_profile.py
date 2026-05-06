@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 import httpx
 from click.testing import CliRunner
 
-from conductor.cli import main
+from conductor.cli import _network_target_for_provider, main
 from conductor.network_profile import (
     NETWORK_PROFILE_FALLBACK_TARGET,
     NETWORK_PROFILE_TTL_SEC,
@@ -15,7 +15,13 @@ from conductor.network_profile import (
     get_network_profile,
     scaling_multiplier,
 )
-from conductor.providers import CallResponse, CodexProvider
+from conductor.providers import (
+    CallResponse,
+    CodexProvider,
+    ShellProvider,
+    ShellProviderSpec,
+    get_provider,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -47,6 +53,17 @@ class _FakeClient:
         return httpx.Response(204)
 
 
+EXPECTED_ENDPOINT_URLS = {
+    "claude": "https://api.anthropic.com",
+    "codex": "https://api.openai.com",
+    "deepseek-chat": "https://openrouter.ai/api/v1/models",
+    "deepseek-reasoner": "https://openrouter.ai/api/v1/models",
+    "gemini": "https://generativelanguage.googleapis.com",
+    "kimi": "https://openrouter.ai/api/v1/models",
+    "openrouter": "https://openrouter.ai/api/v1/models",
+}
+
+
 def _install_fake_probe(monkeypatch, perf_values: list[float]) -> None:
     monkeypatch.setattr("conductor.network_profile.httpx.Client", _FakeClient)
     monkeypatch.setattr(
@@ -54,6 +71,34 @@ def _install_fake_probe(monkeypatch, perf_values: list[float]) -> None:
         lambda: perf_values.pop(0),
     )
     monkeypatch.setattr("conductor.network_profile.time.monotonic", lambda: 10.0)
+
+
+def test_provider_endpoint_urls_are_adapter_owned() -> None:
+    for provider_id, expected in EXPECTED_ENDPOINT_URLS.items():
+        assert get_provider(provider_id).endpoint_url() == expected
+
+    assert get_provider("ollama").endpoint_url() is None
+    assert (
+        ShellProvider(ShellProviderSpec(name="local-shell", shell="printf ok"))
+        .endpoint_url()
+        is None
+    )
+
+
+def test_network_target_for_provider_delegates_to_provider_endpoint() -> None:
+    for provider_id in EXPECTED_ENDPOINT_URLS:
+        provider = get_provider(provider_id)
+        assert _network_target_for_provider(provider_id) == provider.endpoint_url()
+
+    assert _network_target_for_provider(None) == NETWORK_PROFILE_FALLBACK_TARGET
+
+
+def test_network_target_for_ollama_keeps_local_base_url(monkeypatch) -> None:
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    assert _network_target_for_provider("ollama") == "http://localhost:11434"
+
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://ollama.internal:11434")
+    assert _network_target_for_provider("ollama") == "http://ollama.internal:11434"
 
 
 def test_cache_hit_reuses_fresh_profile(monkeypatch, tmp_path):
