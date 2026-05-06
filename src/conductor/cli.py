@@ -34,6 +34,11 @@ from click.core import ParameterSource
 import conductor.providers.openrouter_catalog as openrouter_catalog
 from conductor import __version__, credentials, offline_mode
 from conductor.banner import print_caller_banner
+from conductor.delegation_ledger import (
+    DelegationEvent,
+    read_delegations,
+    record_delegation,
+)
 from conductor.muted_providers import (
     MutedProvidersError,
     load_muted_provider_ids,
@@ -1444,7 +1449,9 @@ def _invoke_council(
         )
 
     started_at = time.monotonic()
+    parent_delegation_id = DelegationEvent().delegation_id
     member_responses: list[CallResponse] = []
+    member_events: list[dict] = []
     member_prompt = _council_member_prompt(task, rounds=rounds)
     synthesis_models = plan.council_synthesis_models or plan.council_member_models[:1]
 
@@ -1478,6 +1485,21 @@ def _invoke_council(
             max_tokens=_council_remaining_output_tokens(caps, member_responses),
         )
         member_responses.append(response)
+        member_delegation_id = _record_response_delegation(
+            "council",
+            response,
+            effort=effort,
+            semantic_plan=plan,
+            parent_delegation_id=parent_delegation_id,
+            council_role="member",
+        )
+        member_events.append(
+            {
+                "delegation_id": member_delegation_id,
+                "provider": response.provider,
+                "model": response.model,
+            }
+        )
         _raise_if_council_cap_hit(
             plan=plan,
             caps=caps,
@@ -1522,6 +1544,14 @@ def _invoke_council(
         log_selection=False,
         max_tokens=_council_remaining_output_tokens(caps, member_responses),
     )
+    synthesis_delegation_id = _record_response_delegation(
+        "council",
+        synthesis,
+        effort=effort,
+        semantic_plan=plan,
+        parent_delegation_id=parent_delegation_id,
+        council_role="synthesis",
+    )
 
     raw, usage, cost_usd = _council_response_metadata(
         plan=plan,
@@ -1534,12 +1564,23 @@ def _invoke_council(
         elapsed_ms=_council_elapsed_ms(started_at),
         cap_hit=None,
     )
-    return replace(
+    parent_response = replace(
         synthesis,
         usage=usage,
         cost_usd=cost_usd,
         raw={**(synthesis.raw or {}), **raw},
     )
+    _record_response_delegation(
+        "council",
+        parent_response,
+        effort=effort,
+        semantic_plan=plan,
+        delegation_id=parent_delegation_id,
+        council_role="parent",
+        members=member_events,
+        synthesis_delegation_id=synthesis_delegation_id,
+    )
+    return parent_response
 
 
 def _openrouter_council_provider(
@@ -2064,6 +2105,151 @@ def _emit_call(
         click.echo(json.dumps(payload, default=str, indent=2))
     else:
         click.echo(response.text)
+
+
+def _record_response_delegation(
+    command: str,
+    response: CallResponse,
+    *,
+    effort: str | int | None,
+    decision: RouteDecision | None = None,
+    semantic_plan: SemanticPlan | None = None,
+    session_log: SessionLog | None = None,
+    delegation_id: str | None = None,
+    parent_delegation_id: str | None = None,
+    council_role: str | None = None,
+    members: list[dict] | None = None,
+    synthesis_delegation_id: str | None = None,
+) -> str:
+    event = _delegation_event_from_response(
+        command,
+        response,
+        effort=effort,
+        decision=decision,
+        semantic_plan=semantic_plan,
+        session_log=session_log,
+        delegation_id=delegation_id,
+        parent_delegation_id=parent_delegation_id,
+        council_role=council_role,
+        members=members,
+        synthesis_delegation_id=synthesis_delegation_id,
+    )
+    record_delegation(event)
+    return event.delegation_id
+
+
+def _delegation_event_from_response(
+    command: str,
+    response: CallResponse,
+    *,
+    effort: str | int | None,
+    decision: RouteDecision | None = None,
+    semantic_plan: SemanticPlan | None = None,
+    session_log: SessionLog | None = None,
+    delegation_id: str | None = None,
+    parent_delegation_id: str | None = None,
+    council_role: str | None = None,
+    members: list[dict] | None = None,
+    synthesis_delegation_id: str | None = None,
+) -> DelegationEvent:
+    usage = response.usage or {}
+    return DelegationEvent(
+        delegation_id=delegation_id or DelegationEvent().delegation_id,
+        command=command,
+        provider=response.provider,
+        model=response.model,
+        effort=effort if isinstance(effort, str) else None,
+        duration_ms=response.duration_ms,
+        status="ok",
+        error=None,
+        input_tokens=_usage_int_or_none(usage.get("input_tokens")),
+        output_tokens=_usage_int_or_none(usage.get("output_tokens")),
+        thinking_tokens=_usage_int_or_none(usage.get("thinking_tokens")),
+        cached_tokens=_usage_int_or_none(usage.get("cached_tokens")),
+        cost_usd=response.cost_usd,
+        tags=_delegation_tags(decision=decision, semantic_plan=semantic_plan),
+        session_log_path=str(session_log.log_path) if session_log is not None else None,
+        parent_delegation_id=parent_delegation_id,
+        council_role=council_role,  # type: ignore[arg-type]
+        members=members,
+        synthesis_delegation_id=synthesis_delegation_id,
+    )
+
+
+def _record_failed_delegation(
+    command: str,
+    *,
+    provider_id: str | None,
+    model: str | None,
+    effort: str | int | None,
+    started_at: float,
+    error: Exception | str,
+    decision: RouteDecision | None = None,
+    semantic_plan: SemanticPlan | None = None,
+    session_log: SessionLog | None = None,
+) -> None:
+    resolved_provider = provider_id or (decision.provider if decision is not None else None)
+    resolved_model = model or _provider_default_model_by_id(resolved_provider)
+    record_delegation(
+        DelegationEvent(
+            command=command,
+            provider=resolved_provider,
+            model=resolved_model,
+            effort=effort if isinstance(effort, str) else None,
+            duration_ms=_council_elapsed_ms(started_at),
+            status=_delegation_status_from_error(error),
+            error=str(error),
+            tags=_delegation_tags(decision=decision, semantic_plan=semantic_plan),
+            session_log_path=(
+                str(session_log.log_path) if session_log is not None else None
+            ),
+        )
+    )
+
+
+def _delegation_tags(
+    *,
+    decision: RouteDecision | None,
+    semantic_plan: SemanticPlan | None,
+) -> list[str]:
+    if semantic_plan is not None:
+        return list(semantic_plan.tags)
+    if decision is not None:
+        return list(decision.task_tags)
+    return []
+
+
+def _delegation_status_from_error(error: Exception | str) -> str:
+    if isinstance(error, ProviderStalledError):
+        text = str(error).lower()
+        if "timed out" in text or "timeout" in text:
+            return "timeout"
+        return "stalled"
+    text = str(error).lower()
+    if any(marker in text for marker in ("quota", "rate limit", "rate-limit", "429")):
+        return "quota"
+    if "stalled" in text:
+        return "stalled"
+    if "timed out" in text or "timeout" in text:
+        return "timeout"
+    return "error"
+
+
+def _usage_int_or_none(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def _provider_default_model_by_id(provider_id: str | None) -> str | None:
+    if provider_id is None:
+        return None
+    try:
+        return _provider_default_model(get_provider(provider_id))
+    except (KeyError, ProviderError, AttributeError):
+        return None
 
 
 def _emit_provider_error(err: ProviderError, *, as_json: bool) -> None:
@@ -2712,6 +2898,13 @@ def ask(
                 silent=silent_route or as_json,
             )
         except CouncilCapError as e:
+            _record_response_delegation(
+                "council",
+                e.response,
+                effort=effort_value,
+                semantic_plan=plan,
+                council_role="parent",
+            )
             click.echo(f"conductor: {e}", err=True)
             _emit_usage_log(e.response, silent=silent_route or as_json)
             _emit_call(e.response, as_json=as_json, semantic_plan=plan)
@@ -2726,6 +2919,7 @@ def ask(
         _emit_call(response, as_json=as_json, semantic_plan=plan)
         return
 
+    dispatch_started_at = time.monotonic()
     if plan.mode == "review":
         review_exclude, review_reasons = _review_exclude_set(
             frozenset()
@@ -2781,12 +2975,39 @@ def ask(
                 },
             )
         except ProviderConfigError as e:
+            _record_failed_delegation(
+                "ask",
+                provider_id=decision.provider,
+                model=None,
+                effort=effort_value,
+                started_at=dispatch_started_at,
+                error=e,
+                decision=decision,
+                semantic_plan=plan,
+            )
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
         except ProviderError as e:
+            _record_failed_delegation(
+                "ask",
+                provider_id=decision.provider,
+                model=None,
+                effort=effort_value,
+                started_at=dispatch_started_at,
+                error=e,
+                decision=decision,
+                semantic_plan=plan,
+            )
             click.echo(f"conductor: {e}", err=True)
             sys.exit(1)
         _emit_usage_log(response, silent=silent_route or as_json)
+        _record_response_delegation(
+            "ask",
+            response,
+            effort=effort_value,
+            decision=decision,
+            semantic_plan=plan,
+        )
         _emit_call(response, as_json=as_json, decision=decision, semantic_plan=plan)
         return
 
@@ -2836,6 +3057,17 @@ def ask(
                     {"provider": provider_obj.name, "error": reason or "preflight failed"},
                 )
                 session_log.mark_finished()
+            _record_failed_delegation(
+                "ask",
+                provider_id=provider_obj.name,
+                model=None,
+                effort=effort_value,
+                started_at=dispatch_started_at,
+                error=reason or "preflight failed",
+                decision=decision,
+                semantic_plan=plan,
+                session_log=session_log,
+            )
             _echo_preflight_failure(provider_obj, reason)
             sys.exit(2)
 
@@ -2866,17 +3098,50 @@ def ask(
         if session_log is not None:
             session_log.emit("provider_failed", {"error": str(e)})
             session_log.mark_finished()
+        _record_failed_delegation(
+            "ask",
+            provider_id=decision.provider,
+            model=None,
+            effort=effort_value,
+            started_at=dispatch_started_at,
+            error=e,
+            decision=decision,
+            semantic_plan=plan,
+            session_log=session_log,
+        )
         click.echo(f"conductor: {e}", err=True)
         sys.exit(2)
     except ProviderConfigError as e:
         if session_log is not None:
             session_log.emit("provider_failed", {"error": str(e)})
             session_log.mark_finished()
+        _record_failed_delegation(
+            "ask",
+            provider_id=decision.provider,
+            model=None,
+            effort=effort_value,
+            started_at=dispatch_started_at,
+            error=e,
+            decision=decision,
+            semantic_plan=plan,
+            session_log=session_log,
+        )
         click.echo(f"conductor: {e}", err=True)
         sys.exit(2)
     except ProviderError as e:
         if session_log is not None:
             session_log.mark_finished()
+        _record_failed_delegation(
+            "ask",
+            provider_id=decision.provider,
+            model=None,
+            effort=effort_value,
+            started_at=dispatch_started_at,
+            error=e,
+            decision=decision,
+            semantic_plan=plan,
+            session_log=session_log,
+        )
         click.echo(f"conductor: {e}", err=True)
         _maybe_echo_stall_recovery_hint(e, cwd=cwd)
         sys.exit(1)
@@ -2885,6 +3150,14 @@ def ask(
     _emit_session_usage(session_log, response)
     if session_log is not None:
         session_log.mark_finished()
+    _record_response_delegation(
+        "ask",
+        response,
+        effort=effort_value,
+        decision=decision,
+        semantic_plan=plan,
+        session_log=session_log,
+    )
     _emit_call(
         response,
         as_json=as_json,
@@ -3106,6 +3379,7 @@ def call(
     attachments = brief_input.attachments
     effort_value = _parse_effort(effort)
     estimated_input_tokens = _estimate_text_tokens(body)
+    dispatch_started_at = time.monotonic()
 
     decision: RouteDecision | None = None
     if auto:
@@ -3150,9 +3424,27 @@ def call(
                 attachments=attachments,
             )
         except ProviderConfigError as e:
+            _record_failed_delegation(
+                "call",
+                provider_id=decision.provider,
+                model=model,
+                effort=effort_value,
+                started_at=dispatch_started_at,
+                error=e,
+                decision=decision,
+            )
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
         except ProviderError as e:
+            _record_failed_delegation(
+                "call",
+                provider_id=decision.provider,
+                model=model,
+                effort=effort_value,
+                started_at=dispatch_started_at,
+                error=e,
+                decision=decision,
+            )
             click.echo(f"conductor: {e}", err=True)
             sys.exit(1)
     else:
@@ -3212,18 +3504,48 @@ def call(
                     resume_session_id=resume_session_id,
                 )
         except ProviderConfigError as e:
+            _record_failed_delegation(
+                "call",
+                provider_id=provider_id,
+                model=model,
+                effort=effort_value,
+                started_at=dispatch_started_at,
+                error=e,
+            )
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
         except UnsupportedCapability as e:
+            _record_failed_delegation(
+                "call",
+                provider_id=provider_id,
+                model=model,
+                effort=effort_value,
+                started_at=dispatch_started_at,
+                error=e,
+            )
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
         except ProviderError as e:
+            _record_failed_delegation(
+                "call",
+                provider_id=provider_id,
+                model=model,
+                effort=effort_value,
+                started_at=dispatch_started_at,
+                error=e,
+            )
             click.echo(f"conductor: {e}", err=True)
             _maybe_echo_explicit_network_hint(provider_id, e)
             sys.exit(1)
 
     if auto and not as_json:
         _emit_usage_log(response, silent=silent_route)
+    _record_response_delegation(
+        "call",
+        response,
+        effort=effort_value,
+        decision=decision,
+    )
     _emit_call(response, as_json=as_json, decision=decision)
 
 
@@ -3439,6 +3761,7 @@ def review(
         uncommitted=uncommitted,
         cwd=cwd,
     )
+    dispatch_started_at = time.monotonic()
     max_fallbacks = _validate_max_fallbacks(max_fallbacks)
     prefer_value = _validate_prefer(prefer) if prefer is not None else "best"
 
@@ -3485,9 +3808,27 @@ def review(
                 max_fallbacks=max_fallbacks,
             )
         except ProviderConfigError as e:
+            _record_failed_delegation(
+                "review",
+                provider_id=decision.provider,
+                model=None,
+                effort=effort_value,
+                started_at=dispatch_started_at,
+                error=e,
+                decision=decision,
+            )
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
         except ProviderError as e:
+            _record_failed_delegation(
+                "review",
+                provider_id=decision.provider,
+                model=None,
+                effort=effort_value,
+                started_at=dispatch_started_at,
+                error=e,
+                decision=decision,
+            )
             click.echo(f"conductor: {e}", err=True)
             sys.exit(1)
     else:
@@ -3527,14 +3868,36 @@ def review(
                 title=title,
             )
         except ProviderConfigError as e:
+            _record_failed_delegation(
+                "review",
+                provider_id=provider_id,
+                model=None,
+                effort=effort_value,
+                started_at=dispatch_started_at,
+                error=e,
+            )
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
         except ProviderError as e:
+            _record_failed_delegation(
+                "review",
+                provider_id=provider_id,
+                model=None,
+                effort=effort_value,
+                started_at=dispatch_started_at,
+                error=e,
+            )
             click.echo(f"conductor: {e}", err=True)
             sys.exit(1)
 
     if auto and not as_json:
         _emit_usage_log(response, silent=silent_route)
+    _record_response_delegation(
+        "review",
+        response,
+        effort=effort_value,
+        decision=decision,
+    )
     _emit_call(response, as_json=as_json, decision=decision)
 
 
@@ -3810,6 +4173,7 @@ def exec_cmd(
     sandbox_value = _validate_sandbox(sandbox, warn=sandbox is not None)
     effort_value = _parse_effort(effort)
     start_timeout_sec = _normalize_start_timeout_sec(start_timeout_sec)
+    dispatch_started_at = time.monotonic()
 
     decision: RouteDecision | None = None
     session_log: SessionLog | None = None
@@ -3867,6 +4231,16 @@ def exec_cmd(
                         {"provider": provider_obj.name, "error": reason or "preflight failed"},
                     )
                     session_log.mark_finished()
+                _record_failed_delegation(
+                    "exec",
+                    provider_id=provider_obj.name,
+                    model=model,
+                    effort=effort_value,
+                    started_at=dispatch_started_at,
+                    error=reason or "preflight failed",
+                    decision=decision,
+                    session_log=session_log,
+                )
                 _echo_preflight_failure(provider_obj, reason)
                 sys.exit(2)
 
@@ -3892,17 +4266,47 @@ def exec_cmd(
             if session_log is not None:
                 session_log.emit("provider_failed", {"error": str(e)})
                 session_log.mark_finished()
+            _record_failed_delegation(
+                "exec",
+                provider_id=decision.provider,
+                model=model,
+                effort=effort_value,
+                started_at=dispatch_started_at,
+                error=e,
+                decision=decision,
+                session_log=session_log,
+            )
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
         except ProviderConfigError as e:
             if session_log is not None:
                 session_log.emit("provider_failed", {"error": str(e)})
                 session_log.mark_finished()
+            _record_failed_delegation(
+                "exec",
+                provider_id=decision.provider,
+                model=model,
+                effort=effort_value,
+                started_at=dispatch_started_at,
+                error=e,
+                decision=decision,
+                session_log=session_log,
+            )
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
         except ProviderError as e:
             if session_log is not None:
                 session_log.mark_finished()
+            _record_failed_delegation(
+                "exec",
+                provider_id=decision.provider,
+                model=model,
+                effort=effort_value,
+                started_at=dispatch_started_at,
+                error=e,
+                decision=decision,
+                session_log=session_log,
+            )
             _emit_provider_error(e, as_json=as_json)
             _maybe_echo_stall_recovery_hint(e, cwd=cwd)
             sys.exit(1)
@@ -3949,6 +4353,15 @@ def exec_cmd(
                     {"provider": provider_id, "error": reason or "preflight failed"},
                 )
                 session_log.mark_finished()
+                _record_failed_delegation(
+                    "exec",
+                    provider_id=provider_id,
+                    model=model,
+                    effort=effort_value,
+                    started_at=dispatch_started_at,
+                    error=reason or "preflight failed",
+                    session_log=session_log,
+                )
                 _echo_preflight_failure(provider, reason)
                 sys.exit(2)
         try:
@@ -4024,16 +4437,43 @@ def exec_cmd(
         except UnsupportedCapability as e:
             session_log.emit("provider_failed", {"provider": provider_id, "error": str(e)})
             session_log.mark_finished()
+            _record_failed_delegation(
+                "exec",
+                provider_id=provider_id,
+                model=model,
+                effort=effort_value,
+                started_at=dispatch_started_at,
+                error=e,
+                session_log=session_log,
+            )
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
         except ProviderConfigError as e:
             session_log.emit("provider_failed", {"provider": provider_id, "error": str(e)})
             session_log.mark_finished()
+            _record_failed_delegation(
+                "exec",
+                provider_id=provider_id,
+                model=model,
+                effort=effort_value,
+                started_at=dispatch_started_at,
+                error=e,
+                session_log=session_log,
+            )
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
         except ProviderError as e:
             session_log.emit("provider_failed", {"provider": provider_id, "error": str(e)})
             session_log.mark_finished()
+            _record_failed_delegation(
+                "exec",
+                provider_id=provider_id,
+                model=model,
+                effort=effort_value,
+                started_at=dispatch_started_at,
+                error=e,
+                session_log=session_log,
+            )
             _emit_provider_error(e, as_json=as_json)
             _maybe_echo_stall_recovery_hint(e, cwd=cwd)
             _maybe_echo_explicit_network_hint(provider_id, e)
@@ -4054,6 +4494,13 @@ def exec_cmd(
     _emit_session_usage(session_log, response)
     if session_log is not None:
         session_log.mark_finished()
+    _record_response_delegation(
+        "exec",
+        response,
+        effort=effort_value,
+        decision=decision,
+        session_log=session_log,
+    )
     _emit_call(
         response,
         as_json=as_json,
@@ -5081,6 +5528,140 @@ def _run_unwire() -> int:
         for path, reason in report.skipped:
             click.echo(f"  {path}  — {reason}")
     return 0
+
+
+# --------------------------------------------------------------------------- #
+# delegations — inspect unified delegation ledger
+# --------------------------------------------------------------------------- #
+
+
+@main.group()
+def delegations() -> None:
+    """Inspect the append-only delegation ledger."""
+
+
+@delegations.command("list")
+@click.option(
+    "--last",
+    "last_n",
+    default=20,
+    type=click.IntRange(min=1),
+    show_default=True,
+)
+@click.option("--since", default=None, help="Only show events since 1h, 24h, 7d, etc.")
+@click.option(
+    "--command",
+    "command_filter",
+    default=None,
+    type=click.Choice(["ask", "call", "review", "exec", "council"]),
+)
+@click.option("--provider", "provider_filter", default=None)
+@click.option("--include-members", is_flag=True, default=False)
+@click.option("--json", "as_json", is_flag=True, default=False)
+def delegations_list(
+    last_n: int,
+    since: str | None,
+    command_filter: str | None,
+    provider_filter: str | None,
+    include_members: bool,
+    as_json: bool,
+) -> None:
+    """List recent delegation ledger events."""
+    try:
+        events = list(
+            read_delegations(
+                last=last_n,
+                since=since,
+                command=command_filter,
+                provider=provider_filter,
+                include_members=include_members,
+            )
+        )
+    except ValueError as e:
+        raise click.UsageError(str(e)) from e
+
+    if as_json:
+        click.echo(json.dumps(events, default=str, indent=2))
+        return
+
+    if not events:
+        click.echo("(no delegations)")
+        return
+
+    click.echo(
+        "TIME              PROVIDER MODEL              CMD     STATUS  "
+        "DURATION TOKENS_IN/OUT COST"
+    )
+    click.echo("-----------------------------------------------------------------------------------------")
+    for event in events:
+        click.echo(_format_delegation_row(event))
+
+
+@delegations.command("show")
+@click.argument("delegation_id")
+@click.option("--json", "as_json", is_flag=True, default=False)
+def delegations_show(delegation_id: str, as_json: bool) -> None:
+    """Show one delegation event by id."""
+    events = list(read_delegations(delegation_id=delegation_id, include_members=True))
+    if not events:
+        raise click.ClickException(f"unknown delegation {delegation_id!r}")
+    event = next(
+        (candidate for candidate in events if candidate.get("delegation_id") == delegation_id),
+        events[0],
+    )
+    if as_json:
+        click.echo(json.dumps(event, default=str))
+        return
+    click.echo(json.dumps(event, default=str, indent=2))
+
+
+def _format_delegation_row(event: dict) -> str:
+    timestamp = _compact_delegation_time(event.get("timestamp"))
+    provider = _truncate_cell(event.get("provider") or "-", 8)
+    model = _truncate_cell(event.get("model") or "-", 18)
+    command = _truncate_cell(event.get("command") or "-", 7)
+    status = _truncate_cell(event.get("status") or "-", 7)
+    duration = _format_duration_ms(event.get("duration_ms"))
+    tokens = (
+        f"{_ledger_value(event.get('input_tokens'))}/"
+        f"{_ledger_value(event.get('output_tokens'))}"
+    )
+    cost = _format_cost(event.get("cost_usd"))
+    return (
+        f"{timestamp:<17} {provider:<8} {model:<18} {command:<7} "
+        f"{status:<7} {duration:>8} {tokens:>13} {cost:>8}"
+    )
+
+
+def _compact_delegation_time(value: object) -> str:
+    if not isinstance(value, str):
+        return "-"
+    return value.replace("T", " ")[:16]
+
+
+def _truncate_cell(value: object, width: int) -> str:
+    text = str(value)
+    if len(text) <= width:
+        return text
+    return text[: max(0, width - 1)] + "…"
+
+
+def _format_duration_ms(value: object) -> str:
+    if not isinstance(value, int):
+        return "-"
+    if value < 1000:
+        return f"{value}ms"
+    return f"{value / 1000:.1f}s"
+
+
+def _ledger_value(value: object) -> str:
+    return str(value) if isinstance(value, int) else "-"
+
+
+def _format_cost(value: object) -> str:
+    if not isinstance(value, (int, float)):
+        return "-"
+    return f"${value:.4f}"
 
 
 # --------------------------------------------------------------------------- #
