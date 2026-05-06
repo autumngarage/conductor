@@ -641,6 +641,14 @@ def _validate_max_fallbacks(raw: int) -> int:
     return raw
 
 
+def _estimate_brief_tokens(task: str) -> int:
+    # Pre-fallback context fitness check is approximate by design: ~4 chars per
+    # token is the standard rough heuristic for English text and is sufficient
+    # to spot-check "this brief obviously won't fit"; precise tokenization
+    # would be per-provider and would couple this layer to provider details.
+    return len(task) // 4
+
+
 def _ollama_index(candidates: list) -> int | None:
     """Return the index of ollama in ``candidates`` (or None if absent)."""
     for i, c in enumerate(candidates):
@@ -952,10 +960,37 @@ def _invoke_with_fallback(
             )
 
     prompted_offline = False
+    brief_tokens = _estimate_brief_tokens(task)
     idx = 0
     while idx < len(candidates):
         candidate = candidates[idx]
         provider = get_provider(candidate.name)
+        # Skip fallback candidates whose context can't hold the brief — burning a
+        # second roundtrip on a model that will exhaust mid-loop is worse than
+        # surfacing the next one early or raising. Only applies once we've fallen
+        # back at least once; the user's primary choice is respected unconditionally.
+        if idx > 0:
+            max_ctx = getattr(provider, "max_context_tokens", None)
+            if max_ctx is not None and brief_tokens > max_ctx:
+                if not silent:
+                    click.echo(
+                        f"[conductor] skipping fallback {candidate.name}: "
+                        f"brief ~{brief_tokens} tokens > model context {max_ctx}",
+                        err=True,
+                    )
+                if session_log is not None:
+                    session_log.emit(
+                        "fallback_skipped",
+                        {
+                            "provider": candidate.name,
+                            "reason": "brief_exceeds_context",
+                            "brief_tokens": brief_tokens,
+                            "max_context_tokens": max_ctx,
+                        },
+                    )
+                fallbacks.append(candidate.name)
+                idx += 1
+                continue
         candidate_models = (models_by_provider or {}).get(candidate.name)
         if session_log is not None:
             session_log.bind_provider(candidate.name)
