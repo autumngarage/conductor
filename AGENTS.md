@@ -38,14 +38,12 @@ This file is the source of truth for how AI reviewers (Codex, Claude, etc.) shou
 
 ## What to prioritize (in order)
 
-{{PRIORITIES — list your project's review priorities in order of importance. Examples:
-
-1. **Data integrity.** Anything that changes how data is written, migrated, or deleted.
-2. **Security.** Auth, input validation, secrets handling, injection risks.
-3. **Silent failures.** New `except: pass`, swallowed exceptions, fallbacks that mask broken state.
-4. **Tests for new failure modes.** Bug fixes must add a test that reproduces the original failure.
-
-Be specific to your project's actual risks. Generic priorities are useless.}}
+1. **Provider contract integrity.** Every adapter must satisfy the `Provider` Protocol (`configured()`, `smoke()`, `call()`); provider quirks belong inside adapters, not in `interface.py` or the router.
+2. **Routing and fallback correctness.** `auto` mode must derive choices from task tags and provider tags. Broken integrations, missing credentials, and provider failures must surface clearly, not silently fall through to another path.
+3. **Credential safety.** Preserve env → `key_command` → keychain resolution. A failing `key_command` is an error, not permission to try a later source.
+4. **Subprocess authority boundaries.** `conductor exec --with codex` runs unsandboxed end-to-end; `--sandbox` is deprecated/ignored. Permission profiles only make sense for providers that enforce conductor's tool whitelist.
+5. **Consumer JSON compatibility.** `CallResponse` on stdout is a public contract used by Sentinel and Touchstone; shape changes need explicit compatibility handling.
+6. **Generated/canonical wiring drift.** Keep provider IDs, model stacks, agent wiring, and templates in sync so subagent dispatch stays deterministic.
 
 Style nits, formatting, and theoretical refactors are **out of scope** unless they hide a bug. Do not flag them.
 
@@ -55,14 +53,17 @@ Style nits, formatting, and theoretical refactors are **out of scope** unless th
 
 ### High-scrutiny paths
 
-{{HIGH_SCRUTINY_PATHS — list the files/directories where mistakes are most expensive. Examples:
+Files:
 
-Files: `src/auth/`, `src/payments/`, `migrations/`
-
-Flag any of the following:
-- (specific anti-patterns relevant to your project)
-- (things that have gone wrong before)
-- (invariants that must hold)}}
+- `src/conductor/providers/interface.py` — shared adapter contract; review for interface widening, leaked vendor details, and call/smoke/configured semantic drift.
+- `src/conductor/providers/__init__.py` — canonical provider identifiers; review for aliases or renames that break config, routing, or downstream callers.
+- `src/conductor/router.py`, `src/conductor/router_defaults.py` — `auto` routing; review for fallback behavior that hides missing integrations or ignores task/provider tags.
+- `src/conductor/credentials.py` — credential resolution; review for ordering changes and swallowed `key_command` failures.
+- `src/conductor/providers/codex.py`, `src/conductor/providers/claude.py`, `src/conductor/providers/gemini.py` — subprocess/tool-whitelist adapters; review watchdogs, heartbeats, permission profiles, and sandbox claims carefully.
+- `src/conductor/providers/openrouter.py` and provider-specific wrappers for Kimi, DeepSeek, and OpenRouter — shared transport with distinct provider IDs; review Moonshot/Kimi constraints such as temperature clamp and `tool_choice`.
+- `src/conductor/cli.py` — CLI and stdout contract; review flag compatibility and `CallResponse` JSON changes as public API changes.
+- `src/conductor/agent_wiring.py`, `src/conductor/openrouter_model_stacks.py`, `src/conductor/_agent_templates.py` — generated/canonical dispatch surfaces; review for drift across provider IDs, tags, and templates.
+- `principles/`, `.cortex/doctrine/` — architectural rules; review for compatibility with the project doctrine rather than local convenience.
 
 ### Silent failures
 
