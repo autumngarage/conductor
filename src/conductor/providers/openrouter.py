@@ -789,13 +789,14 @@ def select_model_for_task(
 ) -> dict[str, object]:
     """Select an OpenRouter completion target.
 
-    ``best`` and ``balanced`` intentionally leave ``openrouter/auto``
-    unrestricted. The auto-router has a curated eligible pool that is narrower
-    than ``/models``; restricting it with concrete catalog slugs can produce
-    "No models match your request and model restrictions" even when every slug
-    appears in the public catalog. ``cheapest`` and ``fastest`` still select a
-    direct model from the catalog because those modes require local cost
-    ordering before the request is sent.
+    ``best`` and ``balanced`` use a curated OpenRouter coding stack for
+    tool-use requests. Non-tool-use requests intentionally leave
+    ``openrouter/auto`` unrestricted because the auto-router has a curated
+    eligible pool that is narrower than ``/models``; restricting it with
+    concrete catalog slugs can produce "No models match your request and model
+    restrictions" even when every slug appears in the public catalog.
+    ``cheapest`` and ``fastest`` still select a direct model from the catalog
+    because those modes require local cost ordering before the request is sent.
     """
     if prefer not in {"best", "balanced", "cheapest", "fastest"}:
         raise ProviderError(
