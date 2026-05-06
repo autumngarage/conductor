@@ -487,7 +487,7 @@ def test_claude_exec_fails_fast_on_quota_stderr(mocker, tmp_path):
     session_log = SessionLog(path=tmp_path / "claude-quota.ndjson")
 
     with pytest.raises(ProviderHTTPError) as exc:
-        ClaudeProvider(first_output_timeout_sec=0.5).exec(
+        ClaudeProvider(exec_first_output_timeout_sec=0.5).exec(
             "hi",
             max_stall_sec=0.5,
             session_log=session_log,
@@ -553,7 +553,7 @@ def test_claude_exec_first_output_watchdog_is_separate_from_mid_task_stall(
     session_log = SessionLog(path=tmp_path / "claude-first-output-stall.ndjson")
 
     with pytest.raises(ProviderStalledError) as exc:
-        ClaudeProvider(first_output_timeout_sec=0.05).exec(
+        ClaudeProvider(exec_first_output_timeout_sec=0.05).exec(
             "hi",
             timeout_sec=1,
             max_stall_sec=30,
@@ -588,6 +588,33 @@ def test_claude_startup_timeout_defaults_split_call_and_exec():
     assert provider._call_first_output_timeout_sec == 60.0
     assert provider._exec_first_output_timeout_sec == 300.0
     assert provider._effective_first_output_timeout(None) == 300.0
+
+
+def test_claude_legacy_first_output_timeout_does_not_override_exec_default(
+    mocker,
+):
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+
+    def fake_run_subprocess_with_live_stderr(**kwargs):
+        raise ProviderStartupStalledError(
+            provider=kwargs["provider_name"],
+            timeout_sec=kwargs["first_output_timeout_sec"],
+        )
+
+    mocker.patch(
+        "conductor.providers.claude.run_subprocess_with_live_stderr",
+        side_effect=fake_run_subprocess_with_live_stderr,
+    )
+
+    with pytest.raises(ProviderStartupStalledError) as exc:
+        ClaudeProvider(first_output_timeout_sec=45).exec(
+            "hi",
+            timeout_sec=1,
+            max_stall_sec=30,
+        )
+
+    assert exc.value.error_response["timeout_sec"] == 300.0
+    assert "within 300s after start" in exc.value.error_response["message"]
 
 
 def test_claude_exec_start_timeout_allows_slow_first_byte(
@@ -733,7 +760,7 @@ def test_claude_exec_startup_watchdog_runs_when_mid_task_stall_disabled(
     )
 
     with pytest.raises(ProviderStartupStalledError) as exc:
-        ClaudeProvider(first_output_timeout_sec=0.01).exec(
+        ClaudeProvider(exec_first_output_timeout_sec=0.01).exec(
             "hi",
             timeout_sec=1,
             max_stall_sec=None,
@@ -773,7 +800,7 @@ def test_claude_exec_sets_pwd_to_configured_cwd_for_project_settings(
     mocker.patch("conductor.providers.claude.subprocess.Popen", side_effect=factory)
     session_log = SessionLog(path=tmp_path / "claude-settings.ndjson")
 
-    response = ClaudeProvider(first_output_timeout_sec=1).exec(
+    response = ClaudeProvider(exec_first_output_timeout_sec=1).exec(
         "hi",
         sandbox="workspace-write",
         cwd=str(repo),
@@ -840,7 +867,7 @@ def test_claude_exec_allows_linked_worktree_cwd(
 
     mocker.patch("conductor.providers.claude.subprocess.Popen", side_effect=factory)
 
-    response = ClaudeProvider(first_output_timeout_sec=1).exec(
+    response = ClaudeProvider(exec_first_output_timeout_sec=1).exec(
         "hi",
         sandbox="workspace-write",
         cwd=str(worktree),
@@ -866,7 +893,7 @@ def test_claude_exec_allows_read_only_linked_worktree_cwd(
 
     mocker.patch("conductor.providers.claude.subprocess.Popen", side_effect=factory)
 
-    response = ClaudeProvider(first_output_timeout_sec=1).exec(
+    response = ClaudeProvider(exec_first_output_timeout_sec=1).exec(
         "hi",
         sandbox="read-only",
         cwd=str(worktree),
