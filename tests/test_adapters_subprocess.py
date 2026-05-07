@@ -1376,6 +1376,7 @@ def test_codex_configured_when_cli_present_and_authed(mocker):
         "conductor.providers.codex.subprocess.run",
         return_value=_fake_completed(stdout="Logged in using ChatGPT"),
     )
+    mocker.patch.object(CodexProvider, "_startup_probe", return_value=(True, None))
     ok, reason = CodexProvider().configured()
     assert ok is True and reason is None
 

@@ -390,6 +390,85 @@ def test_edit_tool_runs_through_executor(tmp_path: Path):
     assert (tmp_path / "a.txt").read_text() == "bye"
 
 
+def test_edit_tool_rejects_python_syntax_error_before_write(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+):
+    path = tmp_path / "a.py"
+    path.write_text("def ok():\n    return 1\n")
+    tool = get_tool("Edit")
+
+    with pytest.raises(ToolExecutionError) as exc:
+        tool.execute(
+            {
+                "path": "a.py",
+                "old_string": "return 1",
+                "new_string": "return (",
+            },
+            cwd=tmp_path,
+        )
+
+    assert "Edit rejected" in str(exc.value)
+    assert "Python syntax error" in str(exc.value)
+    assert path.read_text() == "def ok():\n    return 1\n"
+    assert "Edit rejected for a.py" in capsys.readouterr().err
+
+
+def test_edit_tool_rejects_tool_call_leak_before_write(tmp_path: Path):
+    path = tmp_path / "a.py"
+    path.write_text("x = 1\n")
+    tool = get_tool("Edit")
+
+    with pytest.raises(ToolExecutionError) as exc:
+        tool.execute(
+            {
+                "path": "a.py",
+                "old_string": "x = 1",
+                "new_string": "assistant to=functions.Edit x = 2",
+            },
+            cwd=tmp_path,
+        )
+
+    assert "tool-call leak detected" in str(exc.value)
+    assert path.read_text() == "x = 1\n"
+
+
+def test_edit_tool_rejects_multiscript_mojibake_before_write(tmp_path: Path):
+    path = tmp_path / "a.txt"
+    path.write_text("clean ascii\n")
+    tool = get_tool("Edit")
+
+    with pytest.raises(ToolExecutionError) as exc:
+        tool.execute(
+            {
+                "path": "a.txt",
+                "old_string": "clean ascii",
+                "new_string": "clean ascii 漢字 Привет नमस्ते",
+            },
+            cwd=tmp_path,
+        )
+
+    assert "mojibake detected" in str(exc.value)
+    assert path.read_text() == "clean ascii\n"
+
+
+def test_edit_tool_allows_single_non_ascii_script(tmp_path: Path):
+    path = tmp_path / "a.txt"
+    path.write_text("name = 'Jose'\n")
+    tool = get_tool("Edit")
+
+    tool.execute(
+        {
+            "path": "a.txt",
+            "old_string": "Jose",
+            "new_string": "José García café",
+        },
+        cwd=tmp_path,
+    )
+
+    assert path.read_text() == "name = 'José García café'\n"
+
+
 def test_edit_tool_rejects_escape(tmp_path: Path):
     tool = get_tool("Edit")
     with pytest.raises(ToolExecutionError):
@@ -452,6 +531,83 @@ def test_write_tool_rejects_directory_path(tmp_path: Path):
     with pytest.raises(ToolExecutionError) as exc:
         tool.execute({"path": "subdir", "content": "x"}, cwd=tmp_path)
     assert "directory" in str(exc.value)
+
+
+def test_write_tool_rejects_python_syntax_error_before_write(tmp_path: Path):
+    path = tmp_path / "new.py"
+    tool = get_tool("Write")
+
+    with pytest.raises(ToolExecutionError) as exc:
+        tool.execute({"path": "new.py", "content": "def broken(:\n"}, cwd=tmp_path)
+
+    assert "Write rejected" in str(exc.value)
+    assert "Python syntax error" in str(exc.value)
+    assert not path.exists()
+
+
+def test_write_tool_allows_multiscript_new_file(tmp_path: Path):
+    path = tmp_path / "translations.txt"
+    tool = get_tool("Write")
+
+    tool.execute(
+        {"path": "translations.txt", "content": "漢字 Привет नमस्ते\n"},
+        cwd=tmp_path,
+    )
+
+    assert path.read_text() == "漢字 Привет नमस्ते\n"
+
+
+def test_write_tool_logs_unsupported_syntax_parser_once(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+):
+    path = tmp_path / "config.yaml"
+    path.write_text("old: value\n")
+    tool = get_tool("Write")
+
+    tool.execute({"path": "config.yaml", "content": "new: value\n"}, cwd=tmp_path)
+
+    stderr = capsys.readouterr().err
+    assert stderr.count("no lightweight parser configured for .yaml") == 1
+
+
+def test_executor_no_write_validation_allows_corrupt_write(tmp_path: Path):
+    path = tmp_path / "a.py"
+    path.write_text("x = 1\n")
+    executor = ToolExecutor(cwd=tmp_path, write_validation=False)
+
+    executor.run(
+        "Edit",
+        {
+            "path": "a.py",
+            "old_string": "x = 1",
+            "new_string": "assistant to=functions.Edit def broken(:",
+        },
+    )
+
+    assert path.read_text() == "assistant to=functions.Edit def broken(:\n"
+
+
+def test_write_tool_no_validation_does_not_read_existing_file(
+    tmp_path: Path,
+    mocker,
+):
+    path = tmp_path / "existing.py"
+    path.write_text("old\n")
+    read_text = mocker.patch.object(
+        Path,
+        "read_text",
+        side_effect=AssertionError("read_text should not be called"),
+    )
+    tool = get_tool("Write")
+
+    tool.execute(
+        {"path": "existing.py", "content": "assistant to=functions.Write"},
+        cwd=tmp_path,
+        write_validation=False,
+    )
+
+    assert read_text.call_count == 0
 
 
 # --------------------------------------------------------------------------- #

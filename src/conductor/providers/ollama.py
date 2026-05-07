@@ -502,6 +502,7 @@ class OllamaProvider:
         max_stall_sec: int | None = None,
         resume_session_id: str | None = None,
         session_log: SessionLog | None = None,
+        write_validation: bool = True,
     ) -> CallResponse:
         # accepted for API parity; only codex implements stall-watchdog today
         if resume_session_id:
@@ -520,7 +521,7 @@ class OllamaProvider:
             )
 
         workdir = Path(cwd) if cwd else Path.cwd()
-        executor = ToolExecutor(cwd=workdir)
+        executor = ToolExecutor(cwd=workdir, write_validation=write_validation)
         tool_specs = build_tool_specs(tools)
 
         explicit_model = model is not None

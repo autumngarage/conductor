@@ -85,6 +85,7 @@ from conductor.providers import (
     ClaudeProvider,
     CodexProvider,
     NativeReviewProvider,
+    OllamaProvider,
     OpenRouterProvider,
     ProviderConfigError,
     ProviderError,
@@ -1543,6 +1544,7 @@ def _invoke_with_fallback(
     session_log: SessionLog | None = None,
     models_by_provider: dict[str, tuple[str, ...]] | None = None,
     attachments: tuple[Path, ...] = (),
+    write_validation: bool = True,
 ) -> tuple[CallResponse, list[str]]:
     """Try the decision's ranked providers in order; fallback on retryable errors.
 
@@ -1650,6 +1652,7 @@ def _invoke_with_fallback(
                         max_stall_sec=max_stall_sec,
                         resume_session_id=resume_session_id,
                         session_log=session_log,
+                        write_validation=write_validation,
                     )
                 elif isinstance(provider, ClaudeProvider):
                     _ensure_supports_attachments(provider, attachments)
@@ -1680,6 +1683,21 @@ def _invoke_with_fallback(
                         resume_session_id=resume_session_id,
                         session_log=session_log,
                         attachments=attachments,
+                    )
+                elif isinstance(provider, OllamaProvider):
+                    _ensure_supports_attachments(provider, attachments)
+                    response = provider.exec(
+                        task,
+                        model=model,
+                        effort=effort,
+                        tools=tools,
+                        sandbox=sandbox,
+                        cwd=cwd,
+                        timeout_sec=timeout_sec,
+                        max_stall_sec=max_stall_sec,
+                        resume_session_id=resume_session_id,
+                        session_log=session_log,
+                        write_validation=write_validation,
                     )
                 else:
                     _ensure_supports_attachments(provider, attachments)
@@ -4683,6 +4701,14 @@ def review(
     default=False,
     help="Warn when post-dispatch citation references do not resolve in the worktree.",
 )
+@click.option(
+    "--write-validation/--no-write-validation",
+    default=True,
+    help=(
+        "Validate Conductor-owned Edit/Write content before writing. "
+        "Disable only for intentional corrupt-byte fixtures."
+    ),
+)
 def exec_cmd(
     provider_id: str | None,
     profile: str | None,
@@ -4714,6 +4740,7 @@ def exec_cmd(
     preflight: bool,
     allow_short_brief: bool,
     ground_citations: bool,
+    write_validation: bool,
 ) -> None:
     """Run a task as an agent session with tool access (exec mode)."""
     timeout_is_default = _parameter_is_default("timeout_sec")
@@ -4879,6 +4906,7 @@ def exec_cmd(
                 resume_session_id=resume_session_id,
                 session_log=session_log,
                 attachments=attachments,
+                write_validation=write_validation,
             )
         except UnsupportedCapability as e:
             if session_log is not None:
@@ -5010,6 +5038,7 @@ def exec_cmd(
                     max_stall_sec=max_stall_sec,
                     resume_session_id=resume_session_id,
                     session_log=session_log,
+                    write_validation=write_validation,
                 )
             elif isinstance(provider, ClaudeProvider):
                 response = provider.exec(
@@ -5039,6 +5068,20 @@ def exec_cmd(
                     resume_session_id=resume_session_id,
                     session_log=session_log,
                     attachments=attachments,
+                )
+            elif isinstance(provider, OllamaProvider):
+                response = provider.exec(
+                    body,
+                    model=model,
+                    effort=effort_value,
+                    tools=tools_set,
+                    sandbox=sandbox_value,
+                    cwd=cwd,
+                    timeout_sec=timeout_sec,
+                    max_stall_sec=max_stall_sec,
+                    resume_session_id=resume_session_id,
+                    session_log=session_log,
+                    write_validation=write_validation,
                 )
             else:
                 response = provider.exec(
