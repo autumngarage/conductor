@@ -16,6 +16,13 @@ import subprocess
 from pathlib import Path
 from typing import Any, Protocol
 
+from conductor.tools.write_validation import (
+    WriteValidationError,
+    log_write_rejection,
+    log_write_validation_notice,
+    validate_write_content,
+)
+
 # Default per-command timeout for BashTool when the caller doesn't set one.
 # Kept modest so a runaway shell doesn't wedge the tool-use loop.
 _BASH_DEFAULT_TIMEOUT_SEC = 60
@@ -51,7 +58,13 @@ class Tool(Protocol):
     description: str
     parameters_schema: dict
 
-    def execute(self, params: dict, *, cwd: Path) -> str:
+    def execute(
+        self,
+        params: dict,
+        *,
+        cwd: Path,
+        write_validation: bool = True,
+    ) -> str:
         """Run the tool."""
 
 
@@ -324,7 +337,14 @@ class EditTool:
     )
     parameters_schema: dict  # assigned below
 
-    def execute(self, params: dict, *, cwd: Path, **_) -> str:
+    def execute(
+        self,
+        params: dict,
+        *,
+        cwd: Path,
+        write_validation: bool = True,
+        **_,
+    ) -> str:
         path = _require_str(params, "path")
         old_string = params.get("old_string")
         new_string = params.get("new_string")
@@ -369,6 +389,16 @@ class EditTool:
             if replace_all
             else content.replace(old_string, new_string, 1)
         )
+        if write_validation:
+            try:
+                validate_write_content(
+                    path=target,
+                    old_content=content,
+                    new_content=new_content,
+                )
+            except WriteValidationError as e:
+                log_write_rejection(tool_name=self.name, path=path, reason=str(e))
+                raise ToolExecutionError(f"Edit rejected: {e}") from e
         try:
             target.write_text(new_content, encoding="utf-8")
         except OSError as e:
@@ -407,7 +437,14 @@ class WriteTool:
     )
     parameters_schema: dict  # assigned below
 
-    def execute(self, params: dict, *, cwd: Path, **_) -> str:
+    def execute(
+        self,
+        params: dict,
+        *,
+        cwd: Path,
+        write_validation: bool = True,
+        **_,
+    ) -> str:
         path = _require_str(params, "path")
         content = params.get("content")
         if not isinstance(content, str):
@@ -415,13 +452,40 @@ class WriteTool:
         target = _resolve_in_cwd(path, cwd)
         if target.is_dir():
             raise ToolExecutionError(f"{path} is a directory, not a file")
+        old_content: str | None = None
+        existed_before = target.exists()
+        if existed_before and write_validation:
+            try:
+                old_content = target.read_text(encoding="utf-8")
+            except UnicodeDecodeError as e:
+                log_write_validation_notice(
+                    tool_name=self.name,
+                    path=path,
+                    message=(
+                        "existing file is not valid UTF-8; "
+                        f"skipping old-content validation context ({e})"
+                    ),
+                )
+                old_content = None
+            except OSError as e:
+                raise ToolExecutionError(f"cannot read existing {path}: {e}") from e
+        if write_validation:
+            try:
+                validate_write_content(
+                    path=target,
+                    old_content=old_content,
+                    new_content=content,
+                )
+            except WriteValidationError as e:
+                log_write_rejection(tool_name=self.name, path=path, reason=str(e))
+                raise ToolExecutionError(f"Write rejected: {e}") from e
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
         except OSError as e:
             raise ToolExecutionError(f"cannot write {path}: {e}") from e
         size = len(content.encode("utf-8"))
-        existed = "overwrote" if target.exists() else "wrote"
+        existed = "overwrote" if existed_before else "wrote"
         return f"{existed} {path} ({size} bytes)."
 
 
@@ -590,8 +654,9 @@ class ToolExecutor:
     filesystem tools resolve paths against the given cwd.
     """
 
-    def __init__(self, *, cwd: Path):
+    def __init__(self, *, cwd: Path, write_validation: bool = True):
         self._cwd = Path(cwd).resolve()
+        self._write_validation = write_validation
         if not self._cwd.exists() or not self._cwd.is_dir():
             raise ValueError(f"cwd {cwd} is not an existing directory")
 
@@ -608,7 +673,11 @@ class ToolExecutor:
             raise ToolExecutionError(str(e)) from e
 
         try:
-            return tool.execute(params, cwd=self._cwd)
+            return tool.execute(
+                params,
+                cwd=self._cwd,
+                write_validation=self._write_validation,
+            )
         except ToolExecutionError:
             raise
         except ToolSchemaError as e:

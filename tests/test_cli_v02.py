@@ -1488,6 +1488,31 @@ def test_exec_unknown_tool_errors_with_hint():
     assert "NotARealTool" in result.output
 
 
+def test_exec_no_write_validation_passes_through_to_http_tool_provider(mocker):
+    _stub_all_configured(mocker, {"openrouter"})
+    exec_mock = mocker.patch.object(
+        OpenRouterProvider, "exec", return_value=_fake_response("openrouter")
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "openrouter",
+            "--no-write-validation",
+            "--no-preflight",
+            "--tools",
+            "Edit",
+            "--task",
+            "write a corrupt fixture",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert exec_mock.call_args.kwargs["write_validation"] is False
+
+
 @pytest.mark.parametrize("sandbox", ["workspace-write", "read-only", "strict", "none", "surprise"])
 def test_exec_sandbox_values_warn_once_and_are_ignored(mocker, sandbox):
     _stub_all_configured(mocker, {"codex"})
