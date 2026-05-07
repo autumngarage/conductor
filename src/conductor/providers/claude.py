@@ -806,11 +806,19 @@ class ClaudeProvider:
                             "probe": probe.as_dict(),
                         },
                     )
-                self._sleep_before_startup_retry(
-                    timeout,
-                    start=overall_start,
-                    args=args,
-                )
+                try:
+                    self._sleep_before_startup_retry(
+                        timeout,
+                        start=overall_start,
+                        args=args,
+                    )
+                except subprocess.TimeoutExpired:
+                    raise self._startup_stall_with_diagnostic(
+                        e,
+                        probe=probe,
+                        attempts=attempt,
+                        retry_on_stall=retry_on_stall,
+                    ) from e
                 attempt += 1
 
     def _remaining_timeout(
@@ -862,9 +870,17 @@ class ClaudeProvider:
             else " No *.lock or *.tmp files found directly under ~/.claude."
         )
         recovery_text = (
-            " Retry attempts were exhausted."
+            (
+                " Retry attempts were exhausted. Set `--retry-on-stall` higher "
+                "(default: 1, which has already retried once) to allow conductor "
+                "to re-spawn again."
+            )
             if retry_on_stall
-            else " Or add `--retry-on-stall 1` to allow conductor to re-spawn."
+            else (
+                " Automatic startup-stall retry is disabled. Set "
+                "`--retry-on-stall` to 1 or higher to allow conductor to "
+                "re-spawn."
+            )
         )
         message = (
             f"conductor: claude exec stalled at first_output "

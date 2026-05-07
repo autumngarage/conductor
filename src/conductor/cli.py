@@ -4396,12 +4396,12 @@ def review(
 )
 @click.option(
     "--retry-on-stall",
-    default=0,
+    default=1,
     type=click.IntRange(min=0),
     help=(
-        "Claude exec only: retry this many times if the provider stalls before "
-        "its first output byte. Never retries after first output, to avoid "
-        "duplicating side effects."
+        "Claude exec only. Default: 1. Retry once if the provider stalls before "
+        "its first output byte. The retry is safe: no observable side effects "
+        "can have occurred before first output. Set to 0 to disable."
     ),
 )
 @click.option(
