@@ -182,9 +182,60 @@ worktree_has_uncommitted_changes() {
   [ -n "$(git -C "$path" status --porcelain)" ]
 }
 
+# Echoes the lock reason when the worktree at $path is locked; nothing
+# otherwise. A locked worktree may not be removed without --force or
+# unlocking — both inappropriate when the holder is an active agent
+# harness or another tool that will clean up on its own exit.
+worktree_lock_reason() {
+  local path="$1"
+  local current_path="" current_lock=""
+  local line key value
+
+  # Resolve $path the same way `git worktree list --porcelain` resolves
+  # its output, so symlinked TMPDIRs (e.g. /var → /private/var on macOS)
+  # don't cause spurious mismatches.
+  if [ -d "$path" ]; then
+    path="$(cd "$path" && pwd -P)"
+  fi
+
+  # Process substitution (not a pipe) so the variable mutations persist
+  # in this shell and survive past the loop. A bare `git ... | while`
+  # would lose the final-block state because the pipe spawns a subshell.
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ -z "$line" ]; then
+      if [ "$current_path" = "$path" ] && [ -n "$current_lock" ]; then
+        printf '%s\n' "$current_lock"
+        return 0
+      fi
+      current_path=""
+      current_lock=""
+      continue
+    fi
+
+    key="${line%% *}"
+    value="${line#* }"
+    case "$key" in
+      worktree) current_path="$value" ;;
+      locked)
+        # `locked` may be a bare key with no reason, or `locked <reason>`.
+        if [ "$line" = "locked" ]; then
+          current_lock="(no reason recorded)"
+        else
+          current_lock="$value"
+        fi
+        ;;
+    esac
+  done < <(git worktree list --porcelain)
+
+  if [ "$current_path" = "$path" ] && [ -n "$current_lock" ]; then
+    printf '%s\n' "$current_lock"
+  fi
+  return 0
+}
+
 remove_clean_merged_branch_worktree() {
   local path="$1"
-  local current_worktree common_git_dir
+  local current_worktree common_git_dir lock_reason
 
   if [ -z "$path" ]; then
     return 0
@@ -195,6 +246,11 @@ remove_clean_merged_branch_worktree() {
   fi
   if worktree_has_uncommitted_changes "$path"; then
     echo "WARN: worktree at $path has uncommitted changes; not removing — operator action required" >&2
+    return 0
+  fi
+  lock_reason="$(worktree_lock_reason "$path")"
+  if [ -n "$lock_reason" ]; then
+    echo "==> Worktree at $path is locked ($lock_reason); skipping removal — owner will clean up"
     return 0
   fi
 

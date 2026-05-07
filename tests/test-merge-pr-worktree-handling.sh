@@ -41,6 +41,8 @@ extract_function "git_common_dir_for_worktree" "$MERGE_SCRIPT" "$FUNCTIONS_FILE.
 cat "$FUNCTIONS_FILE.tmp" >> "$FUNCTIONS_FILE"
 extract_function "worktree_has_uncommitted_changes" "$MERGE_SCRIPT" "$FUNCTIONS_FILE.tmp"
 cat "$FUNCTIONS_FILE.tmp" >> "$FUNCTIONS_FILE"
+extract_function "worktree_lock_reason" "$MERGE_SCRIPT" "$FUNCTIONS_FILE.tmp"
+cat "$FUNCTIONS_FILE.tmp" >> "$FUNCTIONS_FILE"
 extract_function "remove_clean_merged_branch_worktree" "$MERGE_SCRIPT" "$FUNCTIONS_FILE.tmp"
 cat "$FUNCTIONS_FILE.tmp" >> "$FUNCTIONS_FILE"
 # shellcheck source=/dev/null
@@ -125,5 +127,41 @@ if ! grep -Fq "WARN: worktree at $DIRTY_WORKTREE has uncommitted changes; not re
   cat "$dirty_stderr" >&2
   exit 1
 fi
+
+# Locked worktree: simulates the swarm-shipping case where a Claude
+# Code agent harness locks the worktree it's running in. Removal must
+# skip cleanly with a one-line note and return 0 (not fail under set -e).
+LOCKED_WORKTREE="$TMP_ROOT/locked-worktree"
+git -C "$TEST_REPO" branch locked
+git -C "$TEST_REPO" worktree add -q "$LOCKED_WORKTREE" locked
+git -C "$TEST_REPO" worktree lock --reason "claude agent agent-test" "$LOCKED_WORKTREE"
+
+# Verify the helper sees the lock.
+detected_lock="$(cd "$TEST_REPO" && worktree_lock_reason "$LOCKED_WORKTREE")"
+if [ "$detected_lock" != "claude agent agent-test" ]; then
+  printf 'FAIL: worktree_lock_reason did not surface the lock reason\n' >&2
+  printf 'expected: claude agent agent-test\n' >&2
+  printf 'actual:   %s\n' "$detected_lock" >&2
+  exit 1
+fi
+
+locked_output="$(cd "$TEST_REPO" && remove_clean_merged_branch_worktree "$LOCKED_WORKTREE")"
+if [ ! -d "$LOCKED_WORKTREE" ]; then
+  printf 'FAIL: locked worktree was removed despite the lock\n' >&2
+  exit 1
+fi
+if [[ "$locked_output" != "==> Worktree at $LOCKED_WORKTREE is locked"* ]]; then
+  printf 'FAIL: locked worktree removal did not print expected note\n' >&2
+  printf 'actual: %s\n' "$locked_output" >&2
+  exit 1
+fi
+if [[ "$locked_output" != *"claude agent agent-test"* ]]; then
+  printf 'FAIL: locked worktree note did not include the lock reason\n' >&2
+  printf 'actual: %s\n' "$locked_output" >&2
+  exit 1
+fi
+
+# Clean up the lock so the trap can rm -rf the tmp tree.
+git -C "$TEST_REPO" worktree unlock "$LOCKED_WORKTREE" 2>/dev/null || true
 
 printf 'ok\n'
