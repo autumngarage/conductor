@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from conductor.providers._startup_lock import gemini_startup_lock
 from conductor.providers.cli_auth import (
     AuthPromptTracker,
     CapturedProcessResult,
@@ -567,6 +568,7 @@ class GeminiProvider:
                     session_log=session_log,
                     tracker=tracker,
                     popen_factory=subprocess.Popen,
+                    startup_lock=gemini_startup_lock(session_log=session_log),
                 )
             else:
                 completed = subprocess.run(
