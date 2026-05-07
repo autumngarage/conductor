@@ -74,9 +74,10 @@ The task prompt, usually a delegation brief, comes from one of these sources:
 
 1. `--brief "..."` / `--task "..."` — string flag. Avoid for long briefs (visible in `ps aux`).
 2. `--brief-file <path>` / `--task-file <path>` — read from a UTF-8 file. Use `-` to read stdin explicitly.
-3. **Stdin** — when no input flag is set, conductor reads stdin until EOF.
+3. `--issue <N|owner/repo#N>` — fetch a GitHub issue via `gh` and use its title, body, labels, and recent comments as the seed brief.
+4. **Stdin** — when no input flag is set, conductor reads stdin until EOF.
 
-`--brief` and `--brief-file` are the preferred spellings for delegation. `--task` and `--task-file` remain compatibility aliases. Long prompts: prefer `--brief-file` or stdin to keep the brief out of process listings.
+`--brief` and `--brief-file` are the preferred spellings for delegation. `--task` and `--task-file` remain compatibility aliases. Long prompts: prefer `--brief-file` or stdin to keep the brief out of process listings. When `--issue` is combined with a brief/task input, the issue text comes first and the operator input is appended as additional context.
 
 ## Exec permission contract
 
@@ -125,6 +126,8 @@ The canonical reference is `conductor call --help`. The contract-level commitmen
 | `--exclude <csv>` | string | stable | Providers to skip in `--auto` |
 | `--brief <text>` | string | stable | Inline delegation brief / prompt |
 | `--brief-file <path>` | string | stable | File path, `-` for stdin |
+| `--issue <N\|owner/repo#N>` | string | stable | GitHub issue seed brief via `gh` |
+| `--issue-comment-limit <n>` | int | stable | Recent comments to include with `--issue`. Default: 10 |
 | `--task <text>` | string | stable | Compatibility alias for `--brief` |
 | `--task-file <path>` | string | stable | Compatibility alias for `--brief-file` |
 | `--model <model>` | string | stable | Override provider default model |
@@ -135,7 +138,7 @@ The canonical reference is `conductor call --help`. The contract-level commitmen
 | `--offline` / `--no-offline` | bool | stable | Force/clear local-only routing |
 | `--profile <name>` | string | stable | Apply named profile defaults |
 
-`conductor ask --help` is the canonical reference for the semantic API. Its stable flags are: --kind, --effort, --cwd, --timeout, --max-stall-seconds, --council-timeout, --council-max-output-tokens, --council-max-cost-usd, --base, --commit, --uncommitted, --title, --brief, --brief-file, --task, --task-file, --log-file, --json, --verbose-route, --silent-route, --offline, --no-offline, --preflight, --no-preflight, and --allow-short-brief.
+`conductor ask --help` is the canonical reference for the semantic API. Its stable flags are: --kind, --effort, --cwd, --timeout, --max-stall-seconds, --council-timeout, --council-max-output-tokens, --council-max-cost-usd, --base, --commit, --uncommitted, --title, --brief, --brief-file, --issue, --issue-comment-limit, --task, --task-file, --log-file, --json, --verbose-route, --silent-route, --offline, --no-offline, --preflight, --no-preflight, and --allow-short-brief.
 
 ## Output (`--json`)
 

@@ -109,6 +109,43 @@ def _fake_response(
     )
 
 
+def _mock_issue_subprocess(mocker, *, origin: str = "git@github.com:autumngarage/conductor.git"):
+    calls: list[list[str]] = []
+    issue_payload = {
+        "title": "Brief from issue",
+        "body": "Implement the issue body.",
+        "labels": [{"name": "enhancement"}, {"name": "cli"}],
+        "comments": [
+            {
+                "author": {"login": "alice"},
+                "createdAt": "2026-05-01T12:00:00Z",
+                "body": "Older context.",
+            },
+            {
+                "author": {"login": "bob"},
+                "createdAt": "2026-05-02T12:00:00Z",
+                "body": "Recent context.",
+            },
+        ],
+    }
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[:4] == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=f"{origin}\n", stderr="")
+        if cmd[:3] == ["gh", "issue", "view"]:
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout=json.dumps(issue_payload),
+                stderr="",
+            )
+        raise AssertionError(f"unexpected command: {cmd!r}")
+
+    mocker.patch("conductor._issue_briefs.subprocess.run", side_effect=fake_run)
+    return calls
+
+
 def _make_diff_repo(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -190,9 +227,7 @@ def test_call_auto_prefer_best_routes_to_frontier(mocker):
     _stub_all_configured(mocker, {"claude", "ollama"})
     mocker.patch.object(ClaudeProvider, "call", return_value=_fake_response("claude"))
 
-    result = CliRunner().invoke(
-        main, ["call", "--auto", "--prefer", "best", "--task", "hi"]
-    )
+    result = CliRunner().invoke(main, ["call", "--auto", "--prefer", "best", "--task", "hi"])
 
     assert result.exit_code == 0
     assert "hello" in result.stdout
@@ -223,9 +258,7 @@ def test_call_auto_route_json_includes_prompt_size_estimate(mocker):
 
 def test_call_auto_effort_max_flows_to_provider(mocker):
     _stub_all_configured(mocker, {"claude"})
-    call_mock = mocker.patch.object(
-        ClaudeProvider, "call", return_value=_fake_response("claude")
-    )
+    call_mock = mocker.patch.object(ClaudeProvider, "call", return_value=_fake_response("claude"))
 
     result = CliRunner().invoke(
         main, ["call", "--auto", "--prefer", "best", "--effort", "max", "--task", "hi"]
@@ -240,16 +273,20 @@ def test_call_auto_effort_max_flows_to_provider(mocker):
 
 def test_call_auto_exclude_skips_named_provider(mocker):
     _stub_all_configured(mocker, {"claude", "codex"})
-    codex_call = mocker.patch.object(
-        CodexProvider, "call", return_value=_fake_response("codex")
-    )
+    codex_call = mocker.patch.object(CodexProvider, "call", return_value=_fake_response("codex"))
     mocker.patch.object(ClaudeProvider, "call", return_value=_fake_response("claude"))
 
     result = CliRunner().invoke(
         main,
         [
-            "call", "--auto", "--prefer", "best",
-            "--exclude", "claude", "--task", "hi",
+            "call",
+            "--auto",
+            "--prefer",
+            "best",
+            "--exclude",
+            "claude",
+            "--task",
+            "hi",
         ],
     )
 
@@ -259,18 +296,14 @@ def test_call_auto_exclude_skips_named_provider(mocker):
 
 
 def test_call_invalid_prefer_errors_with_hint():
-    result = CliRunner().invoke(
-        main, ["call", "--auto", "--prefer", "beast", "--task", "hi"]
-    )
+    result = CliRunner().invoke(main, ["call", "--auto", "--prefer", "beast", "--task", "hi"])
     assert result.exit_code == 2
     assert "--prefer='beast'" in result.output or "--prefer=beast" in result.output
     assert "best" in result.output
 
 
 def test_call_invalid_effort_errors_with_hint():
-    result = CliRunner().invoke(
-        main, ["call", "--auto", "--effort", "maxx", "--task", "hi"]
-    )
+    result = CliRunner().invoke(main, ["call", "--auto", "--effort", "maxx", "--task", "hi"])
     assert result.exit_code == 2
     assert "--effort" in result.output
     assert "max" in result.output
@@ -278,9 +311,7 @@ def test_call_invalid_effort_errors_with_hint():
 
 def test_call_effort_accepts_integer_budget():
     # Just the parse path; no provider invocation needed.
-    result = CliRunner().invoke(
-        main, ["call", "--auto", "--effort", "-5", "--task", "hi"]
-    )
+    result = CliRunner().invoke(main, ["call", "--auto", "--effort", "-5", "--task", "hi"])
     # Negative integer rejected with UsageError.
     assert result.exit_code == 2
 
@@ -306,18 +337,14 @@ def test_call_prefer_without_auto_errors():
 def test_call_resume_requires_with(mocker):
     _stub_all_configured(mocker, {"claude"})
     mocker.patch.object(ClaudeProvider, "call", return_value=_fake_response("claude"))
-    result = CliRunner().invoke(
-        main, ["call", "--auto", "--resume", "abc-123", "--task", "hi"]
-    )
+    result = CliRunner().invoke(main, ["call", "--auto", "--resume", "abc-123", "--task", "hi"])
     assert result.exit_code == 2
     assert "--resume requires --with" in result.output
 
 
 def test_call_resume_passes_session_id_to_provider(mocker):
     _stub_all_configured(mocker, {"claude"})
-    call_mock = mocker.patch.object(
-        ClaudeProvider, "call", return_value=_fake_response("claude")
-    )
+    call_mock = mocker.patch.object(ClaudeProvider, "call", return_value=_fake_response("claude"))
     result = CliRunner().invoke(
         main,
         ["call", "--with", "claude", "--resume", "sess-xyz", "--task", "hi"],
@@ -331,9 +358,7 @@ def test_call_silent_route_suppresses_log(mocker):
     _stub_all_configured(mocker, {"claude"})
     mocker.patch.object(ClaudeProvider, "call", return_value=_fake_response("claude"))
 
-    result = CliRunner().invoke(
-        main, ["call", "--auto", "--silent-route", "--task", "hi"]
-    )
+    result = CliRunner().invoke(main, ["call", "--auto", "--silent-route", "--task", "hi"])
 
     assert result.exit_code == 0
     assert "hello" in result.stdout
@@ -357,9 +382,7 @@ def test_call_verbose_route_prints_full_ranking(mocker):
     assert "ollama" in result.stderr
 
 
-def test_call_auto_can_route_to_openrouter_without_catalog_restrictions(
-    mocker, monkeypatch
-):
+def test_call_auto_can_route_to_openrouter_without_catalog_restrictions(mocker, monkeypatch):
     import conductor.providers.openrouter_catalog as openrouter_catalog
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-test-key")
@@ -463,9 +486,7 @@ def test_ask_research_low_lets_openrouter_auto_select(mocker):
 
 def test_ask_code_high_routes_to_codex_exec_with_default_tools(mocker):
     _stub_all_configured(mocker, {"codex"})
-    exec_mock = mocker.patch.object(
-        CodexProvider, "exec", return_value=_fake_response("codex")
-    )
+    exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
 
     result = CliRunner().invoke(
         main,
@@ -541,9 +562,7 @@ def test_ask_code_high_falls_back_to_openrouter_exec_before_ollama(mocker):
         "exec",
         return_value=_fake_response("openrouter", "openrouter/auto"),
     )
-    ollama_exec = mocker.patch.object(
-        OllamaProvider, "exec", return_value=_fake_response("ollama")
-    )
+    ollama_exec = mocker.patch.object(OllamaProvider, "exec", return_value=_fake_response("ollama"))
 
     result = CliRunner().invoke(
         main,
@@ -575,9 +594,7 @@ def test_ask_code_high_falls_back_to_openrouter_exec_before_ollama(mocker):
         "codex",
         "openrouter",
     ]
-    assert payload["semantic"]["candidates"][1]["models"] == list(
-        OPENROUTER_CODING_HIGH
-    )
+    assert payload["semantic"]["candidates"][1]["models"] == list(OPENROUTER_CODING_HIGH)
 
 
 def test_ask_code_high_without_frontier_fallback_refuses_ollama(mocker):
@@ -1308,9 +1325,7 @@ def test_ask_review_uses_openrouter_code_stack_instead_of_gemini(mocker, tmp_pat
         "claude",
         "openrouter",
     ]
-    assert payload["semantic"]["candidates"][2]["models"] == list(
-        OPENROUTER_CODING_HIGH
-    )
+    assert payload["semantic"]["candidates"][2]["models"] == list(OPENROUTER_CODING_HIGH)
 
 
 def test_review_auto_generic_fallback_repairs_requested_sentinel(mocker, tmp_path):
@@ -1427,7 +1442,7 @@ def test_review_with_gemini_emits_plain_text_without_json_envelope(mocker):
             model="gemini-2.5-pro",
             duration_ms=10,
             usage={},
-            raw={"response": "{\"response\": \"Plain review\\nCODEX_REVIEW_CLEAN\"}"},
+            raw={"response": '{"response": "Plain review\\nCODEX_REVIEW_CLEAN"}'},
         ),
     )
 
@@ -1458,17 +1473,21 @@ def test_review_with_provider_without_native_review_errors():
 
 def test_exec_auto_routes_to_tool_capable_provider(mocker):
     _stub_all_configured(mocker, {"claude", "kimi"})
-    exec_mock = mocker.patch.object(
-        ClaudeProvider, "exec", return_value=_fake_response("claude")
-    )
+    exec_mock = mocker.patch.object(ClaudeProvider, "exec", return_value=_fake_response("claude"))
 
     result = CliRunner().invoke(
         main,
         [
-            "exec", "--auto", "--prefer", "best",
-            "--tools", "Read,Grep,Edit",
-            "--sandbox", "read-only",
-            "--task", "review the diff",
+            "exec",
+            "--auto",
+            "--prefer",
+            "best",
+            "--tools",
+            "Read,Grep,Edit",
+            "--sandbox",
+            "read-only",
+            "--task",
+            "review the diff",
         ],
     )
 
@@ -1483,9 +1502,12 @@ def test_exec_unknown_tool_errors_with_hint():
     result = CliRunner().invoke(
         main,
         [
-            "exec", "--auto",
-            "--tools", "Read,NotARealTool",
-            "--task", "hi",
+            "exec",
+            "--auto",
+            "--tools",
+            "Read,NotARealTool",
+            "--task",
+            "hi",
         ],
     )
     assert result.exit_code == 2
@@ -1520,9 +1542,7 @@ def test_exec_no_write_validation_passes_through_to_http_tool_provider(mocker):
 @pytest.mark.parametrize("sandbox", ["workspace-write", "read-only", "strict", "none", "surprise"])
 def test_exec_sandbox_values_warn_once_and_are_ignored(mocker, sandbox):
     _stub_all_configured(mocker, {"codex"})
-    exec_mock = mocker.patch.object(
-        CodexProvider, "exec", return_value=_fake_response("codex")
-    )
+    exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
 
     result = CliRunner().invoke(
         main,
@@ -1567,11 +1587,17 @@ def test_exec_auto_cheapest_code_review_online_excludes_ollama_primary(mocker):
     result = CliRunner().invoke(
         main,
         [
-            "exec", "--auto", "--prefer", "cheapest",
-            "--tags", "code-review",
-            "--tools", "Read,Grep,Glob,Bash",
+            "exec",
+            "--auto",
+            "--prefer",
+            "cheapest",
+            "--tags",
+            "code-review",
+            "--tools",
+            "Read,Grep,Glob,Bash",
             "--no-preflight",
-            "--task", "review the diff",
+            "--task",
+            "review the diff",
         ],
     )
 
@@ -1594,12 +1620,18 @@ def test_exec_auto_cheapest_code_review_offline_keeps_ollama(mocker):
     result = CliRunner().invoke(
         main,
         [
-            "exec", "--auto", "--prefer", "cheapest",
-            "--tags", "code-review",
-            "--tools", "Read,Grep,Glob,Bash",
+            "exec",
+            "--auto",
+            "--prefer",
+            "cheapest",
+            "--tags",
+            "code-review",
+            "--tools",
+            "Read,Grep,Glob,Bash",
             "--offline",
             "--no-preflight",
-            "--task", "review the diff",
+            "--task",
+            "review the diff",
         ],
     )
 
@@ -1628,11 +1660,17 @@ def test_exec_auto_cheapest_network_probe_offline_keeps_ollama_primary(mocker):
     result = CliRunner().invoke(
         main,
         [
-            "exec", "--auto", "--prefer", "cheapest",
-            "--tags", "code-review",
-            "--tools", "Read,Grep,Glob,Bash",
+            "exec",
+            "--auto",
+            "--prefer",
+            "cheapest",
+            "--tags",
+            "code-review",
+            "--tools",
+            "Read,Grep,Glob,Bash",
             "--no-preflight",
-            "--task", "review the diff",
+            "--task",
+            "review the diff",
         ],
     )
 
@@ -1660,11 +1698,17 @@ def test_exec_auto_explicit_ollama_tag_keeps_ollama_primary(mocker):
     result = CliRunner().invoke(
         main,
         [
-            "exec", "--auto", "--prefer", "cheapest",
-            "--tags", "ollama",
-            "--tools", "Read,Grep,Glob,Bash",
+            "exec",
+            "--auto",
+            "--prefer",
+            "cheapest",
+            "--tags",
+            "ollama",
+            "--tools",
+            "Read,Grep,Glob,Bash",
             "--no-preflight",
-            "--task", "review the diff",
+            "--task",
+            "review the diff",
         ],
     )
 
@@ -1689,10 +1733,14 @@ def test_exec_with_ollama_bypasses_auto_route_exclusions(mocker):
     result = CliRunner().invoke(
         main,
         [
-            "exec", "--with", "ollama",
-            "--tools", "Read,Grep,Glob,Bash",
+            "exec",
+            "--with",
+            "ollama",
+            "--tools",
+            "Read,Grep,Glob,Bash",
             "--no-preflight",
-            "--task", "review the diff",
+            "--task",
+            "review the diff",
         ],
     )
 
@@ -1787,15 +1835,9 @@ def test_exec_ground_citations_errors_warn_without_failing(mocker):
 
 def test_exec_permission_profile_auto_routes_to_enforcing_provider(mocker):
     _stub_all_configured(mocker, {"claude", "codex", "gemini"})
-    claude_exec = mocker.patch.object(
-        ClaudeProvider, "exec", return_value=_fake_response("claude")
-    )
-    codex_exec = mocker.patch.object(
-        CodexProvider, "exec", return_value=_fake_response("codex")
-    )
-    gemini_exec = mocker.patch.object(
-        GeminiProvider, "exec", return_value=_fake_response("gemini")
-    )
+    claude_exec = mocker.patch.object(ClaudeProvider, "exec", return_value=_fake_response("claude"))
+    codex_exec = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
+    gemini_exec = mocker.patch.object(GeminiProvider, "exec", return_value=_fake_response("gemini"))
 
     result = CliRunner().invoke(
         main,
@@ -1823,9 +1865,7 @@ def test_exec_permission_profile_auto_routes_to_enforcing_provider(mocker):
 
 def test_exec_permission_profile_rejects_non_enforcing_direct_provider(mocker):
     _stub_all_configured(mocker, {"codex"})
-    exec_mock = mocker.patch.object(
-        CodexProvider, "exec", return_value=_fake_response("codex")
-    )
+    exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
 
     result = CliRunner().invoke(
         main,
@@ -1844,9 +1884,7 @@ def test_exec_permission_profile_rejects_non_enforcing_direct_provider(mocker):
 
     assert result.exit_code == 2
     assert not exec_mock.called
-    assert "requires a provider that enforces Conductor exec tool whitelists" in (
-        result.output
-    )
+    assert "requires a provider that enforces Conductor exec tool whitelists" in (result.output)
     assert "provider 'codex' does not" in result.output
 
 
@@ -1874,9 +1912,7 @@ def test_exec_permission_profile_rejects_conflicting_tools():
 
 def test_exec_task_file_dash_reads_stdin(mocker):
     _stub_all_configured(mocker, {"codex"})
-    exec_mock = mocker.patch.object(
-        CodexProvider, "exec", return_value=_fake_response("codex")
-    )
+    exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
 
     result = CliRunner().invoke(
         main,
@@ -1895,9 +1931,7 @@ def test_exec_brief_file_reads_file(mocker, tmp_path):
         "# Goal\nRun the delegated change.\n\n# Context\nUse the repository files.",
         encoding="utf-8",
     )
-    exec_mock = mocker.patch.object(
-        CodexProvider, "exec", return_value=_fake_response("codex")
-    )
+    exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
 
     result = CliRunner().invoke(
         main,
@@ -1908,11 +1942,95 @@ def test_exec_brief_file_reads_file(mocker, tmp_path):
     assert exec_mock.call_args.args[0].startswith("# Goal")
 
 
+def test_exec_issue_builds_provider_task(mocker):
+    _stub_all_configured(mocker, {"codex"})
+    _mock_issue_subprocess(mocker)
+    exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "codex",
+            "--no-preflight",
+            "--allow-short-brief",
+            "--issue",
+            "123",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    task = exec_mock.call_args.args[0]
+    assert "# Issue: Brief from issue (autumngarage/conductor#123)" in task
+    assert "Implement the issue body." in task
+    assert "Recent context." in task
+
+
+def test_exec_issue_missing_gh_errors_clearly(mocker):
+    _stub_all_configured(mocker, {"codex"})
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:4] == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout="git@github.com:autumngarage/conductor.git\n",
+                stderr="",
+            )
+        if cmd[:3] == ["gh", "issue", "view"]:
+            raise FileNotFoundError("gh")
+        raise AssertionError(f"unexpected command: {cmd!r}")
+
+    mocker.patch("conductor._issue_briefs.subprocess.run", side_effect=fake_run)
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--with", "codex", "--no-preflight", "--issue", "123"],
+    )
+
+    assert result.exit_code == 2
+    assert "--issue requires the gh CLI; install via brew install gh" in result.output
+
+
+def test_exec_issue_not_found_errors_with_recovery_command(mocker):
+    _stub_all_configured(mocker, {"codex"})
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:4] == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout="git@github.com:autumngarage/conductor.git\n",
+                stderr="",
+            )
+        if cmd[:3] == ["gh", "issue", "view"]:
+            raise subprocess.CalledProcessError(
+                1,
+                cmd,
+                output="",
+                stderr="GraphQL: Could not resolve to an Issue",
+            )
+        raise AssertionError(f"unexpected command: {cmd!r}")
+
+    mocker.patch("conductor._issue_briefs.subprocess.run", side_effect=fake_run)
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--with", "codex", "--no-preflight", "--issue", "123"],
+    )
+
+    assert result.exit_code == 2
+    assert "could not fetch GitHub issue autumngarage/conductor#123" in result.output
+    assert (
+        "Run gh issue view 123 --repo autumngarage/conductor --json title,body,labels,comments"
+    ) in result.output
+    assert "Could not resolve to an Issue" in result.output
+
+
 def test_exec_injects_auto_close_instructions_into_provider_task(mocker):
     _stub_all_configured(mocker, {"codex"})
-    exec_mock = mocker.patch.object(
-        CodexProvider, "exec", return_value=_fake_response("codex")
-    )
+    exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
 
     result = CliRunner().invoke(
         main,
@@ -1969,9 +2087,7 @@ def test_exec_rejects_task_and_task_file_together(mocker):
     )
 
     assert result.exit_code == 2
-    assert "exactly one of --brief, --brief-file, --task, --task-file, or stdin" in (
-        result.output
-    )
+    assert "exactly one of --brief, --brief-file, --task, --task-file, or stdin" in (result.output)
 
 
 def test_exec_rejects_task_and_brief_together(mocker):
@@ -2013,9 +2129,7 @@ def test_exec_cli_default_passes_no_timeout_to_provider(mocker):
         "conductor.cli.get_network_profile",
         return_value=NetworkProfile(310, "https://api.openai.com", 1_000),
     )
-    exec_mock = mocker.patch.object(
-        CodexProvider, "exec", return_value=_fake_response("codex")
-    )
+    exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
 
     result = CliRunner().invoke(
         main,
@@ -2034,9 +2148,7 @@ def test_exec_cli_explicit_timeout_passes_through(mocker):
     """`--timeout 600` must be honored — the no-default change must not
     block users who deliberately want to bound a CI run."""
     _stub_all_configured(mocker, {"codex"})
-    exec_mock = mocker.patch.object(
-        CodexProvider, "exec", return_value=_fake_response("codex")
-    )
+    exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
 
     result = CliRunner().invoke(
         main,
@@ -2049,16 +2161,18 @@ def test_exec_cli_explicit_timeout_passes_through(mocker):
 
 def test_exec_cli_max_stall_seconds_flag_propagates(mocker):
     _stub_all_configured(mocker, {"codex"})
-    exec_mock = mocker.patch.object(
-        CodexProvider, "exec", return_value=_fake_response("codex")
-    )
+    exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
 
     result = CliRunner().invoke(
         main,
         [
-            "exec", "--with", "codex",
-            "--max-stall-seconds", "60",
-            "--task", "do it",
+            "exec",
+            "--with",
+            "codex",
+            "--max-stall-seconds",
+            "60",
+            "--task",
+            "do it",
         ],
     )
 
@@ -2068,9 +2182,7 @@ def test_exec_cli_max_stall_seconds_flag_propagates(mocker):
 
 def test_exec_cli_no_max_stall_seconds_defaults_to_360(mocker):
     _stub_all_configured(mocker, {"codex"})
-    exec_mock = mocker.patch.object(
-        CodexProvider, "exec", return_value=_fake_response("codex")
-    )
+    exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
 
     result = CliRunner().invoke(
         main,
@@ -2083,9 +2195,7 @@ def test_exec_cli_no_max_stall_seconds_defaults_to_360(mocker):
 
 def test_exec_cli_max_stall_seconds_zero_disables_watchdog(mocker):
     _stub_all_configured(mocker, {"codex"})
-    exec_mock = mocker.patch.object(
-        CodexProvider, "exec", return_value=_fake_response("codex")
-    )
+    exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
 
     result = CliRunner().invoke(
         main,
@@ -2142,9 +2252,7 @@ def test_exec_max_iterations_explicit_override_ignores_effort(mocker):
 
 def test_exec_max_iterations_explicit_rejects_unsupported_provider(mocker):
     _stub_all_configured(mocker, {"codex"})
-    exec_mock = mocker.patch.object(
-        CodexProvider, "exec", return_value=_fake_response("codex")
-    )
+    exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
 
     result = CliRunner().invoke(
         main,
@@ -2167,9 +2275,7 @@ def test_exec_max_iterations_explicit_rejects_unsupported_provider(mocker):
 
 def test_exec_max_iterations_banner_only_for_supporting_providers(mocker):
     _stub_all_configured(mocker, {"codex"})
-    exec_mock = mocker.patch.object(
-        CodexProvider, "exec", return_value=_fake_response("codex")
-    )
+    exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
 
     result = CliRunner().invoke(
         main,
@@ -2183,9 +2289,7 @@ def test_exec_max_iterations_banner_only_for_supporting_providers(mocker):
 
 def test_exec_cli_start_timeout_flag_propagates_to_claude(mocker):
     _stub_all_configured(mocker, {"claude"})
-    exec_mock = mocker.patch.object(
-        ClaudeProvider, "exec", return_value=_fake_response("claude")
-    )
+    exec_mock = mocker.patch.object(ClaudeProvider, "exec", return_value=_fake_response("claude"))
 
     result = CliRunner().invoke(
         main,
@@ -2206,9 +2310,7 @@ def test_exec_cli_start_timeout_flag_propagates_to_claude(mocker):
 
 def test_exec_cli_start_timeout_zero_disables_watchdog(mocker):
     _stub_all_configured(mocker, {"claude"})
-    exec_mock = mocker.patch.object(
-        ClaudeProvider, "exec", return_value=_fake_response("claude")
-    )
+    exec_mock = mocker.patch.object(ClaudeProvider, "exec", return_value=_fake_response("claude"))
 
     result = CliRunner().invoke(
         main,
@@ -2226,9 +2328,7 @@ def test_exec_cli_preflight_blocks_exec_and_surfaces_fix_hint(mocker):
         "health_probe",
         return_value=(False, "network is unreachable"),
     )
-    exec_mock = mocker.patch.object(
-        CodexProvider, "exec", return_value=_fake_response("codex")
-    )
+    exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
 
     result = CliRunner().invoke(
         main,
@@ -2252,9 +2352,7 @@ def test_exec_cli_preflight_suppresses_codex_fix_for_startup_probe_failure(mocke
             "The request was rejected.: param=tools",
         ),
     )
-    exec_mock = mocker.patch.object(
-        CodexProvider, "exec", return_value=_fake_response("codex")
-    )
+    exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
 
     result = CliRunner().invoke(
         main,
@@ -2296,9 +2394,7 @@ def test_exec_auto_preflight_failure_does_not_attribute_error_on_str_provider(mo
         tag_default_applied={},
     )
     mocker.patch("conductor.cli.pick", return_value=("codex", fake_decision))
-    exec_mock = mocker.patch.object(
-        CodexProvider, "exec", return_value=_fake_response("codex")
-    )
+    exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
 
     result = CliRunner().invoke(
         main,
@@ -2318,9 +2414,7 @@ def test_exec_cli_no_preflight_skips_probe(mocker):
         "health_probe",
         return_value=(False, "network is unreachable"),
     )
-    exec_mock = mocker.patch.object(
-        CodexProvider, "exec", return_value=_fake_response("codex")
-    )
+    exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
 
     result = CliRunner().invoke(
         main,
@@ -2344,9 +2438,7 @@ def test_exec_json_surfaces_codex_auth_prompt_and_records_auth_prompts(
     ]
     fake = _FakePopen(
         stdout_lines=ndjson,
-        stderr_lines=[
-            "Please visit https://chatgpt.com/oauth/device to authenticate\n"
-        ],
+        stderr_lines=["Please visit https://chatgpt.com/oauth/device to authenticate\n"],
     )
     mocker.patch(
         "conductor.providers.codex.subprocess.Popen",
@@ -2408,9 +2500,7 @@ def test_exec_non_json_still_surfaces_codex_auth_prompt(mocker, monkeypatch, tmp
     ]
     fake = _FakePopen(
         stdout_lines=ndjson,
-        stderr_lines=[
-            "Please visit https://chatgpt.com/oauth/device to authenticate\n"
-        ],
+        stderr_lines=["Please visit https://chatgpt.com/oauth/device to authenticate\n"],
     )
     mocker.patch(
         "conductor.providers.codex.subprocess.Popen",
@@ -2458,9 +2548,7 @@ def test_route_prints_chosen_provider_without_calling(mocker):
     # Critical: route must NOT invoke provider.call() / provider.exec().
     call_mock = mocker.patch.object(ClaudeProvider, "call")
 
-    result = CliRunner().invoke(
-        main, ["route", "--prefer", "best", "--tags", "code-review"]
-    )
+    result = CliRunner().invoke(main, ["route", "--prefer", "best", "--tags", "code-review"])
 
     assert result.exit_code == 0
     assert "would pick: claude" in result.output
@@ -2470,9 +2558,7 @@ def test_route_prints_chosen_provider_without_calling(mocker):
 
 def test_route_json_mode(mocker):
     _stub_all_configured(mocker, {"claude"})
-    result = CliRunner().invoke(
-        main, ["route", "--prefer", "best", "--json"]
-    )
+    result = CliRunner().invoke(main, ["route", "--prefer", "best", "--json"])
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["provider"] == "claude"
@@ -2524,11 +2610,105 @@ def test_ask_call_mode_routes_with_prompt_size_estimate(mocker):
     assert payload["route"]["estimated_output_tokens"] == 500
 
 
+def test_ask_issue_number_uses_origin_and_builds_issue_brief(mocker):
+    _stub_all_configured(mocker, {"openrouter"})
+    calls = _mock_issue_subprocess(mocker)
+    call_mock = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response("openrouter", "openrouter/auto"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "code",
+            "--effort",
+            "low",
+            "--issue",
+            "123",
+            "--issue-comment-limit",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    task = call_mock.call_args.args[0]
+    assert "# Issue: Brief from issue (autumngarage/conductor#123)" in task
+    assert "Labels: enhancement, cli" in task
+    assert "Implement the issue body." in task
+    assert "Older context." not in task
+    assert "Recent context." in task
+    assert ["git", "config", "--get", "remote.origin.url"] in calls
+    assert [
+        "gh",
+        "issue",
+        "view",
+        "123",
+        "--repo",
+        "autumngarage/conductor",
+        "--json",
+        "title,body,labels,comments",
+    ] in calls
+
+
+def test_ask_issue_repo_override_skips_origin_lookup(mocker):
+    _stub_all_configured(mocker, {"openrouter"})
+    calls = _mock_issue_subprocess(mocker)
+    call_mock = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response("openrouter", "openrouter/auto"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["ask", "--kind", "code", "--effort", "low", "--issue", "org/repo#123"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "# Issue: Brief from issue (org/repo#123)" in call_mock.call_args.args[0]
+    assert ["git", "config", "--get", "remote.origin.url"] not in calls
+    assert calls[0][:6] == ["gh", "issue", "view", "123", "--repo", "org/repo"]
+
+
+def test_ask_issue_appends_brief_as_operator_context(mocker):
+    _stub_all_configured(mocker, {"openrouter"})
+    _mock_issue_subprocess(mocker)
+    call_mock = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response("openrouter", "openrouter/auto"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "code",
+            "--effort",
+            "low",
+            "--issue",
+            "123",
+            "--brief",
+            "extra context",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    task = call_mock.call_args.args[0]
+    assert task.index("Implement the issue body.") < task.index(
+        "## Operator-supplied additional context"
+    )
+    assert "extra context" in task
+
+
 def test_ask_exec_mode_injects_auto_close_instructions_into_provider_task(mocker):
     _stub_all_configured(mocker, {"codex"})
-    exec_mock = mocker.patch.object(
-        CodexProvider, "exec", return_value=_fake_response("codex")
-    )
+    exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
 
     result = CliRunner().invoke(
         main,
@@ -2556,9 +2736,7 @@ def test_review_auto_route_includes_patch_size_estimate(mocker, tmp_path):
     repo = _make_diff_repo(tmp_path)
     _stub_all_configured(mocker, {"claude"})
     mocker.patch.object(ClaudeProvider, "review_configured", return_value=(True, None))
-    mocker.patch.object(
-        ClaudeProvider, "review", return_value=_fake_response("claude")
-    )
+    mocker.patch.object(ClaudeProvider, "review", return_value=_fake_response("claude"))
 
     result = CliRunner().invoke(
         main,
@@ -2662,13 +2840,9 @@ def test_call_fallback_on_5xx(mocker):
         "call",
         side_effect=ProviderHTTPError("HTTP 503: service unavailable"),
     )
-    mocker.patch.object(
-        CodexProvider, "call", return_value=_fake_response("codex")
-    )
+    mocker.patch.object(CodexProvider, "call", return_value=_fake_response("codex"))
 
-    result = CliRunner().invoke(
-        main, ["call", "--auto", "--prefer", "best", "--task", "hi"]
-    )
+    result = CliRunner().invoke(main, ["call", "--auto", "--prefer", "best", "--task", "hi"])
 
     assert result.exit_code == 0
     assert "hello" in result.stdout
@@ -2687,13 +2861,9 @@ def test_call_fallback_on_rate_limit(mocker):
         "call",
         side_effect=ProviderHTTPError("Anthropic returned 429 rate limit"),
     )
-    mocker.patch.object(
-        CodexProvider, "call", return_value=_fake_response("codex")
-    )
+    mocker.patch.object(CodexProvider, "call", return_value=_fake_response("codex"))
 
-    result = CliRunner().invoke(
-        main, ["call", "--auto", "--prefer", "best", "--task", "hi"]
-    )
+    result = CliRunner().invoke(main, ["call", "--auto", "--prefer", "best", "--task", "hi"])
 
     assert result.exit_code == 0
     assert "claude failed (rate-limit)" in result.stderr
@@ -2710,13 +2880,9 @@ def test_call_no_fallback_on_auth_error(mocker):
         "call",
         side_effect=ProviderConfigError("claude login required"),
     )
-    codex_call = mocker.patch.object(
-        CodexProvider, "call", return_value=_fake_response("codex")
-    )
+    codex_call = mocker.patch.object(CodexProvider, "call", return_value=_fake_response("codex"))
 
-    result = CliRunner().invoke(
-        main, ["call", "--auto", "--prefer", "best", "--task", "hi"]
-    )
+    result = CliRunner().invoke(main, ["call", "--auto", "--prefer", "best", "--task", "hi"])
 
     assert result.exit_code == 2
     assert "login required" in result.stderr
@@ -2738,9 +2904,7 @@ def test_call_fallback_exhausted_propagates_last_error(mocker):
         side_effect=ProviderHTTPError("HTTP 502: bad gateway"),
     )
 
-    result = CliRunner().invoke(
-        main, ["call", "--auto", "--prefer", "best", "--task", "hi"]
-    )
+    result = CliRunner().invoke(main, ["call", "--auto", "--prefer", "best", "--task", "hi"])
 
     assert result.exit_code == 1
     # Last error (from codex) should surface to the user.
@@ -2767,18 +2931,36 @@ def test_invoke_with_fallback_skips_undersized_context(mocker, capsys, tmp_path)
         candidates_skipped=(),
         ranked=(
             RankedCandidate(
-                name="claude", tier="frontier", tier_rank=0, matched_tags=(),
-                tag_score=0, cost_score=0.0, latency_ms=0, health_penalty=0.0,
+                name="claude",
+                tier="frontier",
+                tier_rank=0,
+                matched_tags=(),
+                tag_score=0,
+                cost_score=0.0,
+                latency_ms=0,
+                health_penalty=0.0,
                 combined_score=1.0,
             ),
             RankedCandidate(
-                name="ollama", tier="local", tier_rank=2, matched_tags=(),
-                tag_score=0, cost_score=0.0, latency_ms=0, health_penalty=0.0,
+                name="ollama",
+                tier="local",
+                tier_rank=2,
+                matched_tags=(),
+                tag_score=0,
+                cost_score=0.0,
+                latency_ms=0,
+                health_penalty=0.0,
                 combined_score=0.5,
             ),
             RankedCandidate(
-                name="codex", tier="frontier", tier_rank=0, matched_tags=(),
-                tag_score=0, cost_score=0.0, latency_ms=0, health_penalty=0.0,
+                name="codex",
+                tier="frontier",
+                tier_rank=0,
+                matched_tags=(),
+                tag_score=0,
+                cost_score=0.0,
+                latency_ms=0,
+                health_penalty=0.0,
                 combined_score=0.4,
             ),
         ),
@@ -2788,12 +2970,15 @@ def test_invoke_with_fallback_skips_undersized_context(mocker, capsys, tmp_path)
     mocker.patch.object(OllamaProvider, "max_context_tokens", 100)
 
     claude_call = mocker.patch.object(
-        ClaudeProvider, "call",
+        ClaudeProvider,
+        "call",
         side_effect=ProviderHTTPError("HTTP 503: unavailable"),
     )
     ollama_call = mocker.patch.object(OllamaProvider, "call")
     codex_call = mocker.patch.object(
-        CodexProvider, "call", return_value=_fake_response("codex"),
+        CodexProvider,
+        "call",
+        return_value=_fake_response("codex"),
     )
 
     # Brief at ~250 tokens (1000 chars / 4) — well over ollama's pinned 100.
@@ -2824,8 +3009,7 @@ def test_invoke_with_fallback_skips_undersized_context(mocker, capsys, tmp_path)
     assert "ollama" in fallbacks
     assert "codex" not in fallbacks  # codex won, so it's not "fallback used"
     assert (
-        "[conductor] skipping fallback ollama: "
-        "brief ~250 tokens > model context 100"
+        "[conductor] skipping fallback ollama: brief ~250 tokens > model context 100"
     ) in capsys.readouterr().err
     events = [
         json.loads(line)
@@ -2937,9 +3121,7 @@ def test_call_with_single_provider_does_not_retry(mocker):
         side_effect=ProviderHTTPError("HTTP 503: unavailable"),
     )
 
-    result = CliRunner().invoke(
-        main, ["call", "--with", "claude", "--task", "hi"]
-    )
+    result = CliRunner().invoke(main, ["call", "--with", "claude", "--task", "hi"])
 
     assert result.exit_code == 1
     assert "503" in result.stderr
