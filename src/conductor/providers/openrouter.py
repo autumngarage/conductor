@@ -360,6 +360,7 @@ class OpenRouterProvider:
         max_stall_sec: int | None = None,
         resume_session_id: str | None = None,
         session_log: SessionLog | None = None,
+        max_iterations: int | None = None,
         write_validation: bool = True,
     ) -> CallResponse:
         if resume_session_id:
@@ -425,9 +426,10 @@ class OpenRouterProvider:
         validation_failures: list[dict[str, object]] = []
         repo_changing_task = _is_repo_changing_tool_task(effective_task_tags, tools)
         git_status_before = _git_clean_status(workdir) if repo_changing_task else None
+        iteration_cap = max_iterations or OPENROUTER_MAX_TOOL_ITERATIONS
 
         start = time.monotonic()
-        while iteration < OPENROUTER_MAX_TOOL_ITERATIONS:
+        while iteration < iteration_cap:
             iteration += 1
             payload: dict = {
                 **target_payload,
@@ -557,9 +559,8 @@ class OpenRouterProvider:
 
         if hit_cap:
             final_text = (final_text or "(no content)") + (
-                f"\n\n[conductor: OpenRouter tool-use loop hit max iterations "
-                f"({OPENROUTER_MAX_TOOL_ITERATIONS}); model kept requesting tools. "
-                "Re-run with a narrower task or a larger budget.]"
+                f"\n\n[conductor] Reached --max-iterations cap ({iteration_cap}). "
+                "Re-run with --max-iterations <larger> or split the brief."
             )
 
         git_status_after = _git_clean_status(workdir) if repo_changing_task else None
@@ -571,6 +572,7 @@ class OpenRouterProvider:
             bash_failures=bash_failures,
             validation_failures=validation_failures,
             hit_cap=hit_cap,
+            iteration_cap=iteration_cap,
             git_status_before=git_status_before,
             git_status_after=git_status_after,
         )
@@ -748,6 +750,7 @@ def _execution_status(
     bash_failures: list[dict[str, object]],
     validation_failures: list[dict[str, object]],
     hit_cap: bool,
+    iteration_cap: int,
     git_status_before: dict[str, object] | None,
     git_status_after: dict[str, object] | None,
 ) -> dict[str, object]:
@@ -775,6 +778,7 @@ def _execution_status(
         "bash_failures": bash_failures,
         "validation_failures": validation_failures,
         "hit_iteration_cap": hit_cap,
+        "iteration_cap": iteration_cap,
         "git_status_before": git_status_before,
         "git_status_after": git_status_after,
     }
@@ -783,7 +787,11 @@ def _execution_status(
 def _execution_failure_message(status: dict[str, object]) -> str | None:
     state = status.get("state")
     if state == "iteration-cap":
-        return "tool-use loop hit max iterations before completing the code task"
+        cap = status.get("iteration_cap")
+        return (
+            f"Reached --max-iterations cap ({cap}). Re-run with "
+            "--max-iterations <larger> or split the brief."
+        )
     if state == "validation-failed":
         return "validation command failed after edits"
     if state == "tool-error":

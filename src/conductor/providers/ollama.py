@@ -502,6 +502,7 @@ class OllamaProvider:
         max_stall_sec: int | None = None,
         resume_session_id: str | None = None,
         session_log: SessionLog | None = None,
+        max_iterations: int | None = None,
         write_validation: bool = True,
     ) -> CallResponse:
         # accepted for API parity; only codex implements stall-watchdog today
@@ -540,9 +541,10 @@ class OllamaProvider:
         context_ceiling = int(
             self.max_context_tokens * (1 - OLLAMA_CONTEXT_SAFETY_MARGIN)
         )
+        iteration_cap = max_iterations or OLLAMA_MAX_TOOL_ITERATIONS
 
         start = time.monotonic()
-        while iteration < OLLAMA_MAX_TOOL_ITERATIONS:
+        while iteration < iteration_cap:
             iteration += 1
             payload: dict = {
                 "model": model,
@@ -686,9 +688,8 @@ class OllamaProvider:
 
         if hit_cap:
             final_text = (final_text or "(no content)") + (
-                f"\n\n[conductor: tool-use loop hit max iterations "
-                f"({OLLAMA_MAX_TOOL_ITERATIONS}); model kept requesting tools. "
-                "Re-run with a narrower task or a larger budget.]"
+                f"\n\n[conductor] Reached --max-iterations cap ({iteration_cap}). "
+                "Re-run with --max-iterations <larger> or split the brief."
             )
         if hit_context_budget:
             final_text = (final_text or "(no content)") + (

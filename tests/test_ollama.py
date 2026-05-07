@@ -564,11 +564,15 @@ def test_exec_iteration_cap(tmp_path):
             tools=frozenset({"Read"}),
             sandbox="read-only",
             cwd=str(tmp_path),
+            max_iterations=3,
         )
     assert resp.usage["hit_iteration_cap"] is True
-    assert resp.usage["tool_iterations"] == 10
-    assert route.call_count == 10
-    assert "max iterations" in resp.text.lower()
+    assert resp.usage["tool_iterations"] == 3
+    assert route.call_count == 3
+    assert (
+        "[conductor] Reached --max-iterations cap (3). Re-run with "
+        "--max-iterations <larger> or split the brief."
+    ) in resp.text
 
 
 def test_exec_workspace_write_runs_edit(tmp_path):
