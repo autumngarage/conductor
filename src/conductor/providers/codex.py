@@ -15,6 +15,7 @@ autumn-garage `plans/sentinel-conductor-migration.md`, future).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
 import shutil
@@ -57,6 +58,8 @@ from conductor.session_log import (
 if TYPE_CHECKING:
     from conductor.session_log import SessionLog
 
+_LOG = logging.getLogger(__name__)
+
 CODEX_DEFAULT_MODEL = "gpt-5.4"
 CODEX_REVIEW_MODEL = "codex-review"
 CODEX_REQUEST_TIMEOUT_SEC = 180.0
@@ -64,6 +67,7 @@ CODEX_STARTUP_PROBE_TIMEOUT_SEC = 8.0
 CODEX_STARTUP_PROBE_CONFIG = (
     "model_reasoning_effort=low",
 )
+CODEX_STARTUP_READY_EVENTS = frozenset({"thread.started", "turn.started"})
 CODEX_STREAM_POLL_INTERVAL_SEC = 0.05
 CODEX_STREAM_EXIT_READER_JOIN_SEC = 0.2
 
@@ -161,6 +165,34 @@ def _codex_startup_probe_failure(reason: str | None) -> bool:
     return bool(reason and "`codex exec` startup probe" in reason)
 
 
+def _codex_startup_ready_event(line: str) -> str | None:
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        _LOG.debug("ignoring non-JSON codex startup probe stdout line: %r", line)
+        return None
+    if not isinstance(event, dict):
+        _LOG.debug("ignoring non-object codex startup probe stdout line: %r", line)
+        return None
+    event_type = event.get("type")
+    if isinstance(event_type, str) and event_type in CODEX_STARTUP_READY_EVENTS:
+        return event_type
+    return None
+
+
+def _terminate_codex_startup_probe(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=1)
+    except OSError:
+        _LOG.debug("failed to terminate codex startup probe", exc_info=True)
+
+
 class CodexProvider:
     name = "codex"
     tags = ["strong-reasoning", "code-review", "tool-use"]
@@ -248,22 +280,15 @@ class CodexProvider:
             "for non-interactive use."
         )
 
-    @staticmethod
-    def _timeout_output(e: subprocess.TimeoutExpired) -> str:
-        stdout = e.stdout or e.output or ""
-        stderr = e.stderr or ""
-        if isinstance(stdout, bytes):
-            stdout = stdout.decode("utf-8", errors="replace")
-        if isinstance(stderr, bytes):
-            stderr = stderr.decode("utf-8", errors="replace")
-        return (stderr or stdout).strip()
-
     def _startup_probe(self) -> tuple[bool, str | None]:
         """Run the same codex exec startup path used by call().
 
         PATH and auth probes can pass while codex wedges before it emits any
         NDJSON, notably in the CLI's models-manager startup. This bounded
         probe keeps `conductor list` aligned with the path users actually run.
+        Codex readiness is forward progress: once the CLI emits a documented
+        startup event, the provider is authenticated and usable even if the
+        tiny probe turn has not completed yet.
         """
         with tempfile.TemporaryDirectory(prefix="conductor-codex-probe-") as tmpdir:
             output_path = Path(tmpdir) / "output.json"
@@ -281,15 +306,69 @@ class CodexProvider:
             for config in CODEX_STARTUP_PROBE_CONFIG:
                 args.extend(["-c", config])
             try:
-                result = subprocess.run(
+                process = subprocess.Popen(
                     args,
-                    input="Reply with OK.",
-                    capture_output=True,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     text=True,
-                    timeout=self._startup_probe_timeout_sec,
                 )
-            except subprocess.TimeoutExpired as e:
-                detail = self._timeout_output(e)
+            except (FileNotFoundError, OSError) as e:
+                return False, f"could not run `{self._cli} exec` startup probe: {e}"
+
+            if process.stdin is not None:
+                try:
+                    process.stdin.write("Reply with OK.")
+                    process.stdin.close()
+                except OSError:
+                    _LOG.debug("failed to write codex startup probe stdin", exc_info=True)
+
+            stdout_lines: list[str] = []
+            stderr_parts: list[str] = []
+            stdout_queue: queue.Queue[str | None] = queue.Queue()
+
+            def read_stdout() -> None:
+                assert process.stdout is not None
+                try:
+                    for line in process.stdout:
+                        stdout_queue.put(line)
+                finally:
+                    stdout_queue.put(None)
+
+            def read_stderr() -> None:
+                assert process.stderr is not None
+                stderr_parts.extend(process.stderr.readlines())
+
+            stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+            stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+            stdout_thread.start()
+            stderr_thread.start()
+
+            deadline = time.monotonic() + self._startup_probe_timeout_sec
+            stdout_eof = False
+            while time.monotonic() < deadline:
+                remaining = deadline - time.monotonic()
+                try:
+                    item = stdout_queue.get(
+                        timeout=min(CODEX_STREAM_POLL_INTERVAL_SEC, max(0.0, remaining))
+                    )
+                except queue.Empty:
+                    if process.poll() is not None and stdout_eof:
+                        break
+                    continue
+                if item is None:
+                    stdout_eof = True
+                    if process.poll() is not None:
+                        break
+                    continue
+                stdout_lines.append(item)
+                if _codex_startup_ready_event(item):
+                    _terminate_codex_startup_probe(process)
+                    return True, None
+
+            if process.poll() is None:
+                _terminate_codex_startup_probe(process)
+                detail = ("".join(stderr_parts) or "".join(stdout_lines)).strip()
                 reason = (
                     f"`{self._cli} exec` startup probe timed out after "
                     f"{self._startup_probe_timeout_sec:.0f}s"
@@ -297,17 +376,22 @@ class CodexProvider:
                 if detail:
                     reason = f"{reason}: {detail[:200]}"
                 return False, reason
-            except (FileNotFoundError, OSError) as e:
-                return False, f"could not run `{self._cli} exec` startup probe: {e}"
-        if result.returncode != 0:
-            detail = _codex_startup_probe_failure_detail(
-                result.stdout or "",
-                result.stderr or "",
-            )
-            return False, (
-                f"`{self._cli} exec` startup probe exited {result.returncode}: "
-                f"{detail[:200]}"
-            )
+
+            stdout_thread.join(timeout=CODEX_STREAM_EXIT_READER_JOIN_SEC)
+            stderr_thread.join(timeout=CODEX_STREAM_EXIT_READER_JOIN_SEC)
+            stdout = "".join(stdout_lines)
+            stderr = "".join(stderr_parts)
+            if process.returncode != 0:
+                detail = _codex_startup_probe_failure_detail(stdout, stderr)
+                return False, (
+                    f"`{self._cli} exec` startup probe exited {process.returncode}: "
+                    f"{detail[:200]}"
+                )
+            detail = (stderr or stdout).strip()
+            reason = f"`{self._cli} exec` startup probe exited before startup events"
+            if detail:
+                reason = f"{reason}: {detail[:200]}"
+            return False, reason
         return True, None
 
     def configured(self) -> tuple[bool, str | None]:

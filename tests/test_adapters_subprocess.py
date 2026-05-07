@@ -12,6 +12,7 @@ import os
 import shutil
 import signal
 import subprocess
+import textwrap
 import threading
 import time
 from pathlib import Path
@@ -60,6 +61,33 @@ def _fake_completed(stdout: str = "", stderr: str = "", returncode: int = 0):
     return subprocess.CompletedProcess(
         args=["stub"], returncode=returncode, stdout=stdout, stderr=stderr
     )
+
+
+def _write_fake_codex_cli(tmp_path: Path, exec_body: str) -> Path:
+    script = tmp_path / "fake-codex"
+    script.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import sys",
+                "import time",
+                "",
+                "if sys.argv[1:3] == ['login', 'status']:",
+                "    print('Logged in using ChatGPT')",
+                "    raise SystemExit(0)",
+                "",
+                "if sys.argv[1:3] == ['exec', '-']:",
+                "    sys.stdin.read()",
+                textwrap.indent(textwrap.dedent(exec_body).strip(), "    "),
+                "    raise SystemExit(0)",
+                "",
+                "raise SystemExit(f'unexpected args: {sys.argv[1:]}')",
+                "",
+            ]
+        )
+    )
+    script.chmod(0o755)
+    return script
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -1387,94 +1415,102 @@ def test_codex_configured_false_when_auth_probe_times_out(mocker):
     assert "could not verify" in reason
 
 
-def test_codex_configured_false_when_exec_startup_probe_times_out(mocker):
+def test_codex_configured_true_when_startup_probe_sees_thread_started(tmp_path):
+    cli = _write_fake_codex_cli(
+        tmp_path,
+        """
+        print('{"type":"thread.started","thread_id":"thread-123"}', flush=True)
+        time.sleep(60)
+        """,
+    )
+
+    ok, reason = CodexProvider(
+        cli_command=str(cli), startup_probe_timeout_sec=2
+    ).configured()
+
+    assert ok is True
+    assert reason is None
+
+
+def test_codex_configured_true_when_startup_probe_sees_turn_started(tmp_path):
+    cli = _write_fake_codex_cli(
+        tmp_path,
+        """
+        print('{"type":"turn.started"}', flush=True)
+        time.sleep(60)
+        """,
+    )
+
+    ok, reason = CodexProvider(
+        cli_command=str(cli), startup_probe_timeout_sec=2
+    ).configured()
+
+    assert ok is True
+    assert reason is None
+
+
+def test_codex_configured_false_when_exec_startup_probe_times_out(tmp_path):
     """Regression for #125: PATH + auth are not enough readiness.
 
     `conductor list` renders provider.configured(); codex must only report
-    ready when the real `codex exec` startup path also completes inside a
-    bounded timeout.
+    ready when the real `codex exec` startup path emits a forward-progress
+    event inside a bounded timeout.
     """
-    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    cli = _write_fake_codex_cli(
+        tmp_path,
+        """
+        print(
+            'codex_models_manager: failed to refresh available models',
+            file=sys.stderr,
+            flush=True,
+        )
+        time.sleep(60)
+        """,
+    )
 
-    def run(args, **kwargs):
-        if args == ["codex", "login", "status"]:
-            return _fake_completed(stdout="Logged in using ChatGPT")
-        if args[:3] == ["codex", "exec", "-"]:
-            raise subprocess.TimeoutExpired(
-                cmd=args,
-                timeout=kwargs["timeout"],
-                stderr=(
-                    "codex_models_manager: failed to refresh available models: "
-                    "timeout waiting for child process to exit"
-                ),
-            )
-        raise AssertionError(f"unexpected command: {args!r}")
-
-    captured = mocker.patch("conductor.providers.codex.subprocess.run", side_effect=run)
-
-    ok, reason = CodexProvider(startup_probe_timeout_sec=8).configured()
+    ok, reason = CodexProvider(
+        cli_command=str(cli), startup_probe_timeout_sec=0.2
+    ).configured()
 
     assert ok is False
-    assert "`codex exec` startup probe timed out after 8s" in reason
+    assert "`" + str(cli) + " exec` startup probe timed out after 0s" in reason
     assert "codex_models_manager" in reason
-    startup_call = captured.call_args_list[1]
-    assert startup_call.args[0][:3] == ["codex", "exec", "-"]
-    assert startup_call.kwargs["timeout"] == 8
-    assert startup_call.kwargs["input"] == "Reply with OK."
 
 
-def test_codex_startup_probe_avoids_minimal_reasoning_tool_conflicts(mocker):
-    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+def test_codex_configured_false_when_startup_probe_eofs_before_event(tmp_path):
+    cli = _write_fake_codex_cli(
+        tmp_path,
+        """
+        print('{"type":"turn.completed"}', flush=True)
+        """,
+    )
 
-    def run(args, **kwargs):
-        if args == ["codex", "login", "status"]:
-            return _fake_completed(stdout="Logged in using ChatGPT")
-        if args[:3] == ["codex", "exec", "-"]:
-            config_values = [
-                args[idx + 1] for idx, value in enumerate(args) if value == "-c"
-            ]
-            if "model_reasoning_effort=minimal" in config_values:
-                web_search_disabled = (
-                    "web_search='disabled'" in config_values
-                    or 'web_search="disabled"' in config_values
-                )
-                tools_disabled = (
-                    web_search_disabled
-                    and "features.image_generation=false" in config_values
-                )
-                if not tools_disabled:
-                    return _fake_completed(
-                        stdout=json.dumps(
-                            {
-                                "type": "error",
-                                "message": json.dumps(
-                                    {
-                                        "type": "error",
-                                        "error": {
-                                            "type": "invalid_request_error",
-                                            "message": (
-                                                "The following tools cannot be used with "
-                                                "reasoning.effort 'minimal': "
-                                                "image_gen, web_search."
-                                            ),
-                                            "param": "tools",
-                                        },
-                                        "status": 400,
-                                    },
-                                ),
-                            },
-                        ),
-                        returncode=1,
-                    )
-            return _fake_completed(stdout='{"type":"turn.completed"}\n')
-        raise AssertionError(f"unexpected command: {args!r}")
+    ok, reason = CodexProvider(
+        cli_command=str(cli), startup_probe_timeout_sec=2
+    ).configured()
 
-    captured = mocker.patch("conductor.providers.codex.subprocess.run", side_effect=run)
+    assert ok is False
+    assert "startup probe exited before startup events" in reason
+    assert "turn.completed" in reason
 
-    ok, reason = CodexProvider().configured()
+
+def test_codex_startup_probe_avoids_minimal_reasoning_tool_conflicts(tmp_path):
+    args_file = tmp_path / "args.txt"
+    cli = _write_fake_codex_cli(
+        tmp_path,
+        f"""
+        open({str(args_file)!r}, 'w').write('\\n'.join(sys.argv))
+        print('{{"type":"turn.started"}}', flush=True)
+        time.sleep(60)
+        """,
+    )
+
+    ok, reason = CodexProvider(
+        cli_command=str(cli), startup_probe_timeout_sec=2
+    ).configured()
 
     assert ok is True and reason is None
-    startup_args = captured.call_args_list[1].args[0]
+    startup_args = args_file.read_text().splitlines()
     config_values = [
         startup_args[idx + 1]
         for idx, value in enumerate(startup_args)
@@ -1486,57 +1522,46 @@ def test_codex_startup_probe_avoids_minimal_reasoning_tool_conflicts(mocker):
     assert "features.web_search=false" not in config_values
     assert "features.image_gen=false" not in config_values
 
-
-def test_codex_startup_probe_reports_api_error_instead_of_first_event(mocker):
-    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
-    stdout = "\n".join(
-        [
-            '{"type":"thread.started","thread_id":"thread-123"}',
-            '{"type":"turn.started"}',
-            json.dumps(
+def test_codex_startup_probe_reports_api_error_without_startup_event(tmp_path):
+    stdout = json.dumps(
+        {
+            "type": "error",
+            "message": json.dumps(
                 {
                     "type": "error",
-                    "message": json.dumps(
-                        {
-                            "type": "error",
-                            "error": {
-                                "type": "invalid_request_error",
-                                "message": (
-                                    "The following tools cannot be used with "
-                                    "reasoning.effort 'minimal': image_gen, web_search."
-                                ),
-                                "param": "tools",
-                            },
-                            "status": 400,
-                        }
-                    ),
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": (
+                            "The following tools cannot be used with "
+                            "reasoning.effort 'minimal': image_gen, web_search."
+                        ),
+                        "param": "tools",
+                    },
+                    "status": 400,
                 }
             ),
-            '{"type":"turn.failed"}',
-        ]
+        }
+    )
+    cli = _write_fake_codex_cli(
+        tmp_path,
+        f"""
+        print({stdout!r}, flush=True)
+        raise SystemExit(1)
+        """,
     )
 
-    def run(args, **kwargs):
-        if args == ["codex", "login", "status"]:
-            return _fake_completed(stdout="Logged in using ChatGPT")
-        if args[:3] == ["codex", "exec", "-"]:
-            return _fake_completed(stdout=stdout, returncode=1)
-        raise AssertionError(f"unexpected command: {args!r}")
-
-    mocker.patch("conductor.providers.codex.subprocess.run", side_effect=run)
-
-    ok, reason = CodexProvider().configured()
+    ok, reason = CodexProvider(
+        cli_command=str(cli), startup_probe_timeout_sec=2
+    ).configured()
 
     assert ok is False
-    assert "`codex exec` startup probe exited 1" in reason
+    assert f"`{cli} exec` startup probe exited 1" in reason
     assert "invalid_request_error" in reason
     assert "The following tools cannot be used" in reason
     assert "param=tools" in reason
-    assert "thread.started" not in reason
 
 
-def test_codex_startup_probe_reports_turn_failed_error_dict(mocker):
-    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+def test_codex_startup_probe_reports_turn_failed_error_dict(tmp_path):
     stdout = json.dumps(
         {
             "type": "turn.failed",
@@ -1547,17 +1572,17 @@ def test_codex_startup_probe_reports_turn_failed_error_dict(mocker):
             },
         }
     )
+    cli = _write_fake_codex_cli(
+        tmp_path,
+        f"""
+        print({stdout!r}, flush=True)
+        raise SystemExit(1)
+        """,
+    )
 
-    def run(args, **kwargs):
-        if args == ["codex", "login", "status"]:
-            return _fake_completed(stdout="Logged in using ChatGPT")
-        if args[:3] == ["codex", "exec", "-"]:
-            return _fake_completed(stdout=stdout, returncode=1)
-        raise AssertionError(f"unexpected command: {args!r}")
-
-    mocker.patch("conductor.providers.codex.subprocess.run", side_effect=run)
-
-    ok, reason = CodexProvider().configured()
+    ok, reason = CodexProvider(
+        cli_command=str(cli), startup_probe_timeout_sec=2
+    ).configured()
 
     assert ok is False
     assert "invalid_request_error: The request was rejected.: param=tools" in reason
