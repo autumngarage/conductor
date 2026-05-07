@@ -158,6 +158,20 @@ PROFILE_PRECEDENCE_TEXT = (
 )
 DEFAULT_EXEC_MAX_STALL_SEC = 360
 MIN_EXEC_BRIEF_CHARS = 300
+DEFAULT_EXEC_MAX_ITERATIONS = 10
+EXEC_MAX_ITERATION_MULTIPLIERS = {
+    "minimal": 1.0,
+    "low": 1.5,
+    "medium": 2.0,
+    "high": 3.0,
+    "max": 4.0,
+}
+EXEC_MAX_ITERATIONS_HELP = (
+    "Maximum Conductor-managed tool-use loop iterations. Default scales with "
+    "--effort from base 10: minimal=10, low=15, medium=20, high=30, max=40. "
+    "If --effort is unset, preserves the legacy cap of 10."
+)
+EXEC_MAX_ITERATION_PROVIDER_IDS = frozenset({"openrouter", "ollama"})
 GIT_RECOVERY_COMMAND_TIMEOUT_SEC = 2.0
 GIT_RECOVERY_MAX_COMMITS = 5
 GIT_RECOVERY_MAX_STATUS_PATHS = 8
@@ -503,6 +517,32 @@ def _parse_effort(raw: str | None) -> str | int:
             f"Did you mean '{hint}'?"
         )
     return raw
+
+
+def _resolve_exec_max_iterations(
+    explicit_max_iterations: int | None,
+    *,
+    raw_effort: str | None,
+) -> int:
+    if explicit_max_iterations is not None:
+        return explicit_max_iterations
+    if raw_effort is None:
+        return DEFAULT_EXEC_MAX_ITERATIONS
+    effort = raw_effort.strip()
+    multiplier = EXEC_MAX_ITERATION_MULTIPLIERS.get(effort, 1.0)
+    return int(DEFAULT_EXEC_MAX_ITERATIONS * multiplier)
+
+
+def _provider_supports_exec_max_iterations(provider_id: str) -> bool:
+    return provider_id in EXEC_MAX_ITERATION_PROVIDER_IDS
+
+
+def _exec_max_iterations_unsupported_message(provider_id: str) -> str:
+    supported = ", ".join(sorted(EXEC_MAX_ITERATION_PROVIDER_IDS))
+    return (
+        "--max-iterations only applies to Conductor-managed tool-use loops "
+        f"({supported}); {provider_id} cannot honor it."
+    )
 
 
 def _validate_tools(raw: str | None) -> frozenset[str]:
@@ -1544,6 +1584,8 @@ def _invoke_with_fallback(
     session_log: SessionLog | None = None,
     models_by_provider: dict[str, tuple[str, ...]] | None = None,
     attachments: tuple[Path, ...] = (),
+    max_iterations: int | None = None,
+    max_iterations_explicit: bool = False,
     write_validation: bool = True,
 ) -> tuple[CallResponse, list[str]]:
     """Try the decision's ranked providers in order; fallback on retryable errors.
@@ -1619,6 +1661,22 @@ def _invoke_with_fallback(
             idx += 1
             continue
         candidate_models = (models_by_provider or {}).get(candidate.name)
+        if (
+            mode == "exec"
+            and max_iterations_explicit
+            and not _provider_supports_exec_max_iterations(candidate.name)
+        ):
+            message = _exec_max_iterations_unsupported_message(candidate.name)
+            if not silent:
+                click.echo(f"[conductor] {candidate.name} skipped: {message}", err=True)
+            if session_log is not None:
+                session_log.emit(
+                    "provider_skipped",
+                    {"provider": candidate.name, "reason": message},
+                )
+            fallbacks.append(candidate.name)
+            idx += 1
+            continue
         if session_log is not None:
             session_log.bind_provider(candidate.name)
             session_log.emit(
@@ -1652,6 +1710,7 @@ def _invoke_with_fallback(
                         max_stall_sec=max_stall_sec,
                         resume_session_id=resume_session_id,
                         session_log=session_log,
+                        max_iterations=max_iterations,
                         write_validation=write_validation,
                     )
                 elif isinstance(provider, ClaudeProvider):
@@ -1697,6 +1756,7 @@ def _invoke_with_fallback(
                         max_stall_sec=max_stall_sec,
                         resume_session_id=resume_session_id,
                         session_log=session_log,
+                        max_iterations=max_iterations,
                         write_validation=write_validation,
                     )
                 else:
@@ -4607,6 +4667,12 @@ def review(
     ),
 )
 @click.option(
+    "--max-iterations",
+    default=None,
+    type=click.IntRange(min=1),
+    help=EXEC_MAX_ITERATIONS_HELP,
+)
+@click.option(
     "--retry-on-stall",
     default=1,
     type=click.IntRange(min=0),
@@ -4724,6 +4790,7 @@ def exec_cmd(
     timeout_sec: int | None,
     max_stall_sec: int | None,
     start_timeout_sec: float | None,
+    max_iterations: int | None,
     retry_on_stall: int,
     task: str | None,
     task_file: str | None,
@@ -4807,6 +4874,11 @@ def exec_cmd(
         permission_profile=permission_profile_value,
     )
     sandbox_value = _validate_sandbox(sandbox, warn=sandbox is not None)
+    max_iterations_value = _resolve_exec_max_iterations(
+        max_iterations,
+        raw_effort=effort,
+    )
+    max_iterations_explicit = max_iterations is not None
     effort_value = _parse_effort(effort)
     start_timeout_sec = _normalize_start_timeout_sec(start_timeout_sec)
     dispatch_started_at = time.monotonic()
@@ -4838,6 +4910,12 @@ def exec_cmd(
         except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
+        if max_iterations_explicit and not _provider_supports_exec_max_iterations(
+            decision.provider
+        ):
+            raise click.UsageError(
+                _exec_max_iterations_unsupported_message(decision.provider)
+            )
         if exclusion_message and not silent_route:
             click.echo(exclusion_message, err=True)
         _ensure_permission_profile_supported(
@@ -4853,6 +4931,14 @@ def exec_cmd(
         _emit_session_route_decision(session_log, decision)
         print_caller_banner(decision.provider, silent=silent_route or as_json)
         _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
+        if (
+            _provider_supports_exec_max_iterations(decision.provider)
+            and not (silent_route or as_json)
+        ):
+            click.echo(
+                f"[conductor] agent loop iteration cap: {max_iterations_value}",
+                err=True,
+            )
         timeout_sec, max_stall_sec = _scale_dispatch_defaults(
             provider_id=decision.provider,
             timeout_sec=timeout_sec,
@@ -4906,6 +4992,8 @@ def exec_cmd(
                 resume_session_id=resume_session_id,
                 session_log=session_log,
                 attachments=attachments,
+                max_iterations=max_iterations_value,
+                max_iterations_explicit=max_iterations_explicit,
                 write_validation=write_validation,
             )
         except UnsupportedCapability as e:
@@ -4966,6 +5054,10 @@ def exec_cmd(
             provider = get_provider(provider_id)
         except KeyError as e:
             raise click.UsageError(str(e)) from e
+        if max_iterations_explicit and not _provider_supports_exec_max_iterations(
+            provider_id
+        ):
+            raise click.UsageError(_exec_max_iterations_unsupported_message(provider_id))
         _ensure_permission_profile_supported(
             provider,
             provider_id=provider_id,
@@ -4983,6 +5075,14 @@ def exec_cmd(
         )
         session_log.bind_provider(provider_id)
         print_caller_banner(provider_id, silent=silent_route or as_json)
+        if (
+            _provider_supports_exec_max_iterations(provider_id)
+            and not (silent_route or as_json)
+        ):
+            click.echo(
+                f"[conductor] agent loop iteration cap: {max_iterations_value}",
+                err=True,
+            )
         timeout_sec, max_stall_sec = _scale_dispatch_defaults(
             provider_id=provider_id,
             timeout_sec=timeout_sec,
@@ -5038,6 +5138,7 @@ def exec_cmd(
                     max_stall_sec=max_stall_sec,
                     resume_session_id=resume_session_id,
                     session_log=session_log,
+                    max_iterations=max_iterations_value,
                     write_validation=write_validation,
                 )
             elif isinstance(provider, ClaudeProvider):
@@ -5081,6 +5182,7 @@ def exec_cmd(
                     max_stall_sec=max_stall_sec,
                     resume_session_id=resume_session_id,
                     session_log=session_log,
+                    max_iterations=max_iterations_value,
                     write_validation=write_validation,
                 )
             else:

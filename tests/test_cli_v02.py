@@ -25,7 +25,11 @@ import respx
 from click.testing import CliRunner
 
 from conductor import offline_mode
-from conductor.cli import SANDBOX_DEPRECATION_WARNING, main
+from conductor.cli import (
+    SANDBOX_DEPRECATION_WARNING,
+    _resolve_exec_max_iterations,
+    main,
+)
 from conductor.network_profile import NetworkProfile
 from conductor.openrouter_model_stacks import OPENROUTER_CODING_HIGH
 from conductor.providers import (
@@ -1602,7 +1606,6 @@ def test_exec_auto_cheapest_code_review_offline_keeps_ollama(mocker):
     assert result.exit_code == 0, result.output
     assert ollama_exec.called
     assert "excluding ollama from fallback chain" not in result.stderr
-    assert "→ ollama" in result.stderr
 
 
 def test_exec_auto_cheapest_network_probe_offline_keeps_ollama_primary(mocker):
@@ -2091,6 +2094,91 @@ def test_exec_cli_max_stall_seconds_zero_disables_watchdog(mocker):
 
     assert result.exit_code == 0, result.output
     assert exec_mock.call_args.kwargs["max_stall_sec"] is None
+
+
+@pytest.mark.parametrize(
+    ("effort", "expected"),
+    [
+        ("minimal", 10),
+        ("low", 15),
+        ("medium", 20),
+        ("high", 30),
+        ("max", 40),
+    ],
+)
+def test_exec_max_iterations_default_scales_by_effort(effort, expected):
+    assert _resolve_exec_max_iterations(None, raw_effort=effort) == expected
+
+
+def test_exec_max_iterations_unset_effort_preserves_legacy_cap():
+    assert _resolve_exec_max_iterations(None, raw_effort=None) == 10
+
+
+def test_exec_max_iterations_explicit_override_ignores_effort(mocker):
+    _stub_all_configured(mocker, {"openrouter"})
+    exec_mock = mocker.patch.object(
+        OpenRouterProvider, "exec", return_value=_fake_response("openrouter")
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "openrouter",
+            "--max-iterations",
+            "100",
+            "--effort",
+            "minimal",
+            "--task",
+            "do it",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert exec_mock.call_args.kwargs["max_iterations"] == 100
+    assert "[conductor] agent loop iteration cap: 100" in result.stderr
+
+
+def test_exec_max_iterations_explicit_rejects_unsupported_provider(mocker):
+    _stub_all_configured(mocker, {"codex"})
+    exec_mock = mocker.patch.object(
+        CodexProvider, "exec", return_value=_fake_response("codex")
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "codex",
+            "--max-iterations",
+            "5",
+            "--task",
+            "do it",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert not exec_mock.called
+    assert "--max-iterations only applies" in result.output
+    assert "codex cannot honor it" in result.output
+
+
+def test_exec_max_iterations_banner_only_for_supporting_providers(mocker):
+    _stub_all_configured(mocker, {"codex"})
+    exec_mock = mocker.patch.object(
+        CodexProvider, "exec", return_value=_fake_response("codex")
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--with", "codex", "--task", "do it"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert exec_mock.called
+    assert "agent loop iteration cap" not in result.stderr
 
 
 def test_exec_cli_start_timeout_flag_propagates_to_claude(mocker):

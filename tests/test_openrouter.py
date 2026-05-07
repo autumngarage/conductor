@@ -849,13 +849,16 @@ def test_exec_code_task_iteration_cap_raises_status(configured, tmp_path):
                 task_tags=("code", "tool-use"),
                 sandbox="none",
                 cwd=str(tmp_path),
+                max_iterations=4,
             )
 
     status = exc.value.status
     assert status["state"] == "iteration-cap"
     assert status["hit_iteration_cap"] is True
-    assert status["tool_calls"] == OPENROUTER_MAX_TOOL_ITERATIONS
-    assert len(requests) == OPENROUTER_MAX_TOOL_ITERATIONS
+    assert status["iteration_cap"] == 4
+    assert status["tool_calls"] == 4
+    assert len(requests) == 4
+    assert "Reached --max-iterations cap (4)" in str(exc.value)
 
 
 def test_exec_with_tools_rejects_model_and_models_together(configured):

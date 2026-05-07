@@ -105,7 +105,9 @@ Current enforcement support:
 
 If the workflow only needs review with no file mutation, prefer `conductor review` or `conductor ask --kind review`. Use `exec --permission-profile read-only` only for agentic inspection workflows that need the multi-turn exec machinery.
 
-`conductor exec --help` is the canonical reference for agentic code/edit mode. Its stable exec-specific flags are: --tools, --permission-profile, --sandbox, --cwd, --timeout, --max-stall-seconds, --start-timeout, --log-file, --preflight, --no-preflight, and --allow-short-brief. `--sandbox` remains parseable for compatibility but is deprecated and ignored.
+`conductor exec --help` is the canonical reference for agentic code/edit mode. Its stable exec-specific flags are: --tools, --permission-profile, --sandbox, --cwd, --timeout, --max-stall-seconds, --start-timeout, --max-iterations, --log-file, --preflight, --no-preflight, and --allow-short-brief. `--sandbox` remains parseable for compatibility but is deprecated and ignored.
+
+`--max-iterations <n>` is an exec-only Conductor-managed tool-use loop cap. If unset, it defaults from base 10 by effective `--effort`: unset/minimal=10, low=15, medium=20, high=30, max=40.
 
 ## Flags
 
