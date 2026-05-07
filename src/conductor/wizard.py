@@ -286,6 +286,7 @@ def run_init_wizard(
     accept_defaults: bool = False,
     only: str | None = None,
     remaining: bool = False,
+    quiet: bool = False,
     wire_agents: str | None = None,
     patch_claude_md: str | None = None,
     patch_agents_md: str | None = None,
@@ -319,7 +320,7 @@ def run_init_wizard(
     _kimi_migration_notice_emitted = False
     interactive = _is_tty() and not accept_defaults
 
-    _print_intro(interactive, only=only, remaining=remaining)
+    _print_intro(interactive, only=only, remaining=remaining, quiet=quiet)
 
     names_to_walk = [only] if only else known_providers()
     outcomes: list[WizardOutcome] = []
@@ -341,9 +342,10 @@ def run_init_wizard(
 
         can_back = idx > 0
 
-        click.echo(_section_header(name, idx + 1, total))
+        if not quiet:
+            click.echo(_section_header(name, idx + 1, total))
         info = _INFO.get(name)
-        if info:
+        if info and not quiet:
             click.echo(f"  {info.tagline}")
             click.echo(f"  tier: {provider.quality_tier}")
             click.echo("")
@@ -351,29 +353,34 @@ def run_init_wizard(
             click.echo("")
 
         if ok:
-            click.echo(
-                f"  Status: ✓ already configured. "
-                f"(run `conductor smoke {name}` to verify.)"
-            )
+            if not quiet:
+                click.echo(
+                    f"  Status: ✓ already configured. "
+                    f"(run `conductor smoke {name}` to verify.)"
+                )
             outcomes.append(WizardOutcome(name, "ok", "already configured"))
-            click.echo("")
+            if not quiet:
+                click.echo("")
             idx += 1
             continue
 
         # Not configured — enter the per-provider setup flow.
-        click.echo(f"  Status: ✗ {reason}")
-        click.echo("")
+        if not quiet:
+            click.echo(f"  Status: ✗ {reason}")
+            click.echo("")
 
         if not interactive:
-            click.echo(
-                f"  Run `conductor init --only {name}` on a TTY for the "
-                f"guided setup, or:"
-            )
-            _print_install_block(info, indent="    ")
+            if not quiet:
+                click.echo(
+                    f"  Run `conductor init --only {name}` on a TTY for the "
+                    f"guided setup, or:"
+                )
+                _print_install_block(info, indent="    ")
             outcomes.append(
                 WizardOutcome(name, "skipped", reason or "needs interactive setup")
             )
-            click.echo("")
+            if not quiet:
+                click.echo("")
             idx += 1
             continue
 
@@ -404,6 +411,7 @@ def run_init_wizard(
     if not only and not aborted:
         wiring_ok = _maybe_wire_agents(
             interactive=interactive,
+            quiet=quiet,
             wire_agents=wire_agents,
             patch_claude_md=patch_claude_md,
             patch_agents_md=patch_agents_md,
@@ -412,8 +420,9 @@ def run_init_wizard(
             wire_cursor_flag=wire_cursor_flag,
         )
 
-    _print_summary(outcomes)
-    _print_next_steps(outcomes)
+    if not quiet:
+        _print_summary(outcomes)
+        _print_next_steps(outcomes)
     if aborted or not wiring_ok:
         return 1
     return 0
@@ -432,13 +441,21 @@ class _GoBack(Exception):  # noqa: N818  — sentinel, never caught outside this
 # --------------------------------------------------------------------------- #
 
 
-def _print_intro(interactive: bool, *, only: str | None, remaining: bool) -> None:
+def _print_intro(
+    interactive: bool,
+    *,
+    only: str | None,
+    remaining: bool,
+    quiet: bool,
+) -> None:
     from conductor.banner import (
         SUBTITLE_INIT,
         conductor_version,
         print_banner,
     )
 
+    if quiet:
+        return
     print_banner(SUBTITLE_INIT, conductor_version())
     click.echo("conductor init — provider setup")
     click.echo("─" * 60)
@@ -998,6 +1015,7 @@ def _print_summary(outcomes: list[WizardOutcome]) -> None:
 def _maybe_wire_agents(
     *,
     interactive: bool,
+    quiet: bool,
     wire_agents: str | None,
     patch_claude_md: str | None,
     patch_agents_md: str | None = None,
@@ -1043,7 +1061,7 @@ def _maybe_wire_agents(
     )
 
     if not any_detected_or_forced:
-        if interactive:
+        if interactive and not quiet:
             click.echo("")
             click.echo("─" * 60)
             click.echo("Agent integration")
@@ -1066,6 +1084,7 @@ def _maybe_wire_agents(
                 detection=detection,
                 version=__version__,
                 interactive=interactive,
+                quiet=quiet,
                 decision=decision,
                 patch_claude_md=patch_claude_md,
             )
@@ -1076,6 +1095,7 @@ def _maybe_wire_agents(
                 detection=detection,
                 version=__version__,
                 interactive=interactive,
+                quiet=quiet,
                 decision=decision,
                 patch_agents_md=patch_agents_md,
             )
@@ -1086,6 +1106,7 @@ def _maybe_wire_agents(
                 detection=detection,
                 version=__version__,
                 interactive=interactive,
+                quiet=quiet,
                 decision=decision,
                 patch_gemini_md=patch_gemini_md,
             )
@@ -1096,6 +1117,7 @@ def _maybe_wire_agents(
                 detection=detection,
                 version=__version__,
                 interactive=interactive,
+                quiet=quiet,
                 decision=decision,
                 patch_claude_md_repo=patch_claude_md_repo,
             )
@@ -1106,6 +1128,7 @@ def _maybe_wire_agents(
                 detection=detection,
                 version=__version__,
                 interactive=interactive,
+                quiet=quiet,
                 decision=decision,
                 wire_cursor_flag=wire_cursor_flag,
             )
@@ -1119,6 +1142,7 @@ def _wire_claude_code_section(
     detection,
     version: str,
     interactive: bool,
+    quiet: bool,
     decision: str,
     patch_claude_md: str | None,
 ) -> bool:
@@ -1126,26 +1150,27 @@ def _wire_claude_code_section(
     from conductor.agent_wiring import wire_claude_code
 
     already_wired = len(detection.managed) > 0
-    click.echo("")
-    click.echo("─" * 60)
-    click.echo("Agent integration — Claude Code")
-    click.echo("─" * 60)
-    if already_wired:
-        click.echo(f"  Already wired ({len(detection.managed)} managed files found).")
-        click.echo("  Re-running will refresh each file to the current version.")
-    else:
-        click.echo("  Claude Code can delegate to other models (kimi, gemini, …)")
-        click.echo("  without leaving your editor. Conductor can wire this up by")
-        click.echo("  writing:")
+    if not quiet:
         click.echo("")
-        click.echo(f"    {detection.conductor_home}/delegation-guidance.md")
-        click.echo(f"    {detection.claude_home}/commands/conductor.md   (slash: /conductor)")
-        click.echo(f"    {detection.claude_home}/agents/kimi-long-context.md")
-        click.echo(f"    {detection.claude_home}/agents/gemini-web-search.md")
+        click.echo("─" * 60)
+        click.echo("Agent integration — Claude Code")
+        click.echo("─" * 60)
+        if already_wired:
+            click.echo(f"  Already wired ({len(detection.managed)} managed files found).")
+            click.echo("  Re-running will refresh each file to the current version.")
+        else:
+            click.echo("  Claude Code can delegate to other models (kimi, gemini, …)")
+            click.echo("  without leaving your editor. Conductor can wire this up by")
+            click.echo("  writing:")
+            click.echo("")
+            click.echo(f"    {detection.conductor_home}/delegation-guidance.md")
+            click.echo(f"    {detection.claude_home}/commands/conductor.md   (slash: /conductor)")
+            click.echo(f"    {detection.claude_home}/agents/kimi-long-context.md")
+            click.echo(f"    {detection.claude_home}/agents/gemini-web-search.md")
+            click.echo("")
+            click.echo("  Every file carries a 'managed-by: conductor' marker and is")
+            click.echo("  fully removable via `conductor init --unwire`.")
         click.echo("")
-        click.echo("  Every file carries a 'managed-by: conductor' marker and is")
-        click.echo("  fully removable via `conductor init --unwire`.")
-    click.echo("")
 
     if decision == "ask":
         prompt = "Refresh conductor integration?" if already_wired else "Wire conductor in now?"
@@ -1189,19 +1214,20 @@ def _wire_claude_code_section(
     try:
         report = wire_claude_code(version, patch_claude_md=do_patch)
     except Exception as exc:  # noqa: BLE001 — surface any unexpected failure
-        click.echo(f"  ✗ wiring failed: {exc}")
+        click.echo(f"  ✗ wiring failed: {exc}", err=True)
         return False
 
-    click.echo("")
-    if report.written:
-        click.echo("  ✓ wrote:")
-        for p in report.written:
-            click.echo(f"      {p}")
+    if not quiet:
+        click.echo("")
+        if report.written:
+            click.echo("  ✓ wrote:")
+            for p in report.written:
+                click.echo(f"      {p}")
     for path, reason in report.skipped:
-        click.echo(f"  ⚠ skipped {path}: {reason}")
-    if report.patched_claude_md:
+        click.echo(f"  ⚠ skipped {path}: {reason}", err=True)
+    if report.patched_claude_md and not quiet:
         click.echo(f"  ✓ patched {detection.claude_user_md} (sentinel block)")
-    elif not do_patch:
+    elif not do_patch and not quiet:
         import_line = f"@{detection.conductor_home}/delegation-guidance.md"
         click.echo("")
         click.echo(
@@ -1209,11 +1235,12 @@ def _wire_claude_code_section(
         )
         click.echo(f"      {import_line}")
 
-    click.echo("")
-    click.echo("  Try it:")
-    click.echo('    Ask Claude: "summarize this README with kimi"')
-    click.echo("    Or run:     /conductor kimi summarize README.md")
-    click.echo("")
+    if not quiet:
+        click.echo("")
+        click.echo("  Try it:")
+        click.echo('    Ask Claude: "summarize this README with kimi"')
+        click.echo("    Or run:     /conductor kimi summarize README.md")
+        click.echo("")
 
     # If every target file was skipped (all user-owned), treat that as a
     # failed wire — the user asked for integration and got nothing.
@@ -1230,6 +1257,7 @@ def _wire_sentinel_section(
     wire_fn,
     version: str,
     interactive: bool,
+    quiet: bool,
     decision: str,
     patch_flag: str | None,
 ) -> bool:
@@ -1241,24 +1269,27 @@ def _wire_sentinel_section(
     an existing conductor block in place, so re-running bumps the
     version and never duplicates.
     """
-    click.echo("")
-    click.echo("─" * 60)
-    click.echo(f"Agent integration — {title}")
-    click.echo("─" * 60)
-    if path_exists:
-        if already_wired:
-            click.echo(f"  {path} already has a conductor block.")
-            click.echo("  Re-running will refresh it to the current version.")
+    if not quiet:
+        click.echo("")
+        click.echo("─" * 60)
+        click.echo(f"Agent integration — {title}")
+        click.echo("─" * 60)
+        if path_exists:
+            if already_wired:
+                click.echo(f"  {path} already has a conductor block.")
+                click.echo("  Re-running will refresh it to the current version.")
+            else:
+                click.echo(f"  {path} found — conductor can inject a")
+                click.echo("  delegation block (sentinel-bounded, fully removable).")
         else:
-            click.echo(f"  {path} found — conductor can inject a")
-            click.echo("  delegation block (sentinel-bounded, fully removable).")
-    else:
-        click.echo(
-            f"  No {filename} in {path.parent}. Conductor can create one"
-        )
-        click.echo("  containing only the delegation block — not recommended")
-        click.echo(f"  unless this repo is intended to use {filename} going forward.")
-    click.echo("")
+            click.echo(
+                f"  No {filename} in {path.parent}. Conductor can create one"
+            )
+            click.echo("  containing only the delegation block — not recommended")
+            click.echo(
+                f"  unless this repo is intended to use {filename} going forward."
+            )
+        click.echo("")
 
     pam = patch_flag if patch_flag is not None else decision
     if pam == "ask":
@@ -1282,11 +1313,12 @@ def _wire_sentinel_section(
     try:
         report = wire_fn(version=version)
     except Exception as exc:  # noqa: BLE001 — surface any unexpected failure
-        click.echo(f"  ✗ {filename} patch failed: {exc}")
+        click.echo(f"  ✗ {filename} patch failed: {exc}", err=True)
         return False
 
-    click.echo(f"  ✓ patched {report.path} (sentinel block)")
-    click.echo("")
+    if not quiet:
+        click.echo(f"  ✓ patched {report.path} (sentinel block)")
+        click.echo("")
     return True
 
 
@@ -1295,6 +1327,7 @@ def _wire_agents_md_section(
     detection,
     version: str,
     interactive: bool,
+    quiet: bool,
     decision: str,
     patch_agents_md: str | None,
 ) -> bool:
@@ -1311,6 +1344,7 @@ def _wire_agents_md_section(
         wire_fn=wire_agents_md,
         version=version,
         interactive=interactive,
+        quiet=quiet,
         decision=decision,
         patch_flag=patch_agents_md,
     )
@@ -1321,6 +1355,7 @@ def _wire_gemini_md_section(
     detection,
     version: str,
     interactive: bool,
+    quiet: bool,
     decision: str,
     patch_gemini_md: str | None,
 ) -> bool:
@@ -1337,6 +1372,7 @@ def _wire_gemini_md_section(
         wire_fn=wire_gemini_md,
         version=version,
         interactive=interactive,
+        quiet=quiet,
         decision=decision,
         patch_flag=patch_gemini_md,
     )
@@ -1347,6 +1383,7 @@ def _wire_claude_md_repo_section(
     detection,
     version: str,
     interactive: bool,
+    quiet: bool,
     decision: str,
     patch_claude_md_repo: str | None,
 ) -> bool:
@@ -1363,6 +1400,7 @@ def _wire_claude_md_repo_section(
         wire_fn=wire_claude_md_repo,
         version=version,
         interactive=interactive,
+        quiet=quiet,
         decision=decision,
         patch_flag=patch_claude_md_repo,
     )
@@ -1373,6 +1411,7 @@ def _wire_cursor_section(
     detection,
     version: str,
     interactive: bool,
+    quiet: bool,
     decision: str,
     wire_cursor_flag: str | None,
 ) -> bool:
@@ -1385,26 +1424,27 @@ def _wire_cursor_section(
 
     already_written = any(a.kind == "cursor-rule" for a in detection.managed)
 
-    click.echo("")
-    click.echo("─" * 60)
-    click.echo("Agent integration — Cursor rule (repo-scoped)")
-    click.echo("─" * 60)
     rule_path = detection.cursor_rules_dir / "conductor-delegation.mdc"
-    if detection.cursor_rules_dir_exists:
-        if already_written:
-            click.echo(f"  {rule_path} already exists (managed by conductor).")
-            click.echo("  Re-running will refresh it to the current version.")
+    if not quiet:
+        click.echo("")
+        click.echo("─" * 60)
+        click.echo("Agent integration — Cursor rule (repo-scoped)")
+        click.echo("─" * 60)
+        if detection.cursor_rules_dir_exists:
+            if already_written:
+                click.echo(f"  {rule_path} already exists (managed by conductor).")
+                click.echo("  Re-running will refresh it to the current version.")
+            else:
+                click.echo("  Cursor rules dir found — conductor can write")
+                click.echo(f"    {rule_path}")
+                click.echo("  as a fully-managed rule (removable via --unwire).")
         else:
-            click.echo("  Cursor rules dir found — conductor can write")
-            click.echo(f"    {rule_path}")
-            click.echo("  as a fully-managed rule (removable via --unwire).")
-    else:
-        click.echo(
-            f"  No .cursor/rules/ dir in {detection.cursor_rules_dir.parent}."
-        )
-        click.echo("  Conductor can create it and write the delegation rule —")
-        click.echo("  only useful if this repo is intended to use Cursor.")
-    click.echo("")
+            click.echo(
+                f"  No .cursor/rules/ dir in {detection.cursor_rules_dir.parent}."
+            )
+            click.echo("  Conductor can create it and write the delegation rule —")
+            click.echo("  only useful if this repo is intended to use Cursor.")
+        click.echo("")
 
     wc = (
         wire_cursor_flag
@@ -1432,11 +1472,12 @@ def _wire_cursor_section(
     try:
         report = wire_cursor(version=version)
     except Exception as exc:  # noqa: BLE001 — surface any unexpected failure
-        click.echo(f"  ✗ Cursor rule write failed: {exc}")
+        click.echo(f"  ✗ Cursor rule write failed: {exc}", err=True)
         return False
 
-    click.echo(f"  ✓ wrote {report.path} (managed file)")
-    click.echo("")
+    if not quiet:
+        click.echo(f"  ✓ wrote {report.path} (managed file)")
+        click.echo("")
     return True
 
 

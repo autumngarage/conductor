@@ -6286,6 +6286,12 @@ def doctor(as_json: bool) -> None:
     help="Resume setup with only the not-yet-configured providers.",
 )
 @click.option(
+    "--quiet",
+    is_flag=True,
+    default=False,
+    help="Suppress informational output. Useful for `post_install` automation.",
+)
+@click.option(
     "--wire-agents",
     type=click.Choice(["yes", "no", "ask"]),
     default=None,
@@ -6345,6 +6351,7 @@ def init(
     accept_defaults: bool,
     only: str | None,
     remaining: bool,
+    quiet: bool,
     wire_agents: str | None,
     patch_claude_md: str | None,
     patch_agents_md: str | None,
@@ -6387,6 +6394,7 @@ def init(
         accept_defaults=accept_defaults,
         only=only,
         remaining=remaining,
+        quiet=quiet,
         wire_agents=wire_agents,
         patch_claude_md=patch_claude_md,
         patch_agents_md=patch_agents_md,
