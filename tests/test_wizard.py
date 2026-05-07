@@ -605,6 +605,45 @@ def test_init_remaining_skips_configured(mocker):
     assert "codex" in result.output.lower()
 
 
+def test_init_remaining_refreshes_all_repo_wiring(mocker):
+    import conductor
+    from conductor import agent_wiring as aw
+    from conductor.providers import (
+        ClaudeProvider,
+        CodexProvider,
+        GeminiProvider,
+        KimiProvider,
+        OllamaProvider,
+        OpenRouterProvider,
+    )
+
+    for cls in (
+        ClaudeProvider,
+        CodexProvider,
+        GeminiProvider,
+        KimiProvider,
+        OllamaProvider,
+        OpenRouterProvider,
+    ):
+        mocker.patch.object(cls, "configured", lambda self: (True, None))
+
+    old_version = "0.8.2"
+    aw.wire_agents_md(version=old_version)
+    aw.wire_gemini_md(version=old_version)
+    aw.wire_claude_md_repo(version=old_version)
+    cursor = aw.wire_cursor(version=old_version).path
+
+    result = CliRunner().invoke(main, ["init", "-y", "--remaining"])
+
+    assert result.exit_code == 0, result.output
+    expected = aw._canonical_wiring_version(conductor.__version__)
+    versions_by_kind = {artifact.kind: artifact.version for artifact in aw.detect().managed}
+    assert versions_by_kind["agents-md-import"] == expected
+    assert versions_by_kind["gemini-md-import"] == expected
+    assert versions_by_kind["claude-md-repo-import"] == expected
+    assert aw.read_managed_version(cursor) == expected
+
+
 def test_init_only_unknown_provider_errors():
     result = CliRunner().invoke(main, ["init", "--only", "nonexistent"])
     assert result.exit_code == 2
