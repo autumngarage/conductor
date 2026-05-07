@@ -729,8 +729,17 @@ def test_doctor_warns_before_next_steps_when_one_integration_file_is_behind(
     assert result.exit_code == 0, result.output
     assert "⚠ Repo integration files behind binary (v0.9.0):" in result.output
     assert "    AGENTS.md (v0.8.9)" in result.output
+    assert "  Auto refresh paths:" in result.output
+    assert "    brew upgrade conductor" in result.output
+    assert "    conductor init --hooks" in result.output
+    assert "  Immediate manual fallback:" in result.output
     assert "    conductor init -y --remaining" in result.output
-    assert "conductor init --hooks" in result.output
+    assert "    conductor refresh-consumers" in result.output
+    assert (
+        result.output.index("Auto refresh paths:")
+        < result.output.index("Immediate manual fallback:")
+        < result.output.index("conductor refresh-consumers")
+    )
     assert (
         result.output.index("Repo integration files behind binary")
         < result.output.index("Next steps:")
@@ -924,6 +933,16 @@ def test_refresh_consumers_defaults_to_empty():
     result = CliRunner().invoke(main, ["refresh-consumers"])
     assert result.exit_code == 0, result.output
     assert "No consumer repos configured." in result.output
+
+
+def test_refresh_consumers_help_positions_command_as_manual_backstop():
+    result = CliRunner().invoke(main, ["refresh-consumers", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "Refresh Conductor integration blocks" in result.output
+    assert "Manual force-refresh backstop" in result.output
+    assert "CLAUDE.md @-import" in result.output
+    assert "conductor init --hooks" in result.output
+    assert "Use `refresh-consumers` only" in result.output
 
 
 def test_refresh_consumers_commits_updated_repo_integration(mocker, tmp_path):
