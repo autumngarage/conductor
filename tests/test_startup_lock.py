@@ -78,6 +78,12 @@ class _StartupFakePopen:
         self._finished.set()
 
 
+def test_startup_lock_dir_honors_xdg_cache_home(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    assert _startup_lock._lock_dir() == tmp_path / "cache" / "conductor" / "locks"
+
+
 def test_live_subprocess_startup_lock_serializes_popen_until_first_output(
     monkeypatch, tmp_path
 ) -> None:
