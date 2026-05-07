@@ -68,7 +68,12 @@ jobs:
 
           expected_version="${RELEASE_TAG#v}"
 
-          brew update --force --quiet autumngarage/conductor
+          # Re-tap to force a fresh fetch of the (just-bumped) tap repo;
+          # `brew update <name>` interprets <name> as a formula to upgrade,
+          # which fails with "no available formula" before the install step
+          # has had a chance to install it.
+          brew untap autumngarage/conductor || true
+          brew tap autumngarage/conductor
 
           formula_version="$(
             brew info --json=v2 autumngarage/conductor/conductor \
