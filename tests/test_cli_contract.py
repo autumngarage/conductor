@@ -83,6 +83,7 @@ DOCUMENTED_EXEC_FLAGS: frozenset[str] = frozenset(
         "--preflight",
         "--no-preflight",
         "--allow-short-brief",
+        "--ground-citations",
     }
 )
 

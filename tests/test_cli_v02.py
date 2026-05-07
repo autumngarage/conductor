@@ -85,11 +85,12 @@ def _fake_response(
     provider: str = "claude",
     model: str = "sonnet",
     *,
+    text: str = "hello",
     cost_usd: float | None = 0.01,
     output_tokens: int | None = 10,
 ) -> CallResponse:
     return CallResponse(
-        text="hello",
+        text=text,
         provider=provider,
         model=model,
         duration_ms=1234,
@@ -1515,6 +1516,90 @@ def test_exec_without_sandbox_does_not_warn(mocker):
 
     assert result.exit_code == 0, result.output
     assert SANDBOX_DEPRECATION_WARNING not in result.stderr
+
+
+def test_exec_ground_citations_default_skips_guardrail(mocker):
+    _stub_all_configured(mocker, {"codex"})
+    mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
+    grounding_mock = mocker.patch("conductor.cli._emit_grounding_warnings")
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "codex",
+            "--no-preflight",
+            "--allow-short-brief",
+            "--task",
+            "hi",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert not grounding_mock.called
+
+
+def test_exec_ground_citations_warns_to_stderr_not_stdout(mocker, tmp_path):
+    _stub_all_configured(mocker, {"codex"})
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "foo.py").write_text("def existing():\n    return 1\n", encoding="utf-8")
+    response_text = "Check `missing_symbol` in src/foo.py:1"
+    mocker.patch.object(
+        CodexProvider,
+        "exec",
+        return_value=_fake_response("codex", text=response_text),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "codex",
+            "--no-preflight",
+            "--allow-short-brief",
+            "--cwd",
+            str(tmp_path),
+            "--ground-citations",
+            "--task",
+            "hi",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == f"{response_text}\n"
+    assert "grounding misses: 1" in result.stderr
+    assert "`missing_symbol` in src/foo.py:1" in result.stderr
+    assert "grounding misses" not in result.stdout
+
+
+def test_exec_ground_citations_errors_warn_without_failing(mocker):
+    _stub_all_configured(mocker, {"codex"})
+    mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
+    mocker.patch(
+        "conductor.grounding.ground_citations",
+        side_effect=OSError("permission denied"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "codex",
+            "--no-preflight",
+            "--allow-short-brief",
+            "--ground-citations",
+            "--task",
+            "hi",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "hello\n"
+    assert "[conductor] grounding check error: permission denied" in result.stderr
 
 
 def test_exec_permission_profile_auto_routes_to_enforcing_provider(mocker):
