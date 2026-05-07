@@ -47,6 +47,17 @@ from conductor.delegation_ledger import (
     read_delegations,
     record_delegation,
 )
+from conductor.git_state import (
+    DEFAULT_BRANCH_SCAN_LIMIT,
+    DEFAULT_KEEP_WORKTREE_DAYS,
+    AbandonedWorktree,
+    BranchScanLimit,
+    GitCleanupPlan,
+    GitStateError,
+    ProtectedRef,
+    StaleBranch,
+    scan_git_state,
+)
 from conductor.muted_providers import (
     MutedProvidersError,
     load_muted_provider_ids,
@@ -5567,6 +5578,7 @@ def _diagnostic_payload() -> dict:
         "credentials": env_info,
         "active_credentials": active_credentials,
         "agent_integration": _agent_integration_payload(),
+        "git_state": _git_state_doctor_payload(),
         "warnings": warnings,
     }
 
@@ -5661,6 +5673,279 @@ def _integration_version_skew_entries(
         )
     )
     return [entry for entry in managed_files if str(entry["path"]) in skewed_paths]
+
+
+def _stale_branch_payload(branch: StaleBranch) -> dict[str, str]:
+    return {
+        "name": branch.name,
+        "reason": branch.reason,
+        "last_commit": branch.last_commit,
+    }
+
+
+def _abandoned_worktree_payload(worktree: AbandonedWorktree) -> dict[str, object]:
+    return {
+        "path": str(worktree.path),
+        "branch": worktree.branch,
+        "reason": worktree.reason,
+        "last_commit": worktree.last_commit,
+    }
+
+
+def _protected_ref_payload(item: ProtectedRef) -> dict[str, str]:
+    return {
+        "kind": item.kind,
+        "name": item.name,
+        "reason": item.reason,
+    }
+
+
+def _git_cleanup_payload(plan: GitCleanupPlan) -> dict[str, object]:
+    return {
+        "stale_branches": [
+            _stale_branch_payload(branch) for branch in plan.stale_branches
+        ],
+        "abandoned_worktrees": [
+            _abandoned_worktree_payload(worktree)
+            for worktree in plan.abandoned_worktrees
+        ],
+        "protected": [_protected_ref_payload(item) for item in plan.protected],
+        "branch_scan": {
+            "checked": plan.branch_scan.checked,
+            "total": plan.branch_scan.total,
+            "limit": plan.branch_scan.limit,
+            "capped": plan.branch_scan.capped,
+        },
+    }
+
+
+def _git_state_doctor_payload() -> dict[str, object]:
+    try:
+        plan = scan_git_state(
+            keep_worktree_days=DEFAULT_KEEP_WORKTREE_DAYS,
+            branch_scan_limit=DEFAULT_BRANCH_SCAN_LIMIT,
+        )
+    except GitStateError as e:
+        return {
+            "stale_branches": [],
+            "abandoned_worktrees": [],
+            "branch_scan": {
+                "checked": 0,
+                "total": 0,
+                "limit": DEFAULT_BRANCH_SCAN_LIMIT,
+                "capped": False,
+            },
+            "error": str(e),
+        }
+    return {
+        "stale_branches": [
+            _stale_branch_payload(branch) for branch in plan.stale_branches
+        ],
+        "abandoned_worktrees": [
+            _abandoned_worktree_payload(worktree)
+            for worktree in plan.abandoned_worktrees
+        ],
+        "branch_scan": {
+            "checked": plan.branch_scan.checked,
+            "total": plan.branch_scan.total,
+            "limit": plan.branch_scan.limit,
+            "capped": plan.branch_scan.capped,
+        },
+        "error": None,
+    }
+
+
+def _format_worktree_age(worktree: AbandonedWorktree) -> str:
+    if worktree.last_commit_age_days is None:
+        return "last commit age unknown"
+    days = worktree.last_commit_age_days
+    unit = "day" if days == 1 else "days"
+    return f"last commit {days} {unit} ago"
+
+
+def _echo_branch_scan_cap(
+    branch_scan: dict[str, object] | BranchScanLimit,
+    *,
+    indent: str = "",
+) -> None:
+    if isinstance(branch_scan, dict):
+        capped = bool(branch_scan.get("capped"))
+        checked = branch_scan.get("checked")
+        total = branch_scan.get("total")
+    else:
+        capped = branch_scan.capped
+        checked = branch_scan.checked
+        total = branch_scan.total
+    if capped:
+        click.echo(f"{indent}(top {checked} of {total} branches checked)")
+
+
+def _run_git_cleanup_command(args: list[str], *, cwd: str | Path | None = None) -> tuple[bool, str]:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    detail = (result.stderr or result.stdout or "").strip()
+    return result.returncode == 0, detail
+
+
+@main.command("git-cleanup")
+@click.option(
+    "--execute",
+    is_flag=True,
+    default=False,
+    help="Actually delete stale branches and abandoned worktrees. Dry-run by default.",
+)
+@click.option(
+    "--branches-only",
+    is_flag=True,
+    default=False,
+    help="Only report or delete stale local branches.",
+)
+@click.option(
+    "--worktrees-only",
+    is_flag=True,
+    default=False,
+    help="Only report or remove abandoned worktrees.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Emit structured cleanup summary as JSON.",
+)
+@click.option(
+    "--keep-worktree-days",
+    default=DEFAULT_KEEP_WORKTREE_DAYS,
+    show_default=True,
+    type=click.IntRange(min=0),
+    help="Protect clean worktrees whose latest commit is newer than this many days.",
+)
+@click.option(
+    "--branch-scan-limit",
+    default=DEFAULT_BRANCH_SCAN_LIMIT,
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="Check only this many recently updated local branches for tree equivalence.",
+)
+def git_cleanup(
+    execute: bool,
+    branches_only: bool,
+    worktrees_only: bool,
+    as_json: bool,
+    keep_worktree_days: int,
+    branch_scan_limit: int,
+) -> None:
+    """Clean stale local branches and abandoned worktrees."""
+    if branches_only and worktrees_only:
+        raise click.UsageError("--branches-only conflicts with --worktrees-only")
+    try:
+        plan = scan_git_state(
+            keep_worktree_days=keep_worktree_days,
+            branch_scan_limit=branch_scan_limit,
+        )
+    except GitStateError as e:
+        raise click.ClickException(str(e)) from e
+
+    stale_branches = [] if worktrees_only else plan.stale_branches
+    abandoned_worktrees = [] if branches_only else plan.abandoned_worktrees
+    payload_plan = GitCleanupPlan(
+        default_branch=plan.default_branch,
+        current_path=plan.current_path,
+        current_branch=plan.current_branch,
+        stale_branches=stale_branches,
+        abandoned_worktrees=abandoned_worktrees,
+        protected=plan.protected,
+        branch_scan=plan.branch_scan,
+    )
+
+    deleted_branches: list[str] = []
+    removed_worktrees: list[str] = []
+    errors: list[dict[str, str]] = []
+    if execute:
+        for item in plan.protected:
+            if item.kind == "worktree" and item.reason == "uncommitted changes":
+                click.echo(
+                    f"[conductor] cleanup warning: protected dirty worktree "
+                    f"{item.name} (uncommitted changes)",
+                    err=True,
+                )
+        for branch in stale_branches:
+            ok, detail = _run_git_cleanup_command(["branch", "-D", branch.name])
+            if ok:
+                deleted_branches.append(branch.name)
+            else:
+                msg = f"git branch -D {branch.name} failed"
+                if detail:
+                    msg = f"{msg}: {detail}"
+                click.echo(f"[conductor] cleanup error: {msg}", err=True)
+                errors.append({"target": branch.name, "error": msg})
+        for worktree in abandoned_worktrees:
+            ok, detail = _run_git_cleanup_command(
+                ["worktree", "remove", str(worktree.path)]
+            )
+            if ok:
+                removed_worktrees.append(str(worktree.path))
+            else:
+                msg = f"git worktree remove {worktree.path} failed"
+                if detail:
+                    msg = f"{msg}: {detail}"
+                click.echo(f"[conductor] cleanup error: {msg}", err=True)
+                errors.append({"target": str(worktree.path), "error": msg})
+
+    if as_json:
+        payload = _git_cleanup_payload(payload_plan)
+        payload["dry_run"] = not execute
+        payload["deleted_branches"] = deleted_branches
+        payload["removed_worktrees"] = removed_worktrees
+        payload["errors"] = errors
+        click.echo(json.dumps(payload, indent=2))
+        return
+
+    click.echo(f"Stale branches ({len(stale_branches)}):")
+    _echo_branch_scan_cap(plan.branch_scan, indent="  ")
+    if stale_branches:
+        for branch in stale_branches:
+            click.echo(
+                f"  - {branch.name} ({branch.reason} → {branch.last_commit})"
+            )
+    else:
+        click.echo("  (none)")
+
+    click.echo("")
+    click.echo(f"Abandoned worktrees ({len(abandoned_worktrees)}):")
+    if abandoned_worktrees:
+        for worktree in abandoned_worktrees:
+            branch_label = worktree.branch or "detached"
+            click.echo(
+                f"  - {worktree.path} (branch {branch_label}, "
+                f"{_format_worktree_age(worktree)}, clean)"
+            )
+    else:
+        click.echo("  (none)")
+
+    click.echo("")
+    click.echo("Protected (won't touch):")
+    if plan.protected:
+        for item in plan.protected:
+            click.echo(f"  - {item.name} ({item.reason})")
+    else:
+        click.echo("  (none)")
+
+    click.echo("")
+    if execute:
+        click.echo(
+            f"Deleted {len(deleted_branches)} branches and removed "
+            f"{len(removed_worktrees)} worktrees."
+        )
+        if errors:
+            click.echo(f"{len(errors)} cleanup operations failed; see stderr.")
+    else:
+        click.echo("Run with --execute to actually delete.")
 
 
 @main.command()
@@ -5854,6 +6139,34 @@ def doctor(as_json: bool) -> None:
             click.echo(f"    {display}{version_note}")
         click.echo("  Refresh with:")
         click.echo("    conductor init -y --remaining")
+
+    git_state = payload["git_state"]
+    stale_branches = git_state["stale_branches"]
+    abandoned_worktrees = git_state["abandoned_worktrees"]
+    if git_state.get("error"):
+        click.echo("")
+        click.echo("⚠ Local git state could not be checked:")
+        click.echo(f"    {git_state['error']}")
+    if stale_branches or abandoned_worktrees:
+        click.echo("")
+        click.echo("⚠ Local git state has drift:")
+        click.echo(f"    Stale branches ({len(stale_branches)}):")
+        _echo_branch_scan_cap(git_state["branch_scan"], indent="      ")
+        for branch in stale_branches:
+            click.echo(
+                f"      - {branch['name']} "
+                f"({branch['reason']} → {branch['last_commit']})"
+            )
+        click.echo(f"    Abandoned worktrees ({len(abandoned_worktrees)}):")
+        for worktree in abandoned_worktrees:
+            branch = worktree["branch"] or "detached"
+            click.echo(
+                f"      - {worktree['path']} "
+                f"(branch {branch}, {worktree['reason']})"
+            )
+        click.echo("  Refresh with:")
+        click.echo("    conductor git-cleanup           # dry-run (default)")
+        click.echo("    conductor git-cleanup --execute # actually delete")
 
     click.echo("")
     click.echo("Next steps:")
