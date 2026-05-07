@@ -31,6 +31,15 @@ EXPECTED_TEMPLATE_COVERAGE = {
         "Write",
         "codex",
         "conductor exec",
+        # Hardening tokens — see conductor#241, #242, #250.
+        # #242: use a unique brief path; never the hardcoded shared path.
+        "mktemp",
+        # #241: explicitly forbid backgrounding the call.
+        "run_in_background",
+        "FOREGROUND",
+        # #250: handle the case where the harness auto-backgrounds.
+        "AUTO-BACKGROUNDS",
+        "BashOutput",
     },
     "ollama-offline": {
         "--offline",
