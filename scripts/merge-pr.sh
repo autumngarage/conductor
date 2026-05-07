@@ -136,6 +136,79 @@ worktree_path_for_branch() {
   return 0
 }
 
+main_worktree_path() {
+  local line key value
+
+  git worktree list --porcelain | while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || break
+    key="${line%% *}"
+    value="${line#* }"
+    if [ "$key" = "worktree" ]; then
+      printf '%s\n' "$value"
+      break
+    fi
+  done
+}
+
+removable_worktree_path_for_branch() {
+  local branch="$1"
+  local branch_worktree main_worktree
+
+  branch_worktree="$(worktree_path_for_branch "$branch" | head -n 1)"
+  if [ -z "$branch_worktree" ]; then
+    return 0
+  fi
+  main_worktree="$(main_worktree_path)"
+  if [ "$branch_worktree" = "$main_worktree" ]; then
+    return 0
+  fi
+  printf '%s\n' "$branch_worktree"
+}
+
+git_common_dir_for_worktree() {
+  local path="$1"
+  local common_dir
+
+  common_dir="$(git -C "$path" rev-parse --git-common-dir)"
+  case "$common_dir" in
+    /*) printf '%s\n' "$common_dir" ;;
+    *) (cd "$path" && cd "$common_dir" && pwd) ;;
+  esac
+}
+
+worktree_has_uncommitted_changes() {
+  local path="$1"
+
+  [ -n "$(git -C "$path" status --porcelain)" ]
+}
+
+remove_clean_merged_branch_worktree() {
+  local path="$1"
+  local current_worktree common_git_dir
+
+  if [ -z "$path" ]; then
+    return 0
+  fi
+  if [ ! -d "$path" ]; then
+    echo "WARNING: merged branch worktree path no longer exists: $path" >&2
+    return 0
+  fi
+  if worktree_has_uncommitted_changes "$path"; then
+    echo "WARN: worktree at $path has uncommitted changes; not removing — operator action required" >&2
+    return 0
+  fi
+
+  current_worktree="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ "$path" = "$current_worktree" ]; then
+    common_git_dir="$(git_common_dir_for_worktree "$path")"
+    cd /
+    git --git-dir="$common_git_dir" worktree remove "$path"
+  else
+    git worktree remove "$path"
+  fi
+  echo "==> Removed worktree at $path"
+}
+
 branch_has_clean_review_marker() {
   local branch="$1"
   local head_oid="$2"
@@ -234,7 +307,7 @@ checkout_default_ref_for_cleanup() {
 cleanup_local_pr_branch_after_merge() {
   local branch="$PR_HEAD_BRANCH"
   local reviewed_head="$REVIEWED_HEAD_OID"
-  local local_head pr_state
+  local local_head pr_state branch_worktree cleanup_git_dir
 
   if [ -z "$branch" ] || [ -z "$reviewed_head" ]; then
     echo "WARNING: Missing reviewed PR head metadata; skipping local branch cleanup." >&2
@@ -261,13 +334,17 @@ cleanup_local_pr_branch_after_merge() {
     echo "WARNING: PR #$PR_NUMBER is not confirmed MERGED (state: ${pr_state:-unknown}); leaving local branch '$branch' intact." >&2
     return 0
   fi
+  branch_worktree="$(removable_worktree_path_for_branch "$branch")"
+  cleanup_git_dir="$(git_common_dir_for_worktree "$(git rev-parse --show-toplevel)")"
 
   if ! checkout_default_ref_for_cleanup "$branch" "$reviewed_head"; then
     return 0
   fi
 
+  remove_clean_merged_branch_worktree "$branch_worktree"
+
   echo "==> Deleting local branch '$branch' after verified squash merge of $reviewed_head ..."
-  if git branch -D "$branch"; then
+  if git --git-dir="$cleanup_git_dir" branch -D "$branch"; then
     echo "==> Local branch '$branch' deleted."
   else
     echo "WARNING: Could not delete local branch '$branch' after verified merge." >&2
