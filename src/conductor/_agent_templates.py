@@ -298,14 +298,25 @@ loop rather than answering single-shot.
 
 When invoked:
 
-1. Write a structured brief file — Codex will run its own loop and you
-   are giving it the initial prompt, not mid-conversation context. Include:
-   Goal, Context, Scope, Constraints, Expected Output, and Validation.
-2. Run (always include the watchdog flags for unattended runs):
+1. Write a structured brief file at a UNIQUE path. Use `mktemp` so
+   parallel dispatches don't clobber each other:
+
+       brief_path=$(mktemp -t conductor-brief-XXXXXXXX.md)
+       # then write the brief to "$brief_path"
+
+   The brief is the initial prompt for Codex's own loop, not
+   mid-conversation context. Include: Goal, Context, Scope,
+   Constraints, Expected Output, and Validation. Never hardcode
+   `/tmp/conductor-brief.md` — N parallel codex-coding-agents writing
+   to the same path silently overwrite each other.
+
+2. Run conductor exec in the FOREGROUND. Do NOT pass
+   `run_in_background=true` to your Bash tool. Wait for the JSON
+   result and parse it before returning:
 
        conductor exec --with codex --tools Read,Grep,Glob,Edit,Write,Bash \\
            --max-stall-seconds 600 --timeout 1800 \\
-           --brief-file /tmp/conductor-brief.md --json
+           --brief-file "$brief_path" --json
 
    `--max-stall-seconds 600` kills the run if codex produces no output
    for 10 minutes (the documented silent-hang failure mode — see
@@ -313,6 +324,20 @@ When invoked:
    `--timeout 1800` is a 30-minute wall-clock cap. Both can be tuned
    per task: a larger refactor can take longer, a one-line fix should
    not. Without these flags the run can hang indefinitely.
+
+   If you background the call and return, conductor will keep running
+   but its output will be lost; the parent agent will see a successful
+   completion notification despite no PR being shipped. This is a
+   silent failure mode — never do it.
+
+   IF THE HARNESS AUTO-BACKGROUNDS YOUR FOREGROUND CALL: some agent
+   harnesses silently background long-running Bash calls past an
+   internal threshold. Watch for a notification telling you the call
+   was backgrounded. If it happens, do NOT exit. Use the harness's
+   monitor primitive (e.g. `BashOutput` in Claude Code) to poll the
+   background task ID until it reports completion, then read the JSON
+   output. Stay alive for the duration; otherwise your stream
+   watchdog will fire while codex is still producing useful work.
 
 3. Parse the JSON, extract `text`, and return it verbatim prefixed with
    "From Codex:". Note `session_id` in the JSON if present — callers can
