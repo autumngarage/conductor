@@ -108,17 +108,42 @@ Get JSON for scripting / piping into other tools:
 
 ## Providers at a glance
 
-| Provider | Best for                     | Cost   | Notes                        |
+| Provider | Best for                     | Cost   | Auth                         |
 |----------|------------------------------|--------|------------------------------|
-| kimi     | long-context, cheap reviews  | $      | OpenRouter-backed            |
-| gemini   | web search, multimodal       | $$     | Google AI Studio or gcloud   |
-| claude   | strongest reasoning          | $$$    | your Claude subscription     |
-| codex    | coding agent                 | $$$    | your ChatGPT subscription    |
-| ollama   | private, offline             | free   | runs locally                 |
+| kimi     | long-context, cheap reviews  | $      | env var (OpenRouter-backed)  |
+| gemini   | web search, multimodal       | $$     | env var or gcloud            |
+| claude   | strongest reasoning          | $$$    | OAuth (Claude subscription)  |
+| codex    | coding agent                 | $$$    | OAuth (ChatGPT subscription) |
+| ollama   | private, offline             | free   | local (no auth)              |
 
 Discover what's currently configured:
 
     conductor list
+
+## Caveat: same-process OAuth contention
+
+When you delegate from inside an active Claude Code session (or any agent
+shell that already holds a `claude` / `codex` OAuth session), prefer the
+**env-var-auth providers** (`openrouter`, `kimi`, `deepseek`, `gemini`) for
+headless paths.
+
+The OAuth-CLI providers (`claude`, `codex`) hold a per-process session
+lock for their CLI's auth state. A second invocation of the same CLI
+inside the same session contends with the parent's lock and stalls at
+first_output (typically a ~300s timeout) before failing. Conductor's
+diagnostic now identifies this clearly ("auth-lock or session-state
+contention"), but you can avoid the stall entirely by routing headless
+delegations to env-var-auth providers.
+
+Two practical defaults:
+
+- `conductor exec --with codex` from inside a Claude Code session →
+  prefer `--with openrouter` (or `--auto --kind code`) instead.
+- `conductor call --with claude` from inside another Claude session →
+  prefer `--with openrouter` or `--with kimi`.
+
+The `--with claude` / `--with codex` paths still work when invoked from
+a non-OAuth-holding shell (e.g. a CI runner, a non-Claude-Code terminal).
 
 ## Subagents available
 
