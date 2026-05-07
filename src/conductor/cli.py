@@ -24,6 +24,7 @@ import os
 import subprocess
 import sys
 import time
+import tomllib
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -149,6 +150,14 @@ GIT_RECOVERY_MAX_STATUS_PATHS = 8
 NATIVE_REVIEW_TAG = "code-review"
 DEFAULT_SESSION_PRUNE_OLDER_THAN = "30d"
 DEFAULT_SESSION_PRUNE_PROTECT_LAST = 50
+REPO_INTEGRATION_KINDS = frozenset(
+    {
+        "agents-md-import",
+        "gemini-md-import",
+        "claude-md-repo-import",
+        "cursor-rule",
+    }
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -5576,6 +5585,14 @@ def _agent_integration_payload() -> dict:
         managed_files,
         binary_version=__version__,
     )
+    user_version_skew_files = _integration_version_skew_files(
+        [f for f in managed_files if f["kind"] not in REPO_INTEGRATION_KINDS],
+        binary_version=__version__,
+    )
+    repo_version_skew_files = _integration_version_skew_files(
+        [f for f in managed_files if f["kind"] in REPO_INTEGRATION_KINDS],
+        binary_version=__version__,
+    )
     return {
         "claude_detected": detection.claude_detected,
         "claude_cli_on_path": detection.claude_cli_on_path,
@@ -5597,6 +5614,8 @@ def _agent_integration_payload() -> dict:
         "managed_files": managed_files,
         "version_skew": bool(version_skew_files),
         "version_skew_files": version_skew_files,
+        "user_version_skew_files": user_version_skew_files,
+        "repo_version_skew_files": repo_version_skew_files,
     }
 
 
@@ -5628,6 +5647,20 @@ def _integration_version_skew_files(
         if parsed < current:
             skewed.append(str(entry["path"]))
     return skewed
+
+
+def _integration_version_skew_entries(
+    managed_files: list[dict],
+    *,
+    binary_version: str,
+) -> list[dict]:
+    skewed_paths = set(
+        _integration_version_skew_files(
+            managed_files,
+            binary_version=binary_version,
+        )
+    )
+    return [entry for entry in managed_files if str(entry["path"]) in skewed_paths]
 
 
 @main.command()
@@ -5726,11 +5759,9 @@ def doctor(as_json: bool) -> None:
     click.echo("Agent integration:")
     ai = payload["agent_integration"]
 
-    _repo_kinds = {
-        "agents-md-import", "gemini-md-import",
-        "claude-md-repo-import", "cursor-rule",
-    }
-    user_managed = [f for f in ai["managed_files"] if f["kind"] not in _repo_kinds]
+    user_managed = [
+        f for f in ai["managed_files"] if f["kind"] not in REPO_INTEGRATION_KINDS
+    ]
     if not ai["claude_detected"]:
         click.echo("  Claude Code:  not detected")
     elif not user_managed:
@@ -5797,11 +5828,31 @@ def doctor(as_json: bool) -> None:
             "(run `conductor init` to add one)"
         )
 
-    if ai["version_skew"]:
+    if ai["user_version_skew_files"]:
         click.echo("")
         click.echo(
             f"⚠ Integration files behind binary (v{payload['version']}). Refresh with:"
         )
+        click.echo("    conductor init -y --remaining")
+    if ai["repo_version_skew_files"]:
+        repo_skew_entries = _integration_version_skew_entries(
+            [
+                f for f in ai["managed_files"]
+                if f["kind"] in REPO_INTEGRATION_KINDS
+            ],
+            binary_version=payload["version"],
+        )
+        click.echo("")
+        click.echo(f"⚠ Repo integration files behind binary (v{payload['version']}):")
+        for entry in repo_skew_entries:
+            path = Path(entry["path"])
+            try:
+                display = path.relative_to(Path.cwd())
+            except ValueError:
+                display = path
+            version_note = f" (v{entry['version']})" if entry["version"] else ""
+            click.echo(f"    {display}{version_note}")
+        click.echo("  Refresh with:")
         click.echo("    conductor init -y --remaining")
 
     click.echo("")
@@ -5960,6 +6011,235 @@ def _run_unwire() -> int:
         for path, reason in report.skipped:
             click.echo(f"  {path}  — {reason}")
     return 0
+
+
+# --------------------------------------------------------------------------- #
+# refresh-consumers — refresh explicit downstream repo wiring
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class _ConsumerRefreshResult:
+    path: Path
+    status: str
+    detail: str
+    branch: str | None = None
+    commit: str | None = None
+
+
+@main.command("refresh-consumers")
+@click.option(
+    "--paths",
+    default=None,
+    help="Comma-separated consumer repo paths to refresh. Defaults to empty.",
+)
+@click.option(
+    "--config-file",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    default=None,
+    help=(
+        "TOML file with operator-owned consumer paths, for example "
+        "`paths = [\"~/repos/Sentinel\"]`."
+    ),
+)
+@click.option(
+    "--branch",
+    "branch_name",
+    default=None,
+    help="Branch name to create or reuse in each repo.",
+)
+def refresh_consumers(
+    paths: str | None,
+    config_file: Path | None,
+    branch_name: str | None,
+) -> None:
+    """Refresh Conductor integration blocks in explicitly configured repos."""
+    try:
+        consumer_paths = _resolve_consumer_repo_paths(paths, config_file)
+    except ValueError as e:
+        raise click.UsageError(str(e)) from e
+
+    if not consumer_paths:
+        click.echo("No consumer repos configured.")
+        return
+
+    branch = branch_name or f"conductor-refresh-v{__version__.split('+', 1)[0]}"
+    results = [_refresh_one_consumer_repo(path, branch=branch) for path in consumer_paths]
+
+    failed = False
+    for result in results:
+        click.echo(f"{result.path}: {result.status} — {result.detail}")
+        if result.branch:
+            click.echo(f"  branch: {result.branch}")
+        if result.commit:
+            click.echo(f"  commit: {result.commit}")
+        if result.status in {"failed", "skipped"}:
+            failed = True
+
+    if failed:
+        sys.exit(1)
+
+
+def _resolve_consumer_repo_paths(
+    paths: str | None,
+    config_file: Path | None,
+) -> tuple[Path, ...]:
+    raw_paths: list[str] = []
+    if paths:
+        raw_paths.extend(part.strip() for part in paths.split(",") if part.strip())
+    if config_file is not None:
+        raw_paths.extend(_consumer_paths_from_config(config_file))
+
+    resolved: list[Path] = []
+    seen: set[Path] = set()
+    for raw in raw_paths:
+        path = Path(raw).expanduser().resolve()
+        if path in seen:
+            continue
+        seen.add(path)
+        resolved.append(path)
+    return tuple(resolved)
+
+
+def _consumer_paths_from_config(config_file: Path) -> tuple[str, ...]:
+    try:
+        data = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        raise ValueError(f"failed to read consumer config {config_file}: {e}") from e
+
+    paths: list[str] = []
+    top_level_paths = data.get("paths", [])
+    if not isinstance(top_level_paths, list):
+        raise ValueError("consumer config `paths` must be a list")
+    for item in top_level_paths:
+        if not isinstance(item, str):
+            raise ValueError("consumer config `paths` entries must be strings")
+        paths.append(item)
+
+    for key in ("consumers", "repositories", "repos"):
+        entries = data.get(key, [])
+        if not isinstance(entries, list):
+            raise ValueError(f"consumer config `{key}` must be a list")
+        for entry in entries:
+            if isinstance(entry, str):
+                paths.append(entry)
+                continue
+            if isinstance(entry, dict) and isinstance(entry.get("path"), str):
+                paths.append(entry["path"])
+                continue
+            raise ValueError(
+                f"consumer config `{key}` entries must be strings or tables with `path`"
+            )
+    return tuple(paths)
+
+
+def _refresh_one_consumer_repo(path: Path, *, branch: str) -> _ConsumerRefreshResult:
+    if not path.is_dir():
+        return _ConsumerRefreshResult(path, "failed", "path is not a directory")
+    if _run_repo_command(path, ["git", "rev-parse", "--is-inside-work-tree"]).returncode != 0:
+        return _ConsumerRefreshResult(path, "failed", "path is not a git repository")
+    before = _git_status_porcelain(path)
+    if before is None:
+        return _ConsumerRefreshResult(path, "failed", "could not read git status")
+    if before:
+        return _ConsumerRefreshResult(path, "skipped", "repo has pre-existing changes")
+
+    checkout = _checkout_refresh_branch(path, branch)
+    if checkout is not None:
+        return _ConsumerRefreshResult(path, "failed", checkout)
+
+    init_result = _run_repo_command(
+        path,
+        [sys.executable, "-m", "conductor.cli", "init", "-y", "--remaining"],
+        timeout=None,
+    )
+    if init_result.returncode != 0:
+        detail = _command_failure_detail(init_result, "conductor init -y --remaining")
+        return _ConsumerRefreshResult(path, "failed", detail, branch=branch)
+
+    after = _git_status_porcelain(path)
+    if after is None:
+        return _ConsumerRefreshResult(path, "failed", "could not read git status", branch=branch)
+    if not after:
+        return _ConsumerRefreshResult(
+            path,
+            "unchanged",
+            "integration files already current",
+            branch=branch,
+        )
+
+    add = _run_repo_command(path, ["git", "add", "--all"])
+    if add.returncode != 0:
+        return _ConsumerRefreshResult(
+            path,
+            "failed",
+            _command_failure_detail(add, "git add --all"),
+            branch=branch,
+        )
+    message = f"Refresh conductor integrations to v{__version__.split('+', 1)[0]}"
+    commit = _run_repo_command(path, ["git", "commit", "-m", message])
+    if commit.returncode != 0:
+        return _ConsumerRefreshResult(
+            path,
+            "failed",
+            _command_failure_detail(commit, "git commit"),
+            branch=branch,
+        )
+    sha = _run_repo_command(path, ["git", "rev-parse", "--short", "HEAD"])
+    commit_sha = sha.stdout.strip() if sha.returncode == 0 else None
+    return _ConsumerRefreshResult(
+        path,
+        "committed",
+        "refresh commit ready for operator review",
+        branch=branch,
+        commit=commit_sha,
+    )
+
+
+def _git_status_porcelain(path: Path) -> str | None:
+    result = _run_repo_command(path, ["git", "status", "--porcelain"])
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def _checkout_refresh_branch(path: Path, branch: str) -> str | None:
+    exists = _run_repo_command(path, ["git", "rev-parse", "--verify", branch])
+    if exists.returncode == 0:
+        checkout = _run_repo_command(path, ["git", "checkout", branch])
+    else:
+        checkout = _run_repo_command(path, ["git", "checkout", "-b", branch])
+    if checkout.returncode != 0:
+        return _command_failure_detail(checkout, f"git checkout {branch}")
+    return None
+
+
+def _run_repo_command(
+    cwd: Path,
+    args: list[str],
+    *,
+    timeout: float | None = 120,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            args,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr=str(e))
+
+
+def _command_failure_detail(
+    result: subprocess.CompletedProcess[str],
+    command: str,
+) -> str:
+    stderr = result.stderr.strip()
+    stdout = result.stdout.strip()
+    detail = stderr or stdout or f"exit {result.returncode}"
+    return f"`{command}` failed: {detail}"
 
 
 # --------------------------------------------------------------------------- #
