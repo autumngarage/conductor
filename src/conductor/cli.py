@@ -169,9 +169,34 @@ REPO_INTEGRATION_KINDS = frozenset(
         "cursor-rule",
     }
 )
+PRE_COMMIT_CONFIG = ".pre-commit-config.yaml"
+CONDUCTOR_REFRESH_HOOK_ID = "conductor-refresh"
+CONDUCTOR_REFRESH_HOOK_LINES = (
+    "- repo: local",
+    "  hooks:",
+    "    - id: conductor-refresh",
+    "      name: Refresh conductor integrations if stale",
+    "      entry: conductor refresh-on-commit",
+    "      language: system",
+    "      pass_filenames: false",
+    "      always_run: true",
+    "      stages: [pre-commit]",
+)
+CONDUCTOR_REFRESH_HOOK_BLOCK = """- repo: local
+  hooks:
+    - id: conductor-refresh
+      name: Refresh conductor integrations if stale
+      entry: conductor refresh-on-commit
+      language: system
+      pass_filenames: false
+      always_run: true
+      stages: [pre-commit]
+"""
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from conductor.agent_wiring import AgentArtifact
 
 DEFAULT_REVIEW_MAX_FALLBACKS = 3
 DEFAULT_COUNCIL_ROUNDS = 1
@@ -5696,6 +5721,21 @@ def _integration_version_skew_entries(
     return [entry for entry in managed_files if str(entry["path"]) in skewed_paths]
 
 
+def _managed_version_is_older(version: str | None, *, binary_version: str) -> bool:
+    """Return True when a managed artifact version predates this binary.
+
+    Invariant: local build metadata never defines a persisted artifact boundary.
+    """
+    if version is None:
+        return False
+    current = parse_version(str(binary_version).split("+", 1)[0])
+    try:
+        artifact_version = parse_version(str(version))
+    except InvalidVersion:
+        return True
+    return artifact_version < current
+
+
 def _stale_branch_payload(branch: StaleBranch) -> dict[str, str]:
     return {
         "name": branch.name,
@@ -6160,6 +6200,10 @@ def doctor(as_json: bool) -> None:
             click.echo(f"    {display}{version_note}")
         click.echo("  Refresh with:")
         click.echo("    conductor init -y --remaining")
+        click.echo(
+            "  Install the auto-refresh hook with `conductor init --hooks` "
+            "to make refreshes happen on commit."
+        )
 
     git_state = payload["git_state"]
     stale_branches = git_state["stale_branches"]
@@ -6282,6 +6326,12 @@ def doctor(as_json: bool) -> None:
     help="Remove every conductor-managed agent integration artifact "
     "(user-scope + repo-scope sentinel blocks + Cursor rule) and exit.",
 )
+@click.option(
+    "--hooks",
+    is_flag=True,
+    default=False,
+    help="Install the opt-in pre-commit hook that refreshes stale repo integrations.",
+)
 def init(
     accept_defaults: bool,
     only: str | None,
@@ -6293,8 +6343,20 @@ def init(
     patch_claude_md_repo: str | None,
     wire_cursor_flag: str | None,
     unwire: bool,
+    hooks: bool,
 ) -> None:
     """Interactively configure Conductor for first use."""
+    if hooks:
+        wiring_flags = (
+            wire_agents, patch_claude_md, patch_agents_md,
+            patch_gemini_md, patch_claude_md_repo, wire_cursor_flag,
+        )
+        if only or remaining or unwire or any(f is not None for f in wiring_flags):
+            raise click.UsageError(
+                "--hooks can't be combined with provider, wiring, or unwire flags."
+            )
+        sys.exit(_run_install_hooks())
+
     if unwire:
         wiring_flags = (
             wire_agents, patch_claude_md, patch_agents_md,
@@ -6345,6 +6407,225 @@ def _run_unwire() -> int:
         for path, reason in report.skipped:
             click.echo(f"  {path}  — {reason}")
     return 0
+
+
+def _run_install_hooks() -> int:
+    """Install the local pre-commit hook entry for refresh-on-commit."""
+    config_path = Path.cwd() / PRE_COMMIT_CONFIG
+    try:
+        changed = _install_refresh_pre_commit_hook(config_path)
+    except OSError as e:
+        raise click.ClickException(
+            f"failed to update {config_path}: {e}"
+        ) from e
+    if changed:
+        click.echo(f"Installed conductor refresh hook in {config_path}.")
+    else:
+        click.echo(f"Conductor refresh hook already present in {config_path}.")
+    return 0
+
+
+def _install_refresh_pre_commit_hook(config_path: Path) -> bool:
+    """Install the documented local hook block if it is not already present.
+
+    The invariant is that the hook lives inside pre-commit's root `repos`
+    list. We keep this as a narrow text insertion so existing comments,
+    anchors, formatting, and top-level settings are preserved.
+    """
+    try:
+        existing = config_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        existing = ""
+    if f"id: {CONDUCTOR_REFRESH_HOOK_ID}" in existing:
+        return False
+
+    updated = _pre_commit_config_with_refresh_hook(existing)
+    config_path.write_text(updated, encoding="utf-8")
+    return True
+
+
+def _pre_commit_config_with_refresh_hook(existing: str) -> str:
+    if not existing.strip():
+        return f"repos:\n{_pre_commit_refresh_hook_block(item_indent='')}"
+
+    lines = existing.splitlines(keepends=True)
+    repos_index = _pre_commit_repos_line_index(lines)
+    if repos_index is None:
+        separator = "" if existing.endswith("\n") else "\n"
+        return (
+            f"{existing}{separator}repos:\n"
+            f"{_pre_commit_refresh_hook_block(item_indent='')}"
+        )
+
+    line = lines[repos_index]
+    stripped = line.strip()
+    item_indent = _pre_commit_repos_item_indent(lines, repos_index)
+    if stripped == "repos: []":
+        line_ending = "\n" if line.endswith("\n") else ""
+        lines[repos_index] = f"repos:{line_ending}"
+        insert_at = repos_index + 1
+        item_indent = ""
+    else:
+        insert_at = _pre_commit_repos_section_end(lines, repos_index)
+
+    if insert_at > 0 and not lines[insert_at - 1].endswith("\n"):
+        lines[insert_at - 1] = f"{lines[insert_at - 1]}\n"
+    lines[insert_at:insert_at] = [
+        _pre_commit_refresh_hook_block(item_indent=item_indent)
+    ]
+    return "".join(lines)
+
+
+def _pre_commit_repos_line_index(lines: list[str]) -> int | None:
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == "repos:" or stripped == "repos: []":
+            return index
+    return None
+
+
+def _pre_commit_repos_section_end(lines: list[str], repos_index: int) -> int:
+    repos_indent = len(lines[repos_index]) - len(lines[repos_index].lstrip(" "))
+    for index in range(repos_index + 1, len(lines)):
+        line = lines[index]
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent <= repos_indent and not stripped.startswith("-"):
+            return index
+    return len(lines)
+
+
+def _pre_commit_repos_item_indent(lines: list[str], repos_index: int) -> str:
+    repos_indent = len(lines[repos_index]) - len(lines[repos_index].lstrip(" "))
+    for line in lines[repos_index + 1:]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent_len = len(line) - len(line.lstrip(" "))
+        if indent_len <= repos_indent and not stripped.startswith("-"):
+            return ""
+        if stripped.startswith("-"):
+            return line[:indent_len]
+    return ""
+
+
+def _pre_commit_refresh_hook_block(*, item_indent: str) -> str:
+    return "".join(f"{item_indent}{line}\n" for line in CONDUCTOR_REFRESH_HOOK_LINES)
+
+
+@main.command("refresh-on-commit")
+def refresh_on_commit() -> None:
+    """Refresh stale embedded Conductor repo integrations and stage changes."""
+    sys.exit(_run_refresh_on_commit())
+
+
+def _run_refresh_on_commit() -> int:
+    cwd = Path.cwd()
+    repo_check = _run_repo_command(cwd, ["git", "rev-parse", "--is-inside-work-tree"])
+    if repo_check.returncode != 0:
+        detail = (repo_check.stderr or repo_check.stdout or "").strip()
+        suffix = f": {detail}" if detail else ""
+        click.echo(
+            f"[conductor] refresh-on-commit: not a git repo, no-op{suffix}",
+            err=True,
+        )
+        return 0
+
+    try:
+        touched = _refresh_stale_repo_integrations(cwd)
+    except OSError as e:
+        click.echo(
+            f"[conductor] refresh-on-commit warning: refresh failed: {e}",
+            err=True,
+        )
+        return 1
+    except Exception as e:
+        click.echo(
+            f"[conductor] refresh-on-commit warning: internal error: {e}",
+            err=True,
+        )
+        return 1
+
+    if not touched:
+        return 0
+
+    add = _run_repo_command(cwd, ["git", "add", "--", *[str(path) for path in touched]])
+    if add.returncode != 0:
+        click.echo(
+            "[conductor] refresh-on-commit warning: "
+            f"{_command_failure_detail(add, 'git add')}",
+            err=True,
+        )
+        return 1
+    return 0
+
+
+def _refresh_stale_repo_integrations(cwd: Path) -> tuple[Path, ...]:
+    from conductor import agent_wiring
+
+    detection = agent_wiring.detect(cwd=cwd)
+    touched: list[Path] = []
+    for artifact in detection.managed:
+        if artifact.kind not in REPO_INTEGRATION_KINDS:
+            continue
+        if not _managed_version_is_older(artifact.version, binary_version=__version__):
+            continue
+        if not _repo_integration_is_embedded(artifact):
+            continue
+        before = _read_path_bytes(artifact.path)
+        _refresh_repo_integration(artifact.kind, cwd=cwd, version=__version__)
+        after = _read_path_bytes(artifact.path)
+        if after != before:
+            touched.append(artifact.path)
+    return tuple(touched)
+
+
+def _repo_integration_is_embedded(artifact: AgentArtifact) -> bool:
+    """Skip import-only sentinel blocks; refresh embedded repo artifacts only."""
+    if artifact.kind == "cursor-rule":
+        return True
+    try:
+        text = artifact.path.read_text(encoding="utf-8")
+    except OSError:
+        raise
+    from conductor.agent_wiring import SENTINEL_BEGIN_PREFIX, SENTINEL_END
+
+    begin = text.find(SENTINEL_BEGIN_PREFIX)
+    end = text.find(SENTINEL_END, begin)
+    if begin == -1 or end == -1:
+        return False
+    marker_end = text.find("-->", begin)
+    if marker_end == -1 or marker_end > end:
+        return False
+    body = text[marker_end + len("-->"):end].strip()
+    return not body.startswith("@")
+
+
+def _refresh_repo_integration(kind: str, *, cwd: Path, version: str) -> None:
+    from conductor import agent_wiring
+
+    if kind == "agents-md-import":
+        agent_wiring.wire_agents_md(cwd=cwd, version=version)
+        return
+    if kind == "gemini-md-import":
+        agent_wiring.wire_gemini_md(cwd=cwd, version=version)
+        return
+    if kind == "claude-md-repo-import":
+        agent_wiring.wire_claude_md_repo(cwd=cwd, version=version)
+        return
+    if kind == "cursor-rule":
+        agent_wiring.wire_cursor(cwd=cwd, version=version)
+        return
+    raise ValueError(f"unsupported repo integration kind: {kind}")
+
+
+def _read_path_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
 
 
 # --------------------------------------------------------------------------- #
