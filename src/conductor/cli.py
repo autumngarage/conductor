@@ -38,6 +38,11 @@ from packaging.version import parse as parse_version
 
 import conductor.providers.openrouter_catalog as openrouter_catalog
 from conductor import __version__, credentials, offline_mode
+from conductor._issue_briefs import (
+    IssueBriefError,
+    append_operator_context,
+    build_issue_brief,
+)
 from conductor._time_filter import parse_timestamp, since_cutoff
 from conductor.banner import print_caller_banner
 from conductor.brief_preprocessor import inject_auto_close
@@ -343,6 +348,9 @@ def _read_task(
     *,
     brief: str | None = None,
     brief_file: str | None = None,
+    issue: str | None = None,
+    issue_comment_limit: int = 10,
+    cwd: str | None = None,
     attach: tuple[str, ...] = (),
 ) -> BriefInput:
     explicit_sources = [
@@ -363,15 +371,19 @@ def _read_task(
         )
 
     source = "stdin"
+    operator_body: str | None = None
+    operator_source: str | None = None
     if brief is not None:
         body = brief
-        source = "--brief"
+        operator_body = body
+        operator_source = "--brief"
     elif task is not None:
         body = task
-        source = "--task"
+        operator_body = body
+        operator_source = "--task"
     elif brief_file is not None or task_file is not None:
         file_source = brief_file if brief_file is not None else task_file
-        source = "--brief-file" if brief_file is not None else "--task-file"
+        operator_source = "--brief-file" if brief_file is not None else "--task-file"
         assert file_source is not None
         if file_source == "-":
             body = sys.stdin.read()
@@ -380,15 +392,34 @@ def _read_task(
                 body = Path(file_source).read_text(encoding="utf-8")
             except OSError as e:
                 raise click.UsageError(
-                    f"could not read {source} {file_source!r}: {e.strerror or e}"
+                    f"could not read {operator_source} {file_source!r}: {e.strerror or e}"
                 ) from e
+        operator_body = body
     elif not sys.stdin.isatty():
         body = sys.stdin.read()
+        operator_body = body
+        operator_source = "stdin"
+    elif issue is not None:
+        body = ""
     else:
         raise click.UsageError(
             "no brief provided. Pass --brief '...', --brief-file PATH, "
             "--task '...', --task-file PATH, or pipe content on stdin."
         )
+
+    if issue is not None:
+        try:
+            body = append_operator_context(
+                build_issue_brief(
+                    issue,
+                    comment_limit=issue_comment_limit,
+                    cwd=cwd,
+                ),
+                operator_body,
+            )
+        except IssueBriefError as e:
+            raise click.UsageError(str(e)) from e
+        source = "--issue" if operator_source is None else f"--issue + {operator_source}"
 
     body = body.strip()
     if not body:
@@ -400,9 +431,7 @@ def _read_task(
         for raw_path in attach:
             path = Path(raw_path).expanduser()
             if not path.is_file():
-                raise click.UsageError(
-                    f"--attach path {raw_path!r} is not a readable file."
-                )
+                raise click.UsageError(f"--attach path {raw_path!r} is not a readable file.")
             resolved.append(path.resolve())
         attachments = tuple(resolved)
     return BriefInput(body=body, source=source, attachments=attachments)
@@ -550,8 +579,7 @@ def _validate_tools(raw: str | None) -> frozenset[str]:
     unknown = [t for t in tools if t not in VALID_TOOLS]
     if unknown:
         raise click.UsageError(
-            f"--tools contains unknown tool(s): {unknown}. "
-            f"Known: {list(VALID_TOOLS)}."
+            f"--tools contains unknown tool(s): {unknown}. Known: {list(VALID_TOOLS)}."
         )
     return frozenset(tools)
 
@@ -700,9 +728,7 @@ def _normalize_max_stall_sec(raw: int | None) -> int | None:
     if raw is None:
         return None
     if raw < 0:
-        raise click.UsageError(
-            f"--max-stall-seconds must be >= 0, got {raw}."
-        )
+        raise click.UsageError(f"--max-stall-seconds must be >= 0, got {raw}.")
     if raw == 0:
         return None
     return raw
@@ -769,14 +795,14 @@ _NETWORK_ERROR_SIGNALS = (
     "connection refused",
     "connection reset",
     "connection aborted",
-    "connection error",       # httpx ConnectError str()
-    "connect call failed",    # asyncio
-    "could not resolve",      # curl / some python stacks
+    "connection error",  # httpx ConnectError str()
+    "connect call failed",  # asyncio
+    "could not resolve",  # curl / some python stacks
     "name or service not known",
     "nodename nor servname",  # macOS getaddrinfo wording
     "temporary failure in name resolution",
     "network is unreachable",
-    "network is down",        # macOS airplane mode, ENETDOWN
+    "network is down",  # macOS airplane mode, ENETDOWN
     "no route to host",
     "no address associated",
     "no such host",
@@ -945,9 +971,11 @@ def _review_exclude_set(
             excludes.add(name)
             reasons[name] = "provider is not tagged code-review"
             continue
-        ok, reason = provider.review_configured() if isinstance(
-            provider, NativeReviewProvider
-        ) else provider.configured()
+        ok, reason = (
+            provider.review_configured()
+            if isinstance(provider, NativeReviewProvider)
+            else provider.configured()
+        )
         if not ok:
             excludes.add(name)
             reasons[name] = reason or "code-review provider is not configured"
@@ -1271,9 +1299,7 @@ def _auto_route_plan_context(
         )
 
     profile = get_network_profile(
-        _network_target_for_provider(
-            _first_online_ranked_candidate_provider(decision.ranked)
-        ),
+        _network_target_for_provider(_first_online_ranked_candidate_provider(decision.ranked)),
         warn=None,
     )
     if profile.rtt_ms is None:
@@ -1970,8 +1996,7 @@ def _invoke_review_with_fallback(
             tried.append((candidate.name, "success"))
             if not silent and len(tried) > 1:
                 click.echo(
-                    f"[conductor] review tried providers: "
-                    f"{_format_tried_providers(tried)}",
+                    f"[conductor] review tried providers: {_format_tried_providers(tried)}",
                     err=True,
                 )
             return response, fallbacks
@@ -2015,8 +2040,7 @@ def _invoke_review_with_fallback(
             "`conductor list` to check configured code-review providers"
         )
         raise ProviderError(
-            "code review failed for all tried providers: "
-            f"{trail}. Next step: {hint}."
+            f"code review failed for all tried providers: {trail}. Next step: {hint}."
         ) from last_exc
     raise last_exc
 
@@ -2052,9 +2076,7 @@ def _invoke_council(
             "council policy invariant violated: council must route through openrouter."
         )
     if not plan.council_member_models:
-        raise ProviderConfigError(
-            "council policy invariant violated: no member models configured."
-        )
+        raise ProviderConfigError("council policy invariant violated: no member models configured.")
 
     provider = get_provider("openrouter")
     if not isinstance(provider, OpenRouterProvider):
@@ -2376,9 +2398,7 @@ def _council_cap_payload(
         "requested_completed_member_models": list(
             plan.council_member_models[:completed_member_calls]
         ),
-        "skipped_member_models": list(
-            plan.council_member_models[completed_member_calls:]
-        ),
+        "skipped_member_models": list(plan.council_member_models[completed_member_calls:]),
         "synthesis_skipped": stage != "after_synthesis",
     }
 
@@ -2469,9 +2489,7 @@ def _council_usage_payload(
     else:
         usage = {
             "input_tokens": _council_known_usage_sum(member_responses, "input_tokens"),
-            "output_tokens": (
-                known_output_tokens if output_accounting_complete else None
-            ),
+            "output_tokens": (known_output_tokens if output_accounting_complete else None),
             "cached_tokens": _council_known_usage_sum(member_responses, "cached_tokens"),
             "thinking_tokens": _council_known_usage_sum(
                 member_responses,
@@ -2504,9 +2522,7 @@ def _council_cost_accounting(
 ) -> tuple[float | None, bool, list[str], list[float | None], float | None]:
     member_costs = [response.cost_usd for response in member_responses]
     missing_costs = [
-        f"member[{idx}]"
-        for idx, cost in enumerate(member_costs, start=1)
-        if cost is None
+        f"member[{idx}]" for idx, cost in enumerate(member_costs, start=1) if cost is None
     ]
     synthesis_cost = synthesis.cost_usd if synthesis is not None else None
     if synthesis is not None and synthesis_cost is None:
@@ -2526,8 +2542,8 @@ def _council_known_cost_value(
     member_responses: list[CallResponse],
     synthesis: CallResponse | None,
 ) -> float:
-    known_cost_usd, _complete, _missing, _member_costs, _synthesis_cost = (
-        _council_cost_accounting(member_responses, synthesis)
+    known_cost_usd, _complete, _missing, _member_costs, _synthesis_cost = _council_cost_accounting(
+        member_responses, synthesis
     )
     return known_cost_usd or 0.0
 
@@ -2616,8 +2632,7 @@ def _council_partial_text(
     lines.append("Partial member responses:")
     for idx, response in enumerate(member_responses, start=1):
         lines.append(
-            f"\n## Member {idx}: {response.model}\n\n"
-            f"{_council_member_response_text(response)}"
+            f"\n## Member {idx}: {response.model}\n\n{_council_member_response_text(response)}"
         )
     return "\n".join(lines)
 
@@ -2672,8 +2687,7 @@ def _council_synthesis_prompt(task: str, member_responses: list[CallResponse]) -
     sections = []
     for i, response in enumerate(member_responses, start=1):
         sections.append(
-            f"## Member {i}: {response.model}\n\n"
-            f"{_council_member_response_text(response)}"
+            f"## Member {i}: {response.model}\n\n{_council_member_response_text(response)}"
         )
     return (
         "You are synthesizing a multi-model council. Compare the independent "
@@ -2682,8 +2696,7 @@ def _council_synthesis_prompt(task: str, member_responses: list[CallResponse]) -
         "instead of flattening it into false consensus.\n\n"
         "Original request:\n"
         f"{task}\n\n"
-        "Council member responses:\n\n"
-        + "\n\n".join(sections)
+        "Council member responses:\n\n" + "\n\n".join(sections)
     )
 
 
@@ -2814,9 +2827,7 @@ def _record_failed_delegation(
             status=_delegation_status_from_error(error),
             error=str(error),
             tags=_delegation_tags(decision=decision, semantic_plan=semantic_plan),
-            session_log_path=(
-                str(session_log.log_path) if session_log is not None else None
-            ),
+            session_log_path=(str(session_log.log_path) if session_log is not None else None),
         )
     )
 
@@ -3007,9 +3018,7 @@ def _maybe_echo_stall_recovery_hint(err: ProviderError, *, cwd: str | None) -> N
 def _format_route_log_line(decision: RouteDecision) -> str:
     """Single-line route summary for stderr observability."""
     tags_matched = ",".join(decision.matched_tags) or "none"
-    effort_str = (
-        decision.effort if isinstance(decision.effort, str) else f"{decision.effort}tok"
-    )
+    effort_str = decision.effort if isinstance(decision.effort, str) else f"{decision.effort}tok"
     return (
         f"[conductor] {decision.prefer} (effort={effort_str}) → {decision.provider} "
         f"(tier: {decision.tier} · matched: {tags_matched} · "
@@ -3045,9 +3054,7 @@ def _format_route_ranking(decision: RouteDecision) -> list[str]:
             picked_note = ""
             if decision.provider == provider and status == "applied":
                 picked_note = ", picked"
-            lines.append(
-                f"[conductor] tag_default: {tag} → {provider} ({status}{picked_note})"
-            )
+            lines.append(f"[conductor] tag_default: {tag} → {provider} ({status}{picked_note})")
     for i, c in enumerate(decision.ranked, start=1):
         marker = " ← picked" if i == 1 else ""
         tags = ",".join(c.matched_tags) or "none"
@@ -3408,6 +3415,18 @@ def main(ctx: click.Context) -> None:
     help="Read the delegation brief from a UTF-8 file. Use '-' to read stdin.",
 )
 @click.option(
+    "--issue",
+    default=None,
+    help=("Use a GitHub issue as the seed brief. Accepts N for the current repo or owner/repo#N."),
+)
+@click.option(
+    "--issue-comment-limit",
+    default=10,
+    type=click.IntRange(min=0),
+    show_default=True,
+    help="Number of recent GitHub issue comments to include with --issue.",
+)
+@click.option(
     "--attach",
     "attach",
     multiple=True,
@@ -3457,6 +3476,8 @@ def ask(
     task_file: str | None,
     brief: str | None,
     brief_file: str | None,
+    issue: str | None,
+    issue_comment_limit: int,
     attach: tuple[str, ...],
     log_file: str | None,
     as_json: bool,
@@ -3505,7 +3526,14 @@ def ask(
         raise click.UsageError("use only one of --base, --commit, or --uncommitted.")
 
     brief_input = _read_task(
-        task, task_file, brief=brief, brief_file=brief_file, attach=attach
+        task,
+        task_file,
+        brief=brief,
+        brief_file=brief_file,
+        issue=issue,
+        issue_comment_limit=issue_comment_limit,
+        cwd=cwd,
+        attach=attach,
     )
     if plan.mode == "exec":
         _warn_if_short_exec_brief(brief_input, allow_short_brief=allow_short_brief)
@@ -3565,9 +3593,7 @@ def ask(
 
     dispatch_started_at = time.monotonic()
     if plan.mode == "review":
-        review_exclude, review_reasons = _review_exclude_set(
-            frozenset()
-        )
+        review_exclude, review_reasons = _review_exclude_set(frozenset())
         exclude_set = _semantic_candidate_exclude_set(plan, review_exclude)
         try:
             _provider, decision = pick(
@@ -3716,9 +3742,7 @@ def ask(
             sys.exit(2)
 
     models_by_provider = {
-        candidate.provider: candidate.models
-        for candidate in plan.candidates
-        if candidate.models
+        candidate.provider: candidate.models for candidate in plan.candidates if candidate.models
     }
     try:
         response, _fallbacks = _invoke_with_fallback(
@@ -3865,8 +3889,7 @@ def ask(
 @click.option(
     "--effort",
     default=None,
-    help=f"Thinking depth: {' | '.join(VALID_EFFORT_LEVELS)} or integer budget "
-    "(default: medium).",
+    help=f"Thinking depth: {' | '.join(VALID_EFFORT_LEVELS)} or integer budget (default: medium).",
 )
 @click.option(
     "--timeout",
@@ -3912,6 +3935,18 @@ def ask(
     "--brief-file",
     default=None,
     help="Read the delegation brief from a UTF-8 file. Use '-' to read stdin.",
+)
+@click.option(
+    "--issue",
+    default=None,
+    help=("Use a GitHub issue as the seed brief. Accepts N for the current repo or owner/repo#N."),
+)
+@click.option(
+    "--issue-comment-limit",
+    default=10,
+    type=click.IntRange(min=0),
+    show_default=True,
+    help="Number of recent GitHub issue comments to include with --issue.",
 )
 @click.option(
     "--attach",
@@ -3975,6 +4010,8 @@ def call(
     task_file: str | None,
     brief: str | None,
     brief_file: str | None,
+    issue: str | None,
+    issue_comment_limit: int,
     attach: tuple[str, ...],
     model: str | None,
     as_json: bool,
@@ -4005,9 +4042,7 @@ def call(
         profile_value=profile_spec.effort if profile_spec else None,
     )
     exclude = _resolve_layered_value(exclude, env_key="CONDUCTOR_EXCLUDE")
-    provider_id, auto = _apply_offline_flag(
-        offline=offline, provider_id=provider_id, auto=auto
-    )
+    provider_id, auto = _apply_offline_flag(offline=offline, provider_id=provider_id, auto=auto)
     if offline is True and provider_id == "ollama":
         prefer = None
     if auto and provider_id:
@@ -4030,6 +4065,8 @@ def call(
         task_file,
         brief=brief,
         brief_file=brief_file,
+        issue=issue,
+        issue_comment_limit=issue_comment_limit,
         attach=attach,
     )
     body = brief_input.body
@@ -4244,10 +4281,7 @@ def call(
 @click.option(
     "--tags",
     default=None,
-    help=(
-        "Comma-separated review tags. code-review is always included for this "
-        "subcommand."
-    ),
+    help=("Comma-separated review tags. code-review is always included for this subcommand."),
 )
 @click.option(
     "--prefer",
@@ -4270,10 +4304,7 @@ def call(
     "timeout_sec",
     default=None,
     type=int,
-    help=(
-        "Wall-clock timeout in seconds for the native review command. "
-        "Unbounded by default."
-    ),
+    help=("Wall-clock timeout in seconds for the native review command. Unbounded by default."),
 )
 @click.option(
     "--max-stall-seconds",
@@ -4336,6 +4367,18 @@ def call(
     help="Read review instructions from a UTF-8 file. Use '-' to read stdin.",
 )
 @click.option(
+    "--issue",
+    default=None,
+    help=("Use a GitHub issue as the seed brief. Accepts N for the current repo or owner/repo#N."),
+)
+@click.option(
+    "--issue-comment-limit",
+    default=10,
+    type=click.IntRange(min=0),
+    show_default=True,
+    help="Number of recent GitHub issue comments to include with --issue.",
+)
+@click.option(
     "--json",
     "as_json",
     is_flag=True,
@@ -4374,6 +4417,8 @@ def review(
     task_file: str | None,
     brief: str | None,
     brief_file: str | None,
+    issue: str | None,
+    issue_comment_limit: int,
     as_json: bool,
     verbose_route: bool,
     silent_route: bool,
@@ -4417,6 +4462,9 @@ def review(
         task_file,
         brief=brief,
         brief_file=brief_file,
+        issue=issue,
+        issue_comment_limit=issue_comment_limit,
+        cwd=cwd,
     )
     body = brief_input.body
     effort_value = _parse_effort(effort)
@@ -4505,9 +4553,7 @@ def review(
             raise click.UsageError(str(e)) from e
         review_provider = _review_provider_or_none(provider)
         if review_provider is None:
-            raise click.UsageError(
-                f"provider {provider_id!r} does not expose native code review."
-            )
+            raise click.UsageError(f"provider {provider_id!r} does not expose native code review.")
         print_caller_banner(provider_id, silent=silent_route or as_json)
         ok, reason = review_provider.review_configured()
         if not ok:
@@ -4706,6 +4752,18 @@ def review(
     help="Read the delegation brief from a UTF-8 file. Use '-' to read stdin.",
 )
 @click.option(
+    "--issue",
+    default=None,
+    help=("Use a GitHub issue as the seed brief. Accepts N for the current repo or owner/repo#N."),
+)
+@click.option(
+    "--issue-comment-limit",
+    default=10,
+    type=click.IntRange(min=0),
+    show_default=True,
+    help="Number of recent GitHub issue comments to include with --issue.",
+)
+@click.option(
     "--attach",
     "attach",
     multiple=True,
@@ -4796,6 +4854,8 @@ def exec_cmd(
     task_file: str | None,
     brief: str | None,
     brief_file: str | None,
+    issue: str | None,
+    issue_comment_limit: int,
     attach: tuple[str, ...],
     model: str | None,
     log_file: str | None,
@@ -4839,9 +4899,7 @@ def exec_cmd(
         profile_value=profile_spec.sandbox if profile_spec else None,
     )
     exclude = _resolve_layered_value(exclude, env_key="CONDUCTOR_EXCLUDE")
-    provider_id, auto = _apply_offline_flag(
-        offline=offline, provider_id=provider_id, auto=auto
-    )
+    provider_id, auto = _apply_offline_flag(offline=offline, provider_id=provider_id, auto=auto)
     if offline is True and provider_id == "ollama":
         prefer = None
     if auto and provider_id:
@@ -4858,6 +4916,9 @@ def exec_cmd(
         task_file,
         brief=brief,
         brief_file=brief_file,
+        issue=issue,
+        issue_comment_limit=issue_comment_limit,
+        cwd=cwd,
         attach=attach,
     )
     _warn_if_short_exec_brief(
@@ -4913,9 +4974,7 @@ def exec_cmd(
         if max_iterations_explicit and not _provider_supports_exec_max_iterations(
             decision.provider
         ):
-            raise click.UsageError(
-                _exec_max_iterations_unsupported_message(decision.provider)
-            )
+            raise click.UsageError(_exec_max_iterations_unsupported_message(decision.provider))
         if exclusion_message and not silent_route:
             click.echo(exclusion_message, err=True)
         _ensure_permission_profile_supported(
@@ -4931,9 +4990,8 @@ def exec_cmd(
         _emit_session_route_decision(session_log, decision)
         print_caller_banner(decision.provider, silent=silent_route or as_json)
         _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
-        if (
-            _provider_supports_exec_max_iterations(decision.provider)
-            and not (silent_route or as_json)
+        if _provider_supports_exec_max_iterations(decision.provider) and not (
+            silent_route or as_json
         ):
             click.echo(
                 f"[conductor] agent loop iteration cap: {max_iterations_value}",
@@ -5054,9 +5112,7 @@ def exec_cmd(
             provider = get_provider(provider_id)
         except KeyError as e:
             raise click.UsageError(str(e)) from e
-        if max_iterations_explicit and not _provider_supports_exec_max_iterations(
-            provider_id
-        ):
+        if max_iterations_explicit and not _provider_supports_exec_max_iterations(provider_id):
             raise click.UsageError(_exec_max_iterations_unsupported_message(provider_id))
         _ensure_permission_profile_supported(
             provider,
@@ -5075,10 +5131,7 @@ def exec_cmd(
         )
         session_log.bind_provider(provider_id)
         print_caller_banner(provider_id, silent=silent_route or as_json)
-        if (
-            _provider_supports_exec_max_iterations(provider_id)
-            and not (silent_route or as_json)
-        ):
+        if _provider_supports_exec_max_iterations(provider_id) and not (silent_route or as_json):
             click.echo(
                 f"[conductor] agent loop iteration cap: {max_iterations_value}",
                 err=True,
@@ -5313,10 +5366,7 @@ def exec_cmd(
     "--estimated-output-tokens",
     default=None,
     type=click.IntRange(min=0),
-    help=(
-        "Estimated output tokens for cost scoring. "
-        f"Default: {DEFAULT_ESTIMATED_OUTPUT_TOKENS}."
-    ),
+    help=(f"Estimated output tokens for cost scoring. Default: {DEFAULT_ESTIMATED_OUTPUT_TOKENS}."),
 )
 @click.option("--json", "as_json", is_flag=True, default=False)
 def route(
@@ -5511,8 +5561,7 @@ def config(subcommand: str, as_json: bool) -> None:
     }
 
     sources: dict[str, str] = {
-        key: ("env" if val is not None else "default")
-        for key, val in env_overrides.items()
+        key: ("env" if val is not None else "default") for key, val in env_overrides.items()
     }
     payload = {
         "version": __version__,
@@ -5619,9 +5668,7 @@ def _provider_rows() -> list[dict]:
                 # "not configured" to "configured". None for providers
                 # without a canonical recipe (e.g. user-defined shell
                 # providers).
-                "fix_command": (
-                    None if ok else _provider_fix_command(provider, reason)
-                ),
+                "fix_command": (None if ok else _provider_fix_command(provider, reason)),
                 "default_model": _provider_default_model(provider),
                 "tags": list(provider.tags),
                 "tier": provider.quality_tier,
@@ -5710,15 +5757,10 @@ def smoke(provider_id: str | None, run_all: bool, as_json: bool) -> None:
 
     if provider_id:
         if provider_id not in known_providers():
-            raise click.UsageError(
-                f"unknown provider {provider_id!r}; known: {known_providers()}"
-            )
+            raise click.UsageError(f"unknown provider {provider_id!r}; known: {known_providers()}")
         targets = [provider_id]
     else:
-        targets = [
-            name for name in known_providers()
-            if get_provider(name).configured()[0]
-        ]
+        targets = [name for name in known_providers() if get_provider(name).configured()[0]]
 
     results = []
     any_failed = False
@@ -5851,18 +5893,14 @@ def _diagnostic_payload() -> dict:
             model_ok, model_reason = provider.default_model_available()
             if not model_ok:
                 provider_warnings.append(model_reason or "default model unavailable")
-                warnings.append(
-                    {"provider": name, "level": "warning", "message": model_reason}
-                )
+                warnings.append({"provider": name, "level": "warning", "message": model_reason})
 
         providers_info.append(
             {
                 "provider": name,
                 "configured": ok,
                 "reason": None if ok else reason,
-                "fix_command": (
-                    None if ok else _provider_fix_command(provider, reason)
-                ),
+                "fix_command": (None if ok else _provider_fix_command(provider, reason)),
                 "default_model": _provider_default_model(provider),
                 "tags": list(provider.tags),
                 "quality_tier": provider.quality_tier,
@@ -5955,8 +5993,7 @@ def _agent_integration_payload() -> dict:
     detection = detect()
     kinds = {a.kind for a in detection.managed}
     managed_files = [
-        {"path": str(a.path), "kind": a.kind, "version": a.version}
-        for a in detection.managed
+        {"path": str(a.path), "kind": a.kind, "version": a.version} for a in detection.managed
     ]
     version_skew_files = _integration_version_skew_files(
         managed_files,
@@ -6082,12 +6119,9 @@ def _protected_ref_payload(item: ProtectedRef) -> dict[str, str]:
 
 def _git_cleanup_payload(plan: GitCleanupPlan) -> dict[str, object]:
     return {
-        "stale_branches": [
-            _stale_branch_payload(branch) for branch in plan.stale_branches
-        ],
+        "stale_branches": [_stale_branch_payload(branch) for branch in plan.stale_branches],
         "abandoned_worktrees": [
-            _abandoned_worktree_payload(worktree)
-            for worktree in plan.abandoned_worktrees
+            _abandoned_worktree_payload(worktree) for worktree in plan.abandoned_worktrees
         ],
         "protected": [_protected_ref_payload(item) for item in plan.protected],
         "branch_scan": {
@@ -6118,12 +6152,9 @@ def _git_state_doctor_payload() -> dict[str, object]:
             "error": str(e),
         }
     return {
-        "stale_branches": [
-            _stale_branch_payload(branch) for branch in plan.stale_branches
-        ],
+        "stale_branches": [_stale_branch_payload(branch) for branch in plan.stale_branches],
         "abandoned_worktrees": [
-            _abandoned_worktree_payload(worktree)
-            for worktree in plan.abandoned_worktrees
+            _abandoned_worktree_payload(worktree) for worktree in plan.abandoned_worktrees
         ],
         "branch_scan": {
             "checked": plan.branch_scan.checked,
@@ -6265,9 +6296,7 @@ def git_cleanup(
                 click.echo(f"[conductor] cleanup error: {msg}", err=True)
                 errors.append({"target": branch.name, "error": msg})
         for worktree in abandoned_worktrees:
-            ok, detail = _run_git_cleanup_command(
-                ["worktree", "remove", str(worktree.path)]
-            )
+            ok, detail = _run_git_cleanup_command(["worktree", "remove", str(worktree.path)])
             if ok:
                 removed_worktrees.append(str(worktree.path))
             else:
@@ -6290,9 +6319,7 @@ def git_cleanup(
     _echo_branch_scan_cap(plan.branch_scan, indent="  ")
     if stale_branches:
         for branch in stale_branches:
-            click.echo(
-                f"  - {branch.name} ({branch.reason} → {branch.last_commit})"
-            )
+            click.echo(f"  - {branch.name} ({branch.reason} → {branch.last_commit})")
     else:
         click.echo("  (none)")
 
@@ -6350,14 +6377,10 @@ def doctor(as_json: bool) -> None:
     from conductor.banner import SUBTITLE_DOCTOR, print_banner
 
     print_banner(SUBTITLE_DOCTOR, payload["version"])
-    click.echo(
-        f"{payload['platform']}  ·  python {payload['python']}"
-    )
+    click.echo(f"{payload['platform']}  ·  python {payload['python']}")
     click.echo("")
     configured = [p for p in payload["providers"] if p["configured"]]
-    unconfigured = [
-        p for p in payload["providers"] if not p["configured"] and not p["muted"]
-    ]
+    unconfigured = [p for p in payload["providers"] if not p["configured"] and not p["muted"]]
     active = [p for p in payload["providers"] if not p["muted"]]
     muted = payload["muted"]
 
@@ -6370,9 +6393,7 @@ def doctor(as_json: bool) -> None:
             f"default={p['default_model']}{effort_note}"
         )
         if p["configured"]:
-            click.echo(
-                f"        Verify end-to-end: conductor smoke {p['provider']}"
-            )
+            click.echo(f"        Verify end-to-end: conductor smoke {p['provider']}")
         if not p["configured"]:
             click.echo(f"        └─ {p['reason']}")
             if p.get("fix_command"):
@@ -6424,9 +6445,7 @@ def doctor(as_json: bool) -> None:
     click.echo("Agent integration:")
     ai = payload["agent_integration"]
 
-    user_managed = [
-        f for f in ai["managed_files"] if f["kind"] not in REPO_INTEGRATION_KINDS
-    ]
+    user_managed = [f for f in ai["managed_files"] if f["kind"] not in REPO_INTEGRATION_KINDS]
     if not ai["claude_detected"]:
         click.echo("  Claude Code:  not detected")
     elif not user_managed:
@@ -6458,23 +6477,26 @@ def doctor(as_json: bool) -> None:
             # The file itself is loaded normally by its host agent; only
             # Conductor's per-repo delegation block is missing. Spell that out
             # so "present but not wired" doesn't read as "the file is broken".
-            click.echo(
-                f"  {label}  no Conductor delegation block — {ai[path_key]}"
-            )
+            click.echo(f"  {label}  no Conductor delegation block — {ai[path_key]}")
             click.echo(
                 "                (file still loads normally for its agent; "
                 "Conductor would add per-repo"
             )
-            click.echo(
-                "                routing hints via `conductor init`.)"
-            )
+            click.echo("                routing hints via `conductor init`.)")
 
-    _repo_line("AGENTS.md:   ", "agents-md-import",
-               "agents_md_exists", "agents_md_wired", "agents_md_path")
-    _repo_line("GEMINI.md:   ", "gemini-md-import",
-               "gemini_md_exists", "gemini_md_wired", "gemini_md_path")
-    _repo_line("CLAUDE.md:   ", "claude-md-repo-import",
-               "claude_md_repo_exists", "claude_md_repo_wired", "claude_md_repo_path")
+    _repo_line(
+        "AGENTS.md:   ", "agents-md-import", "agents_md_exists", "agents_md_wired", "agents_md_path"
+    )
+    _repo_line(
+        "GEMINI.md:   ", "gemini-md-import", "gemini_md_exists", "gemini_md_wired", "gemini_md_path"
+    )
+    _repo_line(
+        "CLAUDE.md:   ",
+        "claude-md-repo-import",
+        "claude_md_repo_exists",
+        "claude_md_repo_wired",
+        "claude_md_repo_path",
+    )
 
     # Cursor is a fully-managed file inside a conventional directory, not a
     # sentinel-block patch. Its detection story is "does .cursor/rules/ exist".
@@ -6489,22 +6511,16 @@ def doctor(as_json: bool) -> None:
         click.echo(f"  Cursor:       rule wired{version_note}")
     else:
         click.echo(
-            "  Cursor:       no Conductor rule in .cursor/rules/ "
-            "(run `conductor init` to add one)"
+            "  Cursor:       no Conductor rule in .cursor/rules/ (run `conductor init` to add one)"
         )
 
     if ai["user_version_skew_files"]:
         click.echo("")
-        click.echo(
-            f"⚠ Integration files behind binary (v{payload['version']}). Refresh with:"
-        )
+        click.echo(f"⚠ Integration files behind binary (v{payload['version']}). Refresh with:")
         click.echo("    conductor init -y --remaining")
     if ai["repo_version_skew_files"]:
         repo_skew_entries = _integration_version_skew_entries(
-            [
-                f for f in ai["managed_files"]
-                if f["kind"] in REPO_INTEGRATION_KINDS
-            ],
+            [f for f in ai["managed_files"] if f["kind"] in REPO_INTEGRATION_KINDS],
             binary_version=payload["version"],
         )
         click.echo("")
@@ -6518,20 +6534,12 @@ def doctor(as_json: bool) -> None:
             version_note = f" (v{entry['version']})" if entry["version"] else ""
             click.echo(f"    {display}{version_note}")
         click.echo("  Auto refresh paths:")
-        click.echo(
-            "    brew upgrade conductor       # CLAUDE.md @-import self-heals on upgrade"
-        )
-        click.echo(
-            "    conductor init --hooks       # refresh embed-only files on commit"
-        )
+        click.echo("    brew upgrade conductor       # CLAUDE.md @-import self-heals on upgrade")
+        click.echo("    conductor init --hooks       # refresh embed-only files on commit")
         click.echo("  Immediate manual fallback:")
         click.echo("    conductor init -y --remaining")
-        click.echo(
-            "    conductor refresh-consumers  # force-refresh configured consumer repos"
-        )
-        click.echo(
-            "  Prefer the auto paths unless an immediate cross-repo refresh is needed."
-        )
+        click.echo("    conductor refresh-consumers  # force-refresh configured consumer repos")
+        click.echo("  Prefer the auto paths unless an immediate cross-repo refresh is needed.")
 
     git_state = payload["git_state"]
     stale_branches = git_state["stale_branches"]
@@ -6546,26 +6554,18 @@ def doctor(as_json: bool) -> None:
         click.echo(f"    Stale branches ({len(stale_branches)}):")
         _echo_branch_scan_cap(git_state["branch_scan"], indent="      ")
         for branch in stale_branches:
-            click.echo(
-                f"      - {branch['name']} "
-                f"({branch['reason']} → {branch['last_commit']})"
-            )
+            click.echo(f"      - {branch['name']} ({branch['reason']} → {branch['last_commit']})")
         click.echo(f"    Abandoned worktrees ({len(abandoned_worktrees)}):")
         for worktree in abandoned_worktrees:
             branch = worktree["branch"] or "detached"
-            click.echo(
-                f"      - {worktree['path']} "
-                f"(branch {branch}, {worktree['reason']})"
-            )
+            click.echo(f"      - {worktree['path']} (branch {branch}, {worktree['reason']})")
         click.echo("  Refresh with:")
         click.echo("    conductor git-cleanup           # dry-run (default)")
         click.echo("    conductor git-cleanup --execute # actually delete")
 
     click.echo("")
     click.echo("Next steps:")
-    not_configured = [
-        p for p in payload["providers"] if not p["configured"] and not p["muted"]
-    ]
+    not_configured = [p for p in payload["providers"] if not p["configured"] and not p["muted"]]
     if not not_configured:
         if payload["muted"]:
             click.echo(
@@ -6683,8 +6683,12 @@ def init(
     """Interactively configure Conductor for first use."""
     if hooks:
         wiring_flags = (
-            wire_agents, patch_claude_md, patch_agents_md,
-            patch_gemini_md, patch_claude_md_repo, wire_cursor_flag,
+            wire_agents,
+            patch_claude_md,
+            patch_agents_md,
+            patch_gemini_md,
+            patch_claude_md_repo,
+            wire_cursor_flag,
         )
         if only or remaining or unwire or any(f is not None for f in wiring_flags):
             raise click.UsageError(
@@ -6694,21 +6698,21 @@ def init(
 
     if unwire:
         wiring_flags = (
-            wire_agents, patch_claude_md, patch_agents_md,
-            patch_gemini_md, patch_claude_md_repo, wire_cursor_flag,
+            wire_agents,
+            patch_claude_md,
+            patch_agents_md,
+            patch_gemini_md,
+            patch_claude_md_repo,
+            wire_cursor_flag,
         )
         if only or remaining or any(f is not None for f in wiring_flags):
-            raise click.UsageError(
-                "--unwire can't be combined with provider or wiring flags."
-            )
+            raise click.UsageError("--unwire can't be combined with provider or wiring flags.")
         sys.exit(_run_unwire())
 
     if only and remaining:
         raise click.UsageError("--only and --remaining are mutually exclusive.")
     if only and only not in known_providers():
-        raise click.UsageError(
-            f"unknown provider {only!r}; known: {known_providers()}"
-        )
+        raise click.UsageError(f"unknown provider {only!r}; known: {known_providers()}")
     exit_code = run_init_wizard(
         accept_defaults=accept_defaults,
         only=only,
@@ -6751,9 +6755,7 @@ def _run_install_hooks() -> int:
     try:
         changed = _install_refresh_pre_commit_hook(config_path)
     except OSError as e:
-        raise click.ClickException(
-            f"failed to update {config_path}: {e}"
-        ) from e
+        raise click.ClickException(f"failed to update {config_path}: {e}") from e
     if changed:
         click.echo(f"Installed conductor refresh hook in {config_path}.")
     else:
@@ -6788,10 +6790,7 @@ def _pre_commit_config_with_refresh_hook(existing: str) -> str:
     repos_index = _pre_commit_repos_line_index(lines)
     if repos_index is None:
         separator = "" if existing.endswith("\n") else "\n"
-        return (
-            f"{existing}{separator}repos:\n"
-            f"{_pre_commit_refresh_hook_block(item_indent='')}"
-        )
+        return f"{existing}{separator}repos:\n{_pre_commit_refresh_hook_block(item_indent='')}"
 
     line = lines[repos_index]
     stripped = line.strip()
@@ -6806,9 +6805,7 @@ def _pre_commit_config_with_refresh_hook(existing: str) -> str:
 
     if insert_at > 0 and not lines[insert_at - 1].endswith("\n"):
         lines[insert_at - 1] = f"{lines[insert_at - 1]}\n"
-    lines[insert_at:insert_at] = [
-        _pre_commit_refresh_hook_block(item_indent=item_indent)
-    ]
+    lines[insert_at:insert_at] = [_pre_commit_refresh_hook_block(item_indent=item_indent)]
     return "".join(lines)
 
 
@@ -6835,7 +6832,7 @@ def _pre_commit_repos_section_end(lines: list[str], repos_index: int) -> int:
 
 def _pre_commit_repos_item_indent(lines: list[str], repos_index: int) -> str:
     repos_indent = len(lines[repos_index]) - len(lines[repos_index].lstrip(" "))
-    for line in lines[repos_index + 1:]:
+    for line in lines[repos_index + 1 :]:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
@@ -6890,8 +6887,7 @@ def _run_refresh_on_commit() -> int:
     add = _run_repo_command(cwd, ["git", "add", "--", *[str(path) for path in touched]])
     if add.returncode != 0:
         click.echo(
-            "[conductor] refresh-on-commit warning: "
-            f"{_command_failure_detail(add, 'git add')}",
+            f"[conductor] refresh-on-commit warning: {_command_failure_detail(add, 'git add')}",
             err=True,
         )
         return 1
@@ -6935,7 +6931,7 @@ def _repo_integration_is_embedded(artifact: AgentArtifact) -> bool:
     marker_end = text.find("-->", begin)
     if marker_end == -1 or marker_end > end:
         return False
-    body = text[marker_end + len("-->"):end].strip()
+    body = text[marker_end + len("-->") : end].strip()
     return not body.startswith("@")
 
 
@@ -6989,8 +6985,7 @@ class _ConsumerRefreshResult:
     type=click.Path(path_type=Path, dir_okay=False, exists=True),
     default=None,
     help=(
-        "TOML file with operator-owned consumer paths, for example "
-        "`paths = [\"~/repos/Sentinel\"]`."
+        'TOML file with operator-owned consumer paths, for example `paths = ["~/repos/Sentinel"]`.'
     ),
 )
 @click.option(
@@ -7261,10 +7256,11 @@ def delegations_list(
         return
 
     click.echo(
-        "TIME              PROVIDER MODEL              CMD     STATUS  "
-        "DURATION TOKENS_IN/OUT COST"
+        "TIME              PROVIDER MODEL              CMD     STATUS  DURATION TOKENS_IN/OUT COST"
     )
-    click.echo("-----------------------------------------------------------------------------------------")
+    click.echo(
+        "-----------------------------------------------------------------------------------------"
+    )
     for event in events:
         click.echo(_format_delegation_row(event))
 
@@ -7295,8 +7291,7 @@ def _format_delegation_row(event: dict) -> str:
     status = _truncate_cell(event.get("status") or "-", 7)
     duration = _format_duration_ms(event.get("duration_ms"))
     tokens = (
-        f"{_ledger_value(event.get('input_tokens'))}/"
-        f"{_ledger_value(event.get('output_tokens'))}"
+        f"{_ledger_value(event.get('input_tokens'))}/{_ledger_value(event.get('output_tokens'))}"
     )
     cost = _format_cost(event.get("cost_usd"))
     return (
@@ -7422,14 +7417,13 @@ def sessions_list(
     click.echo(
         "SESSION ID                           STATUS    UPDATED                      PROVIDER"
     )
-    click.echo("--------------------------------------------------------------------------------------")
+    click.echo(
+        "--------------------------------------------------------------------------------------"
+    )
     for record in reversed(records):
         provider = record.provider or "-"
         click.echo(
-            f"{record.session_id:<36}  "
-            f"{record.status:<8}  "
-            f"{record.updated_at:<27}  "
-            f"{provider}"
+            f"{record.session_id:<36}  {record.status:<8}  {record.updated_at:<27}  {provider}"
         )
 
 
@@ -7777,10 +7771,7 @@ def _print_session_prune_plan(plan: SessionPrunePlan) -> None:
                 state = f" error={planned_path.error}"
             elif planned_path.deleted:
                 state = " deleted"
-            click.echo(
-                f"  {_format_bytes(planned_path.size_bytes):>9}  "
-                f"{planned_path.path}{state}"
-            )
+            click.echo(f"  {_format_bytes(planned_path.size_bytes):>9}  {planned_path.path}{state}")
 
 
 def _format_bytes(size: int) -> str:
@@ -7886,10 +7877,7 @@ def models_list() -> None:
         return
     id_w = max(len("MODEL"), max(len(model.id) for model in sorted_models))
     ctx_w = max(len("CTX"), max(len(f"{model.context_length:,}") for model in sorted_models))
-    header = (
-        f"{'MODEL':<{id_w}}  {'CTX':>{ctx_w}}  {'IN/1K':>10}  "
-        f"{'OUT/1K':>10}  CAPS"
-    )
+    header = f"{'MODEL':<{id_w}}  {'CTX':>{ctx_w}}  {'IN/1K':>10}  {'OUT/1K':>10}  CAPS"
     click.echo(header)
     click.echo("-" * len(header))
     for model in sorted_models:
@@ -7915,9 +7903,7 @@ def models_show(slug: str) -> None:
         )
 
     thinking_price = (
-        "n/a"
-        if model.pricing_thinking is None
-        else f"{model.pricing_thinking:.6f} USD / 1k"
+        "n/a" if model.pricing_thinking is None else f"{model.pricing_thinking:.6f} USD / 1k"
     )
     click.echo(model.id)
     click.echo(f"  name: {model.name}")
@@ -7947,9 +7933,7 @@ def _emit_stack_audit_report(report: StackAuditReport) -> None:
         return
 
     errors = [finding for finding in report.findings if finding.severity == "error"]
-    warnings = [
-        finding for finding in report.findings if finding.severity == "warning"
-    ]
+    warnings = [finding for finding in report.findings if finding.severity == "warning"]
     click.echo(f"{len(errors)} error(s), {len(warnings)} warning(s)")
     for finding in report.findings:
         click.echo(
@@ -8177,10 +8161,7 @@ def providers_list(as_json: bool) -> None:
 
     path = providers_file_path()
     muted_path = muted_providers_file_path()
-    click.echo(
-        "Muted providers: "
-        + (", ".join(muted) if muted else "(none)")
-    )
+    click.echo("Muted providers: " + (", ".join(muted) if muted else "(none)"))
     click.echo(f"file: {muted_path} {'(not yet created)' if not muted_path.exists() else ''}")
     click.echo("")
 
@@ -8200,9 +8181,7 @@ def providers_list(as_json: bool) -> None:
         if s.tags:
             click.echo(f"    tags:     {', '.join(s.tags)}")
         if s.cost_per_1k_in or s.cost_per_1k_out:
-            click.echo(
-                f"    cost:     ${s.cost_per_1k_in}/1k in, ${s.cost_per_1k_out}/1k out"
-            )
+            click.echo(f"    cost:     ${s.cost_per_1k_in}/1k in, ${s.cost_per_1k_out}/1k out")
 
 
 if __name__ == "__main__":

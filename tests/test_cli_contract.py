@@ -35,6 +35,8 @@ DOCUMENTED_STABLE_FLAGS: frozenset[str] = frozenset(
         "--exclude",
         "--brief",
         "--brief-file",
+        "--issue",
+        "--issue-comment-limit",
         "--task",
         "--task-file",
         "--model",
@@ -62,6 +64,8 @@ DOCUMENTED_EXEC_FLAGS: frozenset[str] = frozenset(
         "--exclude",
         "--brief",
         "--brief-file",
+        "--issue",
+        "--issue-comment-limit",
         "--task",
         "--task-file",
         "--model",
@@ -101,6 +105,8 @@ DOCUMENTED_REVIEW_FLAGS: frozenset[str] = frozenset(
         "--exclude",
         "--brief",
         "--brief-file",
+        "--issue",
+        "--issue-comment-limit",
         "--task",
         "--task-file",
         "--json",
@@ -131,6 +137,8 @@ DOCUMENTED_ASK_FLAGS: frozenset[str] = frozenset(
         "--title",
         "--brief",
         "--brief-file",
+        "--issue",
+        "--issue-comment-limit",
         "--task",
         "--task-file",
         "--log-file",
@@ -248,9 +256,7 @@ def _provider_quota_exhausted(stderr: str) -> bool:
             return any(marker in message for marker in ("limit", "quota", "rate"))
 
     message = stderr.lower()
-    return "429" in message and any(
-        marker in message for marker in ("limit", "quota", "rate")
-    )
+    return "429" in message and any(marker in message for marker in ("limit", "quota", "rate"))
 
 
 # ---------------------------------------------------------------------------
@@ -350,8 +356,7 @@ class TestJsonSchema:
 
 def test_provider_quota_exhausted_detects_claude_429() -> None:
     stderr = (
-        'conductor: claude exited 1: {"api_error_status":429,'
-        '"result":"You have hit your limit"}'
+        'conductor: claude exited 1: {"api_error_status":429,"result":"You have hit your limit"}'
     )
 
     assert _provider_quota_exhausted(stderr)
