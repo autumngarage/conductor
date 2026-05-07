@@ -652,7 +652,8 @@ def test_claude_exec_startup_stall_diagnostic_includes_processes_and_locks(
     assert "PIDs: 123, 456" in message
     assert "auth.lock" in message
     assert "session.tmp" in message
-    assert "--retry-on-stall 1" in message
+    assert "Automatic startup-stall retry is disabled" in message
+    assert "--retry-on-stall" in message
 
 
 def test_claude_exec_retry_on_stall_respawns_once_then_reports_diagnostic(
@@ -767,7 +768,7 @@ def test_claude_exec_startup_stall_terminates_child_process_group(
             os.kill(child_pid, signal.SIGKILL)
 
 
-def test_cli_exec_retry_on_stall_wires_to_claude_provider(
+def test_cli_exec_retry_on_stall_default_wires_to_claude_provider(
     mocker,
     monkeypatch,
     tmp_path,
@@ -798,8 +799,6 @@ def test_cli_exec_retry_on_stall_wires_to_claude_provider(
             "--no-preflight",
             "--start-timeout",
             "0.01",
-            "--retry-on-stall",
-            "1",
             "--task",
             "hi",
         ],
@@ -808,6 +807,45 @@ def test_cli_exec_retry_on_stall_wires_to_claude_provider(
     assert result.exit_code == 0, result.output
     assert popen.call_count == 2
     assert "hello from claude" in result.output
+
+
+def test_cli_exec_retry_on_stall_zero_disables_retry(
+    mocker,
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".claude").mkdir()
+    mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
+    mocker.patch(
+        "conductor.providers.claude._run_ps_for_claude_probe",
+        return_value=(0, "123 1 claude -p hi\n", ""),
+    )
+    fake = _FakePopen(stdout_schedule=[], hang_after_stdout=True)
+    popen = mocker.patch(
+        "conductor.providers.claude.subprocess.Popen",
+        side_effect=lambda args, **kwargs: fake,
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "claude",
+            "--no-preflight",
+            "--start-timeout",
+            "0.01",
+            "--retry-on-stall",
+            "0",
+            "--task",
+            "hi",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert popen.call_count == 1
+    assert "Automatic startup-stall retry is disabled" in result.output
 
 
 def test_claude_exec_retry_on_stall_never_retries_mid_task_stall(
@@ -923,6 +961,8 @@ def test_claude_exec_start_timeout_fails_nonzero_with_error_shape(
             "--no-preflight",
             "--start-timeout",
             "0.03",
+            "--retry-on-stall",
+            "0",
             "--task",
             "hi",
             "--json",
