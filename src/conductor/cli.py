@@ -27,6 +27,7 @@ import time
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlparse
 
 import click
@@ -93,6 +94,7 @@ from conductor.router import (
     VALID_PREFER_MODES,
     InvalidRouterRequest,
     NoConfiguredProvider,
+    RankedCandidate,
     RouteDecision,
     mark_outcome,
     mark_rate_limited,
@@ -108,6 +110,7 @@ from conductor.router_defaults import (
 )
 from conductor.semantic import (
     SEMANTIC_KINDS,
+    SemanticCandidate,
     SemanticPlan,
     plan_for,
     with_candidate_override,
@@ -146,6 +149,9 @@ GIT_RECOVERY_MAX_STATUS_PATHS = 8
 NATIVE_REVIEW_TAG = "code-review"
 DEFAULT_SESSION_PRUNE_OLDER_THAN = "30d"
 DEFAULT_SESSION_PRUNE_PROTECT_LAST = 50
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 DEFAULT_REVIEW_MAX_FALLBACKS = 3
 DEFAULT_COUNCIL_ROUNDS = 1
@@ -887,6 +893,31 @@ def _requires_strong_code_provider(plan: SemanticPlan) -> bool:
     return plan.kind == "code" and plan.effort_bucket in {"high", "max"}
 
 
+Candidate = SemanticCandidate | RankedCandidate
+ExclusionPhase = Literal["planning", "runtime"]
+
+
+@dataclass(frozen=True)
+class PlanContext:
+    semantic_plan: SemanticPlan | None = None
+    user_tags: tuple[str, ...] = ()
+    offline_requested: bool = False
+    online_probe_reachable: bool | None = None
+    provider: object | None = None
+    brief_tokens: int | None = None
+    fallback_index: int = 0
+
+
+@dataclass(frozen=True)
+class ExclusionRule:
+    name: str
+    predicate: Callable[[Candidate, PlanContext], bool]
+    message_template: str
+    structured_event: str
+    when: ExclusionPhase
+    event_data: Callable[[Candidate, PlanContext], dict[str, object]]
+
+
 OLLAMA_ONLINE_EXCLUSION_MESSAGE = (
     "[conductor] excluding ollama from fallback chain "
     "(online; ollama is offline-only — pass --offline to override)"
@@ -895,6 +926,146 @@ OLLAMA_PROBE_OFFLINE_INCLUSION_MESSAGE = (
     "[conductor] including ollama as local fallback "
     "(network probe found no reachable target; assuming offline)"
 )
+
+
+def _candidate_provider(candidate: Candidate) -> str:
+    if isinstance(candidate, SemanticCandidate):
+        return candidate.provider
+    return candidate.name
+
+
+def _format_exclusion_message(
+    rule: ExclusionRule,
+    candidate: Candidate,
+    context: PlanContext,
+) -> str:
+    provider = _candidate_provider(candidate)
+    max_ctx = getattr(context.provider, "max_context_tokens", None)
+    return rule.message_template.format(
+        name=provider,
+        provider=provider,
+        brief_tokens=context.brief_tokens,
+        max_context_tokens=max_ctx,
+    )
+
+
+def _is_ollama_candidate(candidate: Candidate) -> bool:
+    return _candidate_provider(candidate) == "ollama"
+
+
+def _ollama_online_only_predicate(
+    candidate: Candidate,
+    context: PlanContext,
+) -> bool:
+    if not _is_ollama_candidate(candidate):
+        return False
+    if context.offline_requested or offline_mode.is_active():
+        return False
+    if "ollama" in context.user_tags:
+        return False
+    return context.online_probe_reachable is True
+
+
+def _code_high_requires_frontier_predicate(
+    candidate: Candidate,
+    context: PlanContext,
+) -> bool:
+    return (
+        _is_ollama_candidate(candidate)
+        and context.semantic_plan is not None
+        and _requires_strong_code_provider(context.semantic_plan)
+    )
+
+
+def _context_fit_required_predicate(
+    candidate: Candidate,
+    context: PlanContext,
+) -> bool:
+    if context.fallback_index <= 0 or context.brief_tokens is None:
+        return False
+    max_ctx = getattr(context.provider, "max_context_tokens", None)
+    return max_ctx is not None and context.brief_tokens > max_ctx
+
+
+def _planning_exclusion_event_data(
+    candidate: Candidate,
+    context: PlanContext,
+) -> dict[str, object]:
+    data: dict[str, object] = {
+        "provider": _candidate_provider(candidate),
+        "phase": "planning",
+    }
+    if context.semantic_plan is not None:
+        data.update(
+            {
+                "kind": context.semantic_plan.kind,
+                "effort": context.semantic_plan.effort_bucket,
+            }
+        )
+    return data
+
+
+def _context_fit_event_data(
+    candidate: Candidate,
+    context: PlanContext,
+) -> dict[str, object]:
+    max_ctx = getattr(context.provider, "max_context_tokens", None)
+    return {
+        "provider": _candidate_provider(candidate),
+        "reason": "brief_exceeds_context",
+        "brief_tokens": context.brief_tokens,
+        "max_context_tokens": max_ctx,
+    }
+
+
+OLLAMA_ONLINE_ONLY = ExclusionRule(
+    name="ollama-online-only",
+    predicate=_ollama_online_only_predicate,
+    message_template=OLLAMA_ONLINE_EXCLUSION_MESSAGE,
+    structured_event="planning_excluded",
+    when="planning",
+    event_data=_planning_exclusion_event_data,
+)
+CONTEXT_FIT_REQUIRED = ExclusionRule(
+    name="context-fit-required",
+    predicate=_context_fit_required_predicate,
+    message_template=(
+        "[conductor] skipping fallback {name}: "
+        "brief ~{brief_tokens} tokens > model context {max_context_tokens}"
+    ),
+    structured_event="fallback_skipped",
+    when="runtime",
+    event_data=_context_fit_event_data,
+)
+CODE_HIGH_REQUIRES_FRONTIER = ExclusionRule(
+    name="code-high-requires-frontier",
+    predicate=_code_high_requires_frontier_predicate,
+    message_template=OLLAMA_ONLINE_EXCLUSION_MESSAGE,
+    structured_event="planning_excluded",
+    when="planning",
+    event_data=_planning_exclusion_event_data,
+)
+EXCLUSION_RULES: tuple[ExclusionRule, ...] = (
+    OLLAMA_ONLINE_ONLY,
+    CONTEXT_FIT_REQUIRED,
+    CODE_HIGH_REQUIRES_FRONTIER,
+)
+
+
+def _exclusion_rules_for_phase(phase: ExclusionPhase) -> tuple[ExclusionRule, ...]:
+    return tuple(rule for rule in EXCLUSION_RULES if rule.when == phase)
+
+
+def _first_matching_exclusion_rule(
+    candidate: Candidate,
+    context: PlanContext,
+    *,
+    phase: ExclusionPhase,
+) -> ExclusionRule | None:
+    for rule in _exclusion_rules_for_phase(phase):
+        if rule.predicate(candidate, context):
+            return rule
+    return None
 
 
 def _with_user_semantic_tags(
@@ -937,23 +1108,69 @@ def _apply_ollama_offline_only_policy(
     if not _semantic_plan_contains_ollama(plan):
         return plan, None
     if offline_requested or offline_mode.is_active():
-        return plan, None
-    if "ollama" in user_tags:
-        return plan, None
+        return _apply_planning_exclusion_rules(
+            plan,
+            PlanContext(
+                semantic_plan=plan,
+                user_tags=user_tags,
+                offline_requested=offline_requested,
+                online_probe_reachable=False,
+            ),
+        )
 
-    profile = get_network_profile(
-        _network_target_for_provider(_first_online_candidate_provider(plan)),
-        warn=None,
-    )
-    if profile.rtt_ms is None:
-        return plan, OLLAMA_PROBE_OFFLINE_INCLUSION_MESSAGE
+    online_probe_reachable: bool | None = None
+    if "ollama" not in user_tags:
+        profile = get_network_profile(
+            _network_target_for_provider(_first_online_candidate_provider(plan)),
+            warn=None,
+        )
+        if profile.rtt_ms is None:
+            plan, message = _apply_planning_exclusion_rules(
+                plan,
+                PlanContext(
+                    semantic_plan=plan,
+                    user_tags=user_tags,
+                    offline_requested=offline_requested,
+                    online_probe_reachable=False,
+                ),
+            )
+            return plan, message or OLLAMA_PROBE_OFFLINE_INCLUSION_MESSAGE
+        online_probe_reachable = True
 
-    candidates = tuple(
-        candidate for candidate in plan.candidates if candidate.provider != "ollama"
+    return _apply_planning_exclusion_rules(
+        plan,
+        PlanContext(
+            semantic_plan=plan,
+            user_tags=user_tags,
+            offline_requested=offline_requested,
+            online_probe_reachable=online_probe_reachable,
+        ),
     )
+
+
+def _apply_planning_exclusion_rules(
+    plan: SemanticPlan,
+    context: PlanContext,
+) -> tuple[SemanticPlan, str | None]:
+    messages: list[str] = []
+    retained: list[SemanticCandidate] = []
+    for candidate in plan.candidates:
+        rule = _first_matching_exclusion_rule(
+            candidate,
+            context,
+            phase="planning",
+        )
+        if rule is None:
+            retained.append(candidate)
+            continue
+        message = _format_exclusion_message(rule, candidate, context)
+        if message not in messages:
+            messages.append(message)
+
+    candidates = tuple(retained)
     if len(candidates) == len(plan.candidates):
         return plan, None
-    return replace(plan, candidates=candidates), OLLAMA_ONLINE_EXCLUSION_MESSAGE
+    return replace(plan, candidates=candidates), "\n".join(messages)
 
 
 def _format_strong_code_no_fallback_error(
@@ -1185,32 +1402,30 @@ def _invoke_with_fallback(
     while idx < len(candidates):
         candidate = candidates[idx]
         provider = get_provider(candidate.name)
-        # Skip fallback candidates whose context can't hold the brief — burning a
-        # second roundtrip on a model that will exhaust mid-loop is worse than
-        # surfacing the next one early or raising. Only applies once we've fallen
-        # back at least once; the user's primary choice is respected unconditionally.
-        if idx > 0:
-            max_ctx = getattr(provider, "max_context_tokens", None)
-            if max_ctx is not None and brief_tokens > max_ctx:
-                if not silent:
-                    click.echo(
-                        f"[conductor] skipping fallback {candidate.name}: "
-                        f"brief ~{brief_tokens} tokens > model context {max_ctx}",
-                        err=True,
-                    )
-                if session_log is not None:
-                    session_log.emit(
-                        "fallback_skipped",
-                        {
-                            "provider": candidate.name,
-                            "reason": "brief_exceeds_context",
-                            "brief_tokens": brief_tokens,
-                            "max_context_tokens": max_ctx,
-                        },
-                    )
-                fallbacks.append(candidate.name)
-                idx += 1
-                continue
+        runtime_context = PlanContext(
+            provider=provider,
+            brief_tokens=brief_tokens,
+            fallback_index=idx,
+        )
+        rule = _first_matching_exclusion_rule(
+            candidate,
+            runtime_context,
+            phase="runtime",
+        )
+        if rule is not None:
+            if not silent:
+                click.echo(
+                    _format_exclusion_message(rule, candidate, runtime_context),
+                    err=True,
+                )
+            if session_log is not None:
+                session_log.emit(
+                    rule.structured_event,
+                    rule.event_data(candidate, runtime_context),
+                )
+            fallbacks.append(candidate.name)
+            idx += 1
+            continue
         candidate_models = (models_by_provider or {}).get(candidate.name)
         if session_log is not None:
             session_log.bind_provider(candidate.name)

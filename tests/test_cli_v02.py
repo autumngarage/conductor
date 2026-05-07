@@ -17,6 +17,7 @@ import io
 import json
 import os
 import subprocess
+from pathlib import Path
 
 import httpx
 import pytest
@@ -40,6 +41,7 @@ from conductor.providers import (
     ProviderExecutionError,
 )
 from conductor.router import RouteDecision, reset_health
+from conductor.session_log import SessionLog
 
 
 @pytest.fixture(autouse=True)
@@ -647,6 +649,10 @@ def test_ask_code_medium_online_excludes_ollama_from_fallback(mocker):
     assert result.exit_code == 0, result.output
     assert openrouter_call.called
     assert not ollama_call.called
+    assert result.stderr == (
+        "[conductor] excluding ollama from fallback chain "
+        "(online; ollama is offline-only — pass --offline to override)\n"
+    )
     assert "excluding ollama from fallback chain" in result.stderr
     assert "online; ollama is offline-only" in result.stderr
     assert "falling through to ollama" not in result.stderr
@@ -2388,7 +2394,7 @@ def test_call_fallback_exhausted_propagates_last_error(mocker):
     assert "502" in result.stderr or "bad gateway" in result.stderr
 
 
-def test_invoke_with_fallback_skips_undersized_context(mocker):
+def test_invoke_with_fallback_skips_undersized_context(mocker, capsys, tmp_path):
     """Fallback chain skips a candidate whose context can't hold the brief."""
     from conductor.cli import _invoke_with_fallback
     from conductor.providers.interface import ProviderHTTPError
@@ -2439,6 +2445,7 @@ def test_invoke_with_fallback_skips_undersized_context(mocker):
 
     # Brief at ~250 tokens (1000 chars / 4) — well over ollama's pinned 100.
     long_brief = "x" * 1000
+    session_log = SessionLog(path=tmp_path / "fallback.ndjson")
 
     response, fallbacks = _invoke_with_fallback(
         decision,
@@ -2453,6 +2460,7 @@ def test_invoke_with_fallback_skips_undersized_context(mocker):
         max_stall_sec=None,
         start_timeout_sec=None,
         silent=False,
+        session_log=session_log,
     )
 
     assert response.provider == "codex"
@@ -2462,6 +2470,103 @@ def test_invoke_with_fallback_skips_undersized_context(mocker):
     # Ollama appears in the fallback list (skipped, not attempted).
     assert "ollama" in fallbacks
     assert "codex" not in fallbacks  # codex won, so it's not "fallback used"
+    assert (
+        "[conductor] skipping fallback ollama: "
+        "brief ~250 tokens > model context 100"
+    ) in capsys.readouterr().err
+    events = [
+        json.loads(line)
+        for line in Path(session_log.log_path).read_text(encoding="utf-8").splitlines()
+    ]
+    skipped = next(event for event in events if event["event"] == "fallback_skipped")
+    assert skipped["data"] == {
+        "provider": "ollama",
+        "reason": "brief_exceeds_context",
+        "brief_tokens": 250,
+        "max_context_tokens": 100,
+    }
+
+
+def test_exclusion_rule_registry_applies_all_current_rules_without_conflict(mocker):
+    from conductor.cli import (
+        CODE_HIGH_REQUIRES_FRONTIER,
+        CONTEXT_FIT_REQUIRED,
+        EXCLUSION_RULES,
+        OLLAMA_ONLINE_EXCLUSION_MESSAGE,
+        OLLAMA_ONLINE_ONLY,
+        PlanContext,
+        _apply_planning_exclusion_rules,
+        _first_matching_exclusion_rule,
+        _format_exclusion_message,
+    )
+    from conductor.router import RankedCandidate
+    from conductor.semantic import plan_for
+
+    plan = plan_for("code", "high")
+    assert (
+        OLLAMA_ONLINE_ONLY,
+        CONTEXT_FIT_REQUIRED,
+        CODE_HIGH_REQUIRES_FRONTIER,
+    ) == EXCLUSION_RULES
+
+    online_plan, online_message = _apply_planning_exclusion_rules(
+        plan,
+        PlanContext(
+            semantic_plan=plan,
+            user_tags=(),
+            offline_requested=False,
+            online_probe_reachable=True,
+        ),
+    )
+    assert online_message == OLLAMA_ONLINE_EXCLUSION_MESSAGE
+    assert [candidate.provider for candidate in online_plan.candidates] == [
+        "codex",
+        "openrouter",
+    ]
+
+    tagged_plan, tagged_message = _apply_planning_exclusion_rules(
+        plan,
+        PlanContext(
+            semantic_plan=plan,
+            user_tags=("ollama",),
+            offline_requested=False,
+            online_probe_reachable=None,
+        ),
+    )
+    assert tagged_message == OLLAMA_ONLINE_EXCLUSION_MESSAGE
+    assert [candidate.provider for candidate in tagged_plan.candidates] == [
+        "codex",
+        "openrouter",
+    ]
+
+    runtime_candidate = RankedCandidate(
+        name="ollama",
+        tier="local",
+        tier_rank=2,
+        matched_tags=(),
+        tag_score=0,
+        cost_score=0.0,
+        latency_ms=0,
+        health_penalty=0.0,
+        combined_score=0.0,
+    )
+    mocker.patch.object(OllamaProvider, "max_context_tokens", 100)
+    runtime_context = PlanContext(
+        provider=OllamaProvider(),
+        brief_tokens=250,
+        fallback_index=1,
+    )
+    runtime_rule = _first_matching_exclusion_rule(
+        runtime_candidate,
+        runtime_context,
+        phase="runtime",
+    )
+    assert runtime_rule is CONTEXT_FIT_REQUIRED
+    assert (
+        _format_exclusion_message(runtime_rule, runtime_candidate, runtime_context)
+        == "[conductor] skipping fallback ollama: "
+        "brief ~250 tokens > model context 100"
+    )
 
 
 def test_call_with_single_provider_does_not_retry(mocker):
