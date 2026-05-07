@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING
 from conductor import __version__ as _conductor_version
 from conductor.offline_mode import _cache_dir
 from conductor.orphan_detect import find_orphan_codex_processes, format_orphan_hints
+from conductor.providers._startup_lock import codex_startup_lock, release_startup_lock
 from conductor.providers.cli_auth import AuthPromptTracker
 from conductor.providers.interface import (
     CallResponse,
@@ -909,15 +910,25 @@ class CodexProvider:
         session_log: SessionLog | None,
     ) -> CallResponse:
         start = time.monotonic()
-        process = subprocess.Popen(
-            args,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=cwd,
-            env=os.environ.copy(),
+        startup_lock_context = codex_startup_lock(
+            session_log=session_log,
+            snapshot_provider=self._codex_startup_lock_snapshot,
         )
+        startup_lock_handle = startup_lock_context.__enter__()
+        try:
+            process = subprocess.Popen(
+                args,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=cwd,
+                env=os.environ.copy(),
+            )
+        except BaseException:
+            release_startup_lock(startup_lock_handle)
+            startup_lock_context.__exit__(*sys.exc_info())
+            raise
         # Pipe the prompt via stdin and close — codex exec reads until EOF.
         # If write blocks (huge prompt + slow consumer), we'd hang here, but
         # codex's own ingestion is fast and the prompt fits in the pipe
@@ -1125,6 +1136,7 @@ class CodexProvider:
                         break
                     continue
 
+                release_startup_lock(startup_lock_handle)
                 if stream_name == "stderr":
                     stderr_parts.append(item)
                     last_output = time.monotonic()
@@ -1203,6 +1215,8 @@ class CodexProvider:
                             )
                             session_id_emitted = True
         finally:
+            release_startup_lock(startup_lock_handle)
+            startup_lock_context.__exit__(None, None, None)
             done_event.set()
             if timeout_thread is not None:
                 timeout_thread.join(timeout=0.1)
@@ -1381,6 +1395,12 @@ class CodexProvider:
             except Exception as exc:  # noqa: BLE001
                 sys.stderr.write(f"[conductor] orphan detection failed: {exc!r}\n")
         return message
+
+    def _codex_startup_lock_snapshot(self) -> tuple[int, str]:
+        orphans = find_orphan_codex_processes(self._cli)
+        if not orphans:
+            return 0, "no stale codex startup processes detected"
+        return len(orphans), format_orphan_hints(orphans)
 
     def _save_forensic_envelope(
         self,

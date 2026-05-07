@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from conductor.providers._startup_lock import claude_startup_lock
 from conductor.providers.cli_auth import (
     AuthPromptTracker,
     CapturedProcessResult,
@@ -162,6 +163,20 @@ def _probe_claude_lock_files(errors: list[str]) -> list[Path]:
         errors.append(f"claude lock-file probe failed: {e}")
         return []
     return sorted(path for path in candidates if path.is_file())
+
+
+def _claude_startup_lock_snapshot() -> tuple[int, str]:
+    probe = probe_claude_state()
+    details: list[str] = [
+        f"pid={proc.pid} ppid={proc.ppid} {proc.command[:120]}"
+        for proc in probe.live_processes
+    ]
+    if probe.lock_files:
+        details.append(
+            "lock_files=" + ",".join(str(path) for path in probe.lock_files[:5])
+        )
+    details.extend(probe.probe_errors)
+    return len(probe.live_processes), "; ".join(details) if details else "none"
 
 
 class ClaudeProvider:
@@ -763,6 +778,10 @@ class ClaudeProvider:
                     session_log=session_log,
                     tracker=tracker,
                     popen_factory=subprocess.Popen,
+                    startup_lock=claude_startup_lock(
+                        session_log=session_log,
+                        snapshot_provider=_claude_startup_lock_snapshot,
+                    ),
                 )
             except ProviderStartupStalledError as e:
                 probe = probe_claude_state()
