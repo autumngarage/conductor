@@ -33,6 +33,16 @@ git -C "$TEST_REPO" branch feature
 git -C "$TEST_REPO" worktree add -q "$FEATURE_WORKTREE" feature
 
 extract_function "worktree_path_for_branch" "$MERGE_SCRIPT" "$FUNCTIONS_FILE"
+extract_function "main_worktree_path" "$MERGE_SCRIPT" "$FUNCTIONS_FILE.tmp"
+cat "$FUNCTIONS_FILE.tmp" >> "$FUNCTIONS_FILE"
+extract_function "removable_worktree_path_for_branch" "$MERGE_SCRIPT" "$FUNCTIONS_FILE.tmp"
+cat "$FUNCTIONS_FILE.tmp" >> "$FUNCTIONS_FILE"
+extract_function "git_common_dir_for_worktree" "$MERGE_SCRIPT" "$FUNCTIONS_FILE.tmp"
+cat "$FUNCTIONS_FILE.tmp" >> "$FUNCTIONS_FILE"
+extract_function "worktree_has_uncommitted_changes" "$MERGE_SCRIPT" "$FUNCTIONS_FILE.tmp"
+cat "$FUNCTIONS_FILE.tmp" >> "$FUNCTIONS_FILE"
+extract_function "remove_clean_merged_branch_worktree" "$MERGE_SCRIPT" "$FUNCTIONS_FILE.tmp"
+cat "$FUNCTIONS_FILE.tmp" >> "$FUNCTIONS_FILE"
 # shellcheck source=/dev/null
 source "$FUNCTIONS_FILE"
 
@@ -43,6 +53,76 @@ if [ "$actual" != "$expected" ]; then
   printf 'FAIL: worktree_path_for_branch main returned wrong path\n' >&2
   printf 'expected: %s\n' "$expected" >&2
   printf 'actual:   %s\n' "$actual" >&2
+  exit 1
+fi
+
+main_worktree="$(cd "$TEST_REPO" && main_worktree_path)"
+if [ "$main_worktree" != "$expected" ]; then
+  printf 'FAIL: main_worktree_path returned wrong path\n' >&2
+  printf 'expected: %s\n' "$expected" >&2
+  printf 'actual:   %s\n' "$main_worktree" >&2
+  exit 1
+fi
+
+main_branch_removable="$(cd "$TEST_REPO" && removable_worktree_path_for_branch main)"
+if [ -n "$main_branch_removable" ]; then
+  printf 'FAIL: main worktree was considered removable\n' >&2
+  printf 'actual: %s\n' "$main_branch_removable" >&2
+  exit 1
+fi
+
+feature_branch_removable="$(cd "$TEST_REPO" && removable_worktree_path_for_branch feature)"
+expected_feature_worktree="$(git -C "$FEATURE_WORKTREE" rev-parse --show-toplevel)"
+if [ "$feature_branch_removable" != "$expected_feature_worktree" ]; then
+  printf 'FAIL: linked feature worktree was not considered removable\n' >&2
+  printf 'expected: %s\n' "$expected_feature_worktree" >&2
+  printf 'actual:   %s\n' "$feature_branch_removable" >&2
+  exit 1
+fi
+
+remove_output="$(cd "$TEST_REPO" && remove_clean_merged_branch_worktree "$FEATURE_WORKTREE")"
+if [ -d "$FEATURE_WORKTREE" ]; then
+  printf 'FAIL: clean feature worktree was not removed\n' >&2
+  exit 1
+fi
+if [ "$remove_output" != "==> Removed worktree at $FEATURE_WORKTREE" ]; then
+  printf 'FAIL: worktree removal printed wrong output\n' >&2
+  printf 'actual: %s\n' "$remove_output" >&2
+  exit 1
+fi
+
+CURRENT_WORKTREE="$TMP_ROOT/current-worktree"
+git -C "$TEST_REPO" branch current
+git -C "$TEST_REPO" worktree add -q "$CURRENT_WORKTREE" current
+current_output="$(cd "$CURRENT_WORKTREE" && remove_clean_merged_branch_worktree "$CURRENT_WORKTREE")"
+if [ -d "$CURRENT_WORKTREE" ]; then
+  printf 'FAIL: current clean worktree was not removed\n' >&2
+  exit 1
+fi
+if [ "$current_output" != "==> Removed worktree at $CURRENT_WORKTREE" ]; then
+  printf 'FAIL: current worktree removal printed wrong output\n' >&2
+  printf 'actual: %s\n' "$current_output" >&2
+  exit 1
+fi
+
+DIRTY_WORKTREE="$TMP_ROOT/dirty-worktree"
+git -C "$TEST_REPO" branch dirty
+git -C "$TEST_REPO" worktree add -q "$DIRTY_WORKTREE" dirty
+printf 'dirty\n' >> "$DIRTY_WORKTREE/README"
+dirty_stderr="$TMP_ROOT/dirty.stderr"
+dirty_output="$(cd "$TEST_REPO" && remove_clean_merged_branch_worktree "$DIRTY_WORKTREE" 2>"$dirty_stderr")"
+if [ ! -d "$DIRTY_WORKTREE" ]; then
+  printf 'FAIL: dirty feature worktree was removed\n' >&2
+  exit 1
+fi
+if [ -n "$dirty_output" ]; then
+  printf 'FAIL: dirty worktree removal printed stdout\n' >&2
+  printf 'actual: %s\n' "$dirty_output" >&2
+  exit 1
+fi
+if ! grep -Fq "WARN: worktree at $DIRTY_WORKTREE has uncommitted changes; not removing" "$dirty_stderr"; then
+  printf 'FAIL: dirty worktree removal did not warn clearly\n' >&2
+  cat "$dirty_stderr" >&2
   exit 1
 fi
 
