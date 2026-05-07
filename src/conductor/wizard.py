@@ -1409,7 +1409,7 @@ def _wire_cursor_section(
     wc = (
         wire_cursor_flag
         if wire_cursor_flag is not None
-        else ("ask" if interactive else "no")
+        else ("ask" if interactive else decision)
     )
     if wc == "ask":
         verb = "refresh" if already_written else "write"
