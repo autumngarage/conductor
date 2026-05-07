@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
+import os
 import queue
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -42,6 +45,7 @@ _AUTH_TEXT_SIGNALS = (
     "waiting for oauth",
     "login --with-api-key",
 )
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -201,12 +205,16 @@ def run_subprocess_with_live_stderr(
     tracker: AuthPromptTracker,
     popen_factory,
     startup_lock: contextlib.AbstractContextManager | None = None,
+    start_new_session: bool = False,
+    cleanup_process_group: bool = False,
 ) -> CapturedProcessResult:
     """Run a subprocess while inspecting stderr for auth prompts live."""
 
     start = time.monotonic()
     lock_context = startup_lock or contextlib.nullcontext()
     with lock_context as startup_lock_handle:
+        process: subprocess.Popen[str] | None = None
+        child_pgid: int | None = None
         process = popen_factory(
             args,
             stdout=subprocess.PIPE,
@@ -214,7 +222,9 @@ def run_subprocess_with_live_stderr(
             text=True,
             cwd=cwd,
             env=env,
+            start_new_session=start_new_session,
         )
+        child_pgid = process.pid if cleanup_process_group else None
 
         parts: dict[str, list[str]] = {"stdout": [], "stderr": []}
         stream_done = {"stdout": False, "stderr": False}
@@ -248,7 +258,7 @@ def run_subprocess_with_live_stderr(
             while True:
                 now = time.monotonic()
                 if timeout is not None and now - start > timeout:
-                    _terminate_process(process)
+                    _terminate_process(process, child_pgid=child_pgid)
                     stdout_thread.join(timeout=1)
                     stderr_thread.join(timeout=1)
                     _drain_stream_queue(stream_q, parts, tracker)
@@ -265,7 +275,7 @@ def run_subprocess_with_live_stderr(
                     and stream_q.empty()
                     and now - start > first_output_timeout_sec
                 ):
-                    _terminate_process(process)
+                    _terminate_process(process, child_pgid=child_pgid)
                     stdout_thread.join(timeout=1)
                     stderr_thread.join(timeout=1)
                     _drain_stream_queue(stream_q, parts, tracker)
@@ -295,7 +305,7 @@ def run_subprocess_with_live_stderr(
                     and stream_q.empty()
                     and now - last_output > max_stall_sec
                 ):
-                    _terminate_process(process)
+                    _terminate_process(process, child_pgid=child_pgid)
                     stdout_thread.join(timeout=1)
                     stderr_thread.join(timeout=1)
                     _drain_stream_queue(stream_q, parts, tracker)
@@ -352,7 +362,7 @@ def run_subprocess_with_live_stderr(
                     source="stderr",
                 )
                 if signal is not None:
-                    _terminate_process(process)
+                    _terminate_process(process, child_pgid=child_pgid)
                     stdout_thread.join(timeout=1)
                     stderr_thread.join(timeout=1)
                     _drain_stream_queue(stream_q, parts, tracker)
@@ -381,6 +391,9 @@ def run_subprocess_with_live_stderr(
                 duration_ms=int((time.monotonic() - start) * 1000),
             )
         finally:
+            if process is not None:
+                # Invariant: child claude processes do not outlive their conductor exec wrapper.
+                _terminate_process(process, child_pgid=child_pgid)
             release_startup_lock(startup_lock_handle)
 
 
@@ -401,7 +414,18 @@ def _drain_stream_queue(
             tracker.observe_text(item, source="stderr")
 
 
-def _terminate_process(process: subprocess.Popen[str]) -> None:
+def _terminate_process(
+    process: subprocess.Popen[str],
+    *,
+    child_pgid: int | None = None,
+) -> None:
+    if child_pgid is not None:
+        _terminate_process_group(process, child_pgid)
+        return
+    _terminate_direct_process(process)
+
+
+def _terminate_direct_process(process: subprocess.Popen[str]) -> None:
     if process.poll() is not None:
         return
     process.terminate()
@@ -411,3 +435,48 @@ def _terminate_process(process: subprocess.Popen[str]) -> None:
         if process.poll() is None:
             process.kill()
             process.wait()
+
+
+def _terminate_process_group(process: subprocess.Popen[str], child_pgid: int) -> None:
+    try:
+        os.killpg(child_pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        _LOG.debug("process group already gone during cleanup: pgid=%s", child_pgid)
+        _terminate_direct_process(process)
+        return
+    except OSError:
+        _LOG.exception("failed to terminate process group: pgid=%s", child_pgid)
+    if process.poll() is None:
+        process.terminate()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if not _process_group_exists(child_pgid):
+            return
+        if process.poll() is None:
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=min(0.1, max(0.0, deadline - time.monotonic())))
+        else:
+            time.sleep(0.05)
+    try:
+        os.killpg(child_pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        _LOG.debug("process group already gone during kill: pgid=%s", child_pgid)
+        return
+    except OSError:
+        _LOG.exception("failed to kill process group: pgid=%s", child_pgid)
+        return
+    if process.poll() is None:
+        process.kill()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=1)
+
+
+def _process_group_exists(child_pgid: int) -> bool:
+    try:
+        os.killpg(child_pgid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        _LOG.exception("failed to probe process group: pgid=%s", child_pgid)
+        return False
+    return True
