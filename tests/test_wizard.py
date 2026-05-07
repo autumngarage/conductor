@@ -644,6 +644,64 @@ def test_init_remaining_refreshes_all_repo_wiring(mocker):
     assert aw.read_managed_version(cursor) == expected
 
 
+def test_init_quiet_suppresses_informational_output(mocker):
+    _stub_all_providers_unconfigured(mocker)
+
+    result = CliRunner().invoke(main, ["init", "--quiet"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output == ""
+    assert result.stderr == ""
+
+
+def test_init_quiet_keeps_wiring_errors_on_stderr(mocker, tmp_path):
+    _stub_all_providers_unconfigured(mocker)
+    (tmp_path / ".claude").mkdir()
+    mocker.patch(
+        "conductor.agent_wiring.wire_claude_code",
+        side_effect=RuntimeError("disk on fire"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["init", "--quiet", "--wire-agents", "yes", "--patch-claude-md", "yes"],
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "Summary" not in result.output
+    assert "Next steps:" not in result.output
+    assert "wiring failed" in result.stderr.lower()
+    assert "disk on fire" in result.stderr
+
+
+def test_init_yes_quiet_remaining_refreshes_without_chatter(mocker):
+    import conductor
+    import conductor.providers as providers_pkg
+    from conductor import agent_wiring as aw
+
+    for class_name in _ALL_PROVIDER_CLASSES:
+        cls = getattr(providers_pkg, class_name)
+        mocker.patch.object(cls, "configured", lambda self: (True, None))
+
+    old_version = "0.8.2"
+    aw.wire_agents_md(version=old_version)
+    aw.wire_gemini_md(version=old_version)
+    aw.wire_claude_md_repo(version=old_version)
+    cursor = aw.wire_cursor(version=old_version).path
+
+    result = CliRunner().invoke(main, ["init", "-y", "--quiet", "--remaining"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output == ""
+    assert result.stderr == ""
+    expected = aw._canonical_wiring_version(conductor.__version__)
+    versions_by_kind = {artifact.kind: artifact.version for artifact in aw.detect().managed}
+    assert versions_by_kind["agents-md-import"] == expected
+    assert versions_by_kind["gemini-md-import"] == expected
+    assert versions_by_kind["claude-md-repo-import"] == expected
+    assert aw.read_managed_version(cursor) == expected
+
+
 def test_init_only_unknown_provider_errors():
     result = CliRunner().invoke(main, ["init", "--only", "nonexistent"])
     assert result.exit_code == 2
