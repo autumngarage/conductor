@@ -782,6 +782,8 @@ class ClaudeProvider:
                         session_log=session_log,
                         snapshot_provider=_claude_startup_lock_snapshot,
                     ),
+                    start_new_session=True,
+                    cleanup_process_group=True,
                 )
             except ProviderStartupStalledError as e:
                 probe = probe_claude_state()

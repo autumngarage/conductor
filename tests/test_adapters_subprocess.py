@@ -10,6 +10,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -74,6 +75,34 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
     )
+
+
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _read_pid_file(path: Path) -> int:
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if path.exists():
+            return int(path.read_text(encoding="utf-8"))
+        time.sleep(0.02)
+    raise AssertionError(f"pid file was not written: {path}")
+
+
+def _wait_for_pid_gone(pid: int, *, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _pid_exists(pid):
+            return True
+        time.sleep(0.02)
+    return not _pid_exists(pid)
 
 
 def _repo_with_linked_worktree(tmp_path: Path) -> tuple[Path, Path]:
@@ -693,6 +722,51 @@ def test_claude_exec_retry_on_stall_can_succeed_after_respawn(
     assert response.text == "hello from claude"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX-only")
+def test_claude_exec_startup_stall_terminates_child_process_group(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    child_pid_file = tmp_path / "claude-child.pid"
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import os",
+                "import pathlib",
+                "import subprocess",
+                "import sys",
+                "import time",
+                "pidfile = pathlib.Path(os.environ['CONDUCTOR_TEST_CHILD_PID'])",
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])",
+                "pidfile.write_text(str(child.pid), encoding='utf-8')",
+                "time.sleep(60)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+    monkeypatch.setenv("CONDUCTOR_TEST_CHILD_PID", str(child_pid_file))
+
+    child_pid: int | None = None
+    try:
+        with pytest.raises(ProviderStartupStalledError):
+            ClaudeProvider(
+                cli_command=str(fake_claude),
+                exec_first_output_timeout_sec=1,
+            ).exec("hi", timeout_sec=5, max_stall_sec=30)
+
+        child_pid = _read_pid_file(child_pid_file)
+        assert _wait_for_pid_gone(child_pid, timeout=2)
+    finally:
+        if child_pid is None and child_pid_file.exists():
+            child_pid = _read_pid_file(child_pid_file)
+        if child_pid is not None and _pid_exists(child_pid):
+            os.kill(child_pid, signal.SIGKILL)
+
+
 def test_cli_exec_retry_on_stall_wires_to_claude_provider(
     mocker,
     monkeypatch,
@@ -1134,6 +1208,8 @@ class _FakeScheduledPipe:
 
 
 class _FakePopen:
+    _next_pid = 500000
+
     def __init__(
         self,
         *,
@@ -1148,6 +1224,8 @@ class _FakePopen:
         self.args: list[str] | None = None
         self.cwd: str | Path | None = None
         self.env: dict[str, str] | None = None
+        self.pid = _FakePopen._next_pid
+        _FakePopen._next_pid += 1
         self.returncode: int | None = None
         self.terminated = False
         self.killed = False
