@@ -6198,11 +6198,20 @@ def doctor(as_json: bool) -> None:
                 display = path
             version_note = f" (v{entry['version']})" if entry["version"] else ""
             click.echo(f"    {display}{version_note}")
-        click.echo("  Refresh with:")
+        click.echo("  Auto refresh paths:")
+        click.echo(
+            "    brew upgrade conductor       # CLAUDE.md @-import self-heals on upgrade"
+        )
+        click.echo(
+            "    conductor init --hooks       # refresh embed-only files on commit"
+        )
+        click.echo("  Immediate manual fallback:")
         click.echo("    conductor init -y --remaining")
         click.echo(
-            "  Install the auto-refresh hook with `conductor init --hooks` "
-            "to make refreshes happen on commit."
+            "    conductor refresh-consumers  # force-refresh configured consumer repos"
+        )
+        click.echo(
+            "  Prefer the auto paths unless an immediate cross-repo refresh is needed."
         )
 
     git_state = payload["git_state"]
@@ -6668,7 +6677,16 @@ def refresh_consumers(
     config_file: Path | None,
     branch_name: str | None,
 ) -> None:
-    """Refresh Conductor integration blocks in explicitly configured repos."""
+    """Refresh Conductor integration blocks in explicitly configured repos.
+
+    Manual force-refresh backstop. After `brew upgrade conductor`, drift should
+    self-heal via the CLAUDE.md @-import path and, for embed-only files
+    (Cursor .mdc, AGENTS.md, GEMINI.md), the opt-in pre-commit refresh hook
+    installed by `conductor init --hooks`.
+
+    Use `refresh-consumers` only when you need an immediate cross-repo refresh
+    without waiting for the next commit in each repo.
+    """
     try:
         consumer_paths = _resolve_consumer_repo_paths(paths, config_file)
     except ValueError as e:
