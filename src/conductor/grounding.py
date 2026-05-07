@@ -16,10 +16,11 @@ Patterns recognised (pragmatic, not exhaustive):
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
-import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 
 # --------------------------------------------------------------------------- #
 # Data types
@@ -38,7 +39,7 @@ _FUNC_CALL_PATH = re.compile(
 
 @dataclass(frozen=True)
 class Citation:
-    symbol: str
+    symbol: str | None
     path: str | None
     line: int | None
     raw: str
@@ -66,24 +67,38 @@ def parse_citations(text: str) -> list[Citation]:
 
     Returns deduplicated citations ordered by first appearance.
     """
-    seen: set[tuple[str, str | None]] = set()
+    seen: set[tuple[str | None, str | None, int | None]] = set()
     results: list[Citation] = []
+    occupied_spans: list[tuple[int, int]] = []
 
-    def _add(symbol: str, path: str | None, line_s: str | None, raw: str) -> None:
+    def _add(
+        symbol: str | None,
+        path: str | None,
+        line_s: str | None,
+        raw: str,
+    ) -> None:
         line = int(line_s) if line_s else None
-        key = (symbol, path)
+        key = (symbol, path, line)
         if key not in seen:
             seen.add(key)
             results.append(Citation(symbol=symbol, path=path, line=line, raw=raw))
 
+    symbol_matches: list[tuple[int, str | None, str | None, str | None, str]] = []
     for m in _BACKTICK_SYMBOL_PATH.finditer(text):
-        _add(m.group(1), m.group(2), m.group(3), m.group(0))
-
-    for m in _BARE_PATH_LINE.finditer(text):
-        _add(m.group(1), m.group(1), m.group(2), m.group(0))
-
+        symbol_matches.append((m.start(), m.group(1), m.group(2), m.group(3), m.group(0)))
+        occupied_spans.append(m.span())
     for m in _FUNC_CALL_PATH.finditer(text):
-        _add(m.group(1), m.group(2), m.group(3), m.group(0))
+        symbol_matches.append((m.start(), m.group(1), m.group(2), m.group(3), m.group(0)))
+        occupied_spans.append(m.span())
+
+    matches = symbol_matches
+    for m in _BARE_PATH_LINE.finditer(text):
+        if any(start <= m.start() and m.end() <= end for start, end in occupied_spans):
+            continue
+        matches.append((m.start(), None, m.group(1), m.group(2), m.group(0)))
+
+    for _, symbol, path, line_s, raw in sorted(matches, key=lambda item: item[0]):
+        _add(symbol, path, line_s, raw)
 
     return results
 
@@ -93,55 +108,80 @@ def parse_citations(text: str) -> list[Citation]:
 # --------------------------------------------------------------------------- #
 
 
-def _grep_symbol(symbol: str, worktree: str) -> bool:
-    """Return True if symbol appears anywhere under worktree."""
+def _grep_symbol(symbol: str, path: Path) -> bool:
+    """Return True if symbol appears under path."""
     try:
         result = subprocess.run(
-            ["grep", "-rF", "--quiet", symbol, worktree],
+            ["grep", "-rF", "--quiet", "--", symbol, str(path)],
             capture_output=True,
             timeout=10,
+            check=False,
         )
         return result.returncode == 0
     except (OSError, subprocess.TimeoutExpired) as e:
         raise RuntimeError(f"grep failed for symbol {symbol!r}: {e}") from e
 
 
-def _path_exists(path: str, worktree: str) -> bool:
-    """Return True if path exists relative to worktree (or as absolute)."""
-    import os
-
+def _resolve_path(path: str, worktree: Path) -> Path:
     if os.path.isabs(path):
-        return os.path.exists(path)
-    return os.path.exists(os.path.join(worktree, path))
+        return Path(path)
+    return worktree / path
+
+
+def _line_exists(path: Path, line: int) -> bool:
+    if line < 1:
+        return False
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as fh:
+            for index, _ in enumerate(fh, start=1):
+                if index == line:
+                    return True
+    except OSError as e:
+        raise RuntimeError(f"could not read {path}: {e}") from e
+    return False
 
 
 def ground_citations(
-    citations: list[Citation],
-    worktree: str,
+    text: str,
+    worktree: str | os.PathLike[str],
 ) -> GroundingReport:
-    """Verify each citation against the worktree.
+    """Verify citation candidates in text against the worktree.
 
-    For citations with a path: first check path existence, then grep symbol.
-    For symbol-only citations: grep the worktree.
-    Grep failures (OSError, timeout) are collected as errors, not misses.
+    Path citations resolve only when the file exists and any cited line is in
+    range. Symbol citations with a path must resolve inside that path; symbol
+    citations without a path search the whole worktree. Grep/read failures are
+    collected as errors, not misses, so the caller can warn without changing the
+    dispatch exit code.
     """
     report = GroundingReport()
+    worktree_path = Path(worktree)
+    citations = parse_citations(text)
     for cit in citations:
         try:
-            if cit.path and not _path_exists(cit.path, worktree):
-                report.misses.append(
-                    GroundingMiss(
-                        citation=cit,
-                        reason=f"path not found: {cit.path}",
+            search_path = worktree_path
+            if cit.path:
+                search_path = _resolve_path(cit.path, worktree_path)
+                if not search_path.exists():
+                    report.misses.append(
+                        GroundingMiss(citation=cit, reason="file does not exist")
                     )
-                )
+                    continue
+                if cit.line is not None and not _line_exists(search_path, cit.line):
+                    report.misses.append(
+                        GroundingMiss(
+                            citation=cit,
+                            reason=f"line {cit.line} does not exist in {cit.path}",
+                        )
+                    )
+                    continue
+            if cit.symbol is None:
                 continue
-            found = _grep_symbol(cit.symbol, worktree)
-            if not found:
+            if not _grep_symbol(cit.symbol, search_path):
+                location = f" in {cit.path}" if cit.path else ""
                 report.misses.append(
                     GroundingMiss(
                         citation=cit,
-                        reason=f"symbol not found in worktree: {cit.symbol!r}",
+                        reason=f"symbol not found{location}",
                     )
                 )
         except RuntimeError as e:
@@ -154,22 +194,32 @@ def ground_citations(
 # --------------------------------------------------------------------------- #
 
 
-def report_grounding(report: GroundingReport) -> list[str]:
-    """Emit grounding warnings to stderr and return them for JSON injection.
+def _display_citation(citation: Citation) -> str:
+    if citation.symbol and citation.path:
+        symbol = citation.raw.split(" in ", 1)[0]
+        return f"`{symbol.strip('`')}` in {citation.path}"
+    if citation.path:
+        return citation.path
+    return f"`{citation.symbol}`"
 
-    Always writes to stderr. Caller injects the returned list into the JSON
-    payload when ``--json`` is active.
-    """
-    warnings: list[str] = []
 
-    for miss in report.misses:
-        msg = f"[grounding] unverified citation: {miss.citation.raw!r} — {miss.reason}"
-        warnings.append(msg)
-        print(f"conductor: WARNING {msg}", file=sys.stderr)
-
+def format_grounding_warning(report: GroundingReport) -> str | None:
+    """Return a structured warning block for grounding misses/errors."""
+    lines: list[str] = []
+    if report.misses:
+        lines.append(f"[conductor] grounding misses: {len(report.misses)}")
+        for miss in report.misses:
+            citation = _display_citation(miss.citation)
+            line_suffix = (
+                f":{miss.citation.line}"
+                if miss.citation.line is not None and miss.citation.path
+                else ""
+            )
+            if miss.citation.path:
+                citation = f"{citation}{line_suffix}"
+            lines.append(f"  - {citation} — {miss.reason}")
     for err in report.errors:
-        msg = f"[grounding] error: {err}"
-        warnings.append(msg)
-        print(f"conductor: WARNING {msg}", file=sys.stderr)
-
-    return warnings
+        if not lines:
+            lines.append(f"[conductor] grounding errors: {len(report.errors)}")
+        lines.append(f"  - grounding check error — {err}")
+    return "\n".join(lines) if lines else None

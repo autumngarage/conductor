@@ -2951,6 +2951,18 @@ def _emit_session_usage(
     )
 
 
+def _emit_grounding_warnings(text: str, worktree: str) -> None:
+    try:
+        from conductor.grounding import format_grounding_warning, ground_citations
+
+        report = ground_citations(text, worktree)
+        warning = format_grounding_warning(report)
+        if warning:
+            click.echo(warning, err=True)
+    except Exception as e:  # noqa: BLE001 - guardrail must not change exec outcome.
+        click.echo(f"[conductor] grounding check error: {e}", err=True)
+
+
 def _tail_record(record: SessionRecord) -> None:
     offset = 0
     current_path = record.log_path
@@ -4483,6 +4495,12 @@ def review(
         "brief is intentionally tiny or all context is supplied through files."
     ),
 )
+@click.option(
+    "--ground-citations",
+    is_flag=True,
+    default=False,
+    help="Warn when post-dispatch citation references do not resolve in the worktree.",
+)
 def exec_cmd(
     provider_id: str | None,
     profile: str | None,
@@ -4513,6 +4531,7 @@ def exec_cmd(
     offline: bool | None,
     preflight: bool,
     allow_short_brief: bool,
+    ground_citations: bool,
 ) -> None:
     """Run a task as an agent session with tool access (exec mode)."""
     timeout_is_default = _parameter_is_default("timeout_sec")
@@ -4909,6 +4928,8 @@ def exec_cmd(
         decision=decision,
         session_log=session_log,
     )
+    if ground_citations:
+        _emit_grounding_warnings(response.text, cwd or os.getcwd())
     _emit_call(
         response,
         as_json=as_json,
