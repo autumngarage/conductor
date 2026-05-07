@@ -730,6 +730,7 @@ def test_doctor_warns_before_next_steps_when_one_integration_file_is_behind(
     assert "⚠ Repo integration files behind binary (v0.9.0):" in result.output
     assert "    AGENTS.md (v0.8.9)" in result.output
     assert "    conductor init -y --remaining" in result.output
+    assert "conductor init --hooks" in result.output
     assert (
         result.output.index("Repo integration files behind binary")
         < result.output.index("Next steps:")
