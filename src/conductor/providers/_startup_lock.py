@@ -73,7 +73,9 @@ class StartupLockHandle:
 
 
 def _lock_dir() -> Path:
-    return Path.home() / ".cache" / "conductor" / "locks"
+    cache_home = os.environ.get("XDG_CACHE_HOME")
+    root = Path(cache_home) if cache_home else Path.home() / ".cache"
+    return root / "conductor" / "locks"
 
 
 def _format_seconds(value: float) -> str:
@@ -268,7 +270,8 @@ def claude_startup_lock(
 ) -> contextlib.AbstractContextManager[StartupLockHandle]:
     """Serialize Claude CLI startups across all conductor processes for this user.
 
-    File: ~/.cache/conductor/locks/claude-startup.lock
+    File: $XDG_CACHE_HOME/conductor/locks/claude-startup.lock, or
+    ~/.cache/conductor/locks/claude-startup.lock when XDG_CACHE_HOME is unset.
     Held only during the startup window (release as soon as first output arrives
     or initial probe completes). Mid-task / long-running phases are NOT held.
     """

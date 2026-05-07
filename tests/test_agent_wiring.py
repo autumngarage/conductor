@@ -23,6 +23,13 @@ def _assert_no_trailing_whitespace(path):
     assert bad_lines == []
 
 
+def _sentinel_body(text: str) -> str:
+    lines = text.splitlines()
+    begin = next(idx for idx, line in enumerate(lines) if line.startswith("<!-- conductor:begin "))
+    end = lines.index("<!-- conductor:end -->", begin + 1)
+    return "\n".join(lines[begin + 1:end])
+
+
 @pytest.fixture(autouse=True)
 def _isolated_homes(tmp_path, monkeypatch):
     """Point every path helper at tmp_path; chdir so repo-scoped checks
@@ -272,7 +279,7 @@ def test_wire_claude_code_writes_all_artifacts():
     assert claude_md.exists()
     text = claude_md.read_text(encoding="utf-8")
     assert "conductor:begin v0.3.2" in text
-    assert "@" in text and "delegation-guidance.md" in text
+    assert _sentinel_body(text) == f"@{aw.conductor_home()}/delegation-guidance.md"
 
 
 def test_wire_claude_code_patch_false_leaves_claude_md_alone():
@@ -665,13 +672,7 @@ def test_wire_gemini_md_preserves_user_content():
     assert "conductor:begin" in text
 
 
-def test_wire_claude_md_repo_injects_inline_block():
-    """Repo-scope CLAUDE.md gets the INLINE block (not an @-import).
-
-    Repo CLAUDE.md is typically tracked in git; baking an
-    ``@/Users/<name>/.conductor/...`` absolute path into it would break on
-    every other contributor's checkout. So it must be self-contained.
-    """
+def test_wire_claude_md_repo_injects_import_line():
     from pathlib import Path
 
     report = aw.wire_claude_md_repo(version="0.4.2")
@@ -679,11 +680,30 @@ def test_wire_claude_md_repo_injects_inline_block():
     assert report.path == path
     text = path.read_text(encoding="utf-8")
     assert "conductor:begin v0.4.2" in text
-    assert "Conductor delegation" in text
-    # Must NOT contain an absolute-path @-import — that would be
-    # machine-local and break for other contributors on git pull.
-    home_prefix = str(aw.conductor_home())
-    assert f"@{home_prefix}" not in text
+    assert _sentinel_body(text) == "@~/.conductor/delegation-guidance.md"
+
+
+def test_wire_claude_md_repo_replaces_embedded_block_preserving_user_content():
+    from conductor import _agent_templates as templates
+
+    path = Path.cwd() / "CLAUDE.md"
+    path.write_text(
+        "# My Claude rules\n\n"
+        "<!-- conductor:begin v0.4.1 -->\n"
+        f"{templates.AGENTS_MD_BLOCK}\n"
+        "<!-- conductor:end -->\n\n"
+        "Keep this local rule.\n",
+        encoding="utf-8",
+    )
+
+    aw.wire_claude_md_repo(version="0.4.2")
+
+    text = path.read_text(encoding="utf-8")
+    assert "# My Claude rules" in text
+    assert "Keep this local rule." in text
+    assert "conductor:begin v0.4.2" in text
+    assert _sentinel_body(text) == "@~/.conductor/delegation-guidance.md"
+    assert "Conductor delegation" not in _sentinel_body(text)
 
 
 def test_wire_claude_md_repo_vs_user_scope_independent(tmp_path):
@@ -696,6 +716,9 @@ def test_wire_claude_md_repo_vs_user_scope_independent(tmp_path):
     repo_path = tmp_path / "repo" / "CLAUDE.md"
     assert user_path.exists() and "conductor:begin" in user_path.read_text(encoding="utf-8")
     assert repo_path.exists() and "conductor:begin" in repo_path.read_text(encoding="utf-8")
+    assert _sentinel_body(repo_path.read_text(encoding="utf-8")) == (
+        "@~/.conductor/delegation-guidance.md"
+    )
 
 
 def test_wire_cursor_writes_managed_rule_file():

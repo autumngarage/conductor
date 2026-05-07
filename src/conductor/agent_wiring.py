@@ -764,25 +764,18 @@ def wire_gemini_md(cwd: Path | None = None, *, version: str) -> AgentsMdReport:
 
 
 def wire_claude_md_repo(cwd: Path | None = None, *, version: str) -> AgentsMdReport:
-    """Inject an inline delegation block into repo-scope ``./CLAUDE.md``.
+    """Inject conductor's delegation @-import into repo-scope ``./CLAUDE.md``.
 
-    Uses inlined content (identical body to AGENTS.md / GEMINI.md), NOT the
-    ``@`` import used by ``wire_claude_code(patch_claude_md=True)`` for
-    user-scope ``~/.claude/CLAUDE.md``.
-
-    Why: repo-scope CLAUDE.md is typically tracked in git. An ``@``-import
-    pointing at ``/Users/<name>/.conductor/…`` would travel into every other
-    contributor's checkout and fail to resolve on their machine. Inline
-    content is self-contained markdown that works regardless of where
-    ``~/.conductor/`` lives on any given machine — the loss is that repos
-    don't auto-pick-up upstream guidance changes the way user-scope does,
-    but that's the correct trade for shared files.
+    The block content is a single ``@~/.conductor/delegation-guidance.md``
+    import line. Claude Code expands ``~`` per-user, so the same checked-in
+    block resolves correctly on every contributor's machine. Drift goes to
+    zero: ``brew upgrade conductor`` updates the user-scope target, and
+    every repo's import re-resolves to the new content automatically.
     """
-    from conductor import _agent_templates as templates
-
     cwd = cwd or Path.cwd()
     path = cwd / "CLAUDE.md"
-    inject_sentinel_block(path, templates.AGENTS_MD_BLOCK, version=version)
+    import_line = "@~/.conductor/delegation-guidance.md"
+    inject_sentinel_block(path, import_line, version=version)
     return AgentsMdReport(path=path, patched=True)
 
 

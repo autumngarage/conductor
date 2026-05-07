@@ -1004,10 +1004,7 @@ def test_init_patch_gemini_md_yes_creates_block(mocker, tmp_path):
     assert "Conductor delegation" in text
 
 
-def test_init_patch_claude_md_repo_yes_creates_inline_block(mocker, tmp_path):
-    """Repo-scope CLAUDE.md wire uses inline content, not an @-import to
-    a user's local ~/.conductor/ path (would break on other machines when
-    the file is committed to git)."""
+def test_init_patch_claude_md_repo_yes_creates_import_block(mocker, tmp_path):
     _stub_all_providers_unconfigured(mocker)
     result = CliRunner().invoke(
         main,
@@ -1018,9 +1015,8 @@ def test_init_patch_claude_md_repo_yes_creates_inline_block(mocker, tmp_path):
     assert repo_claude.exists()
     text = repo_claude.read_text(encoding="utf-8")
     assert "conductor:begin" in text
-    assert "Conductor delegation" in text
-    # No absolute-path @-import that would be machine-local.
-    assert f"@{tmp_path}" not in text
+    assert "@~/.conductor/delegation-guidance.md" in text
+    assert "Conductor delegation" not in text
 
 
 def test_init_wire_cursor_yes_writes_rule(mocker, tmp_path):
