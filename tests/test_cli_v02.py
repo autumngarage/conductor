@@ -1518,6 +1518,161 @@ def test_exec_without_sandbox_does_not_warn(mocker):
     assert SANDBOX_DEPRECATION_WARNING not in result.stderr
 
 
+def test_exec_auto_cheapest_code_review_online_excludes_ollama_primary(mocker):
+    _stub_all_configured(mocker, {"openrouter", "ollama"})
+    mocker.patch(
+        "conductor.cli.get_network_profile",
+        return_value=NetworkProfile(50, "https://1.1.1.1", 1_000),
+    )
+    openrouter_exec = mocker.patch.object(
+        OpenRouterProvider,
+        "exec",
+        return_value=_fake_response("openrouter", "openrouter/auto"),
+    )
+    ollama_exec = mocker.patch.object(
+        OllamaProvider,
+        "exec",
+        return_value=_fake_response("ollama", "llama3.2"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec", "--auto", "--prefer", "cheapest",
+            "--tags", "code-review",
+            "--tools", "Read,Grep,Glob,Bash",
+            "--no-preflight",
+            "--task", "review the diff",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert openrouter_exec.called
+    assert not ollama_exec.called
+    assert "excluding ollama from fallback chain" in result.stderr
+    assert "online; ollama is offline-only" in result.stderr
+    assert "→ openrouter" in result.stderr
+
+
+def test_exec_auto_cheapest_code_review_offline_keeps_ollama(mocker):
+    _stub_all_configured(mocker, {"openrouter", "ollama"})
+    ollama_exec = mocker.patch.object(
+        OllamaProvider,
+        "exec",
+        return_value=_fake_response("ollama", "llama3.2"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec", "--auto", "--prefer", "cheapest",
+            "--tags", "code-review",
+            "--tools", "Read,Grep,Glob,Bash",
+            "--offline",
+            "--no-preflight",
+            "--task", "review the diff",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert ollama_exec.called
+    assert "excluding ollama from fallback chain" not in result.stderr
+    assert "→ ollama" in result.stderr
+
+
+def test_exec_auto_cheapest_network_probe_offline_keeps_ollama_primary(mocker):
+    _stub_all_configured(mocker, {"openrouter", "ollama"})
+    mocker.patch(
+        "conductor.cli.get_network_profile",
+        return_value=NetworkProfile(None, "https://1.1.1.1", 1_000),
+    )
+    openrouter_exec = mocker.patch.object(
+        OpenRouterProvider,
+        "exec",
+        return_value=_fake_response("openrouter", "openrouter/auto"),
+    )
+    ollama_exec = mocker.patch.object(
+        OllamaProvider,
+        "exec",
+        return_value=_fake_response("ollama", "llama3.2"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec", "--auto", "--prefer", "cheapest",
+            "--tags", "code-review",
+            "--tools", "Read,Grep,Glob,Bash",
+            "--no-preflight",
+            "--task", "review the diff",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert ollama_exec.called
+    assert not openrouter_exec.called
+    assert "including ollama as local fallback" in result.stderr
+    assert "network probe found no reachable target" in result.stderr
+    assert "excluding ollama from fallback chain" not in result.stderr
+    assert "→ ollama" in result.stderr
+
+
+def test_exec_auto_explicit_ollama_tag_keeps_ollama_primary(mocker):
+    _stub_all_configured(mocker, {"openrouter", "ollama"})
+    mocker.patch(
+        "conductor.cli.get_network_profile",
+        return_value=NetworkProfile(50, "https://1.1.1.1", 1_000),
+    )
+    ollama_exec = mocker.patch.object(
+        OllamaProvider,
+        "exec",
+        return_value=_fake_response("ollama", "llama3.2"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec", "--auto", "--prefer", "cheapest",
+            "--tags", "ollama",
+            "--tools", "Read,Grep,Glob,Bash",
+            "--no-preflight",
+            "--task", "review the diff",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert ollama_exec.called
+    assert "excluding ollama from fallback chain" not in result.stderr
+    assert "→ ollama" in result.stderr
+
+
+def test_exec_with_ollama_bypasses_auto_route_exclusions(mocker):
+    _stub_all_configured(mocker, {"ollama"})
+    mocker.patch(
+        "conductor.cli.get_network_profile",
+        return_value=NetworkProfile(50, "https://1.1.1.1", 1_000),
+    )
+    ollama_exec = mocker.patch.object(
+        OllamaProvider,
+        "exec",
+        return_value=_fake_response("ollama", "llama3.2"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec", "--with", "ollama",
+            "--tools", "Read,Grep,Glob,Bash",
+            "--no-preflight",
+            "--task", "review the diff",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert ollama_exec.called
+    assert "excluding ollama from fallback chain" not in result.stderr
+
+
 def test_exec_ground_citations_default_skips_guardrail(mocker):
     _stub_all_configured(mocker, {"codex"})
     mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))

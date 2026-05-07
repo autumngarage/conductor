@@ -79,6 +79,7 @@ from conductor.openrouter_stack_audit import (
 from conductor.profiles import ProfileError, ProfileSpec, get_profile, load_profiles
 from conductor.providers import (
     QUALITY_TIERS,
+    TIER_RANK,
     TOOL_NAMES,
     CallResponse,
     ClaudeProvider,
@@ -93,6 +94,7 @@ from conductor.providers import (
     UnsupportedCapability,
     get_provider,
     known_providers,
+    resolve_effort_tokens,
 )
 from conductor.providers.review_contract import (
     ReviewContextError,
@@ -1137,6 +1139,15 @@ def _first_online_candidate_provider(plan: SemanticPlan) -> str | None:
     return None
 
 
+def _first_online_ranked_candidate_provider(
+    candidates: tuple[RankedCandidate, ...],
+) -> str | None:
+    for candidate in candidates:
+        if candidate.name != "ollama":
+            return candidate.name
+    return None
+
+
 def _apply_ollama_offline_only_policy(
     plan: SemanticPlan,
     *,
@@ -1190,6 +1201,110 @@ def _apply_ollama_offline_only_policy(
             offline_requested=offline_requested,
             online_probe_reachable=online_probe_reachable,
         ),
+    )
+
+
+def _auto_route_plan_context(
+    decision: RouteDecision,
+    *,
+    user_tags: tuple[str, ...],
+    offline_requested: bool,
+) -> tuple[PlanContext, str | None]:
+    if not any(candidate.name == "ollama" for candidate in decision.ranked):
+        return (
+            PlanContext(
+                user_tags=user_tags,
+                offline_requested=offline_requested,
+                online_probe_reachable=None,
+            ),
+            None,
+        )
+    if offline_requested or offline_mode.is_active() or "ollama" in user_tags:
+        return (
+            PlanContext(
+                user_tags=user_tags,
+                offline_requested=offline_requested,
+                online_probe_reachable=False,
+            ),
+            None,
+        )
+
+    profile = get_network_profile(
+        _network_target_for_provider(
+            _first_online_ranked_candidate_provider(decision.ranked)
+        ),
+        warn=None,
+    )
+    if profile.rtt_ms is None:
+        return (
+            PlanContext(
+                user_tags=user_tags,
+                offline_requested=offline_requested,
+                online_probe_reachable=False,
+            ),
+            OLLAMA_PROBE_OFFLINE_INCLUSION_MESSAGE,
+        )
+    return (
+        PlanContext(
+            user_tags=user_tags,
+            offline_requested=offline_requested,
+            online_probe_reachable=True,
+        ),
+        None,
+    )
+
+
+def _apply_auto_route_exclusion_rules(
+    decision: RouteDecision,
+    *,
+    user_tags: tuple[str, ...],
+    offline_requested: bool,
+) -> tuple[RouteDecision, str | None]:
+    context, inclusion_message = _auto_route_plan_context(
+        decision,
+        user_tags=user_tags,
+        offline_requested=offline_requested,
+    )
+    messages: list[str] = []
+    retained: list[RankedCandidate] = []
+    skipped = list(decision.candidates_skipped)
+    for candidate in decision.ranked:
+        rule = _first_matching_exclusion_rule(
+            candidate,
+            context,
+            phase="planning",
+        )
+        if rule is None:
+            retained.append(candidate)
+            continue
+        message = _format_exclusion_message(rule, candidate, context)
+        if message not in messages:
+            messages.append(message)
+        skipped.append((candidate.name, f"excluded by {rule.name}"))
+
+    if len(retained) == len(decision.ranked):
+        return decision, inclusion_message
+    if not retained:
+        raise NoConfiguredProvider(
+            "no provider satisfies the routing request after planning exclusions. "
+            f"Skipped: {skipped}"
+        )
+
+    winner = retained[0]
+    return (
+        replace(
+            decision,
+            provider=winner.name,
+            thinking_budget=winner.estimated_thinking_tokens,
+            tier=winner.tier,
+            matched_tags=winner.matched_tags,
+            ranked=tuple(retained),
+            candidates_skipped=tuple(skipped),
+            estimated_input_tokens=winner.estimated_input_tokens,
+            estimated_output_tokens=winner.estimated_output_tokens,
+            estimated_thinking_tokens=winner.estimated_thinking_tokens,
+        ),
+        "\n".join(messages),
     )
 
 
@@ -1377,6 +1492,36 @@ def _maybe_switch_to_ollama(
     del candidates[cursor + 1 :]
     candidates.append(ollama_candidate)
     return True
+
+
+def _planning_excluded_ollama(decision: RouteDecision) -> bool:
+    return any(
+        name == "ollama" and reason.startswith("excluded by ollama-online-only")
+        for name, reason in decision.candidates_skipped
+    )
+
+
+def _ollama_recovery_candidate(decision: RouteDecision) -> RankedCandidate:
+    provider = get_provider("ollama")
+    thinking_tokens = resolve_effort_tokens(
+        decision.effort,
+        provider.effort_to_thinking,
+    )
+    matched_tags = tuple(sorted(set(decision.task_tags) & set(provider.tags)))
+    return RankedCandidate(
+        name="ollama",
+        tier=provider.quality_tier,
+        tier_rank=TIER_RANK.get(provider.quality_tier, 0),
+        matched_tags=matched_tags,
+        tag_score=len(matched_tags),
+        cost_score=0.0,
+        latency_ms=provider.typical_p50_ms,
+        health_penalty=0.0,
+        combined_score=float("-inf"),
+        estimated_input_tokens=decision.estimated_input_tokens,
+        estimated_output_tokens=decision.estimated_output_tokens,
+        estimated_thinking_tokens=thinking_tokens,
+    )
 
 
 def _invoke_with_fallback(
@@ -1634,6 +1779,8 @@ def _invoke_with_fallback(
             # spraying timeouts across every remote in the ranking.
             if category == "network" and not prompted_offline:
                 prompted_offline = True
+                if _planning_excluded_ollama(decision) and _ollama_index(candidates) is None:
+                    candidates.append(_ollama_recovery_candidate(decision))
                 decision_flag = _maybe_switch_to_ollama(
                     failed=candidate.name,
                     candidates=candidates,
@@ -3783,6 +3930,8 @@ def call(
     provider_id, auto = _apply_offline_flag(
         offline=offline, provider_id=provider_id, auto=auto
     )
+    if offline is True and provider_id == "ollama":
+        prefer = None
     if auto and provider_id:
         raise click.UsageError("--with and --auto are mutually exclusive.")
     if not auto and not provider_id:
@@ -3823,9 +3972,17 @@ def call(
                 attachments_required=bool(attachments),
                 estimated_input_tokens=estimated_input_tokens,
             )
+            decision, exclusion_message = _apply_auto_route_exclusion_rules(
+                decision,
+                user_tags=tuple(_parse_csv(tags)),
+                offline_requested=offline is True,
+            )
+            provider = get_provider(decision.provider)
         except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
+        if exclusion_message and not silent_route:
+            click.echo(exclusion_message, err=True)
         print_caller_banner(decision.provider, silent=silent_route or as_json)
         _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
         timeout_sec, max_stall_sec = _scale_dispatch_defaults(
@@ -4591,6 +4748,8 @@ def exec_cmd(
     provider_id, auto = _apply_offline_flag(
         offline=offline, provider_id=provider_id, auto=auto
     )
+    if offline is True and provider_id == "ollama":
+        prefer = None
     if auto and provider_id:
         raise click.UsageError("--with and --auto are mutually exclusive.")
     if not auto and not provider_id:
@@ -4643,9 +4802,17 @@ def exec_cmd(
                 attachments_required=bool(attachments),
                 estimated_input_tokens=estimated_input_tokens,
             )
+            decision, exclusion_message = _apply_auto_route_exclusion_rules(
+                decision,
+                user_tags=tuple(_parse_csv(tags)),
+                offline_requested=offline is True,
+            )
+            provider = get_provider(decision.provider)
         except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
+        if exclusion_message and not silent_route:
+            click.echo(exclusion_message, err=True)
         _ensure_permission_profile_supported(
             _provider_for_preflight(provider),
             provider_id=decision.provider,
@@ -5047,12 +5214,19 @@ def route(
             estimated_input_tokens=estimated_input_tokens,
             estimated_output_tokens=estimated_output_tokens,
         )
+        decision, exclusion_message = _apply_auto_route_exclusion_rules(
+            decision,
+            user_tags=tuple(_parse_csv(tags)),
+            offline_requested=False,
+        )
     except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
         if as_json:
             click.echo(json.dumps({"error": str(e)}, indent=2))
         else:
             click.echo(f"conductor: {e}", err=True)
         sys.exit(2)
+    if exclusion_message:
+        click.echo(exclusion_message, err=True)
 
     if as_json:
         click.echo(json.dumps(asdict(decision), default=str, indent=2))
