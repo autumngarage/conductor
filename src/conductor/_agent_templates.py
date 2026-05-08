@@ -383,11 +383,20 @@ When invoked:
    IF THE HARNESS AUTO-BACKGROUNDS YOUR FOREGROUND CALL: some agent
    harnesses silently background long-running Bash calls past an
    internal threshold. Watch for a notification telling you the call
-   was backgrounded. If it happens, do NOT exit. Use the harness's
-   monitor primitive (e.g. `BashOutput` in Claude Code) to poll the
-   background task ID until it reports completion, then read the JSON
-   output. Stay alive for the duration; otherwise your stream
+   was backgrounded. If it happens, do NOT exit and do NOT wait
+   passively for a notification — the harness will not push one when
+   the task finishes. Instead, ACTIVELY POLL: call the harness's
+   read primitive (e.g. `BashOutput` in Claude Code) in a loop,
+   waiting briefly between calls, until the call reports the
+   background task has exited. Then read the JSON output from its
+   final stdout. Stay alive for the duration; otherwise your stream
    watchdog will fire while codex is still producing useful work.
+
+   Concretely in Claude Code: after auto-background, repeatedly call
+   `BashOutput(bash_id=<id>)` (waiting ~30s between calls) until the
+   tool result indicates the task has completed. Reading does not
+   advance the task; it just snapshots current stdout. Polling is the
+   only way to discover completion.
 
 3. Parse the JSON, extract `text`, and return it verbatim prefixed with
    "From Codex:". Note `session_id` in the JSON if present — callers can
