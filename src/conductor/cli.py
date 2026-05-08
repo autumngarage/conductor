@@ -7018,7 +7018,7 @@ def refresh_consumers(
         click.echo("No consumer repos configured.")
         return
 
-    branch = branch_name or f"conductor-refresh-v{__version__.split('+', 1)[0]}"
+    branch = branch_name or f"chore/conductor-refresh-v{__version__.split('+', 1)[0]}"
     results = [_refresh_one_consumer_repo(path, branch=branch) for path in consumer_paths]
 
     failed = False
