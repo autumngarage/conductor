@@ -861,6 +861,185 @@ def test_exec_code_task_iteration_cap_raises_status(configured, tmp_path):
     assert "Reached --max-iterations cap (4)" in str(exc.value)
 
 
+def test_exec_iteration_cap_reports_missing_tests(configured, tmp_path):
+    _init_clean_git_repo(tmp_path)
+    responses = [
+        {
+            "model": "openai/gpt-5.5",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_write",
+                                "type": "function",
+                                "function": {
+                                    "name": "Write",
+                                    "arguments": json.dumps(
+                                        {"path": "app.py", "content": "value = 1\n"}
+                                    ),
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+        }
+    ]
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(
+            return_value=httpx.Response(200, json=responses[0])
+        )
+        with pytest.raises(ProviderExecutionError) as exc:
+            OpenRouterProvider().exec(
+                "Implement it.\n\n## Tests\nAdd tests.",
+                model="openai/gpt-5.5",
+                tools=frozenset({"Write"}),
+                task_tags=("code", "tool-use"),
+                sandbox="none",
+                cwd=str(tmp_path),
+                max_iterations=1,
+            )
+
+    status = exc.value.status
+    assert status["state"] == "iteration-cap"
+    assert status["missing_deliverables"] == [
+        {
+            "kind": "tests",
+            "message": "Tests requested in brief; diff did not add to tests/.",
+        }
+    ]
+    assert "Detected unfinished items" in str(exc.value)
+
+
+def test_exec_allow_completion_stretch_runs_one_extra_turn(configured, tmp_path):
+    _init_clean_git_repo(tmp_path)
+    requests: list[dict] = []
+    responses = [
+        {
+            "model": "openai/gpt-5.5",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_write",
+                                "type": "function",
+                                "function": {
+                                    "name": "Write",
+                                    "arguments": json.dumps(
+                                        {"path": "app.py", "content": "value = 1\n"}
+                                    ),
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+        },
+        {
+            "model": "openai/gpt-5.5",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "I cannot add tests in the remaining turn.",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 6},
+        },
+    ]
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=responses[len(requests) - 1])
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        response = OpenRouterProvider().exec(
+            "Implement it.\n\n## Tests\nAdd tests.",
+            model="openai/gpt-5.5",
+            tools=frozenset({"Write"}),
+            task_tags=("code", "tool-use"),
+            sandbox="none",
+            cwd=str(tmp_path),
+            max_iterations=1,
+            allow_completion_stretch=True,
+        )
+
+    assert len(requests) == 2
+    assert response.usage["completion_stretched"] is True
+    assert response.usage["hit_iteration_cap"] is False
+    assert requests[1]["messages"][-1] == {
+        "role": "user",
+        "content": (
+            "You're at the iteration cap. Detected unfinished: tests. "
+            "Spend this final turn finishing them or surfacing why you can't."
+        ),
+    }
+
+
+def test_exec_allow_completion_stretch_without_missing_keeps_cap(configured, tmp_path):
+    (tmp_path / "note.txt").write_text("still looping", encoding="utf-8")
+    requests: list[dict] = []
+    response_body = {
+        "model": "openai/gpt-5.5",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_read",
+                            "type": "function",
+                            "function": {
+                                "name": "Read",
+                                "arguments": json.dumps({"path": "note.txt"}),
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+    }
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=response_body)
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        with pytest.raises(ProviderExecutionError) as exc:
+            OpenRouterProvider().exec(
+                "Read note.txt.",
+                model="openai/gpt-5.5",
+                tools=frozenset({"Read"}),
+                sandbox="none",
+                cwd=str(tmp_path),
+                max_iterations=1,
+                allow_completion_stretch=True,
+            )
+
+    assert len(requests) == 1
+    status = exc.value.status
+    assert status["hit_iteration_cap"] is True
+    assert status["missing_deliverables"] == []
+
+
 def test_exec_with_tools_rejects_model_and_models_together(configured):
     with pytest.raises(UnsupportedCapability, match="both `model` and `models`"):
         OpenRouterProvider().exec(
