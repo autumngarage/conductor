@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 import shutil
 import signal
@@ -1880,6 +1881,30 @@ def test_codex_exec_ignores_conductor_sandbox_modes(mocker, conductor_sandbox):
     assert fake.args is not None
     assert "--sandbox" in fake.args
     assert fake.args[fake.args.index("--sandbox") + 1] == "danger-full-access"
+
+
+def test_codex_exec_resume_drops_unsupported_sandbox_flag(mocker, caplog):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    fake = _FakePopen(
+        stdout_schedule=[(0, line) for line in CODEX_NDJSON.splitlines(keepends=True)]
+    )
+    _patch_codex_popen(mocker, fake)
+    caplog.set_level(logging.DEBUG, logger="conductor.providers.codex")
+
+    CodexProvider().exec(
+        "hi",
+        sandbox="workspace-write",
+        resume_session_id="sess-resume-1",
+    )
+
+    assert fake.args is not None
+    assert fake.args[:5] == ["codex", "exec", "resume", "sess-resume-1", "-"]
+    assert "--sandbox" not in fake.args
+    assert "--json" in fake.args
+    assert "-o" in fake.args
+    assert (
+        "dropping unsupported codex exec resume option --sandbox" in caplog.text
+    )
 
 
 def test_codex_exec_worktree_cwd_allows_git_add_and_commit(mocker, tmp_path: Path):
