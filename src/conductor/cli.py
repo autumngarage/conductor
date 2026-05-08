@@ -28,7 +28,7 @@ import tomllib
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, NoReturn
 from urllib.parse import urlparse
 
 import click
@@ -4677,6 +4677,563 @@ def review(
     _emit_call(response, as_json=as_json, decision=decision)
 
 
+class _ExecPhaseError(Exception):
+    def __init__(self, *, exit_code: int, exit_status: str, message: str) -> None:
+        self.exit_code = exit_code
+        self.exit_status = exit_status
+        self.message = message
+        super().__init__(message)
+
+
+def _exec_phase_exit(
+    code: int,
+    *,
+    raise_on_error: bool,
+    status: str = "error",
+    message: str = "exec phase failed",
+) -> NoReturn:
+    if raise_on_error:
+        raise _ExecPhaseError(exit_code=code, exit_status=status, message=message)
+    sys.exit(code)
+
+
+def _exec_failure_status(error: Exception | str) -> str:
+    if isinstance(error, ProviderExecutionError):
+        if error.status.get("state") == "iteration-cap":
+            return "cap-exit"
+        return str(error.status.get("state") or "error")
+    if isinstance(error, ProviderStalledError):
+        return "stalled"
+    return _delegation_status_from_error(error)
+
+
+def _git_phase_head(cwd: str | None) -> str | None:
+    worktree = cwd or os.getcwd()
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as e:
+        click.echo(
+            f"[conductor] warning: could not capture phase git HEAD in {worktree}: {e}",
+            err=True,
+        )
+        return None
+    return result.stdout.strip()
+
+
+def _git_phase_output(cwd: str | None, args: list[str]) -> str | None:
+    worktree = cwd or os.getcwd()
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as e:
+        click.echo(
+            f"[conductor] warning: git {' '.join(args)} failed in {worktree}: {e}",
+            err=True,
+        )
+        return None
+    return result.stdout.strip()
+
+
+def _git_phase_commit_count(cwd: str | None, phase_start: str | None) -> int:
+    if phase_start is None:
+        return 0
+    output = _git_phase_output(cwd, ["rev-list", "--count", f"{phase_start}..HEAD"])
+    if output is None:
+        return 0
+    try:
+        return int(output)
+    except ValueError:
+        click.echo(
+            f"[conductor] warning: unexpected git rev-list count output: {output!r}",
+            err=True,
+        )
+        return 0
+
+
+def _git_phase_summary(cwd: str | None, phase_number: int, phase_start: str | None) -> str:
+    if phase_start is None:
+        return f"## Phase {phase_number} results\n\nGit summary unavailable."
+
+    files = _git_phase_output(cwd, ["diff", "--name-status", f"{phase_start}..HEAD"])
+    commits = _git_phase_output(cwd, ["log", "--oneline", f"{phase_start}..HEAD"])
+    files_text = files if files else "No file changes detected."
+    commits_text = commits if commits else "No new commits."
+    return (
+        f"## Phase {phase_number} results\n\n"
+        "Files changed:\n"
+        f"{files_text}\n\n"
+        "New commits:\n"
+        f"{commits_text}"
+    )
+
+
+def _append_previous_phase_results(body: str, summaries: list[str]) -> str:
+    if not summaries:
+        return body
+    return f"{body}\n\n" + "\n\n".join(summaries)
+
+
+def _run_exec_phase_dispatch(
+    *,
+    provider_id: str | None,
+    auto: bool,
+    tags: str | None,
+    prefer: str | None,
+    effort: str | None,
+    tools: str | None,
+    permission_profile: str | None,
+    sandbox: str | None,
+    exclude: str | None,
+    cwd: str | None,
+    timeout_sec: int | None,
+    max_stall_sec: int | None,
+    strict_stall: bool,
+    start_timeout_sec: float | None,
+    max_iterations: int | None,
+    allow_completion_stretch: bool,
+    retry_on_stall: int,
+    body: str,
+    attachments: tuple[Path, ...],
+    model: str | None,
+    log_file: str | None,
+    as_json: bool,
+    verbose_route: bool,
+    silent_route: bool,
+    resume_session_id: str | None,
+    offline: bool | None,
+    preflight: bool,
+    write_validation: bool,
+    timeout_is_default: bool,
+    max_stall_is_default: bool,
+    raise_on_error: bool,
+) -> tuple[CallResponse, RouteDecision | None, SessionLog | None]:
+    estimated_input_tokens = _estimate_text_tokens(body)
+    permission_profile_value = _validate_permission_profile(permission_profile)
+    tools_set = _resolve_exec_tools(
+        tools,
+        permission_profile=permission_profile_value,
+    )
+    sandbox_value = _validate_sandbox(sandbox, warn=sandbox is not None)
+    max_iterations_value = _resolve_exec_max_iterations(
+        max_iterations,
+        raw_effort=effort,
+    )
+    max_iterations_explicit = max_iterations is not None
+    effort_value = _parse_effort(effort)
+    start_timeout_sec = _normalize_start_timeout_sec(start_timeout_sec)
+    dispatch_started_at = time.monotonic()
+
+    decision: RouteDecision | None = None
+    session_log: SessionLog | None = None
+    if auto:
+        try:
+            provider, decision = pick(
+                _parse_csv(tags),
+                prefer=_validate_prefer(prefer),
+                effort=effort_value,
+                tools=tools_set,
+                sandbox=sandbox_value,
+                exclude=_permission_profile_excludes(
+                    exclude,
+                    permission_profile=permission_profile_value,
+                ),
+                shadow=True,
+                attachments_required=bool(attachments),
+                estimated_input_tokens=estimated_input_tokens,
+            )
+            decision, exclusion_message = _apply_auto_route_exclusion_rules(
+                decision,
+                user_tags=tuple(_parse_csv(tags)),
+                offline_requested=offline is True,
+            )
+            provider = get_provider(decision.provider)
+        except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
+            click.echo(f"conductor: {e}", err=True)
+            _exec_phase_exit(2, raise_on_error=raise_on_error, message=str(e))
+        if max_iterations_explicit and not _provider_supports_exec_max_iterations(
+            decision.provider
+        ):
+            raise click.UsageError(_exec_max_iterations_unsupported_message(decision.provider))
+        if exclusion_message and not silent_route:
+            click.echo(exclusion_message, err=True)
+        _ensure_permission_profile_supported(
+            _provider_for_preflight(provider),
+            provider_id=decision.provider,
+            permission_profile=permission_profile_value,
+            tools=tools_set,
+        )
+        session_log = _start_exec_session_log(
+            log_file=log_file,
+            resume_session_id=resume_session_id,
+        )
+        _emit_session_route_decision(session_log, decision)
+        print_caller_banner(decision.provider, silent=silent_route or as_json)
+        _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
+        if _provider_supports_exec_max_iterations(decision.provider) and not (
+            silent_route or as_json
+        ):
+            click.echo(
+                f"[conductor] agent loop iteration cap: {max_iterations_value}",
+                err=True,
+            )
+        timeout_sec, max_stall_sec = _scale_dispatch_defaults(
+            provider_id=decision.provider,
+            timeout_sec=timeout_sec,
+            max_stall_sec=max_stall_sec,
+            timeout_is_default=timeout_is_default,
+            max_stall_is_default=max_stall_is_default,
+        )
+        max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
+        if preflight:
+            # `provider` may arrive as a Provider object (real `pick()` return)
+            # or as a string (test fixtures, and any caller passing the name).
+            # Resolve once via the helper so downstream `.name` access is safe.
+            provider_obj = _provider_for_preflight(provider)
+            ok, reason = provider_obj.health_probe()
+            if not ok:
+                if session_log is not None:
+                    session_log.bind_provider(provider_obj.name)
+                    session_log.emit(
+                        "provider_failed",
+                        {"provider": provider_obj.name, "error": reason or "preflight failed"},
+                    )
+                    session_log.mark_finished()
+                _record_failed_delegation(
+                    "exec",
+                    provider_id=provider_obj.name,
+                    model=model,
+                    effort=effort_value,
+                    started_at=dispatch_started_at,
+                    error=reason or "preflight failed",
+                    decision=decision,
+                    session_log=session_log,
+                )
+                _echo_preflight_failure(provider_obj, reason)
+                _exec_phase_exit(
+                    2,
+                    raise_on_error=raise_on_error,
+                    message=reason or "preflight failed",
+                )
+
+        try:
+            response, _fallbacks = _invoke_with_fallback(
+                decision,
+                mode="exec",
+                task=body,
+                model=model,
+                effort=effort_value,
+                tools=tools_set,
+                sandbox=sandbox_value,
+                cwd=cwd,
+                timeout_sec=timeout_sec,
+                max_stall_sec=max_stall_sec,
+                start_timeout_sec=start_timeout_sec,
+                retry_on_stall=retry_on_stall,
+                silent=silent_route or as_json,
+                resume_session_id=resume_session_id,
+                session_log=session_log,
+                attachments=attachments,
+                max_iterations=max_iterations_value,
+                max_iterations_explicit=max_iterations_explicit,
+                allow_completion_stretch=allow_completion_stretch,
+                write_validation=write_validation,
+                strict_stall=strict_stall,
+            )
+        except UnsupportedCapability as e:
+            if session_log is not None:
+                session_log.emit("provider_failed", {"error": str(e)})
+                session_log.mark_finished()
+            _record_failed_delegation(
+                "exec",
+                provider_id=decision.provider,
+                model=model,
+                effort=effort_value,
+                started_at=dispatch_started_at,
+                error=e,
+                decision=decision,
+                session_log=session_log,
+            )
+            click.echo(f"conductor: {e}", err=True)
+            _exec_phase_exit(2, raise_on_error=raise_on_error, message=str(e))
+        except ProviderConfigError as e:
+            if session_log is not None:
+                session_log.emit("provider_failed", {"error": str(e)})
+                session_log.mark_finished()
+            _record_failed_delegation(
+                "exec",
+                provider_id=decision.provider,
+                model=model,
+                effort=effort_value,
+                started_at=dispatch_started_at,
+                error=e,
+                decision=decision,
+                session_log=session_log,
+            )
+            click.echo(f"conductor: {e}", err=True)
+            _exec_phase_exit(2, raise_on_error=raise_on_error, message=str(e))
+        except ProviderError as e:
+            if session_log is not None:
+                session_log.mark_finished()
+            _record_failed_delegation(
+                "exec",
+                provider_id=decision.provider,
+                model=model,
+                effort=effort_value,
+                started_at=dispatch_started_at,
+                error=e,
+                decision=decision,
+                session_log=session_log,
+            )
+            _emit_provider_error(e, as_json=as_json)
+            _maybe_echo_stall_recovery_hint(e, cwd=cwd)
+            _exec_phase_exit(
+                1,
+                raise_on_error=raise_on_error,
+                status=_exec_failure_status(e),
+                message=str(e),
+            )
+    else:
+        if prefer is not None and provider_id != "openrouter":
+            raise click.UsageError("--prefer is only meaningful with --auto.")
+        # Same narrowing as in `call()` — the early guard rejects the case
+        # where neither --auto nor --with was passed.
+        assert provider_id is not None
+        try:
+            provider = get_provider(provider_id)
+        except KeyError as e:
+            raise click.UsageError(str(e)) from e
+        if max_iterations_explicit and not _provider_supports_exec_max_iterations(provider_id):
+            raise click.UsageError(_exec_max_iterations_unsupported_message(provider_id))
+        _ensure_permission_profile_supported(
+            provider,
+            provider_id=provider_id,
+            permission_profile=permission_profile_value,
+            tools=tools_set,
+        )
+        try:
+            _ensure_supports_attachments(provider, attachments)
+        except UnsupportedCapability as e:
+            click.echo(f"conductor: {e}", err=True)
+            _exec_phase_exit(2, raise_on_error=raise_on_error, message=str(e))
+        session_log = _start_exec_session_log(
+            log_file=log_file,
+            resume_session_id=resume_session_id,
+        )
+        session_log.bind_provider(provider_id)
+        print_caller_banner(provider_id, silent=silent_route or as_json)
+        if _provider_supports_exec_max_iterations(provider_id) and not (silent_route or as_json):
+            click.echo(
+                f"[conductor] agent loop iteration cap: {max_iterations_value}",
+                err=True,
+            )
+        timeout_sec, max_stall_sec = _scale_dispatch_defaults(
+            provider_id=provider_id,
+            timeout_sec=timeout_sec,
+            max_stall_sec=max_stall_sec,
+            timeout_is_default=timeout_is_default,
+            max_stall_is_default=max_stall_is_default,
+        )
+        max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
+        if preflight:
+            ok, reason = _run_exec_preflight(provider)
+            if not ok:
+                session_log.emit(
+                    "provider_failed",
+                    {"provider": provider_id, "error": reason or "preflight failed"},
+                )
+                session_log.mark_finished()
+                _record_failed_delegation(
+                    "exec",
+                    provider_id=provider_id,
+                    model=model,
+                    effort=effort_value,
+                    started_at=dispatch_started_at,
+                    error=reason or "preflight failed",
+                    session_log=session_log,
+                )
+                _echo_preflight_failure(provider, reason)
+                _exec_phase_exit(
+                    2,
+                    raise_on_error=raise_on_error,
+                    message=reason or "preflight failed",
+                )
+        try:
+            session_log.emit(
+                "provider_started",
+                {
+                    "provider": provider_id,
+                    "mode": "exec",
+                    "model": model,
+                    "tools": sorted(tools_set),
+                    "sandbox": sandbox_value,
+                    "cwd": cwd,
+                    "resume_session_id": resume_session_id,
+                },
+            )
+            if isinstance(provider, OpenRouterProvider):
+                response = provider.exec(
+                    body,
+                    model=model,
+                    effort=effort_value,
+                    task_tags=_parse_csv(tags),
+                    prefer=_validate_prefer(prefer),
+                    log_selection=not (silent_route or as_json),
+                    tools=tools_set,
+                    sandbox=sandbox_value,
+                    cwd=cwd,
+                    timeout_sec=timeout_sec,
+                    max_stall_sec=max_stall_sec,
+                    resume_session_id=resume_session_id,
+                    session_log=session_log,
+                    max_iterations=max_iterations_value,
+                    allow_completion_stretch=allow_completion_stretch,
+                    write_validation=write_validation,
+                )
+            elif isinstance(provider, ClaudeProvider):
+                response = provider.exec(
+                    body,
+                    model=model,
+                    effort=effort_value,
+                    tools=tools_set,
+                    sandbox=sandbox_value,
+                    cwd=cwd,
+                    timeout_sec=timeout_sec,
+                    max_stall_sec=max_stall_sec,
+                    start_timeout_sec=start_timeout_sec,
+                    resume_session_id=resume_session_id,
+                    session_log=session_log,
+                    retry_on_stall=retry_on_stall,
+                )
+            elif isinstance(provider, CodexProvider):
+                response = provider.exec(
+                    body,
+                    model=model,
+                    effort=effort_value,
+                    tools=tools_set,
+                    sandbox=sandbox_value,
+                    cwd=cwd,
+                    timeout_sec=timeout_sec,
+                    max_stall_sec=max_stall_sec,
+                    resume_session_id=resume_session_id,
+                    session_log=session_log,
+                    attachments=attachments,
+                    strict_stall=strict_stall,
+                    max_iterations=max_iterations_value,
+                )
+            elif isinstance(provider, OllamaProvider):
+                response = provider.exec(
+                    body,
+                    model=model,
+                    effort=effort_value,
+                    tools=tools_set,
+                    sandbox=sandbox_value,
+                    cwd=cwd,
+                    timeout_sec=timeout_sec,
+                    max_stall_sec=max_stall_sec,
+                    resume_session_id=resume_session_id,
+                    session_log=session_log,
+                    max_iterations=max_iterations_value,
+                    allow_completion_stretch=allow_completion_stretch,
+                    write_validation=write_validation,
+                )
+            else:
+                response = provider.exec(
+                    body,
+                    model=model,
+                    effort=effort_value,
+                    tools=tools_set,
+                    sandbox=sandbox_value,
+                    cwd=cwd,
+                    timeout_sec=timeout_sec,
+                    max_stall_sec=max_stall_sec,
+                    resume_session_id=resume_session_id,
+                    session_log=session_log,
+                )
+        except UnsupportedCapability as e:
+            session_log.emit("provider_failed", {"provider": provider_id, "error": str(e)})
+            session_log.mark_finished()
+            _record_failed_delegation(
+                "exec",
+                provider_id=provider_id,
+                model=model,
+                effort=effort_value,
+                started_at=dispatch_started_at,
+                error=e,
+                session_log=session_log,
+            )
+            click.echo(f"conductor: {e}", err=True)
+            _exec_phase_exit(2, raise_on_error=raise_on_error, message=str(e))
+        except ProviderConfigError as e:
+            session_log.emit("provider_failed", {"provider": provider_id, "error": str(e)})
+            session_log.mark_finished()
+            _record_failed_delegation(
+                "exec",
+                provider_id=provider_id,
+                model=model,
+                effort=effort_value,
+                started_at=dispatch_started_at,
+                error=e,
+                session_log=session_log,
+            )
+            click.echo(f"conductor: {e}", err=True)
+            _exec_phase_exit(2, raise_on_error=raise_on_error, message=str(e))
+        except ProviderError as e:
+            session_log.emit("provider_failed", {"provider": provider_id, "error": str(e)})
+            session_log.mark_finished()
+            _record_failed_delegation(
+                "exec",
+                provider_id=provider_id,
+                model=model,
+                effort=effort_value,
+                started_at=dispatch_started_at,
+                error=e,
+                session_log=session_log,
+            )
+            _emit_provider_error(e, as_json=as_json)
+            _maybe_echo_stall_recovery_hint(e, cwd=cwd)
+            _maybe_echo_explicit_network_hint(provider_id, e)
+            _exec_phase_exit(
+                1,
+                raise_on_error=raise_on_error,
+                status=_exec_failure_status(e),
+                message=str(e),
+            )
+        session_log.set_session_id(response.session_id)
+        session_log.emit(
+            "provider_finished",
+            {
+                "provider": response.provider,
+                "model": response.model,
+                "duration_ms": response.duration_ms,
+                "session_id": response.session_id,
+            },
+        )
+
+    if auto and not as_json:
+        _emit_usage_log(response, silent=silent_route)
+    _emit_session_usage(session_log, response)
+    if session_log is not None:
+        session_log.mark_finished()
+    _record_response_delegation(
+        "exec",
+        response,
+        effort=effort_value,
+        decision=decision,
+        session_log=session_log,
+    )
+    return response, decision, session_log
+
 # --------------------------------------------------------------------------- #
 # exec — multi-turn agent session with tool access
 # --------------------------------------------------------------------------- #
@@ -4830,8 +5387,13 @@ def review(
 )
 @click.option(
     "--brief-file",
-    default=None,
-    help="Read the delegation brief from a UTF-8 file. Use '-' to read stdin.",
+    default=(),
+    multiple=True,
+    help=(
+        "Read the delegation brief from a UTF-8 file. Repeat for sequential "
+        "phases, e.g. --brief-file implement.md --brief-file tests.md. "
+        "Single use is unchanged. Use '-' to read stdin."
+    ),
 )
 @click.option(
     "--issue",
@@ -4937,7 +5499,7 @@ def exec_cmd(
     task: str | None,
     task_file: str | None,
     brief: str | None,
-    brief_file: str | None,
+    brief_file: tuple[str, ...],
     issue: str | None,
     issue_comment_limit: int,
     attach: tuple[str, ...],
@@ -4995,427 +5557,150 @@ def exec_cmd(
             "--resume requires --with <provider> (sessions are provider-specific)."
         )
 
-    brief_input = _read_task(
-        task,
-        task_file,
-        brief=brief,
-        brief_file=brief_file,
-        issue=issue,
-        issue_comment_limit=issue_comment_limit,
-        cwd=cwd,
-        attach=attach,
-    )
-    _warn_if_short_exec_brief(
-        brief_input,
-        allow_short_brief=allow_short_brief,
-    )
-    brief_input = _with_auto_close_instructions(brief_input)
-    body = brief_input.body
-    attachments = brief_input.attachments
-    estimated_input_tokens = _estimate_text_tokens(body)
-    permission_profile_value = _validate_permission_profile(permission_profile)
-    tools_set = _resolve_exec_tools(
-        tools,
-        permission_profile=permission_profile_value,
-    )
-    sandbox_value = _validate_sandbox(sandbox, warn=sandbox is not None)
-    max_iterations_value = _resolve_exec_max_iterations(
-        max_iterations,
-        raw_effort=effort,
-    )
-    max_iterations_explicit = max_iterations is not None
-    effort_value = _parse_effort(effort)
-    start_timeout_sec = _normalize_start_timeout_sec(start_timeout_sec)
-    dispatch_started_at = time.monotonic()
+    brief_files = tuple(brief_file)
+    if len(brief_files) > 1 and any(path == "-" for path in brief_files):
+        raise click.UsageError("multiple --brief-file phases cannot read from stdin ('-').")
+    if len(brief_files) > 1 and any(value is not None for value in (task, task_file, brief)):
+        raise click.UsageError(
+            "brief source is ambiguous. Use repeated --brief-file without --brief, "
+            "--task, or --task-file."
+        )
+    if len(brief_files) > 1 and issue is not None:
+        raise click.UsageError("--issue cannot be combined with multiple --brief-file phases.")
 
-    decision: RouteDecision | None = None
-    session_log: SessionLog | None = None
-    if auto:
-        try:
-            provider, decision = pick(
-                _parse_csv(tags),
-                prefer=_validate_prefer(prefer),
-                effort=effort_value,
-                tools=tools_set,
-                sandbox=sandbox_value,
-                exclude=_permission_profile_excludes(
-                    exclude,
-                    permission_profile=permission_profile_value,
-                ),
-                shadow=True,
-                attachments_required=bool(attachments),
-                estimated_input_tokens=estimated_input_tokens,
-            )
-            decision, exclusion_message = _apply_auto_route_exclusion_rules(
-                decision,
-                user_tags=tuple(_parse_csv(tags)),
-                offline_requested=offline is True,
-            )
-            provider = get_provider(decision.provider)
-        except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
-            click.echo(f"conductor: {e}", err=True)
-            sys.exit(2)
-        if max_iterations_explicit and not _provider_supports_exec_max_iterations(
-            decision.provider
-        ):
-            raise click.UsageError(_exec_max_iterations_unsupported_message(decision.provider))
-        if exclusion_message and not silent_route:
-            click.echo(exclusion_message, err=True)
-        _ensure_permission_profile_supported(
-            _provider_for_preflight(provider),
-            provider_id=decision.provider,
-            permission_profile=permission_profile_value,
-            tools=tools_set,
+    phase_inputs: list[tuple[str, BriefInput]] = []
+    if len(brief_files) <= 1:
+        brief_input = _read_task(
+            task,
+            task_file,
+            brief=brief,
+            brief_file=brief_files[0] if brief_files else None,
+            issue=issue,
+            issue_comment_limit=issue_comment_limit,
+            cwd=cwd,
+            attach=attach,
         )
-        session_log = _start_exec_session_log(
-            log_file=log_file,
-            resume_session_id=resume_session_id,
-        )
-        _emit_session_route_decision(session_log, decision)
-        print_caller_banner(decision.provider, silent=silent_route or as_json)
-        _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
-        if _provider_supports_exec_max_iterations(decision.provider) and not (
-            silent_route or as_json
-        ):
-            click.echo(
-                f"[conductor] agent loop iteration cap: {max_iterations_value}",
-                err=True,
-            )
-        timeout_sec, max_stall_sec = _scale_dispatch_defaults(
-            provider_id=decision.provider,
-            timeout_sec=timeout_sec,
-            max_stall_sec=max_stall_sec,
-            timeout_is_default=timeout_is_default,
-            max_stall_is_default=max_stall_is_default,
-        )
-        max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
-        if preflight:
-            # `provider` may arrive as a Provider object (real `pick()` return)
-            # or as a string (test fixtures, and any caller passing the name).
-            # Resolve once via the helper so downstream `.name` access is safe.
-            provider_obj = _provider_for_preflight(provider)
-            ok, reason = provider_obj.health_probe()
-            if not ok:
-                if session_log is not None:
-                    session_log.bind_provider(provider_obj.name)
-                    session_log.emit(
-                        "provider_failed",
-                        {"provider": provider_obj.name, "error": reason or "preflight failed"},
-                    )
-                    session_log.mark_finished()
-                _record_failed_delegation(
-                    "exec",
-                    provider_id=provider_obj.name,
-                    model=model,
-                    effort=effort_value,
-                    started_at=dispatch_started_at,
-                    error=reason or "preflight failed",
-                    decision=decision,
-                    session_log=session_log,
+        phase_inputs.append((brief_files[0] if brief_files else brief_input.source, brief_input))
+    else:
+        for path in brief_files:
+            phase_inputs.append(
+                (
+                    path,
+                    _read_task(
+                        None,
+                        None,
+                        brief_file=path,
+                        cwd=cwd,
+                        attach=attach,
+                    ),
                 )
-                _echo_preflight_failure(provider_obj, reason)
-                sys.exit(2)
+            )
 
+    phase_results: list[dict[str, object]] = []
+    phase_summaries: list[str] = []
+    final_response: CallResponse | None = None
+    final_decision: RouteDecision | None = None
+    final_session_log: SessionLog | None = None
+    multi_phase = len(phase_inputs) > 1
+
+    for idx, (brief_label, raw_brief_input) in enumerate(phase_inputs, start=1):
+        brief_input = replace(
+            raw_brief_input,
+            body=_append_previous_phase_results(raw_brief_input.body, phase_summaries),
+        )
+        _warn_if_short_exec_brief(
+            brief_input,
+            allow_short_brief=allow_short_brief,
+        )
+        brief_input = _with_auto_close_instructions(brief_input)
+        phase_started_at = time.monotonic()
+        phase_start_head = _git_phase_head(cwd) if multi_phase else None
         try:
-            response, _fallbacks = _invoke_with_fallback(
-                decision,
-                mode="exec",
-                task=body,
-                model=model,
-                effort=effort_value,
-                tools=tools_set,
-                sandbox=sandbox_value,
+            response, decision, session_log = _run_exec_phase_dispatch(
+                provider_id=provider_id,
+                auto=auto,
+                tags=tags,
+                prefer=prefer,
+                effort=effort,
+                tools=tools,
+                permission_profile=permission_profile,
+                sandbox=sandbox,
+                exclude=exclude,
                 cwd=cwd,
                 timeout_sec=timeout_sec,
                 max_stall_sec=max_stall_sec,
-                start_timeout_sec=start_timeout_sec,
-                retry_on_stall=retry_on_stall,
-                silent=silent_route or as_json,
-                resume_session_id=resume_session_id,
-                session_log=session_log,
-                attachments=attachments,
-                max_iterations=max_iterations_value,
-                max_iterations_explicit=max_iterations_explicit,
-                allow_completion_stretch=allow_completion_stretch,
-                write_validation=write_validation,
                 strict_stall=strict_stall,
-            )
-        except UnsupportedCapability as e:
-            if session_log is not None:
-                session_log.emit("provider_failed", {"error": str(e)})
-                session_log.mark_finished()
-            _record_failed_delegation(
-                "exec",
-                provider_id=decision.provider,
+                start_timeout_sec=start_timeout_sec,
+                max_iterations=max_iterations,
+                allow_completion_stretch=allow_completion_stretch,
+                retry_on_stall=retry_on_stall,
+                body=brief_input.body,
+                attachments=brief_input.attachments,
                 model=model,
-                effort=effort_value,
-                started_at=dispatch_started_at,
-                error=e,
-                decision=decision,
-                session_log=session_log,
+                log_file=log_file,
+                as_json=as_json and not multi_phase,
+                verbose_route=verbose_route,
+                silent_route=silent_route or (as_json and multi_phase),
+                resume_session_id=resume_session_id,
+                offline=offline,
+                preflight=preflight,
+                write_validation=write_validation,
+                timeout_is_default=timeout_is_default,
+                max_stall_is_default=max_stall_is_default,
+                raise_on_error=multi_phase,
             )
-            click.echo(f"conductor: {e}", err=True)
-            sys.exit(2)
-        except ProviderConfigError as e:
-            if session_log is not None:
-                session_log.emit("provider_failed", {"error": str(e)})
-                session_log.mark_finished()
-            _record_failed_delegation(
-                "exec",
-                provider_id=decision.provider,
-                model=model,
-                effort=effort_value,
-                started_at=dispatch_started_at,
-                error=e,
-                decision=decision,
-                session_log=session_log,
+        except _ExecPhaseError as e:
+            duration_ms = int((time.monotonic() - phase_started_at) * 1000)
+            phase_results.append(
+                {
+                    "brief": brief_label,
+                    "exit": e.exit_status,
+                    "commits": _git_phase_commit_count(cwd, phase_start_head),
+                    "duration_ms": duration_ms,
+                }
             )
-            click.echo(f"conductor: {e}", err=True)
-            sys.exit(2)
-        except ProviderError as e:
-            if session_log is not None:
-                session_log.mark_finished()
-            _record_failed_delegation(
-                "exec",
-                provider_id=decision.provider,
-                model=model,
-                effort=effort_value,
-                started_at=dispatch_started_at,
-                error=e,
-                decision=decision,
-                session_log=session_log,
-            )
-            _emit_provider_error(e, as_json=as_json)
-            _maybe_echo_stall_recovery_hint(e, cwd=cwd)
-            sys.exit(1)
-    else:
-        if prefer is not None and provider_id != "openrouter":
-            raise click.UsageError("--prefer is only meaningful with --auto.")
-        # Same narrowing as in `call()` — the early guard rejects the case
-        # where neither --auto nor --with was passed.
-        assert provider_id is not None
-        try:
-            provider = get_provider(provider_id)
-        except KeyError as e:
-            raise click.UsageError(str(e)) from e
-        if max_iterations_explicit and not _provider_supports_exec_max_iterations(provider_id):
-            raise click.UsageError(_exec_max_iterations_unsupported_message(provider_id))
-        _ensure_permission_profile_supported(
-            provider,
-            provider_id=provider_id,
-            permission_profile=permission_profile_value,
-            tools=tools_set,
-        )
-        try:
-            _ensure_supports_attachments(provider, attachments)
-        except UnsupportedCapability as e:
-            click.echo(f"conductor: {e}", err=True)
-            sys.exit(2)
-        session_log = _start_exec_session_log(
-            log_file=log_file,
-            resume_session_id=resume_session_id,
-        )
-        session_log.bind_provider(provider_id)
-        print_caller_banner(provider_id, silent=silent_route or as_json)
-        if _provider_supports_exec_max_iterations(provider_id) and not (silent_route or as_json):
+
             click.echo(
-                f"[conductor] agent loop iteration cap: {max_iterations_value}",
+                f"conductor: phase {idx} failed ({e.exit_status}): {e.message}",
                 err=True,
             )
-        timeout_sec, max_stall_sec = _scale_dispatch_defaults(
-            provider_id=provider_id,
-            timeout_sec=timeout_sec,
-            max_stall_sec=max_stall_sec,
-            timeout_is_default=timeout_is_default,
-            max_stall_is_default=max_stall_is_default,
-        )
-        max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
-        if preflight:
-            ok, reason = _run_exec_preflight(provider)
-            if not ok:
-                session_log.emit(
-                    "provider_failed",
-                    {"provider": provider_id, "error": reason or "preflight failed"},
-                )
-                session_log.mark_finished()
-                _record_failed_delegation(
-                    "exec",
-                    provider_id=provider_id,
-                    model=model,
-                    effort=effort_value,
-                    started_at=dispatch_started_at,
-                    error=reason or "preflight failed",
-                    session_log=session_log,
-                )
-                _echo_preflight_failure(provider, reason)
-                sys.exit(2)
-        try:
-            session_log.emit(
-                "provider_started",
-                {
-                    "provider": provider_id,
-                    "mode": "exec",
-                    "model": model,
-                    "tools": sorted(tools_set),
-                    "sandbox": sandbox_value,
-                    "cwd": cwd,
-                    "resume_session_id": resume_session_id,
-                },
-            )
-            if isinstance(provider, OpenRouterProvider):
-                response = provider.exec(
-                    body,
-                    model=model,
-                    effort=effort_value,
-                    task_tags=_parse_csv(tags),
-                    prefer=_validate_prefer(prefer),
-                    log_selection=not (silent_route or as_json),
-                    tools=tools_set,
-                    sandbox=sandbox_value,
-                    cwd=cwd,
-                    timeout_sec=timeout_sec,
-                    max_stall_sec=max_stall_sec,
-                    resume_session_id=resume_session_id,
-                    session_log=session_log,
-                    max_iterations=max_iterations_value,
-                    allow_completion_stretch=allow_completion_stretch,
-                    write_validation=write_validation,
-                )
-            elif isinstance(provider, ClaudeProvider):
-                response = provider.exec(
-                    body,
-                    model=model,
-                    effort=effort_value,
-                    tools=tools_set,
-                    sandbox=sandbox_value,
-                    cwd=cwd,
-                    timeout_sec=timeout_sec,
-                    max_stall_sec=max_stall_sec,
-                    start_timeout_sec=start_timeout_sec,
-                    resume_session_id=resume_session_id,
-                    session_log=session_log,
-                    retry_on_stall=retry_on_stall,
-                )
-            elif isinstance(provider, CodexProvider):
-                response = provider.exec(
-                    body,
-                    model=model,
-                    effort=effort_value,
-                    tools=tools_set,
-                    sandbox=sandbox_value,
-                    cwd=cwd,
-                    timeout_sec=timeout_sec,
-                    max_stall_sec=max_stall_sec,
-                    resume_session_id=resume_session_id,
-                    session_log=session_log,
-                    attachments=attachments,
-                    strict_stall=strict_stall,
-                    max_iterations=max_iterations_value,
-                )
-            elif isinstance(provider, OllamaProvider):
-                response = provider.exec(
-                    body,
-                    model=model,
-                    effort=effort_value,
-                    tools=tools_set,
-                    sandbox=sandbox_value,
-                    cwd=cwd,
-                    timeout_sec=timeout_sec,
-                    max_stall_sec=max_stall_sec,
-                    resume_session_id=resume_session_id,
-                    session_log=session_log,
-                    max_iterations=max_iterations_value,
-                    allow_completion_stretch=allow_completion_stretch,
-                    write_validation=write_validation,
-                )
-            else:
-                response = provider.exec(
-                    body,
-                    model=model,
-                    effort=effort_value,
-                    tools=tools_set,
-                    sandbox=sandbox_value,
-                    cwd=cwd,
-                    timeout_sec=timeout_sec,
-                    max_stall_sec=max_stall_sec,
-                    resume_session_id=resume_session_id,
-                    session_log=session_log,
-                )
-        except UnsupportedCapability as e:
-            session_log.emit("provider_failed", {"provider": provider_id, "error": str(e)})
-            session_log.mark_finished()
-            _record_failed_delegation(
-                "exec",
-                provider_id=provider_id,
-                model=model,
-                effort=effort_value,
-                started_at=dispatch_started_at,
-                error=e,
-                session_log=session_log,
-            )
-            click.echo(f"conductor: {e}", err=True)
-            sys.exit(2)
-        except ProviderConfigError as e:
-            session_log.emit("provider_failed", {"provider": provider_id, "error": str(e)})
-            session_log.mark_finished()
-            _record_failed_delegation(
-                "exec",
-                provider_id=provider_id,
-                model=model,
-                effort=effort_value,
-                started_at=dispatch_started_at,
-                error=e,
-                session_log=session_log,
-            )
-            click.echo(f"conductor: {e}", err=True)
-            sys.exit(2)
-        except ProviderError as e:
-            session_log.emit("provider_failed", {"provider": provider_id, "error": str(e)})
-            session_log.mark_finished()
-            _record_failed_delegation(
-                "exec",
-                provider_id=provider_id,
-                model=model,
-                effort=effort_value,
-                started_at=dispatch_started_at,
-                error=e,
-                session_log=session_log,
-            )
-            _emit_provider_error(e, as_json=as_json)
-            _maybe_echo_stall_recovery_hint(e, cwd=cwd)
-            _maybe_echo_explicit_network_hint(provider_id, e)
-            sys.exit(1)
-        session_log.set_session_id(response.session_id)
-        session_log.emit(
-            "provider_finished",
-            {
-                "provider": response.provider,
-                "model": response.model,
-                "duration_ms": response.duration_ms,
-                "session_id": response.session_id,
-            },
-        )
 
-    if auto and not as_json:
-        _emit_usage_log(response, silent=silent_route)
-    _emit_session_usage(session_log, response)
-    if session_log is not None:
-        session_log.mark_finished()
-    _record_response_delegation(
-        "exec",
-        response,
-        effort=effort_value,
-        decision=decision,
-        session_log=session_log,
-    )
+            if as_json:
+                click.echo(json.dumps({"phases": phase_results, "ok": False}, indent=2))
+            sys.exit(e.exit_code)
+
+
+
+        final_response = response
+        final_decision = decision
+        final_session_log = session_log
+        duration_ms = int((time.monotonic() - phase_started_at) * 1000)
+        commits = _git_phase_commit_count(cwd, phase_start_head)
+        if multi_phase:
+            phase_results.append(
+                {
+                    "brief": brief_label,
+                    "exit": "ok",
+                    "commits": commits,
+                    "duration_ms": duration_ms,
+                }
+            )
+            phase_summaries.append(_git_phase_summary(cwd, idx, phase_start_head))
+            if not (silent_route or as_json):
+                click.echo(f"[conductor] phase {idx} complete: {brief_label}", err=True)
+
+    assert final_response is not None
     if ground_citations:
-        _emit_grounding_warnings(response.text, cwd or os.getcwd())
-    _emit_call(
-        response,
-        as_json=as_json,
-        decision=decision,
-        auth_prompts=_collect_session_auth_prompts(session_log),
-    )
+        _emit_grounding_warnings(final_response.text, cwd or os.getcwd())
+    if multi_phase and as_json:
+        click.echo(json.dumps({"phases": phase_results, "ok": True}, indent=2))
+    else:
+        _emit_call(
+            final_response,
+            as_json=as_json,
+            decision=final_decision,
+            auth_prompts=_collect_session_auth_prompts(final_session_log),
+        )
 
 
 # --------------------------------------------------------------------------- #
