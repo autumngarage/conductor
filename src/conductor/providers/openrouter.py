@@ -8,6 +8,7 @@ executes local filesystem/shell tools and feeds results back to the model.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -18,6 +19,13 @@ from typing import TYPE_CHECKING
 import httpx
 
 from conductor import credentials
+from conductor.exec_completion import (
+    MissingDeliverable,
+    changed_paths_for_completion_scan,
+    completion_stretch_prompt,
+    detect_missing_deliverables,
+    format_missing_deliverables_cap_message,
+)
 from conductor.openrouter_model_stacks import openrouter_coding_stack
 from conductor.providers.interface import (
     CallResponse,
@@ -34,6 +42,8 @@ if TYPE_CHECKING:
     from conductor.session_log import SessionLog
 
 from . import openrouter_catalog
+
+_LOG = logging.getLogger(__name__)
 
 OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -361,6 +371,7 @@ class OpenRouterProvider:
         resume_session_id: str | None = None,
         session_log: SessionLog | None = None,
         max_iterations: int | None = None,
+        allow_completion_stretch: bool = False,
         write_validation: bool = True,
     ) -> CallResponse:
         if resume_session_id:
@@ -424,9 +435,13 @@ class OpenRouterProvider:
         tool_errors: list[dict[str, object]] = []
         bash_failures: list[dict[str, object]] = []
         validation_failures: list[dict[str, object]] = []
+        recent_tool_calls: list[dict[str, object]] = []
+        missing_deliverables: list[MissingDeliverable] = []
+        completion_stretched = False
         repo_changing_task = _is_repo_changing_tool_task(effective_task_tags, tools)
         git_status_before = _git_clean_status(workdir) if repo_changing_task else None
         iteration_cap = max_iterations or OPENROUTER_MAX_TOOL_ITERATIONS
+        original_iteration_cap = iteration_cap
 
         start = time.monotonic()
         while iteration < iteration_cap:
@@ -498,6 +513,7 @@ class OpenRouterProvider:
 
             for idx, call in enumerate(tool_calls):
                 name, args, result = _parse_tool_call(call)
+                recent_tool_calls.append({"name": name, "args": args or {}})
                 tool_call_count += 1
                 tool_error: str | None = None
                 executed_tool = False
@@ -554,13 +570,53 @@ class OpenRouterProvider:
                     "content": result,
                 }
                 messages.append(tool_msg)
+
+            if iteration >= iteration_cap:
+                missing_deliverables = _detect_and_log_missing_deliverables(
+                    task=task,
+                    workdir=workdir,
+                    recent_tool_calls=recent_tool_calls,
+                    iteration_cap=original_iteration_cap,
+                    session_log=session_log,
+                )
+                if (
+                    allow_completion_stretch
+                    and missing_deliverables
+                    and not completion_stretched
+                ):
+                    prompt = completion_stretch_prompt(missing_deliverables)
+                    messages.append({"role": "user", "content": prompt})
+                    _LOG.info(
+                        "completion stretch enabled: provider=%s iteration_cap=%s "
+                        "missing=%s message=%s",
+                        self.name,
+                        original_iteration_cap,
+                        [item.__dict__ for item in missing_deliverables],
+                        prompt,
+                    )
+                    if session_log is not None:
+                        session_log.emit(
+                            "completion_stretch",
+                            {
+                                "provider": self.name,
+                                "iteration_cap": original_iteration_cap,
+                                "missing": [
+                                    item.__dict__ for item in missing_deliverables
+                                ],
+                                "message": prompt,
+                            },
+                        )
+                    iteration_cap += 1
+                    completion_stretched = True
         else:
             hit_cap = True
 
         if hit_cap:
-            final_text = (final_text or "(no content)") + (
-                f"\n\n[conductor] Reached --max-iterations cap ({iteration_cap}). "
-                "Re-run with --max-iterations <larger> or split the brief."
+            final_text = (final_text or "(no content)") + "\n\n" + (
+                format_missing_deliverables_cap_message(
+                    original_iteration_cap,
+                    missing_deliverables,
+                )
             )
 
         git_status_after = _git_clean_status(workdir) if repo_changing_task else None
@@ -572,9 +628,10 @@ class OpenRouterProvider:
             bash_failures=bash_failures,
             validation_failures=validation_failures,
             hit_cap=hit_cap,
-            iteration_cap=iteration_cap,
+            iteration_cap=original_iteration_cap,
             git_status_before=git_status_before,
             git_status_after=git_status_after,
+            missing_deliverables=missing_deliverables,
         )
         duration_ms = int((time.monotonic() - start) * 1000)
         execution_status["duration_ms"] = duration_ms
@@ -601,6 +658,10 @@ class OpenRouterProvider:
                 "tool_iterations": iteration,
                 "tool_names": sorted(tools),
                 "hit_iteration_cap": hit_cap,
+                "completion_stretched": completion_stretched,
+                "missing_deliverables": [
+                    item.__dict__ for item in missing_deliverables
+                ],
                 "tool_call_count": tool_call_count,
                 "write_success_count": write_success_count,
                 "tool_error_count": len(tool_errors),
@@ -741,6 +802,35 @@ def _is_validation_command(command: str) -> bool:
     return any(signal in normalized for signal in validation_signals)
 
 
+def _detect_and_log_missing_deliverables(
+    *,
+    task: str,
+    workdir: Path,
+    recent_tool_calls: list[dict[str, object]],
+    iteration_cap: int,
+    session_log: SessionLog | None,
+) -> list[MissingDeliverable]:
+    missing = detect_missing_deliverables(
+        task,
+        changed_paths=changed_paths_for_completion_scan(workdir),
+        recent_tool_calls=recent_tool_calls,
+    )
+    _LOG.info(
+        "completion detection at iteration cap: iteration_cap=%s missing=%s",
+        iteration_cap,
+        [item.__dict__ for item in missing],
+    )
+    if session_log is not None:
+        session_log.emit(
+            "completion_detection",
+            {
+                "iteration_cap": iteration_cap,
+                "missing": [item.__dict__ for item in missing],
+            },
+        )
+    return missing
+
+
 def _execution_status(
     *,
     repo_changing_task: bool,
@@ -753,6 +843,7 @@ def _execution_status(
     iteration_cap: int,
     git_status_before: dict[str, object] | None,
     git_status_after: dict[str, object] | None,
+    missing_deliverables: list[MissingDeliverable],
 ) -> dict[str, object]:
     state = "completed"
     after_clean = (
@@ -779,6 +870,7 @@ def _execution_status(
         "validation_failures": validation_failures,
         "hit_iteration_cap": hit_cap,
         "iteration_cap": iteration_cap,
+        "missing_deliverables": [item.__dict__ for item in missing_deliverables],
         "git_status_before": git_status_before,
         "git_status_after": git_status_after,
     }
@@ -788,9 +880,19 @@ def _execution_failure_message(status: dict[str, object]) -> str | None:
     state = status.get("state")
     if state == "iteration-cap":
         cap = status.get("iteration_cap")
-        return (
-            f"Reached --max-iterations cap ({cap}). Re-run with "
-            "--max-iterations <larger> or split the brief."
+        raw_missing = status.get("missing_deliverables")
+        missing_items = raw_missing if isinstance(raw_missing, list) else []
+        missing = [
+            MissingDeliverable(
+                kind=str(item.get("kind") or ""),
+                message=str(item.get("message") or ""),
+            )
+            for item in missing_items
+            if isinstance(item, dict)
+        ]
+        return format_missing_deliverables_cap_message(
+            int(cap) if isinstance(cap, int) else 0,
+            missing,
         )
     if state == "validation-failed":
         return "validation command failed after edits"

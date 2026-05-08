@@ -14,6 +14,7 @@ to their respective CLIs.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -21,6 +22,13 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from conductor.exec_completion import (
+    MissingDeliverable,
+    changed_paths_for_completion_scan,
+    completion_stretch_prompt,
+    detect_missing_deliverables,
+    format_missing_deliverables_cap_message,
+)
 from conductor.providers.interface import (
     CallResponse,
     ProviderConfigError,
@@ -35,6 +43,8 @@ from conductor.tools import (
     ToolExecutor,
     build_tool_specs,
 )
+
+_LOG = logging.getLogger(__name__)
 
 OLLAMA_BASE_URL_ENV = "OLLAMA_BASE_URL"
 OLLAMA_DEFAULT_BASE_URL = "http://localhost:11434"
@@ -503,6 +513,7 @@ class OllamaProvider:
         resume_session_id: str | None = None,
         session_log: SessionLog | None = None,
         max_iterations: int | None = None,
+        allow_completion_stretch: bool = False,
         write_validation: bool = True,
     ) -> CallResponse:
         # accepted for API parity; only codex implements stall-watchdog today
@@ -537,11 +548,15 @@ class OllamaProvider:
         final_body: dict = {}
         hit_cap = False
         hit_context_budget = False
+        recent_tool_calls: list[dict[str, object]] = []
+        missing_deliverables: list[MissingDeliverable] = []
+        completion_stretched = False
         prompt_tokens = 0
         context_ceiling = int(
             self.max_context_tokens * (1 - OLLAMA_CONTEXT_SAFETY_MARGIN)
         )
         iteration_cap = max_iterations or OLLAMA_MAX_TOOL_ITERATIONS
+        original_iteration_cap = iteration_cap
 
         start = time.monotonic()
         while iteration < iteration_cap:
@@ -651,6 +666,7 @@ class OllamaProvider:
                 else:
                     args = {}
                     result = None
+                recent_tool_calls.append({"name": name, "args": args or {}})
 
                 if args is not None:
                     try:
@@ -683,13 +699,53 @@ class OllamaProvider:
                 else:
                     tool_msg["tool_call_id"] = f"call_{iteration}_{idx}"
                 messages.append(tool_msg)
+
+            if iteration >= iteration_cap:
+                missing_deliverables = _detect_and_log_missing_deliverables(
+                    task=task,
+                    workdir=workdir,
+                    recent_tool_calls=recent_tool_calls,
+                    iteration_cap=original_iteration_cap,
+                    session_log=session_log,
+                )
+                if (
+                    allow_completion_stretch
+                    and missing_deliverables
+                    and not completion_stretched
+                ):
+                    prompt = completion_stretch_prompt(missing_deliverables)
+                    messages.append({"role": "user", "content": prompt})
+                    _LOG.info(
+                        "completion stretch enabled: provider=%s iteration_cap=%s "
+                        "missing=%s message=%s",
+                        self.name,
+                        original_iteration_cap,
+                        [item.__dict__ for item in missing_deliverables],
+                        prompt,
+                    )
+                    if session_log is not None:
+                        session_log.emit(
+                            "completion_stretch",
+                            {
+                                "provider": self.name,
+                                "iteration_cap": original_iteration_cap,
+                                "missing": [
+                                    item.__dict__ for item in missing_deliverables
+                                ],
+                                "message": prompt,
+                            },
+                        )
+                    iteration_cap += 1
+                    completion_stretched = True
         else:
             hit_cap = True
 
         if hit_cap:
-            final_text = (final_text or "(no content)") + (
-                f"\n\n[conductor] Reached --max-iterations cap ({iteration_cap}). "
-                "Re-run with --max-iterations <larger> or split the brief."
+            final_text = (final_text or "(no content)") + "\n\n" + (
+                format_missing_deliverables_cap_message(
+                    original_iteration_cap,
+                    missing_deliverables,
+                )
             )
         if hit_context_budget:
             final_text = (final_text or "(no content)") + (
@@ -716,8 +772,41 @@ class OllamaProvider:
                 "tool_iterations": iteration,
                 "tool_names": sorted(tools),
                 "hit_iteration_cap": hit_cap,
+                "completion_stretched": completion_stretched,
+                "missing_deliverables": [
+                    item.__dict__ for item in missing_deliverables
+                ],
                 "hit_context_budget": hit_context_budget,
                 "iterations": iterations_log,
             },
             raw=final_body,
         )
+
+
+def _detect_and_log_missing_deliverables(
+    *,
+    task: str,
+    workdir: Path,
+    recent_tool_calls: list[dict[str, object]],
+    iteration_cap: int,
+    session_log: SessionLog | None,
+) -> list[MissingDeliverable]:
+    missing = detect_missing_deliverables(
+        task,
+        changed_paths=changed_paths_for_completion_scan(workdir),
+        recent_tool_calls=recent_tool_calls,
+    )
+    _LOG.info(
+        "completion detection at iteration cap: iteration_cap=%s missing=%s",
+        iteration_cap,
+        [item.__dict__ for item in missing],
+    )
+    if session_log is not None:
+        session_log.emit(
+            "completion_detection",
+            {
+                "iteration_cap": iteration_cap,
+                "missing": [item.__dict__ for item in missing],
+            },
+        )
+    return missing

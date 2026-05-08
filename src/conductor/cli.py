@@ -1614,6 +1614,7 @@ def _invoke_with_fallback(
     max_iterations_explicit: bool = False,
     write_validation: bool = True,
     strict_stall: bool = False,
+    allow_completion_stretch: bool = False,
 ) -> tuple[CallResponse, list[str]]:
     """Try the decision's ranked providers in order; fallback on retryable errors.
 
@@ -1738,6 +1739,7 @@ def _invoke_with_fallback(
                         resume_session_id=resume_session_id,
                         session_log=session_log,
                         max_iterations=max_iterations,
+                        allow_completion_stretch=allow_completion_stretch,
                         write_validation=write_validation,
                     )
                 elif isinstance(provider, ClaudeProvider):
@@ -1786,6 +1788,7 @@ def _invoke_with_fallback(
                         resume_session_id=resume_session_id,
                         session_log=session_log,
                         max_iterations=max_iterations,
+                        allow_completion_stretch=allow_completion_stretch,
                         write_validation=write_validation,
                     )
                 else:
@@ -4789,6 +4792,15 @@ def review(
     help=EXEC_MAX_ITERATIONS_HELP,
 )
 @click.option(
+    "--allow-completion-stretch",
+    is_flag=True,
+    default=False,
+    help=(
+        "When a managed exec loop hits --max-iterations with detected unfinished "
+        "brief deliverables, grant exactly one final clarifying turn."
+    ),
+)
+@click.option(
     "--retry-on-stall",
     default=1,
     type=click.IntRange(min=0),
@@ -4920,6 +4932,7 @@ def exec_cmd(
     strict_stall: bool,
     start_timeout_sec: float | None,
     max_iterations: int | None,
+    allow_completion_stretch: bool,
     retry_on_stall: int,
     task: str | None,
     task_file: str | None,
@@ -5123,6 +5136,7 @@ def exec_cmd(
                 attachments=attachments,
                 max_iterations=max_iterations_value,
                 max_iterations_explicit=max_iterations_explicit,
+                allow_completion_stretch=allow_completion_stretch,
                 write_validation=write_validation,
                 strict_stall=strict_stall,
             )
@@ -5264,6 +5278,7 @@ def exec_cmd(
                     resume_session_id=resume_session_id,
                     session_log=session_log,
                     max_iterations=max_iterations_value,
+                    allow_completion_stretch=allow_completion_stretch,
                     write_validation=write_validation,
                 )
             elif isinstance(provider, ClaudeProvider):
@@ -5310,6 +5325,7 @@ def exec_cmd(
                     resume_session_id=resume_session_id,
                     session_log=session_log,
                     max_iterations=max_iterations_value,
+                    allow_completion_stretch=allow_completion_stretch,
                     write_validation=write_validation,
                 )
             else:

@@ -269,6 +269,7 @@ class Provider(Protocol):
         resume_session_id: str | None = None,
         session_log: SessionLog | None = None,
         max_iterations: int | None = None,
+        allow_completion_stretch: bool = False,
         write_validation: bool = True,
     ) -> CallResponse:
         """Multi-turn agent session with tool access.
