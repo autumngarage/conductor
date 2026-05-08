@@ -984,6 +984,36 @@ def test_refresh_consumers_commits_updated_repo_integration(mocker, tmp_path):
     ).stdout
 
 
+def test_refresh_consumers_default_branch_uses_typed_prefix(mocker, tmp_path):
+    """Default branch name should have the `chore/` type prefix so that
+    consumer repos with the standard `<type>/<slug>` branch-naming pre-push
+    hook accept the push (closes conductor#273)."""
+    _stub_all_unconfigured(mocker)
+    version = cli_mod.__version__.split("+", 1)[0]
+
+    consumer = tmp_path / "consumer-default-branch"
+    consumer.mkdir()
+    _git(consumer, "init", "-q", "-b", "main")
+    _git(consumer, "config", "user.email", "conductor-test@example.com")
+    _git(consumer, "config", "user.name", "Conductor Test")
+
+    from conductor import agent_wiring
+
+    agent_wiring.wire_agents_md(cwd=consumer, version="0.8.0")
+    _git(consumer, "add", "AGENTS.md")
+    _git(consumer, "commit", "-m", "Initial conductor integration")
+
+    result = CliRunner().invoke(
+        main,
+        ["refresh-consumers", "--paths", str(consumer)],
+    )
+
+    assert result.exit_code == 0, result.output
+    expected_branch = f"chore/conductor-refresh-v{version}"
+    assert f"branch: {expected_branch}" in result.output, result.output
+    assert _git(consumer, "branch", "--show-current").stdout.strip() == expected_branch
+
+
 def test_refresh_consumers_reads_config_file(mocker, tmp_path):
     _stub_all_unconfigured(mocker)
     consumer = tmp_path / "consumer-from-config"
