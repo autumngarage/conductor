@@ -40,6 +40,10 @@ EXPECTED_TEMPLATE_COVERAGE = {
         # #250: handle the case where the harness auto-backgrounds.
         "AUTO-BACKGROUNDS",
         "BashOutput",
+        # #270: tie PR title to commit subject under open-pr.sh.
+        "PR title equals commit subject",
+        # #268: one closing keyword per issue (don't comma-chain).
+        "One closing keyword per issue",
     },
     "ollama-offline": {
         "--offline",

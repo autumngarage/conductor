@@ -120,6 +120,31 @@ Discover what's currently configured:
 
     conductor list
 
+## Caveat: ollama is offline-only by default
+
+When you pick by capability tags (`--auto --tags …` or `--prefer cheapest`),
+conductor's auto-router excludes ollama at any plan position when online —
+the rule fires whether ollama would be the primary or a fallback. The goal
+is to prevent accidentally loading a 25 GB local model when frontier
+providers are reachable.
+
+Three ways to invoke ollama anyway:
+
+- `conductor call --with ollama …` — explicit by name. Bypasses the rule.
+- `conductor call --auto --tags ollama …` — name-as-tag passthrough.
+  Conductor recognizes any provider name in `--tags` as an explicit
+  selection signal. (Note: ollama doesn't actually have a tag named
+  `ollama`; this is the special-case detection. `--tags local` or
+  `--tags cheap` alone — tags ollama legitimately has — does NOT
+  bypass the rule.)
+- `conductor call --offline …` — operator stated offline (or the
+  offline-mode sticky flag fired on a network probe).
+
+If you see the stderr line `[conductor] excluding ollama from fallback
+chain (online; ollama is offline-only — pass --offline to override)`,
+that is the rule firing. Pick one of the three escape hatches above if
+you actually want ollama.
+
 ## Caveat: same-process OAuth contention
 
 When you delegate from inside an active Claude Code session (or any agent
@@ -370,6 +395,22 @@ When invoked:
    the watchdog, conductor's stderr message will name a forensic
    envelope path (under `~/.cache/conductor/codex-*.json`) — surface
    that path to the parent agent so the failure can be triaged.
+
+When briefing codex on a task that ships a PR via `scripts/open-pr.sh
+--auto-merge`, include this guidance in the brief so codex doesn't
+need to discover it empirically:
+
+- **PR title equals commit subject.** `open-pr.sh` derives the PR title
+  from `git log -1 --format=%s`. If the brief specifies a PR title,
+  codex must use THAT EXACT STRING as the commit subject; otherwise
+  the PR title and the brief's specified title will diverge and the
+  operator (or a follow-up agent) has to correct the metadata
+  post-merge.
+- **One closing keyword per issue.** `Closes #A, #B, #C` only
+  auto-closes #A — GitHub requires each issue to have its own keyword.
+  Use the form `Closes #A.\\nCloses #B.\\nCloses #C.` (each on its own
+  line, each with its own `Closes`/`Fixes`/`Resolves`). The wrong form
+  leaves stragglers open and forces manual cleanup after merge.
 
 If the task is a quick one-shot question (no file tools needed), route
 it to a single-turn provider instead — `exec` mode carries more setup
