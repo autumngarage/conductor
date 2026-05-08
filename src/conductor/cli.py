@@ -3316,11 +3316,69 @@ def _maybe_emit_agent_wiring_notice(ctx: click.Context) -> None:
         return
 
 
+AUTO_REFRESH_COMMANDS = frozenset(
+    {
+        "ask",
+        "call",
+        "doctor",
+        "exec",
+        "init",
+        "refresh-consumers",
+        "route",
+    }
+)
+
+
+def _env_flag_enabled(name: str) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return False
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _maybe_auto_refresh_user_scope(ctx: click.Context) -> None:
+    command = ctx.invoked_subcommand
+    if command not in AUTO_REFRESH_COMMANDS:
+        return
+    if _env_flag_enabled("CONDUCTOR_NO_AUTO_REFRESH"):
+        return
+
+    debug = _env_flag_enabled("CONDUCTOR_DEBUG_AUTO_REFRESH")
+    try:
+        from conductor import agent_wiring
+
+        decisions = agent_wiring.user_scope_version_decisions(binary_version=__version__)
+        if debug:
+            for decision in decisions:
+                version = decision.version or "-"
+                click.echo(
+                    "[conductor] auto-refresh scan: "
+                    f"{decision.kind} {decision.path} version={version} "
+                    f"stale={decision.stale} reason={decision.reason}",
+                    err=True,
+                )
+        if not any(decision.stale for decision in decisions):
+            return
+        agent_wiring.wire_claude_code(__version__, patch_claude_md=True)
+        click.echo(
+            "[conductor] refreshed user-scope integration files "
+            f"to v{__version__.split('+', 1)[0]}",
+            err=True,
+        )
+    except Exception as e:
+        click.echo(
+            f"[conductor] auto-refresh warning: failed to refresh "
+            f"user-scope integration files: {e}",
+            err=True,
+        )
+
+
 @click.group()
 @click.version_option(__version__, prog_name="conductor")
 @click.pass_context
 def main(ctx: click.Context) -> None:
     """Pick an LLM, give it a job."""
+    _maybe_auto_refresh_user_scope(ctx)
     _maybe_emit_agent_wiring_notice(ctx)
 
 
