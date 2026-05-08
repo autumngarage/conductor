@@ -731,7 +731,7 @@ def test_doctor_warns_before_next_steps_when_one_integration_file_is_behind(
     assert "    AGENTS.md (v0.8.9)" in result.output
     assert "  Auto refresh paths:" in result.output
     assert "    brew upgrade conductor" in result.output
-    assert "    conductor init --hooks" in result.output
+    assert "    conductor init               # installs refresh hook by default" in result.output
     assert "  Immediate manual fallback:" in result.output
     assert "    conductor init -y --remaining" in result.output
     assert "    conductor refresh-consumers" in result.output
@@ -941,7 +941,7 @@ def test_refresh_consumers_help_positions_command_as_manual_backstop():
     assert "Refresh Conductor integration blocks" in result.output
     assert "Manual force-refresh backstop" in result.output
     assert "CLAUDE.md @-import" in result.output
-    assert "conductor init --hooks" in result.output
+    assert "conductor init`" in result.output
     assert "Use `refresh-consumers` only" in result.output
 
 

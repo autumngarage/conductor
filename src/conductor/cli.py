@@ -3347,9 +3347,11 @@ def _env_flag_enabled(name: str) -> bool:
     return value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
-def _maybe_auto_refresh_user_scope(ctx: click.Context) -> None:
+def _maybe_auto_refresh(ctx: click.Context) -> None:
     command = ctx.invoked_subcommand
     if command not in AUTO_REFRESH_COMMANDS:
+        return
+    if any(arg in {"--help", "-h", "--version"} for arg in sys.argv[1:]):
         return
     if _env_flag_enabled("CONDUCTOR_NO_AUTO_REFRESH"):
         return
@@ -3368,18 +3370,54 @@ def _maybe_auto_refresh_user_scope(ctx: click.Context) -> None:
                     f"stale={decision.stale} reason={decision.reason}",
                     err=True,
                 )
-        if not any(decision.stale for decision in decisions):
-            return
-        agent_wiring.wire_claude_code(__version__, patch_claude_md=True)
-        click.echo(
-            "[conductor] refreshed user-scope integration files "
-            f"to v{__version__.split('+', 1)[0]}",
-            err=True,
-        )
+        if any(decision.stale for decision in decisions):
+            agent_wiring.wire_claude_code(__version__, patch_claude_md=True)
+            click.echo(
+                "[conductor] refreshed user-scope integration files "
+                f"to v{__version__.split('+', 1)[0]}",
+                err=True,
+            )
     except Exception as e:
         click.echo(
             f"[conductor] auto-refresh warning: failed to refresh "
             f"user-scope integration files: {e}",
+            err=True,
+        )
+    try:
+        from conductor import agent_wiring
+
+        cwd = Path.cwd()
+        repo_decisions = agent_wiring.repo_scope_version_decisions(
+            cwd,
+            binary_version=__version__,
+        )
+        if debug:
+            for repo_decision in repo_decisions:
+                version = repo_decision.version or "-"
+                click.echo(
+                    "[conductor] auto-refresh scan: "
+                    f"{repo_decision.kind} {repo_decision.path} version={version} "
+                    f"stale={repo_decision.stale} reason={repo_decision.reason}",
+                    err=True,
+                )
+        if not any(repo_decision.stale for repo_decision in repo_decisions):
+            return
+        report = agent_wiring.refresh_repo_scope(cwd, version=__version__)
+        for path, reason in report.skipped:
+            click.echo(
+                f"[conductor] auto-refresh warning: skipped {path}: {reason}",
+                err=True,
+            )
+        if report.refreshed:
+            click.echo(
+                "[conductor] refreshed repo-scope integration files "
+                f"in {cwd} to v{__version__.split('+', 1)[0]}",
+                err=True,
+            )
+    except Exception as e:
+        click.echo(
+            f"[conductor] auto-refresh warning: failed to refresh "
+            f"repo-scope integration files: {e}",
             err=True,
         )
 
@@ -3389,7 +3427,7 @@ def _maybe_auto_refresh_user_scope(ctx: click.Context) -> None:
 @click.pass_context
 def main(ctx: click.Context) -> None:
     """Pick an LLM, give it a job."""
-    _maybe_auto_refresh_user_scope(ctx)
+    _maybe_auto_refresh(ctx)
     _maybe_emit_agent_wiring_notice(ctx)
 
 
@@ -7019,7 +7057,7 @@ def doctor(as_json: bool) -> None:
             click.echo(f"    {display}{version_note}")
         click.echo("  Auto refresh paths:")
         click.echo("    brew upgrade conductor       # CLAUDE.md @-import self-heals on upgrade")
-        click.echo("    conductor init --hooks       # refresh embed-only files on commit")
+        click.echo("    conductor init               # installs refresh hook by default")
         click.echo("  Immediate manual fallback:")
         click.echo("    conductor init -y --remaining")
         click.echo("    conductor refresh-consumers  # force-refresh configured consumer repos")
@@ -7145,10 +7183,12 @@ def doctor(as_json: bool) -> None:
     "(user-scope + repo-scope sentinel blocks + Cursor rule) and exit.",
 )
 @click.option(
-    "--hooks",
-    is_flag=True,
-    default=False,
-    help="Install the opt-in pre-commit hook that refreshes stale repo integrations.",
+    "--hooks/--no-hooks",
+    default=True,
+    help=(
+        "Install pre-commit refresh hook for embed-only files "
+        "(default: yes; pass --no-hooks to skip)."
+    ),
 )
 def init(
     accept_defaults: bool,
@@ -7165,21 +7205,6 @@ def init(
     hooks: bool,
 ) -> None:
     """Interactively configure Conductor for first use."""
-    if hooks:
-        wiring_flags = (
-            wire_agents,
-            patch_claude_md,
-            patch_agents_md,
-            patch_gemini_md,
-            patch_claude_md_repo,
-            wire_cursor_flag,
-        )
-        if only or remaining or unwire or any(f is not None for f in wiring_flags):
-            raise click.UsageError(
-                "--hooks can't be combined with provider, wiring, or unwire flags."
-            )
-        sys.exit(_run_install_hooks())
-
     if unwire:
         wiring_flags = (
             wire_agents,
@@ -7209,6 +7234,8 @@ def init(
         patch_claude_md_repo=patch_claude_md_repo,
         wire_cursor_flag=wire_cursor_flag,
     )
+    if exit_code == 0 and hooks:
+        exit_code = _run_install_hooks(quiet=quiet)
     sys.exit(exit_code)
 
 
@@ -7233,17 +7260,23 @@ def _run_unwire() -> int:
     return 0
 
 
-def _run_install_hooks() -> int:
+def _run_install_hooks(*, quiet: bool = False) -> int:
     """Install the local pre-commit hook entry for refresh-on-commit."""
     config_path = Path.cwd() / PRE_COMMIT_CONFIG
     try:
         changed = _install_refresh_pre_commit_hook(config_path)
     except OSError as e:
         raise click.ClickException(f"failed to update {config_path}: {e}") from e
+    if quiet:
+        return 0
     if changed:
-        click.echo(f"Installed conductor refresh hook in {config_path}.")
+        click.echo(
+            f"==> Installed conductor-refresh pre-commit hook in {PRE_COMMIT_CONFIG}."
+        )
     else:
-        click.echo(f"Conductor refresh hook already present in {config_path}.")
+        click.echo(
+            f"==> conductor-refresh pre-commit hook already present in {PRE_COMMIT_CONFIG}."
+        )
     return 0
 
 
@@ -7502,8 +7535,8 @@ def refresh_consumers(
 
     Manual force-refresh backstop. After `brew upgrade conductor`, drift should
     self-heal via the CLAUDE.md @-import path and, for embed-only files
-    (Cursor .mdc, AGENTS.md, GEMINI.md), the opt-in pre-commit refresh hook
-    installed by `conductor init --hooks`.
+    (Cursor .mdc, AGENTS.md, GEMINI.md), the pre-commit refresh hook installed
+    by default by `conductor init`.
 
     Use `refresh-consumers` only when you need an immediate cross-repo refresh
     without waiting for the next commit in each repo.
