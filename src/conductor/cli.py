@@ -176,7 +176,7 @@ EXEC_MAX_ITERATIONS_HELP = (
     "--effort from base 10: minimal=10, low=15, medium=20, high=30, max=40. "
     "If --effort is unset, preserves the legacy cap of 10."
 )
-EXEC_MAX_ITERATION_PROVIDER_IDS = frozenset({"openrouter", "ollama"})
+EXEC_MAX_ITERATION_PROVIDER_IDS = frozenset({"codex", "openrouter", "ollama"})
 GIT_RECOVERY_COMMAND_TIMEOUT_SEC = 2.0
 GIT_RECOVERY_MAX_COMMITS = 5
 GIT_RECOVERY_MAX_STATUS_PATHS = 8
@@ -1772,6 +1772,7 @@ def _invoke_with_fallback(
                         session_log=session_log,
                         attachments=attachments,
                         strict_stall=strict_stall,
+                        max_iterations=max_iterations,
                     )
                 elif isinstance(provider, OllamaProvider):
                     _ensure_supports_attachments(provider, attachments)
@@ -5309,6 +5310,7 @@ def exec_cmd(
                     session_log=session_log,
                     attachments=attachments,
                     strict_stall=strict_stall,
+                    max_iterations=max_iterations_value,
                 )
             elif isinstance(provider, OllamaProvider):
                 response = provider.exec(

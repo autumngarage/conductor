@@ -268,6 +268,7 @@ class Provider(Protocol):
         max_stall_sec: int | None = None,
         resume_session_id: str | None = None,
         session_log: SessionLog | None = None,
+        max_iterations: int | None = None,
         allow_completion_stretch: bool = False,
         write_validation: bool = True,
     ) -> CallResponse:

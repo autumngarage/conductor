@@ -32,6 +32,7 @@ from conductor import __version__ as _conductor_version
 from conductor.offline_mode import _cache_dir
 from conductor.orphan_detect import find_orphan_codex_processes, format_orphan_hints
 from conductor.providers._startup_lock import codex_startup_lock, release_startup_lock
+from conductor.providers._tool_weights import ToolBudgetCounter
 from conductor.providers.cli_auth import AuthPromptTracker
 from conductor.providers.interface import (
     CallResponse,
@@ -929,6 +930,7 @@ class CodexProvider:
         session_log: SessionLog | None = None,
         attachments: tuple[Path, ...] = (),
         strict_stall: bool = False,
+        max_iterations: int | None = None,
     ) -> CallResponse:
         return self._run(
             task,
@@ -944,6 +946,7 @@ class CodexProvider:
             session_log=session_log,
             attachments=attachments,
             strict_stall=strict_stall,
+            max_iterations=max_iterations,
         )
 
     def _run(
@@ -962,6 +965,7 @@ class CodexProvider:
         session_log: SessionLog | None = None,
         attachments: tuple[Path, ...] = (),
         strict_stall: bool = False,
+        max_iterations: int | None = None,
     ) -> CallResponse:
         # Cheap PATH check on the hot path; auth state surfaces as a CLI
         # exit failure below if needed. configured() (with auth probe) is
@@ -1040,6 +1044,7 @@ class CodexProvider:
                 output_path=output_path,
                 session_log=session_log,
                 strict_stall=strict_stall,
+                max_iterations=max_iterations,
             )
 
         start = time.monotonic()
@@ -1122,6 +1127,7 @@ class CodexProvider:
         output_path: Path,
         session_log: SessionLog | None,
         strict_stall: bool,
+        max_iterations: int | None,
     ) -> CallResponse:
         start = time.monotonic()
         startup_lock_context = codex_startup_lock(
@@ -1217,6 +1223,8 @@ class CodexProvider:
         initial_stall_event_seen = False
         stdout_event_buffer = ""
         stderr_failure_tail = ""
+        tool_budget = ToolBudgetCounter()
+        hit_iteration_cap = False
         try:
             while True:
                 now = time.monotonic()
@@ -1393,6 +1401,26 @@ class CodexProvider:
                     line = f"{line}\n"
                     auth_tracker.observe_json_line(line, source="stdout")
                     self._emit_stream_event(line, session_log=session_log)
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        event = None
+                    if isinstance(event, dict):
+                        tool_budget.observe_event(event)
+                        if (
+                            max_iterations is not None
+                            and tool_budget.weighted_total >= max_iterations
+                        ):
+                            hit_iteration_cap = True
+                            self._emit_watchdog_stderr(
+                                "[conductor] Reached --max-iterations cap "
+                                f"(weighted: {tool_budget.weighted_total:.1f} / "
+                                f"{max_iterations}; raw count: "
+                                f"{tool_budget.raw_count}). Re-run with "
+                                "--max-iterations <larger> or split the brief.\n"
+                            )
+                            self._terminate_process(process)
+                            break
                     progress_kind = self._codex_stall_progress_kind(line)
                     if progress_kind == "initial":
                         if not initial_stall_event_seen:
@@ -1438,6 +1466,8 @@ class CodexProvider:
                                 f"[conductor] codex session_id={sid}\n"
                             )
                             session_id_emitted = True
+                if hit_iteration_cap:
+                    break
         finally:
             release_startup_lock(startup_lock_handle)
             startup_lock_context.__exit__(None, None, None)
@@ -1478,7 +1508,7 @@ class CodexProvider:
         stdout = "".join(stdout_parts)
         stderr = "".join(stderr_parts)
 
-        if returncode != 0:
+        if returncode != 0 and not hit_iteration_cap:
             raise ProviderHTTPError(
                 f"codex exited {returncode}: "
                 f"{(stderr or stdout).strip()[:500]}"
@@ -1489,6 +1519,14 @@ class CodexProvider:
             session_log.set_session_id(session_id)
         if not content:
             content = self._read_output_backstop(output_path) or ""
+        if hit_iteration_cap:
+            cap_message = (
+                "[conductor] Reached --max-iterations cap "
+                f"(weighted: {tool_budget.weighted_total:.1f} / {max_iterations}; "
+                f"raw count: {tool_budget.raw_count}). Re-run with "
+                "--max-iterations <larger> or split the brief."
+            )
+            content = f"{content.rstrip()}\n\n{cap_message}".strip()
         if not content:
             raise ProviderHTTPError(
                 f"codex NDJSON stream had no agent_message: {stdout[:500]!r}"
@@ -1505,6 +1543,9 @@ class CodexProvider:
                 "thinking_tokens": None,
                 "effort": effort if isinstance(effort, str) else None,
                 "thinking_budget": thinking_budget,
+                "tool_iterations": tool_budget.weighted_total,
+                "tool_call_count": tool_budget.raw_count,
+                "hit_iteration_cap": hit_iteration_cap,
             },
             session_id=session_id,
             raw={"stdout": stdout, "output_path": str(output_path)},
