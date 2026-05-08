@@ -37,6 +37,8 @@ def _fast_cli_network_profile(monkeypatch):
     from conductor import cli
     from conductor.network_profile import NETWORK_PROFILE_FALLBACK_TARGET, NetworkProfile
 
+    monkeypatch.setenv("CONDUCTOR_NO_AUTO_REFRESH", "1")
+
     def _profile(target: str | None, *, warn=None):
         return NetworkProfile(
             rtt_ms=50,

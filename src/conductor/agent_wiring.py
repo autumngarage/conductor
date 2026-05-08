@@ -29,6 +29,9 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from packaging.version import InvalidVersion
+from packaging.version import parse as parse_version
+
 # --------------------------------------------------------------------------- #
 # Marker formats — the two shapes of "conductor owns this".
 # --------------------------------------------------------------------------- #
@@ -66,6 +69,24 @@ _REPO_SCOPED_KINDS = frozenset(
         "cursor-rule",
     }
 )
+_USER_SCOPED_KINDS = frozenset(
+    {
+        "guidance",
+        "slash-command",
+        "subagent",
+        "claude-md-import",
+    }
+)
+_VERSION_SCAN_BYTES = 512
+
+
+@dataclass(frozen=True)
+class UserScopeVersionDecision:
+    path: Path
+    kind: str
+    version: str | None
+    stale: bool
+    reason: str
 
 
 def _managed_comment(version: str) -> str:
@@ -101,6 +122,17 @@ def _canonical_wiring_version(version: str) -> str:
 
 def _wiring_versions_match(left: str, right: str) -> bool:
     return _canonical_wiring_version(left) == _canonical_wiring_version(right)
+
+
+def _wiring_version_is_older(version: str | None, *, binary_version: str) -> bool:
+    if version is None:
+        return False
+    current = parse_version(_canonical_wiring_version(binary_version))
+    try:
+        artifact_version = parse_version(_canonical_wiring_version(version))
+    except InvalidVersion:
+        return True
+    return artifact_version < current
 
 
 # --------------------------------------------------------------------------- #
@@ -259,6 +291,23 @@ def _candidate_sentinel_paths(*, cwd: Path | None = None) -> dict[Path, str]:
     }
 
 
+def _user_scope_candidate_artifacts() -> dict[Path, str]:
+    """User-scope files conductor refreshes automatically after upgrades."""
+    return {
+        path: kind
+        for path, kind in _candidate_artifacts().items()
+        if kind in _USER_SCOPED_KINDS
+    }
+
+
+def _user_scope_candidate_sentinel_paths() -> dict[Path, str]:
+    return {
+        path: kind
+        for path, kind in _candidate_sentinel_paths().items()
+        if kind in _USER_SCOPED_KINDS
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Managed-file helpers — write/read/detect ownership.
 # --------------------------------------------------------------------------- #
@@ -297,6 +346,102 @@ def read_managed_version(path: Path) -> str | None:
 
 def is_managed_file(path: Path) -> bool:
     return read_managed_version(path) is not None
+
+
+def user_scope_version_decisions(
+    *,
+    binary_version: str,
+) -> tuple[UserScopeVersionDecision, ...]:
+    """Scan user-scope managed files for stale conductor version stamps.
+
+    The startup auto-refresh path calls this before eligible CLI commands, so
+    it intentionally reads only a small prefix from each candidate file.
+    Missing or user-owned files are not stale; only conductor-managed stamps
+    older than the running binary trigger a refresh.
+    """
+    decisions: list[UserScopeVersionDecision] = []
+    for path, kind in _user_scope_candidate_artifacts().items():
+        version = _read_managed_version_prefix(path)
+        decisions.append(
+            _user_scope_decision(
+                path=path,
+                kind=kind,
+                version=version,
+                exists=path.is_file(),
+                binary_version=binary_version,
+            )
+        )
+    for path, kind in _user_scope_candidate_sentinel_paths().items():
+        version = _read_sentinel_version_prefix(path)
+        decisions.append(
+            _user_scope_decision(
+                path=path,
+                kind=kind,
+                version=version,
+                exists=path.is_file(),
+                binary_version=binary_version,
+            )
+        )
+    return tuple(decisions)
+
+
+def is_user_scope_stale(*, binary_version: str) -> bool:
+    """Return True when any user-scope conductor-managed file is stale."""
+    return any(
+        decision.stale
+        for decision in user_scope_version_decisions(binary_version=binary_version)
+    )
+
+
+def _user_scope_decision(
+    *,
+    path: Path,
+    kind: str,
+    version: str | None,
+    exists: bool,
+    binary_version: str,
+) -> UserScopeVersionDecision:
+    if version is None:
+        reason = "missing" if not exists else "not conductor-managed"
+        return UserScopeVersionDecision(path, kind, None, False, reason)
+    stale = _wiring_version_is_older(version, binary_version=binary_version)
+    reason = "stale" if stale else "current"
+    return UserScopeVersionDecision(path, kind, version, stale, reason)
+
+
+def _read_prefix(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    with path.open("r", encoding="utf-8") as fh:
+        return fh.read(_VERSION_SCAN_BYTES)
+
+
+def _read_managed_version_prefix(path: Path) -> str | None:
+    text = _read_prefix(path)
+    if not text:
+        return None
+    first_line = text.splitlines()[0] if text.splitlines() else ""
+    if first_line.startswith(MANAGED_COMMENT_PREFIX):
+        return _extract_version(first_line, MANAGED_COMMENT_PREFIX)
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(MANAGED_FRONTMATTER_KEY):
+            return _extract_version(stripped, MANAGED_FRONTMATTER_KEY)
+    return None
+
+
+def _read_sentinel_version_prefix(path: Path) -> str | None:
+    text = _read_prefix(path)
+    if not text:
+        return None
+    idx = text.find(SENTINEL_BEGIN_PREFIX)
+    if idx == -1:
+        return None
+    rest = text[idx + len(SENTINEL_BEGIN_PREFIX) :]
+    end = rest.find(" -->")
+    if end == -1:
+        return None
+    return rest[:end].strip()
 
 
 def project_root_for_wiring_notice(cwd: Path | None = None) -> Path | None:
