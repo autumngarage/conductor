@@ -89,10 +89,71 @@ _EFFORT_TO_CODEX_FLAG = {
     "max": "high",  # codex's ceiling
 }
 
+_CODEX_EXEC_RESUME_OPTION_ARITY = {
+    "-c": 1,
+    "--config": 1,
+    "--all": 0,
+    "--dangerously-bypass-approvals-and-sandbox": 0,
+    "--disable": 1,
+    "--enable": 1,
+    "--ephemeral": 0,
+    "--ignore-rules": 0,
+    "--ignore-user-config": 0,
+    "-i": 1,
+    "--image": 1,
+    "--json": 0,
+    "--last": 0,
+    "-m": 1,
+    "--model": 1,
+    "-o": 1,
+    "--output-last-message": 1,
+    "--skip-git-repo-check": 0,
+}
+_CODEX_EXEC_RESUME_DROPPED_OPTION_ARITY = {
+    "--sandbox": 1,
+}
+
 
 def _codex_output_path(resume_session_id: str | None) -> Path:
     sessionish = resume_session_id or uuid.uuid4().hex
     return _cache_dir() / f"codex-exec-{sessionish}.json"
+
+
+def _filter_codex_exec_resume_args(args: list[str]) -> list[str]:
+    """Return argv accepted by `codex exec resume`.
+
+    The resume subcommand has a narrower flag surface than `codex exec`.
+    Keep the known accepted flags explicit so compatibility-only parent flags
+    do not leak into resume and fail before the provider can do useful work.
+    """
+    filtered: list[str] = []
+    index = 0
+    while index < len(args):
+        item = args[index]
+        if item == "-" or not item.startswith("-"):
+            filtered.append(item)
+            index += 1
+            continue
+
+        if item in _CODEX_EXEC_RESUME_DROPPED_OPTION_ARITY:
+            value_count = _CODEX_EXEC_RESUME_DROPPED_OPTION_ARITY[item]
+            _LOG.debug("dropping unsupported codex exec resume option %s", item)
+            index += 1 + value_count
+            continue
+
+        accepted_value_count = _CODEX_EXEC_RESUME_OPTION_ARITY.get(item)
+        if accepted_value_count is None:
+            raise ProviderError(
+                f"internal error: codex exec resume option is not allowlisted: {item}"
+            )
+        if index + accepted_value_count >= len(args):
+            raise ProviderError(
+                f"internal error: codex exec resume option {item} is missing a value"
+            )
+        filtered.append(item)
+        filtered.extend(args[index + 1 : index + 1 + accepted_value_count])
+        index += 1 + accepted_value_count
+    return filtered
 
 
 def _format_compact_count(value: int) -> str:
@@ -891,6 +952,9 @@ class CodexProvider:
 
         for attachment in attachments:
             args.extend(["-i", str(attachment)])
+
+        if resume_session_id:
+            args = _filter_codex_exec_resume_args(args)
 
         if timeout_sec_override is _USE_DEFAULT:
             timeout = self._timeout_sec
