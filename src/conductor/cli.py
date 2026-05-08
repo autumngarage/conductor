@@ -4829,6 +4829,337 @@ def _append_previous_phase_results(body: str, summaries: list[str]) -> str:
     return f"{body}\n\n" + "\n\n".join(summaries)
 
 
+SWARM_SUCCESS_STATUSES = frozenset({"shipped", "no-changes"})
+SWARM_BRANCH_PREFIX = "feat/swarm"
+
+
+@dataclass
+class SwarmTaskResult:
+    brief: str
+    branch: str
+    worktree: str
+    status: str
+    commits: int
+    pr_url: str | None
+    merge_sha: str | None
+    duration_ms: int
+    failure_reason: str | None = None
+
+    def to_json(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "brief": self.brief,
+            "branch": self.branch,
+            "worktree": self.worktree,
+            "status": self.status,
+            "commits": self.commits,
+            "pr_url": self.pr_url,
+            "merge_sha": self.merge_sha,
+            "duration_ms": self.duration_ms,
+        }
+        if self.failure_reason is not None:
+            payload["failure_reason"] = self.failure_reason
+        return payload
+
+
+def _sanitize_swarm_stem(path: str) -> str:
+    raw = Path(path).stem.lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", raw).strip("-")
+    slug = re.sub(r"-+", "-", slug)
+    if not slug:
+        raise click.UsageError(f"could not derive a branch slug from --brief {path!r}.")
+    return slug
+
+
+def _swarm_branch_for_brief(path: str) -> str:
+    return f"{SWARM_BRANCH_PREFIX}/{_sanitize_swarm_stem(path)}"
+
+
+def _run_swarm_git(
+    args: list[str],
+    *,
+    cwd: str | Path | None,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as e:
+        raise RuntimeError(f"`git {' '.join(args)}` failed to start in {cwd}: {e}") from e
+    if check and result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        suffix = f": {detail}" if detail else ""
+        raise RuntimeError(f"`git {' '.join(args)}` failed in {cwd}{suffix}")
+    return result
+
+
+def _swarm_repo_root() -> Path:
+    return Path(_run_swarm_git(["rev-parse", "--show-toplevel"], cwd=None).stdout.strip())
+
+
+def _swarm_commit_count(worktree: Path, base_branch: str) -> int:
+    output = _run_swarm_git(
+        ["rev-list", "--count", f"{base_branch}..HEAD"],
+        cwd=worktree,
+    ).stdout.strip()
+    try:
+        return int(output)
+    except ValueError as e:
+        raise RuntimeError(f"unexpected git rev-list output in {worktree}: {output!r}") from e
+
+
+def _swarm_dirty_paths(worktree: Path) -> list[str]:
+    output = _run_swarm_git(["status", "--porcelain"], cwd=worktree).stdout
+    return [line for line in output.splitlines() if line.strip()]
+
+
+def _remove_swarm_worktree(worktree: Path, *, repo_root: Path) -> None:
+    _run_swarm_git(["worktree", "remove", str(worktree)], cwd=repo_root)
+
+
+def _extract_pr_url(output: str) -> str | None:
+    match = re.search(r"https://github\.com/[^\s]+/pull/\d+", output)
+    return match.group(0) if match else None
+
+
+def _swarm_pr_merge_sha(worktree: Path, pr_url: str | None) -> str | None:
+    if pr_url is None:
+        return None
+    pr_number = pr_url.rstrip("/").rsplit("/", 1)[-1]
+    if not pr_number.isdigit():
+        return None
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "view",
+                pr_number,
+                "--json",
+                "mergeCommit",
+                "--jq",
+                ".mergeCommit.oid // empty",
+            ],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as e:
+        click.echo(
+            f"[conductor] warning: could not inspect PR merge commit for {pr_url}: {e}",
+            err=True,
+        )
+        return None
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        click.echo(
+            f"[conductor] warning: gh pr view failed for {pr_url}: {detail}",
+            err=True,
+        )
+        return None
+    return result.stdout.strip() or None
+
+
+def _ship_swarm_pr(
+    worktree: Path,
+    *,
+    base_branch: str,
+    auto_merge: bool,
+) -> tuple[str, str | None, str | None]:
+    repo_root = _swarm_repo_root()
+    script = repo_root / "scripts" / "open-pr.sh"
+    args = ["bash", str(script), "--base", base_branch]
+    if auto_merge:
+        args.append("--auto-merge")
+    result = subprocess.run(
+        args,
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    output = f"{result.stdout}\n{result.stderr}".strip()
+    pr_url = _extract_pr_url(output)
+    if result.returncode != 0:
+        status = "review-blocked" if auto_merge and pr_url else "failed"
+        reason = output or f"open-pr.sh exited {result.returncode}"
+        return status, pr_url, reason
+    merge_sha = _swarm_pr_merge_sha(worktree, pr_url) if auto_merge else None
+    return ("shipped" if auto_merge else "pushed-not-merged"), pr_url, merge_sha
+
+
+def _swarm_summary(results: list[SwarmTaskResult]) -> dict[str, object]:
+    shipped_count = sum(1 for result in results if result.status == "shipped")
+    failed_count = sum(1 for result in results if result.status == "failed")
+    no_changes_count = sum(1 for result in results if result.status == "no-changes")
+    ok = all(result.status in SWARM_SUCCESS_STATUSES for result in results)
+    return {
+        "tasks": [result.to_json() for result in results],
+        "ok": ok,
+        "shipped_count": shipped_count,
+        "failed_count": failed_count,
+        "no_changes_count": no_changes_count,
+    }
+
+
+def _run_swarm_task(
+    *,
+    brief_path: str,
+    provider_id: str,
+    base_branch: str,
+    base_ref: str,
+    auto_merge: bool,
+    max_iterations: int | None,
+    max_stall_sec: int | None,
+    timeout_sec: int | None,
+    keep_worktrees_on_failure: bool,
+    as_json: bool,
+) -> SwarmTaskResult:
+    started_at = time.monotonic()
+    repo_root = _swarm_repo_root()
+    branch = _swarm_branch_for_brief(brief_path)
+    task_id = _sanitize_swarm_stem(brief_path)
+    worktree = (repo_root / ".cache" / "conductor" / "swarm" / task_id).resolve()
+    brief = Path(brief_path)
+    if not brief.is_absolute():
+        brief = (repo_root / brief).resolve()
+    try:
+        body = brief.read_text(encoding="utf-8").strip()
+    except OSError as e:
+        raise click.UsageError(f"could not read --brief {brief_path!r}: {e.strerror or e}") from e
+    if not body:
+        raise click.UsageError(f"brief is empty after stripping whitespace: {brief_path!r}")
+
+    created_worktree = False
+    status = "failed"
+    commits = 0
+    pr_url: str | None = None
+    merge_sha: str | None = None
+    failure_reason: str | None = None
+    try:
+        worktree.parent.mkdir(parents=True, exist_ok=True)
+        _run_swarm_git(
+            ["worktree", "add", str(worktree), "-b", branch, base_ref],
+            cwd=repo_root,
+        )
+        created_worktree = True
+        if not as_json:
+            click.echo(f"[conductor] swarm task started: {brief_path} -> {branch}", err=True)
+
+        _run_exec_phase_dispatch(
+            provider_id=provider_id,
+            auto=False,
+            tags=None,
+            prefer=None,
+            effort=None,
+            tools=None,
+            permission_profile=None,
+            sandbox=None,
+            exclude=None,
+            cwd=str(worktree),
+            timeout_sec=timeout_sec,
+            max_stall_sec=max_stall_sec,
+            strict_stall=False,
+            start_timeout_sec=None,
+            max_iterations=max_iterations,
+            allow_completion_stretch=False,
+            retry_on_stall=1,
+            body=body,
+            attachments=(),
+            model=None,
+            log_file=None,
+            as_json=False,
+            verbose_route=False,
+            silent_route=True,
+            resume_session_id=None,
+            offline=None,
+            preflight=True,
+            write_validation=True,
+            timeout_is_default=timeout_sec is None,
+            max_stall_is_default=max_stall_sec == DEFAULT_EXEC_MAX_STALL_SEC,
+            raise_on_error=True,
+        )
+        dirty_paths = _swarm_dirty_paths(worktree)
+        if dirty_paths:
+            status = "failed"
+            failure_reason = (
+                "task left uncommitted changes in worktree: "
+                + ", ".join(path[:200] for path in dirty_paths[:10])
+            )
+        else:
+            commits = _swarm_commit_count(worktree, base_ref)
+            if commits == 0:
+                status = "no-changes"
+            else:
+                shipped_status, shipped_pr_url, shipped_detail = _ship_swarm_pr(
+                    worktree,
+                    base_branch=base_branch,
+                    auto_merge=auto_merge,
+                )
+                status = shipped_status
+                pr_url = shipped_pr_url
+                if status == "shipped":
+                    merge_sha = shipped_detail
+                elif status in {"failed", "review-blocked"}:
+                    failure_reason = shipped_detail
+    except _ExecPhaseError as e:
+        status = "failed"
+        failure_reason = e.message
+        if created_worktree:
+            try:
+                commits = _swarm_commit_count(worktree, base_ref)
+            except RuntimeError as count_error:
+                click.echo(f"[conductor] warning: {count_error}", err=True)
+    except RuntimeError as e:
+        status = "failed"
+        failure_reason = str(e)
+    finally:
+        duration_ms = int((time.monotonic() - started_at) * 1000)
+
+    result = SwarmTaskResult(
+        brief=brief_path,
+        branch=branch,
+        worktree=str(worktree),
+        status=status,
+        commits=commits,
+        pr_url=pr_url,
+        merge_sha=merge_sha,
+        duration_ms=duration_ms,
+        failure_reason=failure_reason,
+    )
+    if created_worktree and (
+        result.status in SWARM_SUCCESS_STATUSES or not keep_worktrees_on_failure
+    ):
+        try:
+            _remove_swarm_worktree(worktree, repo_root=repo_root)
+        except RuntimeError as e:
+            result.status = "failed"
+            result.failure_reason = f"{result.failure_reason or result.status}; cleanup failed: {e}"
+    if result.status == "failed":
+        click.echo(
+            f"[conductor] swarm task failed: {brief_path}; inspect {worktree}; "
+            f"reason: {result.failure_reason}",
+            err=True,
+        )
+    elif result.status == "review-blocked":
+        click.echo(
+            f"[conductor] swarm task review-blocked: {brief_path}; inspect {worktree}",
+            err=True,
+        )
+    elif not as_json:
+        click.echo(
+            f"[conductor] swarm task {result.status}: {brief_path} "
+            f"({result.commits} commits)",
+            err=True,
+        )
+    return result
+
+
 DEFAULT_AUTO_PHASE_ANCHORS: tuple[str, ...] = (
     "## Tests",
     "## Validation",
@@ -5848,6 +6179,134 @@ def exec_cmd(
             decision=final_decision,
             auth_prompts=_collect_session_auth_prompts(final_session_log),
         )
+
+
+# --------------------------------------------------------------------------- #
+# swarm — sequential multi-task coding supervisor
+# --------------------------------------------------------------------------- #
+
+
+@main.command(name="swarm")
+@click.option(
+    "--brief",
+    "briefs",
+    multiple=True,
+    required=True,
+    help="Path to one task brief. Repeat for multiple independent tasks.",
+)
+@click.option(
+    "--provider",
+    "provider_id",
+    required=True,
+    help="Provider to run for every task. v0 supports codex only.",
+)
+@click.option(
+    "--base-branch",
+    default="main",
+    show_default=True,
+    help="Branch each task worktree forks from.",
+)
+@click.option(
+    "--auto-merge",
+    is_flag=True,
+    default=False,
+    help="Open, review, and squash-merge each task PR.",
+)
+@click.option(
+    "--max-iterations",
+    default=None,
+    type=click.IntRange(min=1),
+    help=EXEC_MAX_ITERATIONS_HELP,
+)
+@click.option(
+    "--max-stall-seconds",
+    "max_stall_sec",
+    default=DEFAULT_EXEC_MAX_STALL_SEC,
+    type=int,
+    help="Per-task no-output watchdog in seconds. Set 0 to disable.",
+)
+@click.option(
+    "--timeout",
+    "timeout_sec",
+    default=None,
+    type=int,
+    help="Per-task wall-clock timeout in seconds. Unbounded by default.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Emit structured swarm results as JSON.",
+)
+@click.option(
+    "--keep-worktrees-on-failure/--remove-worktrees-on-failure",
+    default=True,
+    show_default=True,
+    help="Preserve failed task worktrees for inspection.",
+)
+@click.option(
+    "--max-parallel",
+    default=None,
+    type=click.IntRange(min=1),
+    hidden=True,
+)
+def swarm(
+    briefs: tuple[str, ...],
+    provider_id: str,
+    base_branch: str,
+    auto_merge: bool,
+    max_iterations: int | None,
+    max_stall_sec: int | None,
+    timeout_sec: int | None,
+    as_json: bool,
+    keep_worktrees_on_failure: bool,
+    max_parallel: int | None,
+) -> None:
+    """Run independent coding briefs under Conductor's sequential supervisor."""
+    if max_parallel is not None:
+        raise click.UsageError("--max-parallel is a v1 feature; runs sequentially in v0.")
+    if provider_id != "codex":
+        raise click.UsageError("conductor swarm v0 supports --provider codex only.")
+
+    results: list[SwarmTaskResult] = []
+    try:
+        base_ref = _run_swarm_git(
+            ["rev-parse", "--verify", base_branch],
+            cwd=_swarm_repo_root(),
+        ).stdout.strip()
+    except RuntimeError as e:
+        raise click.UsageError(str(e)) from e
+    for brief_path in briefs:
+        result = _run_swarm_task(
+            brief_path=brief_path,
+            provider_id=provider_id,
+            base_branch=base_branch,
+            base_ref=base_ref,
+            auto_merge=auto_merge,
+            max_iterations=max_iterations,
+            max_stall_sec=max_stall_sec,
+            timeout_sec=timeout_sec,
+            keep_worktrees_on_failure=keep_worktrees_on_failure,
+            as_json=as_json,
+        )
+        results.append(result)
+
+    payload = _swarm_summary(results)
+    if as_json:
+        click.echo(json.dumps(payload, indent=2))
+    else:
+        for result in results:
+            detail = f"{result.status}: {result.brief} -> {result.branch}"
+            if result.pr_url:
+                detail += f" ({result.pr_url})"
+            click.echo(detail)
+        click.echo(
+            "ok={ok} shipped={shipped_count} failed={failed_count} "
+            "no-changes={no_changes_count}".format(**payload)
+        )
+    if not payload["ok"]:
+        sys.exit(1)
 
 
 # --------------------------------------------------------------------------- #
