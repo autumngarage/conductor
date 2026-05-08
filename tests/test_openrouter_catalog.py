@@ -156,6 +156,34 @@ def test_load_catalog_raises_without_cache_on_network_error(catalog_cache):
             openrouter_catalog.load_catalog_snapshot()
 
 
+def test_load_catalog_recovers_from_missing_default_ca_bundle(
+    catalog_response, catalog_cache, mocker
+):
+    original_client = httpx.Client
+    client_kwargs: list[dict[str, object]] = []
+
+    def client_factory(*args, **kwargs):
+        client_kwargs.append(dict(kwargs))
+        if len(client_kwargs) == 1:
+            raise FileNotFoundError(
+                2,
+                "No such file or directory",
+                "/missing/certifi/cacert.pem",
+            )
+        return original_client(*args, **kwargs)
+
+    mocker.patch("conductor.providers._http_client.httpx.Client", side_effect=client_factory)
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.get("/models").mock(return_value=httpx.Response(200, json=catalog_response))
+        snapshot = openrouter_catalog.load_catalog_snapshot()
+
+    assert snapshot.models[0].id == "anthropic/claude-sonnet-4.6"
+    assert len(client_kwargs) == 2
+    assert "verify" not in client_kwargs[0]
+    assert "verify" in client_kwargs[1]
+
+
 def test_read_cached_catalog_returns_none_when_missing(catalog_cache):
     assert openrouter_catalog.read_cached_catalog() is None
 

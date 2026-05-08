@@ -151,6 +151,7 @@ CONDUCTOR_TAGS=""
 CONDUCTOR_EXCLUDE=""
 ROUTING_ENABLED=false
 ROUTING_SMALL_MAX_DIFF_LINES=400
+LARGE_DIFF_REVIEW_BUDGET_SEC=900
 ROUTING_SMALL_REVIEWERS=()   # legacy 1.x shape; retained for back-compat parsing
 ROUTING_LARGE_REVIEWERS=()   # legacy 1.x shape; retained for back-compat parsing
 # 2.0 routing knobs — override CONDUCTOR_* for small vs large diffs.
@@ -1180,6 +1181,45 @@ apply_review_routing() {
   fi
 }
 
+scale_large_diff_review_budget() {
+  local diff_lines="$1"
+
+  case "$ROUTING_SMALL_MAX_DIFF_LINES" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  case "$diff_lines" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+
+  [ "$diff_lines" -gt "$ROUTING_SMALL_MAX_DIFF_LINES" ] 2>/dev/null || return 0
+
+  # Runtime env overrides are deliberate operator choices. Config-file values
+  # are repo defaults, so large diffs may still raise the budget unless the
+  # operator pins a value for this run.
+  if [ -n "${CODEX_REVIEW_TIMEOUT:-}" ] || [ -n "${CODEX_REVIEW_MAX_STALL_SEC:-}" ]; then
+    return 0
+  fi
+
+  case "$REVIEW_MAX_STALL_SEC" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  case "$REVIEW_TIMEOUT" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+
+  if [ "$REVIEW_MAX_STALL_SEC" -le 0 ] || [ "$REVIEW_TIMEOUT" -le 0 ]; then
+    return 0
+  fi
+
+  if [ "$REVIEW_MAX_STALL_SEC" -lt "$LARGE_DIFF_REVIEW_BUDGET_SEC" ] \
+      || [ "$REVIEW_TIMEOUT" -lt "$LARGE_DIFF_REVIEW_BUDGET_SEC" ]; then
+    REVIEW_MAX_STALL_SEC="$LARGE_DIFF_REVIEW_BUDGET_SEC"
+    REVIEW_TIMEOUT="$LARGE_DIFF_REVIEW_BUDGET_SEC"
+    echo "==> Review budget: large diff ($diff_lines > $ROUTING_SMALL_MAX_DIFF_LINES) — timeout/stall scaled to ${LARGE_DIFF_REVIEW_BUDGET_SEC}s"
+    echo "    Override with CODEX_REVIEW_TIMEOUT or CODEX_REVIEW_MAX_STALL_SEC."
+  fi
+}
+
 run_reviewer() {
   "reviewer_${ACTIVE_REVIEWER}_exec" "$1"
 }
@@ -1357,6 +1397,7 @@ fi
 
 ROUTING_DIFF_LINE_COUNT="$(git diff "$MERGE_BASE"..HEAD | wc -l | tr -d ' ')"
 apply_review_routing "$ROUTING_DIFF_LINE_COUNT"
+scale_large_diff_review_budget "$ROUTING_DIFF_LINE_COUNT"
 
 # Resolve which reviewer to use from the cascade.
 if ! resolve_reviewer; then

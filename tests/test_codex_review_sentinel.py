@@ -170,6 +170,72 @@ def test_codex_review_wrapper_accepts_footer_after_sentinel(tmp_path: Path) -> N
     assert not any(line.startswith("exec ") for line in conductor_invocations)
 
 
+def test_codex_review_large_diff_scales_default_review_budget(tmp_path: Path) -> None:
+    repo, env = _make_review_repo(tmp_path)
+    large_body = "".join(f"generated line {i}\n" for i in range(450))
+    (repo / "large.txt").write_text(large_body, encoding="utf-8")
+    subprocess.run(["git", "add", "large.txt"], cwd=repo, env=env, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "large diff"], cwd=repo, env=env, check=True)
+
+    fakes = tmp_path / "fakes"
+    fakes.mkdir()
+    conductor_args = tmp_path / "conductor-args.txt"
+    conductor = fakes / "conductor"
+    conductor.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            printf '%s\\n' "$*" >> "${FAKE_CONDUCTOR_ARGS:?}"
+            case "$1" in
+              doctor)
+                printf '{"configured": true}\\n'
+                ;;
+              review|exec)
+                cat >/dev/null
+                printf 'LGTM\\nCODEX_REVIEW_CLEAN\\n'
+                ;;
+              *)
+                exit 1
+                ;;
+            esac
+            """
+        ),
+        encoding="utf-8",
+    )
+    conductor.chmod(0o755)
+
+    script = Path(__file__).resolve().parent.parent / "scripts" / "codex-review.sh"
+    result = subprocess.run(
+        ["bash", str(script)],
+        cwd=repo,
+        env={
+            **env,
+            "PATH": f"{fakes}:{os.environ.get('PATH', '')}",
+            "CODEX_REVIEW_BASE": "HEAD~1",
+            "CODEX_REVIEW_MODE": "review-only",
+            "CODEX_REVIEW_DISABLE_CACHE": "1",
+            "CODEX_REVIEW_TIMEOUT": "",
+            "CODEX_REVIEW_MAX_STALL_SEC": "",
+            "FAKE_CONDUCTOR_ARGS": str(conductor_args),
+            "NO_COLOR": "1",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Review budget: large diff" in result.stdout
+    conductor_invocations = conductor_args.read_text(encoding="utf-8").splitlines()
+    review_invocations = [
+        line for line in conductor_invocations if line.startswith("review --auto")
+    ]
+    assert any(
+        "--timeout 900" in line and "--max-stall-seconds 900" in line
+        for line in review_invocations
+    ), conductor_invocations
+
+
 def test_codex_review_wrapper_blocks_malformed_sentinel_even_fail_open(
     tmp_path: Path,
 ) -> None:

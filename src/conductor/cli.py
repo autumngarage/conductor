@@ -24,8 +24,10 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import tomllib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -37,6 +39,7 @@ from click.core import ParameterSource
 from packaging.version import InvalidVersion
 from packaging.version import parse as parse_version
 
+import conductor.git_state as git_state
 import conductor.providers.openrouter_catalog as openrouter_catalog
 from conductor import __version__, credentials, offline_mode
 from conductor._issue_briefs import (
@@ -169,12 +172,12 @@ EXEC_MAX_ITERATION_MULTIPLIERS = {
     "minimal": 1.0,
     "low": 1.5,
     "medium": 2.0,
-    "high": 3.0,
-    "max": 4.0,
+    "high": 6.0,
+    "max": 8.0,
 }
 EXEC_MAX_ITERATIONS_HELP = (
     "Maximum Conductor-managed tool-use loop iterations. Default scales with "
-    "--effort from base 10: minimal=10, low=15, medium=20, high=30, max=40. "
+    "--effort from base 10: minimal=10, low=15, medium=20, high=60, max=80. "
     "If --effort is unset, preserves the legacy cap of 10."
 )
 EXEC_MAX_ITERATION_PROVIDER_IDS = frozenset({"codex", "openrouter", "ollama"})
@@ -472,6 +475,47 @@ def _warn_if_short_exec_brief(
         "--brief-file with goal, context, scope, constraints, expected output, "
         "and validation. Pass --allow-short-brief to silence this warning.",
         err=True,
+    )
+
+
+def _call_mode_side_effect_reason(body: str) -> str | None:
+    patterns = (
+        (
+            re.compile(
+                r"(?is)\b(write|create|update|edit|modify)\b.{0,80}"
+                r"\b(file|path|\.md|\.py|\.toml|AGENTS\.md|CLAUDE\.md)\b"
+            ),
+            "write local files",
+        ),
+        (
+            re.compile(r"(?is)\bwrite\b.{0,80}\b(to|at)\s+`?[./~\w-]"),
+            "write local files",
+        ),
+        (re.compile(r"(?i)\b(git\s+)?commit\b"), "commit changes"),
+        (re.compile(r"(?i)\b(git\s+)?push\b"), "push a branch"),
+        (
+            re.compile(r"(?i)\b(open|create)\s+(a\s+)?(draft\s+)?(pr|pull request)\b|\bgh\s+pr\b"),
+            "open a pull request",
+        ),
+        (
+            re.compile(r"(?i)\b(create|switch|checkout)\b.{0,40}\bbranch\b|\bgit\s+checkout\b"),
+            "change branches",
+        ),
+    )
+    for pattern, reason in patterns:
+        if pattern.search(body):
+            return reason
+    return None
+
+
+def _reject_call_mode_side_effect_brief(kind: str, body: str) -> None:
+    reason = _call_mode_side_effect_reason(body)
+    if reason is None:
+        return
+    raise click.UsageError(
+        f"`conductor ask --kind {kind}` uses call mode and cannot {reason}. "
+        "Use `conductor ask --kind code --effort high`, `conductor exec`, "
+        "or ask for text output on stdout."
     )
 
 
@@ -3338,6 +3382,8 @@ AUTO_REFRESH_COMMANDS = frozenset(
         "route",
     }
 )
+AUTO_REFRESH_VIA_PR_ENV = "CONDUCTOR_AUTO_REFRESH_VIA_PR"
+AUTO_REFRESH_VIA_PR_MODES = frozenset({"auto", "always", "never"})
 
 
 def _env_flag_enabled(name: str) -> bool:
@@ -3345,6 +3391,29 @@ def _env_flag_enabled(name: str) -> bool:
     if value is None:
         return False
     return value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _auto_refresh_via_pr_mode() -> tuple[str, str | None]:
+    raw = os.environ.get(AUTO_REFRESH_VIA_PR_ENV, "auto").strip().lower()
+    if raw in AUTO_REFRESH_VIA_PR_MODES:
+        return raw, None
+    return (
+        "auto",
+        f"{AUTO_REFRESH_VIA_PR_ENV}={raw!r} is invalid; expected auto, always, or never",
+    )
+
+
+def _repo_scope_auto_refresh_uses_branch(cwd: Path, mode: str) -> tuple[bool, str | None]:
+    if mode == "never":
+        return False, None
+    if mode == "always":
+        return True, None
+    try:
+        current = git_state.current_branch(cwd=cwd)
+        default = git_state.default_branch(cwd=cwd)
+    except GitStateError as e:
+        return False, f"could not determine default branch; refreshing in place: {e}"
+    return current is not None and current == default, None
 
 
 def _maybe_auto_refresh(ctx: click.Context) -> None:
@@ -3401,6 +3470,40 @@ def _maybe_auto_refresh(ctx: click.Context) -> None:
                     err=True,
                 )
         if not any(repo_decision.stale for repo_decision in repo_decisions):
+            return
+        mode, mode_warning = _auto_refresh_via_pr_mode()
+        if mode_warning:
+            click.echo(f"[conductor] auto-refresh warning: {mode_warning}", err=True)
+        via_branch, branch_warning = _repo_scope_auto_refresh_uses_branch(cwd, mode)
+        if branch_warning:
+            click.echo(f"[conductor] auto-refresh warning: {branch_warning}", err=True)
+        if via_branch:
+            version = __version__.split("+", 1)[0]
+            branch = f"chore/conductor-refresh-v{version}"
+            result = _refresh_current_repo_scope_on_branch(
+                cwd,
+                branch=branch,
+                version=__version__,
+            )
+            if result.status in {"failed", "needs-attention", "skipped"}:
+                click.echo(
+                    "[conductor] auto-refresh warning: "
+                    f"{result.status}: {result.detail}",
+                    err=True,
+                )
+                return
+            if result.status == "committed":
+                click.echo(
+                    "[conductor] auto-refreshed repo-scope integration files "
+                    f"on {branch} ({result.detail})",
+                    err=True,
+                )
+            elif result.status == "unchanged":
+                click.echo(
+                    "[conductor] repo-scope integration refresh branch "
+                    f"{branch} is already current",
+                    err=True,
+                )
             return
         report = agent_wiring.refresh_repo_scope(cwd, version=__version__)
         for path, reason in report.skipped:
@@ -3644,6 +3747,8 @@ def ask(
         cwd=cwd,
         attach=attach,
     )
+    if plan.mode == "call":
+        _reject_call_mode_side_effect_brief(kind, brief_input.body)
     if plan.mode == "exec":
         _warn_if_short_exec_brief(brief_input, allow_short_brief=allow_short_brief)
     if plan.mode not in {"review", "council"}:
@@ -4831,6 +4936,7 @@ def _append_previous_phase_results(body: str, summaries: list[str]) -> str:
 
 SWARM_SUCCESS_STATUSES = frozenset({"shipped", "no-changes"})
 SWARM_BRANCH_PREFIX = "feat/swarm"
+SWARM_WORKTREE_LOCK = threading.Lock()
 
 
 @dataclass
@@ -4872,6 +4978,34 @@ def _sanitize_swarm_stem(path: str) -> str:
 
 def _swarm_branch_for_brief(path: str) -> str:
     return f"{SWARM_BRANCH_PREFIX}/{_sanitize_swarm_stem(path)}"
+
+
+def _swarm_worktree_for_brief(path: str, *, repo_root: Path) -> Path:
+    return (repo_root / ".cache" / "conductor" / "swarm" / _sanitize_swarm_stem(path)).resolve()
+
+
+def _validate_swarm_briefs(briefs: tuple[str, ...], *, repo_root: Path) -> None:
+    seen_branches: dict[str, str] = {}
+    for brief_path in briefs:
+        branch = _swarm_branch_for_brief(brief_path)
+        if branch in seen_branches:
+            raise click.UsageError(
+                f"--brief {brief_path!r} and {seen_branches[branch]!r} both map to "
+                f"{branch!r}; rename one brief so swarm branches are unique."
+            )
+        seen_branches[branch] = brief_path
+
+        brief = Path(brief_path)
+        if not brief.is_absolute():
+            brief = (repo_root / brief).resolve()
+        try:
+            body = brief.read_text(encoding="utf-8").strip()
+        except OSError as e:
+            raise click.UsageError(
+                f"could not read --brief {brief_path!r}: {e.strerror or e}"
+            ) from e
+        if not body:
+            raise click.UsageError(f"brief is empty after stripping whitespace: {brief_path!r}")
 
 
 def _run_swarm_git(
@@ -4918,7 +5052,8 @@ def _swarm_dirty_paths(worktree: Path) -> list[str]:
 
 
 def _remove_swarm_worktree(worktree: Path, *, repo_root: Path) -> None:
-    _run_swarm_git(["worktree", "remove", str(worktree)], cwd=repo_root)
+    with SWARM_WORKTREE_LOCK:
+        _run_swarm_git(["worktree", "remove", str(worktree)], cwd=repo_root)
 
 
 def _extract_pr_url(output: str) -> str | None:
@@ -5023,8 +5158,7 @@ def _run_swarm_task(
     started_at = time.monotonic()
     repo_root = _swarm_repo_root()
     branch = _swarm_branch_for_brief(brief_path)
-    task_id = _sanitize_swarm_stem(brief_path)
-    worktree = (repo_root / ".cache" / "conductor" / "swarm" / task_id).resolve()
+    worktree = _swarm_worktree_for_brief(brief_path, repo_root=repo_root)
     brief = Path(brief_path)
     if not brief.is_absolute():
         brief = (repo_root / brief).resolve()
@@ -5043,10 +5177,11 @@ def _run_swarm_task(
     failure_reason: str | None = None
     try:
         worktree.parent.mkdir(parents=True, exist_ok=True)
-        _run_swarm_git(
-            ["worktree", "add", str(worktree), "-b", branch, base_ref],
-            cwd=repo_root,
-        )
+        with SWARM_WORKTREE_LOCK:
+            _run_swarm_git(
+                ["worktree", "add", str(worktree), "-b", branch, base_ref],
+                cwd=repo_root,
+            )
         created_worktree = True
         if not as_json:
             click.echo(f"[conductor] swarm task started: {brief_path} -> {branch}", err=True)
@@ -5158,6 +5293,25 @@ def _run_swarm_task(
             err=True,
         )
     return result
+
+
+def _failed_swarm_thread_result(brief_path: str, error: BaseException) -> SwarmTaskResult:
+    repo_root = _swarm_repo_root()
+    branch = _swarm_branch_for_brief(brief_path)
+    worktree = _swarm_worktree_for_brief(brief_path, repo_root=repo_root)
+    message = f"internal swarm task error: {error}"
+    click.echo(f"[conductor] swarm task crashed: {brief_path}; {message}", err=True)
+    return SwarmTaskResult(
+        brief=brief_path,
+        branch=branch,
+        worktree=str(worktree),
+        status="failed",
+        commits=0,
+        pr_url=None,
+        merge_sha=None,
+        duration_ms=0,
+        failure_reason=message,
+    )
 
 
 DEFAULT_AUTO_PHASE_ANCHORS: tuple[str, ...] = (
@@ -6247,9 +6401,10 @@ def exec_cmd(
 )
 @click.option(
     "--max-parallel",
-    default=None,
+    default=1,
     type=click.IntRange(min=1),
-    hidden=True,
+    show_default=True,
+    help="Maximum number of swarm tasks to run concurrently.",
 )
 def swarm(
     briefs: tuple[str, ...],
@@ -6261,24 +6416,25 @@ def swarm(
     timeout_sec: int | None,
     as_json: bool,
     keep_worktrees_on_failure: bool,
-    max_parallel: int | None,
+    max_parallel: int,
 ) -> None:
-    """Run independent coding briefs under Conductor's sequential supervisor."""
-    if max_parallel is not None:
-        raise click.UsageError("--max-parallel is a v1 feature; runs sequentially in v0.")
+    """Run independent coding briefs under Conductor's supervisor."""
     if provider_id != "codex":
-        raise click.UsageError("conductor swarm v0 supports --provider codex only.")
+        raise click.UsageError("conductor swarm currently supports --provider codex only.")
 
     results: list[SwarmTaskResult] = []
+    repo_root = _swarm_repo_root()
+    _validate_swarm_briefs(briefs, repo_root=repo_root)
     try:
         base_ref = _run_swarm_git(
             ["rev-parse", "--verify", base_branch],
-            cwd=_swarm_repo_root(),
+            cwd=repo_root,
         ).stdout.strip()
     except RuntimeError as e:
         raise click.UsageError(str(e)) from e
-    for brief_path in briefs:
-        result = _run_swarm_task(
+
+    def run_one(brief_path: str) -> SwarmTaskResult:
+        return _run_swarm_task(
             brief_path=brief_path,
             provider_id=provider_id,
             base_branch=base_branch,
@@ -6290,7 +6446,25 @@ def swarm(
             keep_worktrees_on_failure=keep_worktrees_on_failure,
             as_json=as_json,
         )
-        results.append(result)
+
+    if max_parallel == 1 or len(briefs) == 1:
+        for brief_path in briefs:
+            results.append(run_one(brief_path))
+    else:
+        result_slots: list[SwarmTaskResult | None] = [None] * len(briefs)
+        with ThreadPoolExecutor(max_workers=max_parallel) as executor:
+            futures = {
+                executor.submit(run_one, brief_path): index
+                for index, brief_path in enumerate(briefs)
+            }
+            for future in as_completed(futures):
+                index = futures[future]
+                brief_path = briefs[index]
+                try:
+                    result_slots[index] = future.result()
+                except Exception as e:
+                    result_slots[index] = _failed_swarm_thread_result(brief_path, e)
+        results = [result for result in result_slots if result is not None]
 
     payload = _swarm_summary(results)
     if as_json:
@@ -8089,6 +8263,144 @@ def _consumer_paths_from_config(config_file: Path) -> tuple[str, ...]:
                 f"consumer config `{key}` entries must be strings or tables with `path`"
             )
     return tuple(paths)
+
+
+def _refresh_current_repo_scope_on_branch(
+    path: Path,
+    *,
+    branch: str,
+    version: str,
+) -> _ConsumerRefreshResult:
+    if not path.is_dir():
+        return _ConsumerRefreshResult(path, "failed", "path is not a directory")
+    if _run_repo_command(path, ["git", "rev-parse", "--is-inside-work-tree"]).returncode != 0:
+        return _ConsumerRefreshResult(path, "failed", "path is not a git repository")
+
+    before = _git_status_porcelain(path)
+    if before is None:
+        return _ConsumerRefreshResult(path, "failed", "could not read git status")
+
+    orig_branch_proc = _run_repo_command(path, ["git", "rev-parse", "--abbrev-ref", "HEAD"])
+    orig_branch = orig_branch_proc.stdout.strip() if orig_branch_proc.returncode == 0 else None
+    if not orig_branch:
+        return _ConsumerRefreshResult(path, "failed", "could not read current branch")
+
+    stashed = False
+    if before:
+        stash_msg = f"conductor-refresh-v{version.split('+', 1)[0]} auto-stash"
+        stash = _run_repo_command(path, ["git", "stash", "push", "-u", "-m", stash_msg])
+        if stash.returncode != 0:
+            return _ConsumerRefreshResult(
+                path, "failed", _command_failure_detail(stash, "git stash push")
+            )
+        stashed = True
+
+    def _restore(result: _ConsumerRefreshResult) -> _ConsumerRefreshResult:
+        back = _run_repo_command(path, ["git", "checkout", orig_branch])
+        if back.returncode != 0:
+            detail = (
+                f"refresh ran but could not return to {orig_branch}; "
+                "stash@{0} preserved for manual resolution"
+                if stashed
+                else f"refresh ran but could not return to {orig_branch}; "
+                "manual cleanup required"
+            )
+            return _ConsumerRefreshResult(
+                result.path,
+                "needs-attention",
+                detail,
+                branch=result.branch,
+                commit=result.commit,
+                stash_status="preserved" if stashed else "none",
+            )
+        if not stashed:
+            if result.status == "committed":
+                return replace(result, detail=f"no changes left on {orig_branch}")
+            return result
+        pop = _run_repo_command(path, ["git", "stash", "pop"])
+        if pop.returncode != 0:
+            return _ConsumerRefreshResult(
+                result.path,
+                "needs-attention",
+                f"refresh committed on {result.branch}; auto-stash pop "
+                f"conflicted on {orig_branch}; stash@{{0}} preserved for "
+                "manual resolution",
+                branch=result.branch,
+                commit=result.commit,
+                stash_status="preserved",
+            )
+        detail = (
+            f"operator changes restored on {orig_branch}"
+            if result.status == "committed"
+            else f"{result.detail} (auto-stashed and restored)"
+        )
+        return replace(result, detail=detail, stash_status="popped")
+
+    checkout = _checkout_refresh_branch(path, branch)
+    if checkout is not None:
+        return _restore(_ConsumerRefreshResult(path, "failed", checkout, branch=branch))
+
+    from conductor import agent_wiring
+
+    report = agent_wiring.refresh_repo_scope(path, version=version)
+    if report.skipped and not report.refreshed:
+        skipped = "; ".join(f"{item}: {reason}" for item, reason in report.skipped)
+        return _restore(
+            _ConsumerRefreshResult(
+                path,
+                "needs-attention",
+                f"refresh skipped: {skipped}",
+                branch=branch,
+            )
+        )
+
+    after = _git_status_porcelain(path)
+    if after is None:
+        return _restore(
+            _ConsumerRefreshResult(path, "failed", "could not read git status", branch=branch)
+        )
+    if not after:
+        return _restore(
+            _ConsumerRefreshResult(
+                path,
+                "unchanged",
+                "integration files already current",
+                branch=branch,
+            )
+        )
+
+    add = _run_repo_command(path, ["git", "add", "--all"])
+    if add.returncode != 0:
+        return _restore(
+            _ConsumerRefreshResult(
+                path,
+                "failed",
+                _command_failure_detail(add, "git add --all"),
+                branch=branch,
+            )
+        )
+    message = f"Refresh conductor integrations to v{version.split('+', 1)[0]}"
+    commit = _run_repo_command(path, ["git", "commit", "-m", message])
+    if commit.returncode != 0:
+        return _restore(
+            _ConsumerRefreshResult(
+                path,
+                "failed",
+                _command_failure_detail(commit, "git commit"),
+                branch=branch,
+            )
+        )
+    sha = _run_repo_command(path, ["git", "rev-parse", "--short", "HEAD"])
+    commit_sha = sha.stdout.strip() if sha.returncode == 0 else None
+    return _restore(
+        _ConsumerRefreshResult(
+            path,
+            "committed",
+            f"no changes left on {orig_branch}",
+            branch=branch,
+            commit=commit_sha,
+        )
+    )
 
 
 def _refresh_one_consumer_repo(

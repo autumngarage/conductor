@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from conductor.session_log import SessionLog
 
 from . import openrouter_catalog
+from ._http_client import provider_http_client
 
 _LOG = logging.getLogger(__name__)
 
@@ -176,8 +177,10 @@ class OpenRouterProvider:
 
         url = f"{self._base_url}/models"
         try:
-            with httpx.Client(timeout=timeout_sec) as client:
+            with provider_http_client(timeout=timeout_sec) as client:
                 resp = client.get(url, headers=headers)
+        except ProviderHTTPError as e:
+            return False, str(e)
         except httpx.TimeoutException:
             return False, f"`GET {url}` timed out after {timeout_sec:.0f}s"
         except httpx.HTTPError as e:
@@ -190,7 +193,7 @@ class OpenRouterProvider:
     def _post_chat(self, payload: dict, *, timeout_sec: int | None = None) -> dict:
         try:
             timeout = self._timeout_sec if timeout_sec is None else timeout_sec
-            with httpx.Client(timeout=timeout) as client:
+            with provider_http_client(timeout=timeout) as client:
                 resp = client.post(
                     f"{self._base_url}/chat/completions",
                     headers=self._headers(),
