@@ -42,6 +42,7 @@ from conductor.providers import (
     KimiProvider,
     OllamaProvider,
     OpenRouterProvider,
+    ProviderConfigError,
     ProviderExecutionError,
 )
 from conductor.router import RouteDecision, reset_health
@@ -165,6 +166,27 @@ def _make_diff_repo(tmp_path):
     subprocess.run(["git", "add", "README.md"], cwd=repo, env=env, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "feature"], cwd=repo, env=env, check=True)
     return repo
+
+
+def _commit_test_change(repo: Path, name: str) -> None:
+    target = repo / f"{name}.txt"
+    target.write_text(f"{name}\n", encoding="utf-8")
+    subprocess.run(["git", "add", target.name], cwd=repo, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            name,
+        ],
+        cwd=repo,
+        check=True,
+    )
 
 
 class _FakeScheduledPipe:
@@ -2450,6 +2472,174 @@ def test_exec_cli_no_preflight_skips_probe(mocker):
     assert result.exit_code == 0, result.output
     assert not probe_mock.called
     assert exec_mock.called
+
+
+def test_exec_single_brief_file_preserves_call_response_json(mocker, tmp_path):
+    _stub_all_configured(mocker, {"codex"})
+    brief = tmp_path / "phase1.md"
+    brief.write_text("single phase work\n", encoding="utf-8")
+    exec_mock = mocker.patch.object(
+        CodexProvider,
+        "exec",
+        return_value=_fake_response("codex", text="done"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "codex",
+            "--no-preflight",
+            "--brief-file",
+            str(brief),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["text"] == "done"
+    assert "phases" not in payload
+    assert exec_mock.call_count == 1
+    assert exec_mock.call_args.args[0] == "single phase work"
+
+
+def test_exec_multiple_brief_files_run_sequential_phases_json(mocker, tmp_path):
+    repo = _make_diff_repo(tmp_path)
+    phase1 = tmp_path / "phase1.md"
+    phase2 = tmp_path / "phase2.md"
+    phase1.write_text("implement it\n", encoding="utf-8")
+    phase2.write_text("test it\n", encoding="utf-8")
+    seen_prompts: list[str] = []
+
+    def fake_exec(self, prompt, **kwargs):
+        seen_prompts.append(prompt)
+        _commit_test_change(repo, f"phase-{len(seen_prompts)}")
+        return _fake_response("codex", text=f"phase {len(seen_prompts)} done")
+
+    _stub_all_configured(mocker, {"codex"})
+    exec_mock = mocker.patch.object(CodexProvider, "exec", autospec=True, side_effect=fake_exec)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "codex",
+            "--no-preflight",
+            "--cwd",
+            str(repo),
+            "--brief-file",
+            str(phase1),
+            "--brief-file",
+            str(phase2),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert exec_mock.call_count == 2
+    assert seen_prompts[0] == "implement it"
+    assert seen_prompts[1].startswith("test it\n\n## Phase 1 results")
+    assert "phase-1.txt" in seen_prompts[1]
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert [phase["exit"] for phase in payload["phases"]] == ["ok", "ok"]
+    assert [phase["commits"] for phase in payload["phases"]] == [1, 1]
+    assert [phase["brief"] for phase in payload["phases"]] == [str(phase1), str(phase2)]
+
+
+def test_exec_multiple_brief_files_first_cap_exit_aborts_json(mocker, tmp_path):
+    repo = _make_diff_repo(tmp_path)
+    phase1 = tmp_path / "phase1.md"
+    phase2 = tmp_path / "phase2.md"
+    phase1.write_text("implement it\n", encoding="utf-8")
+    phase2.write_text("test it\n", encoding="utf-8")
+    _stub_all_configured(mocker, {"codex"})
+    exec_mock = mocker.patch.object(
+        CodexProvider,
+        "exec",
+        side_effect=ProviderExecutionError(
+            "Reached --max-iterations cap (1).",
+            provider="codex",
+            status={"state": "iteration-cap", "iteration_cap": 1},
+        ),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "codex",
+            "--no-preflight",
+            "--cwd",
+            str(repo),
+            "--brief-file",
+            str(phase1),
+            "--brief-file",
+            str(phase2),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert exec_mock.call_count == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert len(payload["phases"]) == 1
+    assert payload["phases"][0]["brief"] == str(phase1)
+    assert payload["phases"][0]["exit"] == "cap-exit"
+    assert payload["phases"][0]["commits"] == 0
+    assert payload["phases"][0]["duration_ms"] >= 0
+    assert "phase 1 failed (cap-exit)" in result.stderr
+
+
+def test_exec_multiple_brief_files_second_error_aborts_before_third(mocker, tmp_path):
+    repo = _make_diff_repo(tmp_path)
+    phase1 = tmp_path / "phase1.md"
+    phase2 = tmp_path / "phase2.md"
+    phase3 = tmp_path / "phase3.md"
+    phase1.write_text("implement it\n", encoding="utf-8")
+    phase2.write_text("test it\n", encoding="utf-8")
+    phase3.write_text("ship it\n", encoding="utf-8")
+
+    def fake_exec(self, prompt, **kwargs):
+        if "test it" in prompt:
+            raise ProviderConfigError("codex config broke")
+        _commit_test_change(repo, "phase-1")
+        return _fake_response("codex", text="phase 1 done")
+
+    _stub_all_configured(mocker, {"codex"})
+    exec_mock = mocker.patch.object(CodexProvider, "exec", autospec=True, side_effect=fake_exec)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "codex",
+            "--no-preflight",
+            "--cwd",
+            str(repo),
+            "--brief-file",
+            str(phase1),
+            "--brief-file",
+            str(phase2),
+            "--brief-file",
+            str(phase3),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert exec_mock.call_count == 2
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert [phase["brief"] for phase in payload["phases"]] == [str(phase1), str(phase2)]
+    assert [phase["exit"] for phase in payload["phases"]] == ["ok", "error"]
+    assert "phase 2 failed (error)" in result.stderr
 
 
 def test_exec_json_surfaces_codex_auth_prompt_and_records_auth_prompts(
