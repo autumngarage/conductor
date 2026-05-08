@@ -134,11 +134,11 @@ def test_brew_upgrade_then_consumer_commit_refresh(tmp_path, monkeypatch):
     _assert_user_versions("0.10.0")
     _assert_repo_versions(consumer, "0.10.0")
 
-    first_hooks = _invoke(["init", "--hooks"])
-    second_hooks = _invoke(["init", "--hooks"])
+    first_hooks = _invoke(["init", "-y"])
+    second_hooks = _invoke(["init", "-y"])
     pre_commit_config = consumer / ".pre-commit-config.yaml"
     pre_commit_text = pre_commit_config.read_text(encoding="utf-8")
-    assert "Installed conductor refresh hook" in first_hooks.output
+    assert "already present" in first_hooks.output
     assert "already present" in second_hooks.output
     assert pre_commit_text.count("id: conductor-refresh") == 1
     assert pre_commit_text.count("entry: conductor refresh-on-commit") == 1

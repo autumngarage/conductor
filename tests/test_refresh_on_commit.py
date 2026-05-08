@@ -98,10 +98,10 @@ def test_refresh_on_commit_mixed_embedded_and_import_refreshes_only_embedded(
     assert _staged_paths(repo) == ["AGENTS.md"]
 
 
-def test_init_hooks_creates_pre_commit_config(tmp_path):
+def test_init_hooks_creates_pre_commit_config_by_default(tmp_path):
     repo = tmp_path / "repo"
 
-    result = CliRunner().invoke(main, ["init", "--hooks"])
+    result = CliRunner().invoke(main, ["init", "--yes"])
 
     assert result.exit_code == 0, result.output
     config = repo / ".pre-commit-config.yaml"
@@ -110,6 +110,34 @@ def test_init_hooks_creates_pre_commit_config(tmp_path):
     assert "id: conductor-refresh" in text
     assert "entry: conductor refresh-on-commit" in text
     assert "always_run: true" in text
+    assert "Installed conductor-refresh pre-commit hook" in result.output
+
+
+def test_init_no_hooks_skips_pre_commit_config(tmp_path):
+    repo = tmp_path / "repo"
+
+    result = CliRunner().invoke(main, ["init", "--yes", "--no-hooks"])
+
+    assert result.exit_code == 0, result.output
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+def test_init_accept_defaults_no_hooks_skips_prompts_and_hooks(tmp_path):
+    repo = tmp_path / "repo"
+
+    result = CliRunner().invoke(main, ["init", "-y", "--no-hooks"])
+
+    assert result.exit_code == 0, result.output
+    assert "Proceed?" not in result.output
+    assert not (repo / ".pre-commit-config.yaml").exists()
+
+
+def test_init_help_documents_hooks_default():
+    result = CliRunner().invoke(main, ["init", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "--hooks / --no-hooks" in result.output
+    assert "default: yes; pass --no-hooks to skip" in result.output
 
 
 def test_init_hooks_merges_existing_config_without_duplication(tmp_path):
@@ -125,7 +153,7 @@ def test_init_hooks_merges_existing_config_without_duplication(tmp_path):
         encoding="utf-8",
     )
 
-    result = CliRunner().invoke(main, ["init", "--hooks"])
+    result = CliRunner().invoke(main, ["init", "--yes"])
 
     assert result.exit_code == 0, result.output
     text = config.read_text(encoding="utf-8")
@@ -149,7 +177,7 @@ default_language_version:
         encoding="utf-8",
     )
 
-    result = CliRunner().invoke(main, ["init", "--hooks"])
+    result = CliRunner().invoke(main, ["init", "--yes"])
 
     assert result.exit_code == 0, result.output
     text = config.read_text(encoding="utf-8")
@@ -160,8 +188,8 @@ default_language_version:
 def test_init_hooks_is_idempotent(tmp_path):
     repo = tmp_path / "repo"
 
-    first = CliRunner().invoke(main, ["init", "--hooks"])
-    second = CliRunner().invoke(main, ["init", "--hooks"])
+    first = CliRunner().invoke(main, ["init", "--yes"])
+    second = CliRunner().invoke(main, ["init", "--yes"])
 
     assert first.exit_code == 0, first.output
     assert second.exit_code == 0, second.output

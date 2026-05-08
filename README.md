@@ -142,6 +142,8 @@ hand-authoring any prompts:
   `<!-- conductor:begin -->` markers.
 - Writes a Cursor rule at `.cursor/rules/conductor-delegation.mdc` if
   the directory exists.
+- Installs the `conductor-refresh` pre-commit hook by default so stale
+  embed-only repo instructions refresh on commit; pass `--no-hooks` to skip.
 
 On a TTY you get a prompt per detected file (default yes); in CI use
 `--wire-agents=yes`, `--patch-claude-md=yes`, `--patch-agents-md=yes`,

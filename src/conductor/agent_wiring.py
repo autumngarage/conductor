@@ -89,6 +89,21 @@ class UserScopeVersionDecision:
     reason: str
 
 
+@dataclass(frozen=True)
+class RepoScopeVersionDecision:
+    path: Path
+    kind: str
+    version: str | None
+    stale: bool
+    reason: str
+
+
+@dataclass(frozen=True)
+class RefreshReport:
+    refreshed: tuple[Path, ...]
+    skipped: tuple[tuple[Path, str], ...]
+
+
 def _managed_comment(version: str) -> str:
     version = _canonical_wiring_version(version)
     return (
@@ -308,6 +323,22 @@ def _user_scope_candidate_sentinel_paths() -> dict[Path, str]:
     }
 
 
+def _repo_scope_candidate_artifacts(cwd: Path) -> dict[Path, str]:
+    return {
+        path: kind
+        for path, kind in _candidate_artifacts(cwd=cwd).items()
+        if kind in _REPO_SCOPED_KINDS
+    }
+
+
+def _repo_scope_candidate_sentinel_paths(cwd: Path) -> dict[Path, str]:
+    return {
+        path: kind
+        for path, kind in _candidate_sentinel_paths(cwd=cwd).items()
+        if kind in _REPO_SCOPED_KINDS
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Managed-file helpers — write/read/detect ownership.
 # --------------------------------------------------------------------------- #
@@ -393,6 +424,118 @@ def is_user_scope_stale(*, binary_version: str) -> bool:
     )
 
 
+def repo_scope_version_decisions(
+    cwd: Path,
+    *,
+    binary_version: str,
+) -> tuple[RepoScopeVersionDecision, ...]:
+    """Scan repo-scope managed files for stale conductor version stamps.
+
+    Startup auto-refresh calls this on eligible CLI commands, so the scan is
+    intentionally bounded to the conventional repo-scope files in ``cwd`` and
+    reads only a small prefix from each existing candidate.
+    """
+    root = cwd.resolve()
+    if not _is_inside_git_repo(root):
+        return ()
+
+    decisions: list[RepoScopeVersionDecision] = []
+    for path, kind in _repo_scope_candidate_sentinel_paths(root).items():
+        exists = path.is_file()
+        version, reason = _read_repo_sentinel_version_prefix(path)
+        decisions.append(
+            _repo_scope_decision(
+                path=path,
+                kind=kind,
+                version=version,
+                exists=exists,
+                binary_version=binary_version,
+                reason=reason,
+            )
+        )
+    for path, kind in _repo_scope_candidate_artifacts(root).items():
+        exists = path.is_file()
+        version = _read_managed_version_prefix(path)
+        decisions.append(
+            _repo_scope_decision(
+                path=path,
+                kind=kind,
+                version=version,
+                exists=exists,
+                binary_version=binary_version,
+                reason=None,
+            )
+        )
+    return tuple(decisions)
+
+
+def is_repo_scope_stale(cwd: Path) -> bool:
+    """Return True when any repo-scope conductor-managed file is stale."""
+    from conductor import __version__
+
+    return any(
+        decision.stale
+        for decision in repo_scope_version_decisions(cwd, binary_version=__version__)
+    )
+
+
+def refresh_repo_scope(cwd: Path, *, version: str) -> RefreshReport:
+    """Refresh stale repo-scope conductor-managed files in ``cwd``."""
+    refreshed: list[Path] = []
+    skipped: list[tuple[Path, str]] = []
+    root = cwd.resolve()
+
+    for decision in repo_scope_version_decisions(root, binary_version=version):
+        if not decision.stale:
+            if decision.reason not in {"missing", "not conductor-managed", "current"}:
+                skipped.append((decision.path, decision.reason))
+            continue
+        try:
+            _refresh_repo_scope_path(decision.kind, cwd=root, version=version)
+            refreshed.append(decision.path)
+        except OSError as e:
+            skipped.append((decision.path, f"refresh failed: {e}"))
+        except UserOwnedFileError as e:
+            skipped.append((e.path, "user-owned file; refusing to overwrite"))
+
+    return RefreshReport(refreshed=tuple(refreshed), skipped=tuple(skipped))
+
+
+def _repo_scope_decision(
+    *,
+    path: Path,
+    kind: str,
+    version: str | None,
+    exists: bool,
+    binary_version: str,
+    reason: str | None,
+) -> RepoScopeVersionDecision:
+    if reason is not None:
+        return RepoScopeVersionDecision(path, kind, version, False, reason)
+    if version is None:
+        detail = "missing" if not exists else "not conductor-managed"
+        return RepoScopeVersionDecision(path, kind, None, False, detail)
+    stale = _wiring_version_is_older(version, binary_version=binary_version)
+    detail = "stale" if stale else "current"
+    return RepoScopeVersionDecision(path, kind, version, stale, detail)
+
+
+def _refresh_repo_scope_path(kind: str, *, cwd: Path, version: str) -> None:
+    if kind == "agents-md-import":
+        wire_agents_md(cwd=cwd, version=version)
+        return
+    if kind == "gemini-md-import":
+        wire_gemini_md(cwd=cwd, version=version)
+        return
+    if kind == "claude-md-repo-import":
+        wire_claude_md_repo(cwd=cwd, version=version)
+        return
+    if kind == "cursor-rule":
+        wire_cursor(cwd=cwd, version=version)
+        return
+    raise ValueError(f"unsupported repo integration kind: {kind}")
+
+
 def _user_scope_decision(
     *,
     path: Path,
@@ -442,6 +585,27 @@ def _read_sentinel_version_prefix(path: Path) -> str | None:
     if end == -1:
         return None
     return rest[:end].strip()
+
+
+def _read_repo_sentinel_version_prefix(path: Path) -> tuple[str | None, str | None]:
+    text = _read_prefix(path)
+    if not text:
+        return None, None
+    idx = text.find(SENTINEL_BEGIN_PREFIX)
+    if idx == -1:
+        return None, None
+    marker_end = text.find("-->", idx)
+    if marker_end == -1:
+        return None, "malformed sentinel"
+    body_prefix = text[marker_end + len("-->") :].lstrip()
+    if body_prefix.startswith("@"):
+        return None, "import-mode"
+    version = text[idx + len(SENTINEL_BEGIN_PREFIX) : marker_end].strip()
+    return version or None, None
+
+
+def _is_inside_git_repo(cwd: Path) -> bool:
+    return any((candidate / ".git").exists() for candidate in (cwd, *cwd.parents))
 
 
 def project_root_for_wiring_notice(cwd: Path | None = None) -> Path | None:

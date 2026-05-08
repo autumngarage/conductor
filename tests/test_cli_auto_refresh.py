@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+
 from click.testing import CliRunner
 
 from conductor import agent_wiring as aw
@@ -8,9 +10,14 @@ from conductor.cli import main
 
 
 def _isolate_user_scope(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path / ".conductor"))
     monkeypatch.setenv("CLAUDE_HOME", str(tmp_path / ".claude"))
     monkeypatch.delenv("CONDUCTOR_NO_AUTO_REFRESH", raising=False)
+
+
+def _init_git_repo(path) -> None:
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=path, check=True)
 
 
 def test_auto_refresh_current_user_scope_is_silent(tmp_path, monkeypatch):
@@ -46,17 +53,114 @@ def test_auto_refresh_stale_user_scope_updates_files(tmp_path, monkeypatch):
     }
 
 
+def test_auto_refresh_stale_repo_scope_updates_files(tmp_path, monkeypatch):
+    _isolate_user_scope(tmp_path, monkeypatch)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(cli_mod, "__version__", "0.9.0")
+    aw.wire_agents_md(cwd=repo, version="0.8.0")
+
+    result = CliRunner().invoke(main, ["doctor", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert (
+        f"[conductor] refreshed repo-scope integration files in {repo} to v0.9.0"
+        in result.stderr
+    )
+    assert "<!-- conductor:begin v0.9.0 -->" in (
+        repo / "AGENTS.md"
+    ).read_text(encoding="utf-8")
+
+
+def test_auto_refresh_clean_repo_scope_is_silent(tmp_path, monkeypatch):
+    _isolate_user_scope(tmp_path, monkeypatch)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(cli_mod, "__version__", "0.9.0")
+    aw.wire_agents_md(cwd=repo, version="0.9.0")
+
+    result = CliRunner().invoke(main, ["doctor", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert "refreshed repo-scope" not in result.stderr
+
+
+def test_auto_refresh_repo_scope_skips_import_mode_claude_md(tmp_path, monkeypatch):
+    _isolate_user_scope(tmp_path, monkeypatch)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(cli_mod, "__version__", "0.9.0")
+    aw.wire_agents_md(cwd=repo, version="0.8.0")
+    aw.wire_claude_md_repo(cwd=repo, version="0.8.0")
+
+    result = CliRunner().invoke(main, ["doctor", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert "<!-- conductor:begin v0.9.0 -->" in (
+        repo / "AGENTS.md"
+    ).read_text(encoding="utf-8")
+    claude_text = (repo / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "<!-- conductor:begin v0.8.0 -->" in claude_text
+    assert "@~/.conductor/delegation-guidance.md" in claude_text
+
+
+def test_auto_refresh_repo_scope_non_git_noops(tmp_path, monkeypatch):
+    _isolate_user_scope(tmp_path, monkeypatch)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(cli_mod, "__version__", "0.9.0")
+    aw.wire_agents_md(cwd=repo, version="0.8.0")
+
+    result = CliRunner().invoke(main, ["doctor", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert "refreshed repo-scope" not in result.stderr
+    assert "<!-- conductor:begin v0.8.0 -->" in (
+        repo / "AGENTS.md"
+    ).read_text(encoding="utf-8")
+
+
+def test_auto_refresh_repo_scope_non_wired_noops(tmp_path, monkeypatch):
+    _isolate_user_scope(tmp_path, monkeypatch)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(cli_mod, "__version__", "0.9.0")
+
+    result = CliRunner().invoke(main, ["doctor", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert "refreshed repo-scope" not in result.stderr
+
+
 def test_auto_refresh_env_opt_out_leaves_stale_files(tmp_path, monkeypatch):
     _isolate_user_scope(tmp_path, monkeypatch)
     monkeypatch.setenv("CONDUCTOR_NO_AUTO_REFRESH", "1")
     monkeypatch.setattr(cli_mod, "__version__", "0.9.0")
     aw.wire_claude_code("0.8.0", patch_claude_md=True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    monkeypatch.chdir(repo)
+    aw.wire_agents_md(cwd=repo, version="0.8.0")
 
     result = CliRunner().invoke(main, ["doctor", "--json"])
 
     assert result.exit_code == 0, result.output
     assert "refreshed user-scope" not in result.stderr
+    assert "refreshed repo-scope" not in result.stderr
     assert aw.is_user_scope_stale(binary_version="0.9.0") is True
+    assert "<!-- conductor:begin v0.8.0 -->" in (
+        repo / "AGENTS.md"
+    ).read_text(encoding="utf-8")
 
 
 def test_auto_refresh_skips_read_only_commands(monkeypatch):
@@ -66,8 +170,9 @@ def test_auto_refresh_skips_read_only_commands(monkeypatch):
         raise AssertionError(f"unexpected auto-refresh scan for {binary_version}")
 
     monkeypatch.setattr(aw, "user_scope_version_decisions", fail_scan)
+    monkeypatch.setattr(aw, "repo_scope_version_decisions", fail_scan)
 
-    for args in (["list"], ["--help"], ["--version"]):
+    for args in (["list"], ["--help"], ["--version"], ["init", "--help"]):
         result = CliRunner().invoke(main, args)
         assert result.exit_code == 0, result.output
 
