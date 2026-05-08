@@ -2250,7 +2250,7 @@ def test_exec_max_iterations_explicit_override_ignores_effort(mocker):
     assert "[conductor] agent loop iteration cap: 100" in result.stderr
 
 
-def test_exec_max_iterations_explicit_rejects_unsupported_provider(mocker):
+def test_exec_max_iterations_explicit_passes_to_codex(mocker):
     _stub_all_configured(mocker, {"codex"})
     exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
 
@@ -2267,19 +2267,43 @@ def test_exec_max_iterations_explicit_rejects_unsupported_provider(mocker):
         ],
     )
 
-    assert result.exit_code == 2
-    assert not exec_mock.called
-    assert "--max-iterations only applies" in result.output
-    assert "codex cannot honor it" in result.output
+    assert result.exit_code == 0, result.output
+    assert exec_mock.call_args.kwargs["max_iterations"] == 5
+    assert "[conductor] agent loop iteration cap: 5" in result.stderr
 
 
-def test_exec_max_iterations_banner_only_for_supporting_providers(mocker):
-    _stub_all_configured(mocker, {"codex"})
-    exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
+def test_exec_max_iterations_explicit_rejects_unsupported_provider(mocker):
+    _stub_all_configured(mocker, {"claude"})
+    exec_mock = mocker.patch.object(
+        ClaudeProvider, "exec", return_value=_fake_response("claude")
+    )
 
     result = CliRunner().invoke(
         main,
-        ["exec", "--with", "codex", "--task", "do it"],
+        [
+            "exec",
+            "--with",
+            "claude",
+            "--max-iterations",
+            "5",
+            "--task",
+            "do it",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert not exec_mock.called
+    assert "--max-iterations only applies" in result.output
+    assert "claude cannot honor it" in result.output
+
+
+def test_exec_max_iterations_banner_only_for_supporting_providers(mocker):
+    _stub_all_configured(mocker, {"claude"})
+    exec_mock = mocker.patch.object(ClaudeProvider, "exec", return_value=_fake_response("claude"))
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--with", "claude", "--task", "do it"],
     )
 
     assert result.exit_code == 0, result.output

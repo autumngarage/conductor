@@ -2132,6 +2132,97 @@ def test_codex_exec_stall_watchdog_resets_on_tool_use_amid_heartbeats(mocker):
     assert fake.terminated is False
 
 
+def test_codex_exec_weighted_cap_allows_many_small_reads(mocker):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    lines = ['{"type":"session.created","session_id":"sess-small-tools"}\n']
+    lines.extend(
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "function_call",
+                    "id": f"call-{idx}",
+                    "name": "Read",
+                    "arguments": {"limit": 20},
+                },
+            }
+        )
+        + "\n"
+        for idx in range(47)
+    )
+    lines.extend(
+        [
+            '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n',
+            '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":2}}\n',
+        ]
+    )
+    fake = _FakePopen(stdout_schedule=[(0, line) for line in lines])
+    _patch_codex_popen(mocker, fake)
+
+    response = CodexProvider().exec(
+        "hi",
+        max_iterations=30,
+        liveness_interval_sec=0,
+    )
+
+    assert response.text == "done"
+    assert response.usage["tool_call_count"] == 47
+    assert response.usage["tool_iterations"] == pytest.approx(14.1)
+    assert response.usage["hit_iteration_cap"] is False
+    assert fake.terminated is False
+
+
+def test_codex_exec_weighted_cap_stops_verbose_bash(mocker):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    lines = ['{"type":"session.created","session_id":"sess-heavy-bash"}\n']
+    for idx in range(30):
+        lines.append(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "function_call",
+                        "id": f"bash-{idx}",
+                        "name": "Bash",
+                        "arguments": {"command": "pytest"},
+                    },
+                }
+            )
+            + "\n"
+        )
+        lines.append(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "function_call_output",
+                        "id": f"bash-{idx}",
+                        "output": "x" * 501,
+                    },
+                }
+            )
+            + "\n"
+        )
+    fake = _FakePopen(
+        stdout_schedule=[(0, line) for line in lines],
+        hang_after_stdout=True,
+    )
+    _patch_codex_popen(mocker, fake)
+
+    response = CodexProvider().exec(
+        "hi",
+        max_iterations=30,
+        liveness_interval_sec=0,
+    )
+
+    assert "[conductor] Reached --max-iterations cap" in response.text
+    assert "weighted: 30.0 / 30; raw count: 20" in response.text
+    assert response.usage["tool_call_count"] == 20
+    assert response.usage["tool_iterations"] == pytest.approx(30.0)
+    assert response.usage["hit_iteration_cap"] is True
+    assert fake.terminated is True
+
+
 def test_codex_exec_strict_stall_ignores_assistant_text_progress(mocker):
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
     lines = [
