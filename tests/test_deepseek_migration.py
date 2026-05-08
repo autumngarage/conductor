@@ -19,6 +19,13 @@ from conductor.providers.deepseek import (
 from conductor.providers.openrouter import OpenRouterProvider
 
 
+@pytest.fixture(autouse=True)
+def _isolated_init_cwd(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
+
+
 def _model(model_id: str, *, created: int) -> openrouter_catalog.ModelEntry:
     return openrouter_catalog.ModelEntry(
         id=model_id,
