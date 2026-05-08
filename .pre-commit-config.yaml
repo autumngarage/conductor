@@ -86,7 +86,7 @@ repos:
     hooks:
       - id: conductor-refresh
         name: Refresh conductor integrations if stale
-        entry: conductor refresh-on-commit
+        entry: uv run conductor refresh-on-commit
         language: system
         pass_filenames: false
         always_run: true
