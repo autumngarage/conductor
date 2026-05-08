@@ -2238,6 +2238,7 @@ def test_exec_max_iterations_explicit_override_ignores_effort(mocker):
             "openrouter",
             "--max-iterations",
             "100",
+            "--allow-completion-stretch",
             "--effort",
             "minimal",
             "--task",
@@ -2247,6 +2248,7 @@ def test_exec_max_iterations_explicit_override_ignores_effort(mocker):
 
     assert result.exit_code == 0, result.output
     assert exec_mock.call_args.kwargs["max_iterations"] == 100
+    assert exec_mock.call_args.kwargs["allow_completion_stretch"] is True
     assert "[conductor] agent loop iteration cap: 100" in result.stderr
 
 
