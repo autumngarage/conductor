@@ -400,6 +400,15 @@ When briefing codex on a task that ships a PR via `scripts/open-pr.sh
 --auto-merge`, include this guidance in the brief so codex doesn't
 need to discover it empirically:
 
+- **Branch must be `<type>/<slug>` shape.** Most autumn-garage repos
+  enforce a pre-push hook that requires the branch to start with
+  `feat/`, `fix/`, `chore/`, `refactor/`, or `docs/`. Agent worktrees
+  are created on a default branch like `worktree-agent-<id>` which
+  fails this hook. Tell codex to check `git branch --show-current` as
+  its first action, and if the result doesn't match the convention
+  (or is `main` / `master`), immediately `git checkout -b <type>/<slug>`.
+  Skipping this step means every push fails the hook and codex has
+  to recover with a rename + re-push.
 - **PR title equals commit subject.** `open-pr.sh` derives the PR title
   from `git log -1 --format=%s`. If the brief specifies a PR title,
   codex must use THAT EXACT STRING as the commit subject; otherwise

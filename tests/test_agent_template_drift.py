@@ -44,6 +44,8 @@ EXPECTED_TEMPLATE_COVERAGE = {
         "PR title equals commit subject",
         # #268: one closing keyword per issue (don't comma-chain).
         "One closing keyword per issue",
+        # #278: harness-default branch names fail the pre-push naming hook.
+        "Branch must be `<type>/<slug>` shape",
     },
     "ollama-offline": {
         "--offline",
