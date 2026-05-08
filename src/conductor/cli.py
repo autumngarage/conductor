@@ -7456,6 +7456,10 @@ class _ConsumerRefreshResult:
     detail: str
     branch: str | None = None
     commit: str | None = None
+    # "none" — repo was clean, no stash involved.
+    # "popped" — repo was dirty; auto-stashed; pop succeeded (operator's changes restored).
+    # "preserved" — repo was dirty; auto-stashed; pop conflicted; stash@{0} kept for operator.
+    stash_status: str = "none"
 
 
 @main.command("refresh-consumers")
@@ -7478,10 +7482,21 @@ class _ConsumerRefreshResult:
     default=None,
     help="Branch name to create or reuse in each repo.",
 )
+@click.option(
+    "--no-auto-stash",
+    "no_auto_stash",
+    is_flag=True,
+    default=False,
+    help=(
+        "Skip repos with uncommitted changes instead of auto-stashing them. "
+        "Default: auto-stash uncommitted changes, refresh, then pop the stash back."
+    ),
+)
 def refresh_consumers(
     paths: str | None,
     config_file: Path | None,
     branch_name: str | None,
+    no_auto_stash: bool,
 ) -> None:
     """Refresh Conductor integration blocks in explicitly configured repos.
 
@@ -7492,6 +7507,12 @@ def refresh_consumers(
 
     Use `refresh-consumers` only when you need an immediate cross-repo refresh
     without waiting for the next commit in each repo.
+
+    Repos with uncommitted changes are auto-stashed by default: stash → refresh
+    → pop. If the pop conflicts (rare; happens when operator changes overlap
+    conductor-managed sentinel blocks), the stash entry is preserved at
+    `stash@{0}` for manual resolution. Pass `--no-auto-stash` to revert to the
+    older skip-on-dirty behavior.
     """
     try:
         consumer_paths = _resolve_consumer_repo_paths(paths, config_file)
@@ -7503,7 +7524,11 @@ def refresh_consumers(
         return
 
     branch = branch_name or f"chore/conductor-refresh-v{__version__.split('+', 1)[0]}"
-    results = [_refresh_one_consumer_repo(path, branch=branch) for path in consumer_paths]
+    auto_stash = not no_auto_stash
+    results = [
+        _refresh_one_consumer_repo(path, branch=branch, auto_stash=auto_stash)
+        for path in consumer_paths
+    ]
 
     failed = False
     for result in results:
@@ -7512,7 +7537,9 @@ def refresh_consumers(
             click.echo(f"  branch: {result.branch}")
         if result.commit:
             click.echo(f"  commit: {result.commit}")
-        if result.status in {"failed", "skipped"}:
+        if result.stash_status == "preserved":
+            click.echo("  stash: stash@{0} preserved — resolve manually with `git stash pop`")
+        if result.status in {"failed", "skipped", "needs-attention"}:
             failed = True
 
     if failed:
@@ -7572,7 +7599,9 @@ def _consumer_paths_from_config(config_file: Path) -> tuple[str, ...]:
     return tuple(paths)
 
 
-def _refresh_one_consumer_repo(path: Path, *, branch: str) -> _ConsumerRefreshResult:
+def _refresh_one_consumer_repo(
+    path: Path, *, branch: str, auto_stash: bool = True
+) -> _ConsumerRefreshResult:
     if not path.is_dir():
         return _ConsumerRefreshResult(path, "failed", "path is not a directory")
     if _run_repo_command(path, ["git", "rev-parse", "--is-inside-work-tree"]).returncode != 0:
@@ -7580,12 +7609,71 @@ def _refresh_one_consumer_repo(path: Path, *, branch: str) -> _ConsumerRefreshRe
     before = _git_status_porcelain(path)
     if before is None:
         return _ConsumerRefreshResult(path, "failed", "could not read git status")
+
+    # Capture the operator's current branch before we switch to the refresh
+    # branch — we'll return to it before popping the stash so the operator's
+    # in-flight work lands back where they made it.
+    orig_branch_proc = _run_repo_command(path, ["git", "rev-parse", "--abbrev-ref", "HEAD"])
+    orig_branch = orig_branch_proc.stdout.strip() if orig_branch_proc.returncode == 0 else None
+    if not orig_branch:
+        return _ConsumerRefreshResult(path, "failed", "could not read current branch")
+
+    stashed = False
     if before:
-        return _ConsumerRefreshResult(path, "skipped", "repo has pre-existing changes")
+        if not auto_stash:
+            return _ConsumerRefreshResult(path, "skipped", "repo has pre-existing changes")
+        stash_msg = f"conductor-refresh-v{__version__.split('+', 1)[0]} auto-stash"
+        stash = _run_repo_command(path, ["git", "stash", "push", "-u", "-m", stash_msg])
+        if stash.returncode != 0:
+            return _ConsumerRefreshResult(
+                path, "failed", _command_failure_detail(stash, "git stash push")
+            )
+        stashed = True
+
+    def _pop_or_preserve(result: _ConsumerRefreshResult) -> _ConsumerRefreshResult:
+        """If we stashed, return to orig_branch and pop. Augment result with
+        stash_status; on pop conflict, preserve the stash and downgrade
+        status to "needs-attention"."""
+        if not stashed:
+            return result
+        # Best-effort return to the operator's original branch before popping.
+        back = _run_repo_command(path, ["git", "checkout", orig_branch])
+        if back.returncode != 0:
+            return _ConsumerRefreshResult(
+                result.path,
+                "needs-attention",
+                f"refresh ran but could not return to {orig_branch}; "
+                "stash@{0} preserved for manual resolution",
+                branch=result.branch,
+                commit=result.commit,
+                stash_status="preserved",
+            )
+        pop = _run_repo_command(path, ["git", "stash", "pop"])
+        if pop.returncode != 0:
+            return _ConsumerRefreshResult(
+                result.path,
+                "needs-attention",
+                f"refresh committed on {result.branch}; auto-stash pop "
+                f"conflicted on {orig_branch}; stash@{{0}} preserved for "
+                "manual resolution",
+                branch=result.branch,
+                commit=result.commit,
+                stash_status="preserved",
+            )
+        # Pop succeeded — augment detail to record the auto-stash.
+        augmented_detail = f"{result.detail} (auto-stashed and restored)"
+        return _ConsumerRefreshResult(
+            result.path,
+            result.status,
+            augmented_detail,
+            branch=result.branch,
+            commit=result.commit,
+            stash_status="popped",
+        )
 
     checkout = _checkout_refresh_branch(path, branch)
     if checkout is not None:
-        return _ConsumerRefreshResult(path, "failed", checkout)
+        return _pop_or_preserve(_ConsumerRefreshResult(path, "failed", checkout))
 
     init_result = _run_repo_command(
         path,
@@ -7594,44 +7682,56 @@ def _refresh_one_consumer_repo(path: Path, *, branch: str) -> _ConsumerRefreshRe
     )
     if init_result.returncode != 0:
         detail = _command_failure_detail(init_result, "conductor init -y --remaining")
-        return _ConsumerRefreshResult(path, "failed", detail, branch=branch)
+        return _pop_or_preserve(
+            _ConsumerRefreshResult(path, "failed", detail, branch=branch)
+        )
 
     after = _git_status_porcelain(path)
     if after is None:
-        return _ConsumerRefreshResult(path, "failed", "could not read git status", branch=branch)
+        return _pop_or_preserve(
+            _ConsumerRefreshResult(path, "failed", "could not read git status", branch=branch)
+        )
     if not after:
-        return _ConsumerRefreshResult(
-            path,
-            "unchanged",
-            "integration files already current",
-            branch=branch,
+        return _pop_or_preserve(
+            _ConsumerRefreshResult(
+                path,
+                "unchanged",
+                "integration files already current",
+                branch=branch,
+            )
         )
 
     add = _run_repo_command(path, ["git", "add", "--all"])
     if add.returncode != 0:
-        return _ConsumerRefreshResult(
-            path,
-            "failed",
-            _command_failure_detail(add, "git add --all"),
-            branch=branch,
+        return _pop_or_preserve(
+            _ConsumerRefreshResult(
+                path,
+                "failed",
+                _command_failure_detail(add, "git add --all"),
+                branch=branch,
+            )
         )
     message = f"Refresh conductor integrations to v{__version__.split('+', 1)[0]}"
     commit = _run_repo_command(path, ["git", "commit", "-m", message])
     if commit.returncode != 0:
-        return _ConsumerRefreshResult(
-            path,
-            "failed",
-            _command_failure_detail(commit, "git commit"),
-            branch=branch,
+        return _pop_or_preserve(
+            _ConsumerRefreshResult(
+                path,
+                "failed",
+                _command_failure_detail(commit, "git commit"),
+                branch=branch,
+            )
         )
     sha = _run_repo_command(path, ["git", "rev-parse", "--short", "HEAD"])
     commit_sha = sha.stdout.strip() if sha.returncode == 0 else None
-    return _ConsumerRefreshResult(
-        path,
-        "committed",
-        "refresh commit ready for operator review",
-        branch=branch,
-        commit=commit_sha,
+    return _pop_or_preserve(
+        _ConsumerRefreshResult(
+            path,
+            "committed",
+            "refresh commit ready for operator review",
+            branch=branch,
+            commit=commit_sha,
+        )
     )
 
 
