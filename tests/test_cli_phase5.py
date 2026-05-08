@@ -1014,6 +1014,83 @@ def test_refresh_consumers_default_branch_uses_typed_prefix(mocker, tmp_path):
     assert _git(consumer, "branch", "--show-current").stdout.strip() == expected_branch
 
 
+def test_refresh_consumers_auto_stashes_dirty_repo(mocker, tmp_path):
+    """Dirty repo with operator changes outside the conductor sentinel block
+    should be auto-stashed, refreshed on the refresh branch, and popped back
+    on the original branch (closes #289 piece 3)."""
+    _stub_all_unconfigured(mocker)
+
+    consumer = tmp_path / "consumer-dirty-stash"
+    consumer.mkdir()
+    _git(consumer, "init", "-q", "-b", "main")
+    _git(consumer, "config", "user.email", "conductor-test@example.com")
+    _git(consumer, "config", "user.name", "Conductor Test")
+
+    from conductor import agent_wiring
+
+    agent_wiring.wire_agents_md(cwd=consumer, version="0.8.0")
+    (consumer / "operator-file.txt").write_text("baseline\n", encoding="utf-8")
+    _git(consumer, "add", "AGENTS.md", "operator-file.txt")
+    _git(consumer, "commit", "-m", "Initial state")
+
+    # Operator makes uncommitted changes to a non-conductor file.
+    (consumer / "operator-file.txt").write_text("operator's in-flight work\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        main,
+        ["refresh-consumers", "--paths", str(consumer), "--branch", "chore/refresh-test"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "committed" in result.output
+    assert "auto-stashed and restored" in result.output
+    # Operator's in-flight work survived: working tree on original branch with the modification.
+    assert _git(consumer, "branch", "--show-current").stdout.strip() == "main"
+    assert (consumer / "operator-file.txt").read_text(encoding="utf-8") == (
+        "operator's in-flight work\n"
+    )
+    # Refresh commit landed on the refresh branch.
+    log = _git(consumer, "log", "chore/refresh-test", "-1", "--pretty=%s").stdout
+    assert "Refresh conductor integrations" in log
+    # Stash entry was popped (none preserved).
+    stash_list = _git(consumer, "stash", "list").stdout.strip()
+    assert stash_list == "", f"stash should be empty after successful pop; got: {stash_list!r}"
+
+
+def test_refresh_consumers_no_auto_stash_skips_dirty_repo(mocker, tmp_path):
+    """`--no-auto-stash` preserves the older skip-on-dirty behavior so
+    operator scripts that depended on it keep working."""
+    _stub_all_unconfigured(mocker)
+
+    consumer = tmp_path / "consumer-no-stash"
+    consumer.mkdir()
+    _git(consumer, "init", "-q", "-b", "main")
+    _git(consumer, "config", "user.email", "conductor-test@example.com")
+    _git(consumer, "config", "user.name", "Conductor Test")
+
+    from conductor import agent_wiring
+
+    agent_wiring.wire_agents_md(cwd=consumer, version="0.8.0")
+    _git(consumer, "add", "AGENTS.md")
+    _git(consumer, "commit", "-m", "Initial state")
+
+    # Make the repo dirty.
+    (consumer / "operator-file.txt").write_text("dirty\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        main,
+        ["refresh-consumers", "--paths", str(consumer), "--no-auto-stash"],
+    )
+
+    # Skip-on-dirty exits 1 (today's behavior with --no-auto-stash opted in).
+    assert result.exit_code == 1, result.output
+    assert "skipped" in result.output
+    assert "pre-existing changes" in result.output
+    # Repo state untouched: still on main, untracked file still present.
+    assert _git(consumer, "branch", "--show-current").stdout.strip() == "main"
+    assert (consumer / "operator-file.txt").read_text(encoding="utf-8") == "dirty\n"
+
+
 def test_refresh_consumers_reads_config_file(mocker, tmp_path):
     _stub_all_unconfigured(mocker)
     consumer = tmp_path / "consumer-from-config"
