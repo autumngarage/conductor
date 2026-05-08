@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import time
@@ -233,6 +234,12 @@ class BriefInput:
     body: str
     source: str
     attachments: tuple[Path, ...] = ()
+
+
+@dataclass(frozen=True)
+class BriefPhase:
+    title: str
+    body: str
 
 
 @dataclass(frozen=True)
@@ -4784,6 +4791,60 @@ def _append_previous_phase_results(body: str, summaries: list[str]) -> str:
     return f"{body}\n\n" + "\n\n".join(summaries)
 
 
+DEFAULT_AUTO_PHASE_ANCHORS: tuple[str, ...] = (
+    "## Tests",
+    "## Validation",
+)
+DEFAULT_AUTO_PHASE_REGEX_ANCHORS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^## Phase \d+\s*$"),
+)
+
+
+def _phase_heading_title(line: str) -> str:
+    return line.lstrip("#").strip()
+
+
+def _auto_phase_anchor_matcher(extra_anchors: tuple[str, ...]) -> re.Pattern[str]:
+    literal_anchors = [
+        anchor.strip() for anchor in (*DEFAULT_AUTO_PHASE_ANCHORS, *extra_anchors) if anchor.strip()
+    ]
+    exact_patterns = [rf"^{re.escape(anchor)}\s*$" for anchor in literal_anchors]
+    regex_patterns = [pattern.pattern for pattern in DEFAULT_AUTO_PHASE_REGEX_ANCHORS]
+    return re.compile("|".join([*exact_patterns, *regex_patterns]))
+
+
+def _split_brief_into_auto_phases(
+    body: str,
+    *,
+    extra_anchors: tuple[str, ...] = (),
+) -> list[BriefPhase]:
+    anchor_pattern = _auto_phase_anchor_matcher(extra_anchors)
+    lines = body.splitlines(keepends=True)
+    anchor_indexes = [
+        idx for idx, line in enumerate(lines) if anchor_pattern.match(line.rstrip("\r\n"))
+    ]
+    if not anchor_indexes:
+        return [BriefPhase(title="Brief", body=body)]
+
+    phases: list[BriefPhase] = []
+    first_anchor = anchor_indexes[0]
+    intro = "".join(lines[:first_anchor]).strip()
+    if intro:
+        phases.append(BriefPhase(title="Intro", body=intro))
+
+    for anchor_position, start in enumerate(anchor_indexes):
+        end = (
+            anchor_indexes[anchor_position + 1]
+            if anchor_position + 1 < len(anchor_indexes)
+            else len(lines)
+        )
+        chunk = "".join(lines[start:end]).strip()
+        if chunk:
+            phases.append(BriefPhase(title=_phase_heading_title(lines[start]), body=chunk))
+
+    return phases
+
+
 def _run_exec_phase_dispatch(
     *,
     provider_id: str | None,
@@ -5396,6 +5457,23 @@ def _run_exec_phase_dispatch(
     ),
 )
 @click.option(
+    "--auto-phase",
+    is_flag=True,
+    default=False,
+    help=(
+        "Split one brief into sequential phases on documented anchors "
+        "(e.g. ## Tests, ## Validation, ## Phase 2)."
+    ),
+)
+@click.option(
+    "--phase-anchor",
+    multiple=True,
+    help=(
+        "Additional exact heading anchor for --auto-phase, e.g. "
+        "--phase-anchor '## Custom'. Repeat to add more."
+    ),
+)
+@click.option(
     "--issue",
     default=None,
     help=("Use a GitHub issue as the seed brief. Accepts N for the current repo or owner/repo#N."),
@@ -5500,6 +5578,8 @@ def exec_cmd(
     task_file: str | None,
     brief: str | None,
     brief_file: tuple[str, ...],
+    auto_phase: bool,
+    phase_anchor: tuple[str, ...],
     issue: str | None,
     issue_comment_limit: int,
     attach: tuple[str, ...],
@@ -5558,6 +5638,10 @@ def exec_cmd(
         )
 
     brief_files = tuple(brief_file)
+    if auto_phase and len(brief_files) > 1:
+        raise click.UsageError(
+            "use `--brief-file` repeated OR `--auto-phase` on a single brief, not both."
+        )
     if len(brief_files) > 1 and any(path == "-" for path in brief_files):
         raise click.UsageError("multiple --brief-file phases cannot read from stdin ('-').")
     if len(brief_files) > 1 and any(value is not None for value in (task, task_file, brief)):
@@ -5580,7 +5664,32 @@ def exec_cmd(
             cwd=cwd,
             attach=attach,
         )
-        phase_inputs.append((brief_files[0] if brief_files else brief_input.source, brief_input))
+        if auto_phase:
+            auto_phases = _split_brief_into_auto_phases(
+                brief_input.body,
+                extra_anchors=phase_anchor,
+            )
+            if len(auto_phases) == 1 and auto_phases[0].title == "Brief":
+                click.echo(
+                    "[conductor] --auto-phase: no anchor headers found in brief; "
+                    "running as single phase.",
+                    err=True,
+                )
+                phase_inputs.append(
+                    (brief_files[0] if brief_files else brief_input.source, brief_input)
+                )
+            else:
+                phase_inputs.extend(
+                    (
+                        phase.title,
+                        replace(brief_input, body=phase.body, source=phase.title),
+                    )
+                    for phase in auto_phases
+                )
+        else:
+            phase_inputs.append(
+                (brief_files[0] if brief_files else brief_input.source, brief_input)
+            )
     else:
         for path in brief_files:
             phase_inputs.append(
