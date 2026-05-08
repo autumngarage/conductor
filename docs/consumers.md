@@ -64,6 +64,8 @@ Use `conductor review` for code review. It only routes to providers with native 
 
 `council` is intentionally OpenRouter-only and is not the cheap default delegation path. It runs independent member calls through OpenRouter, then sends those outputs to an OpenRouter synthesis model. Use `research` or `code` for routine single-model delegation; reserve `council` for explicit multi-model judgment.
 
+Rows with mode `call` return text on stdout only. They do not have tool access and cannot write files, create branches, commit, push, or open PRs. Use `code` with `high`/`max` effort or `conductor exec` when the brief requires repository side effects.
+
 Council has conservative default caps: 180 seconds total wall-clock, 6,000 reported output tokens across members plus synthesis, and $0.25 total known OpenRouter cost. Override them with `--council-timeout`, `--council-max-output-tokens`, and `--council-max-cost-usd`. When a cap stops the council before synthesis, the command exits nonzero and emits a partial `CallResponse`; `raw.conductor_council.cap_hit` includes the cap kind, requested/observed limit, elapsed time, completed member count, completed member models, and skipped member models. `--timeout` remains the per-call provider timeout and is bounded by the remaining council wall-clock cap.
 
 `--offline` is rejected for council because it violates the OpenRouter-only invariant.

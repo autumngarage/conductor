@@ -104,9 +104,10 @@ flags remain supported as compatibility aliases.
 Shipped:
 
 - Built-in providers: `kimi` (OpenRouter-backed HTTP preset), `openrouter`, `deepseek-chat`, `deepseek-reasoner`, `claude`, `codex`, `gemini`, and `ollama`.
-- `conductor ask --kind <research|code|review|council> --effort <level>` — deterministic semantic routing. Research and low/medium code favor OpenRouter auto-routing; high-effort code escalates through Codex, Claude, OpenRouter tool-use exec, then Ollama; review routes to native review; council fans out through OpenRouter and synthesizes the results.
+- `conductor ask --kind <research|code|review|council> --effort <level>` — deterministic semantic routing. Research and low/medium code favor call-mode answer synthesis and cannot write files or open PRs; high-effort code escalates through Codex, Claude, OpenRouter tool-use exec, then Ollama; review routes to native review; council fans out through OpenRouter and synthesizes the results.
 - `conductor call --with <id> --brief "..."` — manual mode for any provider.
 - `conductor call --auto [--tags a,b,c] --brief "..."` — rule-based router picks the best configured provider for the task's tags.
+- `conductor swarm --brief a.md --brief b.md --provider codex --max-parallel 2 --json` — first-class multi-task coding supervisor with isolated worktrees and structured per-task results.
 - `conductor review --auto --base <ref> --brief-file <path>` — code review routed only to native review providers (`codex review`, Claude `/review`, Gemini `/code-review` extension).
 - `conductor list [--json]` — shows every provider with ready/not-ready status, default model, and capability tags.
 - `conductor smoke <id>` / `conductor smoke --all [--json]` — proves a provider's auth + endpoint work (cheapest round-trip that exercises the full path).

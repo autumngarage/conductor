@@ -213,6 +213,41 @@ def test_openrouter_family_health_probe_network_error(
     assert "network error" in reason
 
 
+def test_call_recovers_from_missing_default_ca_bundle(configured, mocker):
+    original_client = httpx.Client
+    client_kwargs: list[dict[str, object]] = []
+
+    def client_factory(*args, **kwargs):
+        client_kwargs.append(dict(kwargs))
+        if len(client_kwargs) == 1:
+            raise FileNotFoundError(
+                2,
+                "No such file or directory",
+                "/missing/certifi/cacert.pem",
+            )
+        return original_client(*args, **kwargs)
+
+    mocker.patch("conductor.providers._http_client.httpx.Client", side_effect=client_factory)
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "model": OPENROUTER_DEFAULT_MODEL,
+                    "choices": [{"message": {"content": "ok"}}],
+                    "usage": {},
+                },
+            )
+        )
+        response = OpenRouterProvider().call("hi", model=OPENROUTER_DEFAULT_MODEL)
+
+    assert response.text == "ok"
+    assert len(client_kwargs) == 2
+    assert "verify" not in client_kwargs[0]
+    assert "verify" in client_kwargs[1]
+
+
 def test_call_sends_reasoning_effort_and_openrouter_headers(configured):
     captured: dict[str, object] = {}
 

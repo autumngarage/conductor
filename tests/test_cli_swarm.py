@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -226,14 +227,86 @@ def test_swarm_sanitizes_brief_stem_for_branch(monkeypatch, tmp_path: Path) -> N
     assert payload["tasks"][0]["branch"] == "feat/swarm/feature-big-thing"
 
 
-def test_swarm_max_parallel_is_v1_usage_error(tmp_path: Path) -> None:
+def test_swarm_max_parallel_runs_tasks_concurrently(monkeypatch, tmp_path: Path) -> None:
     repo = _repo(tmp_path)
-    brief = _brief(repo, "foo.md")
+    first = _brief(repo, "foo.md", "first change")
+    second = _brief(repo, "bar.md", "second change")
+    monkeypatch.chdir(repo)
+    started: set[str] = set()
+    started_lock = threading.Lock()
+    both_started = threading.Event()
+
+    def fake_exec(**kwargs):
+        worktree = Path(kwargs["cwd"])
+        body = kwargs["body"]
+        with started_lock:
+            started.add(body)
+            if len(started) == 2:
+                both_started.set()
+        if not both_started.wait(timeout=2):
+            raise cli._ExecPhaseError(
+                exit_code=1,
+                exit_status="parallelism-missing",
+                message="tasks did not overlap",
+            )
+        filename = f"{body.replace(' ', '-')}.txt"
+        _commit_change(worktree, filename, body)
+        return (
+            CallResponse(
+                text="done",
+                provider="codex",
+                model="codex",
+                duration_ms=1,
+            ),
+            None,
+            None,
+        )
+
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", fake_exec)
+    monkeypatch.setattr(cli, "_ship_swarm_pr", _fake_ship)
 
     result = CliRunner().invoke(
         main,
-        ["swarm", "--provider", "codex", "--brief", str(brief), "--max-parallel", "2"],
+        [
+            "swarm",
+            "--provider",
+            "codex",
+            "--brief",
+            str(first),
+            "--brief",
+            str(second),
+            "--max-parallel",
+            "2",
+            "--auto-merge",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert [task["status"] for task in payload["tasks"]] == ["shipped", "shipped"]
+    assert started == {"first change", "second change"}
+
+
+def test_swarm_rejects_duplicate_brief_branch_slugs(monkeypatch, tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    first = _brief(repo, "first/foo.md", "first change")
+    second = _brief(repo, "second/foo.md", "second change")
+    monkeypatch.chdir(repo)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "swarm",
+            "--provider",
+            "codex",
+            "--brief",
+            str(first),
+            "--brief",
+            str(second),
+        ],
     )
 
     assert result.exit_code == 2
-    assert "--max-parallel is a v1 feature; runs sequentially in v0" in result.output
+    assert "both map to 'feat/swarm/foo'" in result.output

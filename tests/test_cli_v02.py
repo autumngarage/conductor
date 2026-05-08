@@ -506,6 +506,37 @@ def test_ask_research_low_lets_openrouter_auto_select(mocker):
     assert payload["semantic"]["candidates"][0]["models"] == []
 
 
+def test_ask_research_rejects_repo_side_effect_brief(mocker):
+    _stub_all_configured(mocker, {"openrouter"})
+    call_mock = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response("openrouter", "openrouter/auto"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "research",
+            "--effort",
+            "medium",
+            "--brief",
+            (
+                "Synthesize a doctrine candidate, write it to "
+                ".cortex/doctrine/candidate.md, commit it, push, and open a PR."
+            ),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert not call_mock.called
+    assert "uses call mode" in result.output
+    assert "cannot write local files" in result.output
+    assert "conductor ask --kind code --effort high" in result.output
+
+
 def test_ask_code_high_routes_to_codex_exec_with_default_tools(mocker):
     _stub_all_configured(mocker, {"codex"})
     exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
@@ -2234,8 +2265,8 @@ def test_exec_cli_max_stall_seconds_zero_disables_watchdog(mocker):
         ("minimal", 10),
         ("low", 15),
         ("medium", 20),
-        ("high", 30),
-        ("max", 40),
+        ("high", 60),
+        ("max", 80),
     ],
 )
 def test_exec_max_iterations_default_scales_by_effort(effort, expected):

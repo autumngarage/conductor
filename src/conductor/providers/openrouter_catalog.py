@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from conductor.providers._http_client import provider_http_client
 from conductor.providers.interface import ProviderHTTPError
 
 if TYPE_CHECKING:
@@ -202,7 +203,7 @@ def _is_fresh(snapshot: CatalogSnapshot) -> bool:
 
 def _fetch_catalog() -> CatalogSnapshot:
     try:
-        with httpx.Client(timeout=OPENROUTER_CATALOG_TIMEOUT_SEC) as client:
+        with provider_http_client(timeout=OPENROUTER_CATALOG_TIMEOUT_SEC) as client:
             response = client.get(OPENROUTER_MODELS_URL)
     except httpx.HTTPError as e:
         raise ProviderHTTPError(
