@@ -64,6 +64,8 @@ DOCUMENTED_EXEC_FLAGS: frozenset[str] = frozenset(
         "--exclude",
         "--brief",
         "--brief-file",
+        "--auto-phase",
+        "--phase-anchor",
         "--issue",
         "--issue-comment-limit",
         "--task",

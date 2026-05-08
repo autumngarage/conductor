@@ -2550,6 +2550,234 @@ def test_exec_multiple_brief_files_run_sequential_phases_json(mocker, tmp_path):
     assert [phase["brief"] for phase in payload["phases"]] == [str(phase1), str(phase2)]
 
 
+def test_exec_auto_phase_splits_tests_and_validation_anchors(mocker, tmp_path):
+    repo = _make_diff_repo(tmp_path)
+    brief = tmp_path / "combined.md"
+    brief.write_text(
+        "# Brief: implement X\n\n"
+        "Build the production path.\n\n"
+        "## Tests\n\n"
+        "Add regression tests.\n\n"
+        "## Validation\n\n"
+        "Run pytest.\n",
+        encoding="utf-8",
+    )
+    seen_prompts: list[str] = []
+
+    def fake_exec(self, prompt, **kwargs):
+        seen_prompts.append(prompt)
+        return _fake_response("codex", text=f"phase {len(seen_prompts)} done")
+
+    _stub_all_configured(mocker, {"codex"})
+    exec_mock = mocker.patch.object(CodexProvider, "exec", autospec=True, side_effect=fake_exec)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "codex",
+            "--no-preflight",
+            "--cwd",
+            str(repo),
+            "--brief-file",
+            str(brief),
+            "--auto-phase",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert exec_mock.call_count == 3
+    assert seen_prompts[0] == "# Brief: implement X\n\nBuild the production path."
+    assert seen_prompts[1].startswith("## Tests\n\nAdd regression tests.")
+    assert seen_prompts[2].startswith("## Validation\n\nRun pytest.")
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert [phase["brief"] for phase in payload["phases"]] == [
+        "Intro",
+        "Tests",
+        "Validation",
+    ]
+
+
+def test_exec_auto_phase_no_anchors_falls_back_to_single_phase(mocker, tmp_path):
+    brief = tmp_path / "combined.md"
+    single_phase_body = "# Brief\n\nDo one thing.\n\n## Notes\n\nDo not split here."
+    brief.write_text(f"{single_phase_body}\n", encoding="utf-8")
+    _stub_all_configured(mocker, {"codex"})
+    exec_mock = mocker.patch.object(
+        CodexProvider,
+        "exec",
+        return_value=_fake_response("codex", text="done"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "codex",
+            "--no-preflight",
+            "--brief-file",
+            str(brief),
+            "--auto-phase",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert exec_mock.call_count == 1
+    assert exec_mock.call_args.args[0] == single_phase_body
+    assert "--auto-phase: no anchor headers found" in result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["text"] == "done"
+    assert "phases" not in payload
+
+
+def test_exec_auto_phase_splits_phase_number_anchors(mocker, tmp_path):
+    repo = _make_diff_repo(tmp_path)
+    brief = tmp_path / "combined.md"
+    brief.write_text(
+        "## Phase 1\n\nImplement it.\n\n## Phase 2\n\nTest it.\n",
+        encoding="utf-8",
+    )
+    seen_prompts: list[str] = []
+
+    def fake_exec(self, prompt, **kwargs):
+        seen_prompts.append(prompt)
+        return _fake_response("codex", text=f"phase {len(seen_prompts)} done")
+
+    _stub_all_configured(mocker, {"codex"})
+    mocker.patch.object(CodexProvider, "exec", autospec=True, side_effect=fake_exec)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "codex",
+            "--no-preflight",
+            "--cwd",
+            str(repo),
+            "--brief-file",
+            str(brief),
+            "--auto-phase",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert seen_prompts[0] == "## Phase 1\n\nImplement it."
+    assert seen_prompts[1].startswith("## Phase 2\n\nTest it.")
+    payload = json.loads(result.stdout)
+    assert [phase["brief"] for phase in payload["phases"]] == ["Phase 1", "Phase 2"]
+
+
+def test_exec_auto_phase_custom_anchor_extends_default_list(mocker, tmp_path):
+    repo = _make_diff_repo(tmp_path)
+    brief = tmp_path / "combined.md"
+    brief.write_text(
+        "# Brief\n\nImplement it.\n\n## Custom\n\nCustom validation.\n",
+        encoding="utf-8",
+    )
+    seen_prompts: list[str] = []
+
+    def fake_exec(self, prompt, **kwargs):
+        seen_prompts.append(prompt)
+        return _fake_response("codex", text=f"phase {len(seen_prompts)} done")
+
+    _stub_all_configured(mocker, {"codex"})
+    mocker.patch.object(CodexProvider, "exec", autospec=True, side_effect=fake_exec)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "codex",
+            "--no-preflight",
+            "--cwd",
+            str(repo),
+            "--brief-file",
+            str(brief),
+            "--auto-phase",
+            "--phase-anchor",
+            "## Custom",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert seen_prompts[0] == "# Brief\n\nImplement it."
+    assert seen_prompts[1].startswith("## Custom\n\nCustom validation.")
+    payload = json.loads(result.stdout)
+    assert [phase["brief"] for phase in payload["phases"]] == ["Intro", "Custom"]
+
+
+def test_exec_auto_phase_rejects_repeated_brief_files(mocker, tmp_path):
+    phase1 = tmp_path / "phase1.md"
+    phase2 = tmp_path / "phase2.md"
+    phase1.write_text("implement it\n", encoding="utf-8")
+    phase2.write_text("test it\n", encoding="utf-8")
+    _stub_all_configured(mocker, {"codex"})
+    exec_mock = mocker.patch.object(CodexProvider, "exec")
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "codex",
+            "--brief-file",
+            str(phase1),
+            "--brief-file",
+            str(phase2),
+            "--auto-phase",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert not exec_mock.called
+    assert "use `--brief-file` repeated OR `--auto-phase` on a single brief, not both" in (
+        result.output
+    )
+
+
+def test_exec_auto_phase_default_off_preserves_single_phase_behavior(mocker, tmp_path):
+    brief = tmp_path / "combined.md"
+    brief.write_text(
+        "# Brief\n\nImplement it.\n\n## Tests\n\nThese stay in the same phase.\n",
+        encoding="utf-8",
+    )
+    _stub_all_configured(mocker, {"codex"})
+    exec_mock = mocker.patch.object(
+        CodexProvider,
+        "exec",
+        return_value=_fake_response("codex", text="done"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "codex",
+            "--no-preflight",
+            "--brief-file",
+            str(brief),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert exec_mock.call_count == 1
+    assert "## Tests" in exec_mock.call_args.args[0]
+    payload = json.loads(result.stdout)
+    assert payload["text"] == "done"
+    assert "phases" not in payload
+
+
 def test_exec_multiple_brief_files_first_cap_exit_aborts_json(mocker, tmp_path):
     repo = _make_diff_repo(tmp_path)
     phase1 = tmp_path / "phase1.md"
