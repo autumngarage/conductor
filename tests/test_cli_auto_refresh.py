@@ -102,6 +102,8 @@ def test_auto_refresh_repo_scope_skips_import_mode_claude_md(tmp_path, monkeypat
     result = CliRunner().invoke(main, ["doctor", "--json"])
 
     assert result.exit_code == 0, result.output
+    assert "import-mode" not in result.stderr
+    assert "auto-refresh warning: skipped" not in result.stderr
     assert "<!-- conductor:begin v0.9.0 -->" in (
         repo / "AGENTS.md"
     ).read_text(encoding="utf-8")

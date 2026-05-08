@@ -487,7 +487,12 @@ def refresh_repo_scope(cwd: Path, *, version: str) -> RefreshReport:
 
     for decision in repo_scope_version_decisions(root, binary_version=version):
         if not decision.stale:
-            if decision.reason not in {"missing", "not conductor-managed", "current"}:
+            if decision.reason not in {
+                "missing",
+                "not conductor-managed",
+                "current",
+                "import-mode",
+            }:
                 skipped.append((decision.path, decision.reason))
             continue
         try:
