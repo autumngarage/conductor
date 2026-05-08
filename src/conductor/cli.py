@@ -1613,6 +1613,7 @@ def _invoke_with_fallback(
     max_iterations: int | None = None,
     max_iterations_explicit: bool = False,
     write_validation: bool = True,
+    strict_stall: bool = False,
 ) -> tuple[CallResponse, list[str]]:
     """Try the decision's ranked providers in order; fallback on retryable errors.
 
@@ -1768,6 +1769,7 @@ def _invoke_with_fallback(
                         resume_session_id=resume_session_id,
                         session_log=session_log,
                         attachments=attachments,
+                        strict_stall=strict_stall,
                     )
                 elif isinstance(provider, OllamaProvider):
                     _ensure_supports_attachments(provider, attachments)
@@ -4702,6 +4704,15 @@ def review(
     ),
 )
 @click.option(
+    "--strict-stall",
+    is_flag=True,
+    default=False,
+    help=(
+        "Codex exec only. Reset --max-stall-seconds only on tool-use/tool-result "
+        "events and stderr, ignoring assistant text and turn-boundary events."
+    ),
+)
+@click.option(
     "--start-timeout",
     "start_timeout_sec",
     default=None,
@@ -4847,6 +4858,7 @@ def exec_cmd(
     cwd: str | None,
     timeout_sec: int | None,
     max_stall_sec: int | None,
+    strict_stall: bool,
     start_timeout_sec: float | None,
     max_iterations: int | None,
     retry_on_stall: int,
@@ -5053,6 +5065,7 @@ def exec_cmd(
                 max_iterations=max_iterations_value,
                 max_iterations_explicit=max_iterations_explicit,
                 write_validation=write_validation,
+                strict_stall=strict_stall,
             )
         except UnsupportedCapability as e:
             if session_log is not None:
@@ -5222,6 +5235,7 @@ def exec_cmd(
                     resume_session_id=resume_session_id,
                     session_log=session_log,
                     attachments=attachments,
+                    strict_stall=strict_stall,
                 )
             elif isinstance(provider, OllamaProvider):
                 response = provider.exec(

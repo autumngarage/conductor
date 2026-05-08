@@ -2087,6 +2087,76 @@ def test_codex_exec_streams_output_resets_stall_clock(mocker):
     assert fake.terminated is False
 
 
+def test_codex_exec_stall_watchdog_ignores_subagent_message_heartbeats(mocker):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    lines = [
+        '{"type":"session.created","session_id":"sess-subagent-heartbeats"}\n',
+        *[
+            '{"type":"subagent_message","message":"still waiting"}\n'
+            for _ in range(20)
+        ],
+    ]
+    fake = _FakePopen(
+        stdout_schedule=[(0.02, line) for line in lines],
+        hang_after_stdout=True,
+    )
+    _patch_codex_popen(mocker, fake)
+
+    started = time.monotonic()
+    with pytest.raises(ProviderStalledError) as exc:
+        CodexProvider().exec("hi", max_stall_sec=0.08, liveness_interval_sec=0)
+    elapsed = time.monotonic() - started
+
+    assert "codex CLI stalled" in str(exc.value)
+    assert fake.terminated is True
+    assert elapsed < 0.3
+
+
+def test_codex_exec_stall_watchdog_resets_on_tool_use_amid_heartbeats(mocker):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    lines = [
+        '{"type":"session.created","session_id":"sess-tool-progress"}\n',
+        '{"type":"subagent_message","message":"still waiting"}\n',
+        '{"type":"tool_use","name":"Read","arguments":{"path":"README.md"}}\n',
+        '{"type":"subagent_message","message":"still waiting"}\n',
+        '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n',
+        '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":2}}\n',
+    ]
+    fake = _FakePopen(stdout_schedule=[(0.04, line) for line in lines])
+    _patch_codex_popen(mocker, fake)
+
+    response = CodexProvider().exec("hi", max_stall_sec=0.11, liveness_interval_sec=0)
+
+    assert response.text == "done"
+    assert response.session_id == "sess-tool-progress"
+    assert fake.terminated is False
+
+
+def test_codex_exec_strict_stall_ignores_assistant_text_progress(mocker):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    lines = [
+        '{"type":"session.created","session_id":"sess-strict-stall"}\n',
+        '{"type":"item.completed","item":{"type":"agent_message","text":"working"}}\n',
+        '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":2}}\n',
+    ]
+    fake = _FakePopen(
+        stdout_schedule=[(0.05, line) for line in lines],
+        hang_after_stdout=True,
+    )
+    _patch_codex_popen(mocker, fake)
+
+    with pytest.raises(ProviderStalledError) as exc:
+        CodexProvider().exec(
+            "hi",
+            max_stall_sec=0.08,
+            liveness_interval_sec=0,
+            strict_stall=True,
+        )
+
+    assert "codex CLI stalled" in str(exc.value)
+    assert fake.terminated is True
+
+
 def test_codex_exec_returns_after_process_exit_when_stdout_reader_lingers(
     mocker, capsys
 ):

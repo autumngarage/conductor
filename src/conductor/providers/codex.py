@@ -68,6 +68,21 @@ CODEX_STARTUP_PROBE_CONFIG = (
     "model_reasoning_effort=low",
 )
 CODEX_STARTUP_READY_EVENTS = frozenset({"thread.started", "turn.started"})
+CODEX_STALL_INITIAL_EVENTS = frozenset(
+    {"session.created", "thread.started", "turn.started"}
+)
+CODEX_STALL_BOUNDARY_EVENTS = frozenset({"turn.completed", "turn.failed"})
+CODEX_STALL_TOOL_EVENTS = frozenset({"tool_use", "tool_result"})
+CODEX_STALL_KNOWN_NON_PROGRESS_EVENTS = frozenset(
+    {
+        "error",
+        "item.started",
+        "session.created",
+        "subagent_message",
+        "thread.started",
+        "turn.started",
+    }
+)
 CODEX_STREAM_POLL_INTERVAL_SEC = 0.05
 CODEX_STREAM_EXIT_READER_JOIN_SEC = 0.2
 
@@ -734,6 +749,52 @@ class CodexProvider:
                 },
             )
 
+    def _codex_stall_progress_kind(self, raw_line: str) -> str | None:
+        """Classify Codex JSONL events that prove the session is progressing."""
+        try:
+            event = json.loads(raw_line)
+        except json.JSONDecodeError:
+            _LOG.debug("ignoring non-JSON codex stdout line for stall watchdog: %r", raw_line)
+            return None
+        if not isinstance(event, dict):
+            _LOG.debug("ignoring non-object codex stdout line for stall watchdog: %r", raw_line)
+            return None
+
+        kind = event.get("type")
+        if not isinstance(kind, str) or not kind:
+            _LOG.debug("ignoring codex stdout event without string type: %r", event)
+            return None
+
+        item = event.get("item") or {}
+        if not isinstance(item, dict):
+            item = {}
+        item_type = item.get("type")
+        item_type_text = str(item_type) if item_type is not None else ""
+
+        if kind in CODEX_STALL_TOOL_EVENTS:
+            return "tool"
+        if item_type_text and (
+            "tool" in item_type_text
+            or item_type_text in {"function_call", "function_call_output"}
+        ):
+            return "tool"
+
+        if kind == "item.completed" and item_type == "agent_message":
+            if item.get("text"):
+                return "content"
+            return None
+        if item_type == "agent_message" and (event.get("delta") or item.get("delta")):
+            return "content"
+
+        if kind in CODEX_STALL_BOUNDARY_EVENTS:
+            return "boundary"
+        if kind in CODEX_STALL_INITIAL_EVENTS:
+            return "initial"
+
+        if kind not in CODEX_STALL_KNOWN_NON_PROGRESS_EVENTS:
+            _LOG.debug("codex stdout event does not reset stall watchdog: %s", kind)
+        return None
+
     def _read_session_log_progress(
         self,
         *,
@@ -867,6 +928,7 @@ class CodexProvider:
         resume_session_id: str | None = None,
         session_log: SessionLog | None = None,
         attachments: tuple[Path, ...] = (),
+        strict_stall: bool = False,
     ) -> CallResponse:
         return self._run(
             task,
@@ -881,6 +943,7 @@ class CodexProvider:
             resume_session_id=resume_session_id,
             session_log=session_log,
             attachments=attachments,
+            strict_stall=strict_stall,
         )
 
     def _run(
@@ -898,6 +961,7 @@ class CodexProvider:
         resume_session_id: str | None = None,
         session_log: SessionLog | None = None,
         attachments: tuple[Path, ...] = (),
+        strict_stall: bool = False,
     ) -> CallResponse:
         # Cheap PATH check on the hot path; auth state surfaces as a CLI
         # exit failure below if needed. configured() (with auth probe) is
@@ -975,6 +1039,7 @@ class CodexProvider:
                 liveness_interval_sec=liveness_interval_sec,
                 output_path=output_path,
                 session_log=session_log,
+                strict_stall=strict_stall,
             )
 
         start = time.monotonic()
@@ -1056,6 +1121,7 @@ class CodexProvider:
         liveness_interval_sec: float,
         output_path: Path,
         session_log: SessionLog | None,
+        strict_stall: bool,
     ) -> CallResponse:
         start = time.monotonic()
         startup_lock_context = codex_startup_lock(
@@ -1148,6 +1214,7 @@ class CodexProvider:
         last_liveness = start
         heartbeat_log_offset = 0
         session_id_emitted = False
+        initial_stall_event_seen = False
         stdout_event_buffer = ""
         stderr_failure_tail = ""
         try:
@@ -1320,14 +1387,23 @@ class CodexProvider:
                     continue
 
                 stdout_parts.append(item)
-                last_output = time.monotonic()
-                last_liveness = last_output
                 stdout_event_buffer += item
                 while "\n" in stdout_event_buffer:
                     line, stdout_event_buffer = stdout_event_buffer.split("\n", 1)
                     line = f"{line}\n"
                     auth_tracker.observe_json_line(line, source="stdout")
                     self._emit_stream_event(line, session_log=session_log)
+                    progress_kind = self._codex_stall_progress_kind(line)
+                    if progress_kind == "initial":
+                        if not initial_stall_event_seen:
+                            last_output = time.monotonic()
+                            last_liveness = last_output
+                            initial_stall_event_seen = True
+                    elif progress_kind is not None and (
+                        not strict_stall or progress_kind == "tool"
+                    ):
+                        last_output = time.monotonic()
+                        last_liveness = last_output
                     signal = detect_retriable_provider_failure(
                         line,
                         source="stdout",
