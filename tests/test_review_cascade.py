@@ -129,7 +129,7 @@ def test_review_chain_walks_past_codex_to_next_code_review_provider(mocker) -> N
     assert "claude (stall), codex (stall), openrouter (success)" in result.stderr
 
 
-def test_review_fallback_call_propagates_timeout_flags(mocker) -> None:
+def test_review_fallback_call_uses_conductor_owned_budget(mocker) -> None:
     from conductor.providers.interface import ProviderStalledError
 
     _stub_all_configured(mocker, {"claude", "codex", "openrouter"})
@@ -166,8 +166,10 @@ def test_review_fallback_call_propagates_timeout_flags(mocker) -> None:
     )
 
     assert result.exit_code == 0, result.output
-    assert openrouter_call.call_args.kwargs["timeout_sec"] == 7
-    assert openrouter_call.call_args.kwargs["max_stall_sec"] == 3
+    assert openrouter_call.call_args.kwargs["timeout_sec"] == 300
+    assert openrouter_call.call_args.kwargs["max_stall_sec"] == 75
+    assert "review gate budget: timeout=300s stall=75s" in result.stderr
+    assert "ignored caller timeout=7s max-stall=3s" in result.stderr
 
 
 def test_review_patch_context_git_timeout_surfaces_context_error(

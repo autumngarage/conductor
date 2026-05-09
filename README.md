@@ -118,7 +118,7 @@ Shipped:
 - `conductor refresh-on-commit` — hook-mode counterpart to `update`, installed by `conductor init` for pre-commit refresh of stale embedded repo integrations.
 - Credentials resolver (`conductor.credentials`): env var first, then `key_command`, then macOS Keychain under service `conductor`.
 - Offline-mode fallback: on a real connectivity failure (DNS, TCP reset, unreachable host) during `--auto` routing, Conductor prompts once to switch to the local `ollama` provider and remembers that choice for a short window. `conductor call --offline --brief "..."` is the non-interactive form — useful on a plane, in CI, or any time you want to force local. Clear the sticky flag with `--no-offline`. Ollama requests use `CONDUCTOR_OLLAMA_MODEL` when set; when no explicit `--model` is passed and the requested local model is missing, Conductor queries `/api/tags` and retries once with a non-embedding installed chat model.
-- Review-gate routing: `--auto` routes tagged `code-review` derive bounded provider budgets from prompt size and fallback count, so consumers do not need to guess raw timeout flags for normal review delegation. OpenRouter empty responses are retried against the remaining model stack before surfacing a provider error.
+- Review-gate routing: `--auto` routes tagged `code-review` derive bounded provider budgets from prompt size and fallback count, so consumers do not need to guess raw timeout flags for normal review delegation. For these review-gate routes, Conductor owns provider timeout/stall budgets even when a caller accidentally forwards timeout flags. OpenRouter empty responses are retried against the remaining model stack before surfacing a provider error.
 
 Deferred (see `autumn-garage/.cortex/plans/conductor-bootstrap.md`):
 
