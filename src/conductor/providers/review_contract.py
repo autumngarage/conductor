@@ -15,6 +15,7 @@ _REVIEW_SENTINELS = (
 )
 _SAFE_BLOCKED_SENTINEL = "CODEX_REVIEW_BLOCKED"
 _DEFAULT_PATCH_CONTEXT_MAX_BYTES = 200_000
+_REVIEW_GIT_TIMEOUT_SEC = 30.0
 
 
 class ReviewContextError(RuntimeError):
@@ -131,15 +132,27 @@ def _uncommitted_patch_chunks(*, cwd: Path) -> list[str]:
 
 
 def _run_git(args: list[str], *, cwd: Path) -> str:
-    result = subprocess.run(
-        ["git", *args],
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_REVIEW_GIT_TIMEOUT_SEC,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise ReviewContextError(
+            f"`git {' '.join(args)}` timed out after {_REVIEW_GIT_TIMEOUT_SEC:.0f}s "
+            "while building review patch context"
+        ) from e
+    except OSError as e:
+        raise ReviewContextError(
+            f"`git {' '.join(args)}` failed to start while building review patch "
+            f"context: {e}"
+        ) from e
     if result.returncode != 0:
         raise ReviewContextError(
             f"could not build review patch context from `git {' '.join(args)}`: "
@@ -149,15 +162,27 @@ def _run_git(args: list[str], *, cwd: Path) -> str:
 
 
 def _run_git_no_index(args: list[str], *, cwd: Path) -> str:
-    result = subprocess.run(
-        ["git", *args],
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_REVIEW_GIT_TIMEOUT_SEC,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise ReviewContextError(
+            f"`git {' '.join(args)}` timed out after {_REVIEW_GIT_TIMEOUT_SEC:.0f}s "
+            "while building untracked-file review patch"
+        ) from e
+    except OSError as e:
+        raise ReviewContextError(
+            f"`git {' '.join(args)}` failed to start while building untracked-file "
+            f"review patch: {e}"
+        ) from e
     if result.returncode not in {0, 1}:
         raise ReviewContextError(
             f"could not build untracked-file review patch from `git {' '.join(args)}`: "

@@ -169,3 +169,14 @@ def test_git_start_failure_is_converted_to_git_state_error(mocker) -> None:
 
     with pytest.raises(GitStateError, match="failed to start"):
         scan_git_state()
+
+
+def test_git_timeout_is_converted_to_git_state_error(mocker) -> None:
+    mocker.patch.object(
+        git_state_mod.subprocess,
+        "run",
+        side_effect=subprocess.TimeoutExpired(["git"], 10),
+    )
+
+    with pytest.raises(GitStateError, match="timed out after 10s"):
+        scan_git_state()

@@ -33,7 +33,7 @@ from conductor.offline_mode import _cache_dir
 from conductor.orphan_detect import find_orphan_codex_processes, format_orphan_hints
 from conductor.providers._startup_lock import codex_startup_lock, release_startup_lock
 from conductor.providers._tool_weights import ToolBudgetCounter
-from conductor.providers.cli_auth import AuthPromptTracker
+from conductor.providers.cli_auth import STARTUP_LOCK_MAX_HOLD_SEC, AuthPromptTracker
 from conductor.providers.interface import (
     CallResponse,
     ProviderConfigError,
@@ -1129,7 +1129,6 @@ class CodexProvider:
         strict_stall: bool,
         max_iterations: int | None,
     ) -> CallResponse:
-        start = time.monotonic()
         startup_lock_context = codex_startup_lock(
             session_log=session_log,
             snapshot_provider=self._codex_startup_lock_snapshot,
@@ -1145,6 +1144,7 @@ class CodexProvider:
                 cwd=cwd,
                 env=os.environ.copy(),
             )
+            start = time.monotonic()
         except BaseException:
             release_startup_lock(startup_lock_handle)
             startup_lock_context.__exit__(*sys.exc_info())
@@ -1221,6 +1221,7 @@ class CodexProvider:
         heartbeat_log_offset = 0
         session_id_emitted = False
         initial_stall_event_seen = False
+        saw_output = False
         stdout_event_buffer = ""
         stderr_failure_tail = ""
         tool_budget = ToolBudgetCounter()
@@ -1228,6 +1229,9 @@ class CodexProvider:
         try:
             while True:
                 now = time.monotonic()
+                if not saw_output and now - start >= STARTUP_LOCK_MAX_HOLD_SEC:
+                    release_startup_lock(startup_lock_handle)
+
                 if process.poll() is not None and stream_q.empty():
                     break
 
@@ -1360,6 +1364,7 @@ class CodexProvider:
                     continue
 
                 release_startup_lock(startup_lock_handle)
+                saw_output = True
                 if stream_name == "stderr":
                     stderr_parts.append(item)
                     last_output = time.monotonic()

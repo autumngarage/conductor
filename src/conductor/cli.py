@@ -18,10 +18,12 @@ v0.2 additions:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -59,6 +61,7 @@ from conductor.delegation_ledger import (
 from conductor.git_state import (
     DEFAULT_BRANCH_SCAN_LIMIT,
     DEFAULT_KEEP_WORKTREE_DAYS,
+    GIT_STATE_COMMAND_TIMEOUT_SEC,
     AbandonedWorktree,
     BranchScanLimit,
     GitCleanupPlan,
@@ -2028,6 +2031,8 @@ def _invoke_review_with_fallback(
                     task_tags=list(decision.task_tags),
                     prefer=decision.prefer,
                     log_selection=not silent,
+                    timeout_sec=timeout_sec,
+                    max_stall_sec=max_stall_sec,
                 )
             else:
                 response = provider.call(
@@ -2041,6 +2046,8 @@ def _invoke_review_with_fallback(
                         include_patch=True,
                     ),
                     effort=effort,
+                    timeout_sec=timeout_sec,
+                    max_stall_sec=max_stall_sec,
                 )
             repaired_text = ensure_requested_review_sentinel(
                 provider_name=response.provider,
@@ -4857,6 +4864,9 @@ def _exec_failure_status(error: Exception | str) -> str:
     return _delegation_status_from_error(error)
 
 
+_EXEC_PHASE_GIT_TIMEOUT_SEC = 10.0
+
+
 def _git_phase_head(cwd: str | None) -> str | None:
     worktree = cwd or os.getcwd()
     try:
@@ -4865,9 +4875,10 @@ def _git_phase_head(cwd: str | None) -> str | None:
             cwd=worktree,
             capture_output=True,
             text=True,
+            timeout=_EXEC_PHASE_GIT_TIMEOUT_SEC,
             check=True,
         )
-    except (OSError, subprocess.CalledProcessError) as e:
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         click.echo(
             f"[conductor] warning: could not capture phase git HEAD in {worktree}: {e}",
             err=True,
@@ -4884,9 +4895,10 @@ def _git_phase_output(cwd: str | None, args: list[str]) -> str | None:
             cwd=worktree,
             capture_output=True,
             text=True,
+            timeout=_EXEC_PHASE_GIT_TIMEOUT_SEC,
             check=True,
         )
-    except (OSError, subprocess.CalledProcessError) as e:
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         click.echo(
             f"[conductor] warning: git {' '.join(args)} failed in {worktree}: {e}",
             err=True,
@@ -4937,6 +4949,9 @@ def _append_previous_phase_results(body: str, summaries: list[str]) -> str:
 SWARM_SUCCESS_STATUSES = frozenset({"shipped", "no-changes"})
 SWARM_BRANCH_PREFIX = "feat/swarm"
 SWARM_WORKTREE_LOCK = threading.Lock()
+SWARM_GIT_TIMEOUT_SEC = 30.0
+SWARM_GH_TIMEOUT_SEC = 30.0
+SWARM_SHIP_TIMEOUT_SEC = 1800.0
 
 
 @dataclass
@@ -5020,8 +5035,14 @@ def _run_swarm_git(
             cwd=cwd,
             capture_output=True,
             text=True,
+            timeout=SWARM_GIT_TIMEOUT_SEC,
             check=False,
         )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            f"`git {' '.join(args)}` timed out after {SWARM_GIT_TIMEOUT_SEC:.0f}s "
+            f"in {cwd}"
+        ) from e
     except OSError as e:
         raise RuntimeError(f"`git {' '.join(args)}` failed to start in {cwd}: {e}") from e
     if check and result.returncode != 0:
@@ -5082,8 +5103,16 @@ def _swarm_pr_merge_sha(worktree: Path, pr_url: str | None) -> str | None:
             cwd=worktree,
             capture_output=True,
             text=True,
+            timeout=SWARM_GH_TIMEOUT_SEC,
             check=False,
         )
+    except subprocess.TimeoutExpired as e:
+        click.echo(
+            f"[conductor] warning: gh pr view timed out after {SWARM_GH_TIMEOUT_SEC:.0f}s "
+            f"for {pr_url}: {e}",
+            err=True,
+        )
+        return None
     except OSError as e:
         click.echo(
             f"[conductor] warning: could not inspect PR merge commit for {pr_url}: {e}",
@@ -5111,13 +5140,30 @@ def _ship_swarm_pr(
     args = ["bash", str(script), "--base", base_branch]
     if auto_merge:
         args.append("--auto-merge")
-    result = subprocess.run(
-        args,
-        cwd=worktree,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            args,
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            timeout=SWARM_SHIP_TIMEOUT_SEC,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as e:
+        output = "\n".join(
+            part
+            for part in (_timeout_output_text(e.stdout), _timeout_output_text(e.stderr))
+            if part
+        ).strip()
+        pr_url = _extract_pr_url(output)
+        status = "review-blocked" if auto_merge and pr_url else "failed"
+        reason = (
+            f"open-pr.sh timed out after {SWARM_SHIP_TIMEOUT_SEC:.0f}s"
+            + (f": {output}" if output else "")
+        )
+        return status, pr_url, reason
+    except OSError as e:
+        return "failed", None, f"open-pr.sh failed to start: {e}"
     output = f"{result.stdout}\n{result.stderr}".strip()
     pr_url = _extract_pr_url(output)
     if result.returncode != 0:
@@ -5126,6 +5172,14 @@ def _ship_swarm_pr(
         return status, pr_url, reason
     merge_sha = _swarm_pr_merge_sha(worktree, pr_url) if auto_merge else None
     return ("shipped" if auto_merge else "pushed-not-merged"), pr_url, merge_sha
+
+
+def _timeout_output_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
 
 
 def _swarm_summary(results: list[SwarmTaskResult]) -> dict[str, object]:
@@ -6887,6 +6941,72 @@ def list_cmd(as_json: bool) -> None:
 # --------------------------------------------------------------------------- #
 
 
+class _SmokeDeadlineExpiredError(RuntimeError):
+    pass
+
+
+@contextlib.contextmanager
+def _smoke_deadline(timeout_sec: float):
+    if (
+        timeout_sec <= 0
+        or not hasattr(signal, "setitimer")
+        or threading.current_thread() is not threading.main_thread()
+    ):
+        yield
+        return
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+
+    def raise_timeout(_signum, _frame) -> None:
+        raise _SmokeDeadlineExpiredError
+
+    signal.signal(signal.SIGALRM, raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, timeout_sec)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
+
+
+def _smoke_provider(name: str, *, provider_timeout: float) -> dict[str, object]:
+    provider = get_provider(name)
+    try:
+        with _smoke_deadline(provider_timeout):
+            ok, reason = provider.smoke()
+    except _SmokeDeadlineExpiredError:
+        ok, reason = False, f"smoke timed out after {provider_timeout:g}s"
+    except Exception as exc:  # noqa: BLE001 - smoke reports every provider failure.
+        ok = False
+        reason = f"smoke raised {type(exc).__name__}: {exc}"
+    return {"provider": name, "ok": ok, "reason": reason}
+
+
+def _smoke_configured_result(
+    name: str, *, provider_timeout: float
+) -> tuple[bool, dict[str, object] | None]:
+    provider = get_provider(name)
+    try:
+        with _smoke_deadline(provider_timeout):
+            ok, _reason = provider.configured()
+    except _SmokeDeadlineExpiredError:
+        return False, {
+            "provider": name,
+            "ok": False,
+            "reason": f"configured check timed out after {provider_timeout:g}s",
+        }
+    except Exception as exc:  # noqa: BLE001 - smoke reports every provider failure.
+        return False, {
+            "provider": name,
+            "ok": False,
+            "reason": f"configured check raised {type(exc).__name__}: {exc}",
+        }
+    return ok, None
+
+
 @main.command()
 @click.argument("provider_id", required=False)
 @click.option(
@@ -6903,7 +7023,19 @@ def list_cmd(as_json: bool) -> None:
     default=False,
     help="Emit results as JSON.",
 )
-def smoke(provider_id: str | None, run_all: bool, as_json: bool) -> None:
+@click.option(
+    "--provider-timeout",
+    type=click.FloatRange(min=0.1),
+    default=30.0,
+    show_default=True,
+    help="Maximum seconds to wait for each provider smoke test.",
+)
+def smoke(
+    provider_id: str | None,
+    run_all: bool,
+    as_json: bool,
+    provider_timeout: float,
+) -> None:
     """Prove a provider's auth + endpoint actually work."""
     if provider_id and run_all:
         raise click.UsageError("pass a provider id OR --all, not both.")
@@ -6915,15 +7047,27 @@ def smoke(provider_id: str | None, run_all: bool, as_json: bool) -> None:
             raise click.UsageError(f"unknown provider {provider_id!r}; known: {known_providers()}")
         targets = [provider_id]
     else:
-        targets = [name for name in known_providers() if get_provider(name).configured()[0]]
+        targets = []
+        results = []
+        any_failed = False
+        for name in known_providers():
+            configured, failure = _smoke_configured_result(
+                name,
+                provider_timeout=provider_timeout,
+            )
+            if failure is not None:
+                results.append(failure)
+                any_failed = True
+            elif configured:
+                targets.append(name)
 
-    results = []
-    any_failed = False
+    if provider_id:
+        results = []
+        any_failed = False
     for name in targets:
-        provider = get_provider(name)
-        ok, reason = provider.smoke()
-        results.append({"provider": name, "ok": ok, "reason": reason})
-        if not ok:
+        result = _smoke_provider(name, provider_timeout=provider_timeout)
+        results.append(result)
+        if not result["ok"]:
             any_failed = True
 
     if as_json:
@@ -7347,13 +7491,22 @@ def _echo_branch_scan_cap(
 
 
 def _run_git_cleanup_command(args: list[str], *, cwd: str | Path | None = None) -> tuple[bool, str]:
-    result = subprocess.run(
-        ["git", *args],
-        cwd=cwd,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=GIT_STATE_COMMAND_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        return False, (
+            f"`git {' '.join(args)}` timed out after "
+            f"{GIT_STATE_COMMAND_TIMEOUT_SEC:.0f}s"
+        )
+    except OSError as e:
+        return False, f"`git {' '.join(args)}` failed to start: {e}"
     detail = (result.stderr or result.stdout or "").strip()
     return result.returncode == 0, detail
 
@@ -8482,7 +8635,6 @@ def _refresh_one_consumer_repo(
     init_result = _run_repo_command(
         path,
         [sys.executable, "-m", "conductor.cli", "init", "-y", "--remaining"],
-        timeout=None,
     )
     if init_result.returncode != 0:
         detail = _command_failure_detail(init_result, "conductor init -y --remaining")

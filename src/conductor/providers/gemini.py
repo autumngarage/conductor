@@ -70,6 +70,7 @@ GEMINI_AUTH_ENV_VARS = (
     "GOOGLE_API_KEY",
     "GOOGLE_APPLICATION_CREDENTIALS",
 )
+GEMINI_TRUST_WORKSPACE_ENV = "GEMINI_CLI_TRUST_WORKSPACE"
 # Default OAuth credentials file written by the CLI's first-run browser
 # flow. Override per-instance via the constructor for tests.
 GEMINI_DEFAULT_OAUTH_CREDS_PATH = Path.home() / ".gemini" / "oauth_creds.json"
@@ -546,6 +547,8 @@ class GeminiProvider:
         # Gemini CLI thinking budget support is evolving; pass via env var as
         # a forward-compatible hook. Ignored by versions that don't read it.
         env_overrides: dict[str, str] = {}
+        if approval_mode == "yolo":
+            env_overrides[GEMINI_TRUST_WORKSPACE_ENV] = "true"
         if thinking_budget:
             env_overrides["GEMINI_THINKING_BUDGET"] = str(thinking_budget)
         proc_env = {**os.environ, **env_overrides} if env_overrides else None

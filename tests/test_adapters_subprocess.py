@@ -6,6 +6,7 @@ All three call external CLIs. We stub ``subprocess.run`` and
 
 from __future__ import annotations
 
+import errno
 import io
 import json
 import logging
@@ -22,13 +23,18 @@ import pytest
 from click.testing import CliRunner
 
 from conductor.cli import main
+from conductor.providers import _startup_lock
 from conductor.providers.claude import (
     CLAUDE_CALL_FIRST_OUTPUT_TIMEOUT_SEC,
     CLAUDE_EXEC_FIRST_OUTPUT_TIMEOUT_SEC,
     ClaudeProvider,
 )
 from conductor.providers.codex import CODEX_STARTUP_PROBE_CONFIG, CodexProvider
-from conductor.providers.gemini import GEMINI_AUTH_ENV_VARS, GeminiProvider
+from conductor.providers.gemini import (
+    GEMINI_AUTH_ENV_VARS,
+    GEMINI_TRUST_WORKSPACE_ENV,
+    GeminiProvider,
+)
 from conductor.providers.interface import (
     CallResponse,
     ProviderConfigError,
@@ -1979,6 +1985,67 @@ def test_codex_exec_explicit_timeout_is_honored(mocker):
     assert fake.terminated is True
 
 
+def test_codex_exec_releases_startup_lock_when_provider_stays_silent(
+    monkeypatch, mocker, tmp_path
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    monkeypatch.setattr("conductor.providers.codex.STARTUP_LOCK_MAX_HOLD_SEC", 0.03)
+
+    lock_state = {"locked": False}
+    lock_guard = threading.Lock()
+
+    def fake_flock(_fd: int, op: int) -> None:
+        with lock_guard:
+            if op & _startup_lock.fcntl.LOCK_UN:
+                lock_state["locked"] = False
+                return
+            if not (op & _startup_lock.fcntl.LOCK_EX):
+                return
+            if lock_state["locked"]:
+                raise OSError(errno.EAGAIN, "locked")
+            lock_state["locked"] = True
+
+    monkeypatch.setattr(_startup_lock.fcntl, "flock", fake_flock)
+
+    popen_times: list[float] = []
+    popen_guard = threading.Lock()
+    first_started = threading.Event()
+    delays = [0.35, 0.0]
+
+    def factory(args, **kwargs):
+        with popen_guard:
+            delay = delays[len(popen_times)]
+            popen_times.append(time.monotonic())
+            if len(popen_times) == 1:
+                first_started.set()
+        fake = _FakePopen(stdout_schedule=[(delay, CODEX_NDJSON)])
+        fake.args = args
+        fake.cwd = kwargs.get("cwd")
+        fake.env = kwargs.get("env")
+        return fake
+
+    mocker.patch("conductor.providers.codex.subprocess.Popen", side_effect=factory)
+
+    def run_one() -> None:
+        CodexProvider().exec("hi", timeout_sec=3, max_stall_sec=None)
+
+    first = threading.Thread(target=run_one)
+    second = threading.Thread(target=run_one)
+
+    first.start()
+    assert first_started.wait(timeout=1)
+    time.sleep(0.08)
+    second.start()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert len(popen_times) == 2
+    assert popen_times[1] - popen_times[0] < 0.25
+
+
 def test_codex_call_keeps_constructor_default_timeout(mocker):
     """Single-turn call() retains the constructor-default HTTP-style timeout
     (180s) — the no-timeout change is scoped to exec(), where long agent
@@ -3016,6 +3083,25 @@ def test_gemini_exec_allows_saved_write_file_response(mocker):
     response = GeminiProvider().exec("write a file", sandbox="workspace-write")
 
     assert "has been saved" in response.text
+
+
+def test_gemini_exec_sets_headless_workspace_trust_env(mocker, monkeypatch):
+    mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
+    monkeypatch.setenv(GEMINI_TRUST_WORKSPACE_ENV, "false")
+    fake = _FakePopen(stdout_schedule=[(0, GEMINI_JSON)])
+    captured: dict[str, dict[str, str] | None] = {}
+
+    def factory(args, **kwargs):
+        fake.args = args
+        captured["env"] = kwargs.get("env")
+        return fake
+
+    mocker.patch("conductor.providers.gemini.subprocess.Popen", side_effect=factory)
+
+    GeminiProvider().exec("modify this workspace")
+
+    assert captured["env"] is not None
+    assert captured["env"][GEMINI_TRUST_WORKSPACE_ENV] == "true"
 
 
 def test_gemini_review_uses_code_review_extension_command(mocker, monkeypatch):

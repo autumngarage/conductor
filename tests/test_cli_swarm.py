@@ -5,6 +5,7 @@ import subprocess
 import threading
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from conductor import cli
@@ -82,6 +83,43 @@ def _fake_ship(worktree: Path, *, base_branch: str, auto_merge: bool):
     if auto_merge:
         return "shipped", "https://github.com/example/repo/pull/123", "abc1234"
     return "pushed-not-merged", "https://github.com/example/repo/pull/123", None
+
+
+def test_run_swarm_git_timeout_surfaces_runtime_error(monkeypatch) -> None:
+    def fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="timed out after 30s"):
+        cli._run_swarm_git(["status"], cwd=None)
+
+
+def test_ship_swarm_pr_timeout_preserves_detected_pr_url(monkeypatch, tmp_path: Path) -> None:
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    monkeypatch.setattr(cli, "_swarm_repo_root", lambda: tmp_path)
+
+    def fake_run(args, **kwargs):
+        assert kwargs["timeout"] == cli.SWARM_SHIP_TIMEOUT_SEC
+        raise subprocess.TimeoutExpired(
+            args,
+            kwargs["timeout"],
+            output="created https://github.com/example/repo/pull/123",
+        )
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    status, pr_url, reason = cli._ship_swarm_pr(
+        tmp_path,
+        base_branch="main",
+        auto_merge=True,
+    )
+
+    assert status == "review-blocked"
+    assert pr_url == "https://github.com/example/repo/pull/123"
+    assert reason is not None
+    assert "open-pr.sh timed out" in reason
 
 
 def test_swarm_one_brief_succeeds_as_shipped(monkeypatch, tmp_path: Path) -> None:

@@ -31,6 +31,7 @@ from conductor.providers import (
     KimiProvider,
     OllamaProvider,
     OpenRouterProvider,
+    review_contract,
 )
 from conductor.router import reset_health
 
@@ -126,6 +127,65 @@ def test_review_chain_walks_past_codex_to_next_code_review_provider(mocker) -> N
     assert "claude review failed (stall)" in result.stderr
     assert "codex review failed (stall)" in result.stderr
     assert "claude (stall), codex (stall), openrouter (success)" in result.stderr
+
+
+def test_review_fallback_call_propagates_timeout_flags(mocker) -> None:
+    from conductor.providers.interface import ProviderStalledError
+
+    _stub_all_configured(mocker, {"claude", "codex", "openrouter"})
+    mocker.patch.object(
+        ClaudeProvider,
+        "review",
+        side_effect=ProviderStalledError("claude review stalled"),
+    )
+    mocker.patch.object(
+        CodexProvider,
+        "review",
+        side_effect=ProviderStalledError("codex review stalled"),
+    )
+    openrouter_call = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response("openrouter"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--max-fallbacks",
+            "3",
+            "--timeout",
+            "7",
+            "--max-stall-seconds",
+            "3",
+            "--brief",
+            "Review this merge using the project reviewer guide.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert openrouter_call.call_args.kwargs["timeout_sec"] == 7
+    assert openrouter_call.call_args.kwargs["max_stall_sec"] == 3
+
+
+def test_review_patch_context_git_timeout_surfaces_context_error(
+    mocker, tmp_path: Path
+) -> None:
+    mocker.patch.object(
+        review_contract.subprocess,
+        "run",
+        side_effect=subprocess.TimeoutExpired(["git", "diff"], 30),
+    )
+
+    with pytest.raises(review_contract.ReviewContextError, match="timed out"):
+        review_contract.build_review_patch_context(
+            base="main",
+            commit=None,
+            uncommitted=False,
+            cwd=str(tmp_path),
+        )
 
 
 def test_review_max_fallbacks_caps_total_attempts(mocker) -> None:

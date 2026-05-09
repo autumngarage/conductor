@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import pytest
 from click.testing import CliRunner
 
+from conductor import cli
 from conductor.cli import main
 
 if TYPE_CHECKING:
@@ -166,6 +167,18 @@ def test_git_cleanup_json_shape(repo: Path) -> None:
     assert payload["stale_branches"][0]["name"] == "feat/stale"
     assert payload["abandoned_worktrees"] == []
     assert payload["protected"]
+
+
+def test_git_cleanup_command_timeout_returns_failure(mocker) -> None:
+    mocker.patch(
+        "conductor.cli.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(["git"], 10),
+    )
+
+    ok, detail = cli._run_git_cleanup_command(["branch", "-D", "feat/stale"])
+
+    assert ok is False
+    assert "timed out after 10s" in detail
 
 
 def _stub_all_unconfigured(mocker) -> None:
