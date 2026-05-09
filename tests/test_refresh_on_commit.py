@@ -98,6 +98,70 @@ def test_refresh_on_commit_mixed_embedded_and_import_refreshes_only_embedded(
     assert _staged_paths(repo) == ["AGENTS.md"]
 
 
+def test_update_refreshes_stale_embedded_file_and_stages(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    monkeypatch.setattr(cli_mod, "__version__", "0.9.0")
+    agent_wiring.wire_agents_md(cwd=repo, version="0.8.9")
+
+    result = CliRunner().invoke(main, ["update"])
+
+    assert result.exit_code == 0, result.output
+    assert "Refreshed Conductor repo integrations:" in result.output
+    assert "AGENTS.md" in result.output
+    assert "<!-- conductor:begin v0.9.0 -->" in (
+        repo / "AGENTS.md"
+    ).read_text(encoding="utf-8")
+    assert _staged_paths(repo) == ["AGENTS.md"]
+
+
+def test_update_dry_run_reports_stale_without_writing(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    monkeypatch.setattr(cli_mod, "__version__", "0.9.0")
+    agent_wiring.wire_agents_md(cwd=repo, version="0.8.9")
+
+    result = CliRunner().invoke(main, ["update", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "Would refresh Conductor repo integrations:" in result.output
+    assert "AGENTS.md (v0.8.9 -> v0.9.0)" in result.output
+    assert "<!-- conductor:begin v0.8.9 -->" in (
+        repo / "AGENTS.md"
+    ).read_text(encoding="utf-8")
+    assert _staged_paths(repo) == []
+
+
+def test_update_check_exits_one_for_stale_without_writing(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    monkeypatch.setattr(cli_mod, "__version__", "0.9.0")
+    agent_wiring.wire_agents_md(cwd=repo, version="0.8.9")
+
+    result = CliRunner().invoke(main, ["update", "--check"])
+
+    assert result.exit_code == 1, result.output
+    assert "Conductor repo integrations are stale:" in result.output
+    assert "Run `conductor update` to refresh them." in result.output
+    assert "<!-- conductor:begin v0.8.9 -->" in (
+        repo / "AGENTS.md"
+    ).read_text(encoding="utf-8")
+    assert _staged_paths(repo) == []
+
+
+def test_update_check_exits_zero_when_current(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    monkeypatch.setattr(cli_mod, "__version__", "0.9.0")
+    agent_wiring.wire_agents_md(cwd=repo, version="0.9.0")
+
+    result = CliRunner().invoke(main, ["update", "--check"])
+
+    assert result.exit_code == 0, result.output
+    assert "Conductor repo integrations are current." in result.output
+    assert _staged_paths(repo) == []
+
+
 def test_init_hooks_creates_pre_commit_config_by_default(tmp_path):
     repo = tmp_path / "repo"
 

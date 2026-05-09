@@ -113,6 +113,9 @@ Shipped:
 - `conductor smoke <id>` / `conductor smoke --all [--json]` — proves a provider's auth + endpoint work (cheapest round-trip that exercises the full path).
 - `conductor doctor [--json]` — diagnostic report: which providers are configured, which env vars are set, what's in the macOS Keychain.
 - `conductor init [-y]` — interactive first-run wizard (TTY-detected, `--yes` for non-TTY). For providers needing credentials (`openrouter`, plus OpenRouter-backed `kimi` / `deepseek-*`), prompts, recommends macOS Keychain or Linux `secret-tool` when available, keeps 1Password available via `op read`, runs a setup verification smoke test, and prints the manual env-var fallback when no encrypted store is available.
+- `conductor update [--dry-run] [--check]` — refreshes stale embedded Conductor repo integrations in the current repo and stages the refreshed paths. `--check` exits non-zero when an update is needed.
+- `conductor update-all [--paths ...] [--config-file ...] [--branch ...] [--no-auto-stash]` — batch-refreshes configured consumer repos on review branches. `conductor refresh-consumers` remains as a deprecated compatibility alias and prints a one-line warning.
+- `conductor refresh-on-commit` — hook-mode counterpart to `update`, installed by `conductor init` for pre-commit refresh of stale embedded repo integrations.
 - Credentials resolver (`conductor.credentials`): env var first, then `key_command`, then macOS Keychain under service `conductor`.
 - Offline-mode fallback: on a real connectivity failure (DNS, TCP reset, unreachable host) during `--auto` routing, Conductor prompts once to switch to the local `ollama` provider and remembers that choice for a short window. `conductor call --offline --brief "..."` is the non-interactive form — useful on a plane, in CI, or any time you want to force local. Clear the sticky flag with `--no-offline`. Ollama requests use `CONDUCTOR_OLLAMA_MODEL` when set; when no explicit `--model` is passed and the requested local model is missing, Conductor queries `/api/tags` and retries once with a non-embedding installed chat model.
 
@@ -155,6 +158,11 @@ exactly those files and strips the sentinel blocks, preserving user content.
 
 Diagnose wiring state anytime with `conductor doctor` (JSON shape:
 `--json`).
+Run `conductor update` to refresh stale embedded repo-scope wiring in the
+current repo immediately. Use `conductor update-all` when you intentionally
+need to walk configured consumer repos; `refresh-consumers` still works as a
+deprecated alias for existing scripts. The installed pre-commit hook continues
+to call `conductor refresh-on-commit`.
 
 ## How Sentinel and Touchstone use it
 
