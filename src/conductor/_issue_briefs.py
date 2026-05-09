@@ -15,6 +15,8 @@ class IssueBriefError(RuntimeError):
 
 _EXPLICIT_ISSUE_RE = re.compile(r"^(?P<repo>[^/\s#]+/[^/\s#]+)#(?P<number>[1-9]\d*)$")
 _ISSUE_NUMBER_RE = re.compile(r"^[1-9]\d*$")
+_GIT_REMOTE_TIMEOUT_SEC = 5.0
+_GH_ISSUE_TIMEOUT_SEC = 30.0
 
 
 def build_issue_brief(
@@ -57,6 +59,7 @@ def _owner_repo_from_origin(*, cwd: str | Path | None) -> str:
             cwd=cwd,
             capture_output=True,
             text=True,
+            timeout=_GIT_REMOTE_TIMEOUT_SEC,
             check=True,
         )
     except subprocess.CalledProcessError as e:
@@ -67,6 +70,11 @@ def _owner_repo_from_origin(*, cwd: str | Path | None) -> str:
         ) from e
     except FileNotFoundError as e:
         raise IssueBriefError("--issue <N> requires git to resolve the current repository.") from e
+    except subprocess.TimeoutExpired as e:
+        raise IssueBriefError(
+            f"--issue <N> timed out after {_GIT_REMOTE_TIMEOUT_SEC:.0f}s while "
+            "resolving the current repository origin."
+        ) from e
 
     origin = result.stdout.strip()
     owner_repo = _parse_github_owner_repo(origin)
@@ -108,10 +116,16 @@ def _fetch_issue(owner_repo: str, number: str, *, cwd: str | Path | None) -> dic
             cwd=cwd,
             capture_output=True,
             text=True,
+            timeout=_GH_ISSUE_TIMEOUT_SEC,
             check=True,
         )
     except FileNotFoundError as e:
         raise IssueBriefError("--issue requires the gh CLI; install via brew install gh.") from e
+    except subprocess.TimeoutExpired as e:
+        raise IssueBriefError(
+            f"timed out after {_GH_ISSUE_TIMEOUT_SEC:.0f}s fetching GitHub issue "
+            f"{owner_repo}#{number}. Run {' '.join(command)} to inspect manually."
+        ) from e
     except subprocess.CalledProcessError as e:
         detail = (e.stderr or e.stdout or str(e)).strip()
         raise IssueBriefError(

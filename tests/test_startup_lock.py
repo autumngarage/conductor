@@ -139,6 +139,66 @@ def test_live_subprocess_startup_lock_serializes_popen_until_first_output(
     assert popen_times[1] - popen_times[0] >= 0.08
 
 
+def test_live_subprocess_startup_lock_releases_when_provider_stays_silent(
+    monkeypatch, tmp_path
+) -> None:
+    lock_state = {"locked": False}
+    lock_guard = threading.Lock()
+
+    def fake_flock(_fd: int, op: int) -> None:
+        with lock_guard:
+            if op & _startup_lock.fcntl.LOCK_UN:
+                lock_state["locked"] = False
+                return
+            if not (op & _startup_lock.fcntl.LOCK_EX):
+                return
+            if lock_state["locked"]:
+                raise OSError(errno.EAGAIN, "locked")
+            lock_state["locked"] = True
+
+    monkeypatch.setattr(_startup_lock, "_lock_dir", lambda: tmp_path)
+    monkeypatch.setattr(_startup_lock.fcntl, "flock", fake_flock)
+
+    popen_times: list[float] = []
+    popen_guard = threading.Lock()
+    first_started = threading.Event()
+
+    def run_one(stdout_delay: float) -> None:
+        def popen_factory(*_args, **_kwargs):
+            with popen_guard:
+                popen_times.append(time.monotonic())
+                if len(popen_times) == 1:
+                    first_started.set()
+            return _StartupFakePopen(stdout_delay)
+
+        run_subprocess_with_live_stderr(
+            args=["claude"],
+            cwd=None,
+            env=None,
+            timeout=3,
+            provider_name="claude",
+            tracker=AuthPromptTracker("claude"),
+            popen_factory=popen_factory,
+            startup_lock=claude_startup_lock(timeout_sec=1),
+            startup_lock_max_hold_sec=0.03,
+        )
+
+    first = threading.Thread(target=run_one, args=(0.35,))
+    second = threading.Thread(target=run_one, args=(0.0,))
+
+    first.start()
+    assert first_started.wait(timeout=1)
+    time.sleep(0.08)
+    second.start()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert len(popen_times) == 2
+    assert popen_times[1] - popen_times[0] < 0.25
+
+
 def test_startup_lock_timeout_emits_diagnostic_and_proceeds(
     monkeypatch, tmp_path, capsys
 ) -> None:

@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 StartupProcessSnapshot = tuple[int, str]
 SnapshotProvider = Callable[[], StartupProcessSnapshot]
 
-STARTUP_LOCK_TIMEOUT_SEC = 30.0
+STARTUP_LOCK_TIMEOUT_SEC = 5.0
 
 
 @dataclass

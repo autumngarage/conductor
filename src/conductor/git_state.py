@@ -15,6 +15,7 @@ from pathlib import Path
 
 DEFAULT_BRANCH_SCAN_LIMIT = 50
 DEFAULT_KEEP_WORKTREE_DAYS = 7
+GIT_STATE_COMMAND_TIMEOUT_SEC = 10.0
 
 
 @dataclass(frozen=True)
@@ -97,7 +98,12 @@ def _git(
             check=False,
             capture_output=True,
             text=True,
+            timeout=GIT_STATE_COMMAND_TIMEOUT_SEC,
         )
+    except subprocess.TimeoutExpired as e:
+        raise GitStateError(
+            f"`git {' '.join(args)}` timed out after {GIT_STATE_COMMAND_TIMEOUT_SEC:.0f}s"
+        ) from e
     except OSError as e:
         raise GitStateError(f"`git {' '.join(args)}` failed to start: {e}") from e
     if check and result.returncode != 0:

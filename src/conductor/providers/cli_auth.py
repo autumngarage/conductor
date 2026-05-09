@@ -46,6 +46,7 @@ _AUTH_TEXT_SIGNALS = (
     "login --with-api-key",
 )
 _LOG = logging.getLogger(__name__)
+STARTUP_LOCK_MAX_HOLD_SEC = 2.0
 
 
 @dataclass(frozen=True)
@@ -205,12 +206,12 @@ def run_subprocess_with_live_stderr(
     tracker: AuthPromptTracker,
     popen_factory,
     startup_lock: contextlib.AbstractContextManager | None = None,
+    startup_lock_max_hold_sec: float | None = STARTUP_LOCK_MAX_HOLD_SEC,
     start_new_session: bool = False,
     cleanup_process_group: bool = False,
 ) -> CapturedProcessResult:
     """Run a subprocess while inspecting stderr for auth prompts live."""
 
-    start = time.monotonic()
     lock_context = startup_lock or contextlib.nullcontext()
     with lock_context as startup_lock_handle:
         process: subprocess.Popen[str] | None = None
@@ -224,6 +225,7 @@ def run_subprocess_with_live_stderr(
             env=env,
             start_new_session=start_new_session,
         )
+        start = time.monotonic()
         child_pgid = process.pid if cleanup_process_group else None
 
         parts: dict[str, list[str]] = {"stdout": [], "stderr": []}
@@ -257,6 +259,13 @@ def run_subprocess_with_live_stderr(
         try:
             while True:
                 now = time.monotonic()
+                if (
+                    startup_lock_max_hold_sec is not None
+                    and not saw_output
+                    and now - start >= startup_lock_max_hold_sec
+                ):
+                    release_startup_lock(startup_lock_handle)
+
                 if timeout is not None and now - start > timeout:
                     _terminate_process(process, child_pgid=child_pgid)
                     stdout_thread.join(timeout=1)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 
 import pytest
 from click.testing import CliRunner
@@ -288,6 +289,22 @@ def test_smoke_specific_provider_fails_exits_1(mocker):
     assert "bad token" in result.output
 
 
+def test_smoke_specific_provider_timeout_exits_1(mocker):
+    from conductor.providers import KimiProvider
+
+    def slow_smoke(self):
+        time.sleep(1)
+        return True, None
+
+    mocker.patch.object(KimiProvider, "smoke", slow_smoke)
+    result = CliRunner().invoke(
+        main,
+        ["smoke", "kimi", "--provider-timeout", "0.1"],
+    )
+    assert result.exit_code == 1
+    assert "smoke timed out after 0.1s" in result.output
+
+
 def test_smoke_all_only_hits_configured_providers(mocker):
     from conductor.providers import (
         ClaudeProvider,
@@ -308,6 +325,26 @@ def test_smoke_all_only_hits_configured_providers(mocker):
     result = CliRunner().invoke(main, ["smoke", "--all"])
     assert result.exit_code == 0
     assert claude_smoke.called
+
+
+def test_smoke_all_configured_timeout_exits_1(mocker):
+    from conductor.providers import KimiProvider
+
+    _stub_all_unconfigured(mocker)
+
+    def slow_configured(self):
+        time.sleep(1)
+        return True, None
+
+    mocker.patch.object(KimiProvider, "configured", slow_configured)
+
+    result = CliRunner().invoke(
+        main,
+        ["smoke", "--all", "--provider-timeout", "0.1"],
+    )
+
+    assert result.exit_code == 1
+    assert "configured check timed out after 0.1s" in result.output
 
 
 def test_smoke_json_output_shape(mocker):

@@ -43,6 +43,7 @@ CONDUCTOR_SECRET_SERVICE = "conductor"
 CREDENTIALS_FILE_ENV = "CONDUCTOR_CREDENTIALS_FILE"
 DEFAULT_CREDENTIALS_PATH = Path.home() / ".config" / "conductor" / "credentials.toml"
 KEY_COMMAND_TIMEOUT_SEC = 30.0
+CREDENTIAL_HELPER_TIMEOUT_SEC = 15.0
 
 CredentialSource = Literal["env", "key_command", "keychain"]
 
@@ -323,7 +324,7 @@ def _run_key_command(key: str, command: str) -> str | None:
 
 
 # --------------------------------------------------------------------------- #
-# Keychain — macOS Keychain wrappers (unchanged).
+# Keychain — macOS Keychain wrappers.
 # --------------------------------------------------------------------------- #
 
 
@@ -343,21 +344,29 @@ def set_in_keychain(key: str, value: str) -> None:
         raise RuntimeError(
             "`security` command not found (expected at /usr/bin/security on macOS)"
         )
-    result = subprocess.run(
-        [
-            "security",
-            "add-generic-password",
-            "-s",
-            CONDUCTOR_KEYCHAIN_SERVICE,
-            "-a",
-            key,
-            "-w",
-            value,
-            "-U",
-        ],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "security",
+                "add-generic-password",
+                "-s",
+                CONDUCTOR_KEYCHAIN_SERVICE,
+                "-a",
+                key,
+                "-w",
+                value,
+                "-U",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=CREDENTIAL_HELPER_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            f"Keychain write timed out after {CREDENTIAL_HELPER_TIMEOUT_SEC:.0f}s"
+        ) from e
+    except OSError as e:
+        raise RuntimeError(f"Keychain write failed to launch: {e}") from e
     if result.returncode != 0:
         raise RuntimeError(
             f"Keychain write failed ({result.returncode}): {result.stderr.strip()}"
@@ -379,21 +388,29 @@ def set_in_libsecret(key: str, value: str) -> None:
         raise RuntimeError(
             "`secret-tool` not found. Install libsecret-tools or use env / 1Password."
         )
-    result = subprocess.run(
-        [
-            "secret-tool",
-            "store",
-            "--label",
-            f"Conductor {key}",
-            "service",
-            CONDUCTOR_SECRET_SERVICE,
-            "account",
-            key,
-        ],
-        input=value,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "secret-tool",
+                "store",
+                "--label",
+                f"Conductor {key}",
+                "service",
+                CONDUCTOR_SECRET_SERVICE,
+                "account",
+                key,
+            ],
+            input=value,
+            capture_output=True,
+            text=True,
+            timeout=CREDENTIAL_HELPER_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            f"libsecret write timed out after {CREDENTIAL_HELPER_TIMEOUT_SEC:.0f}s"
+        ) from e
+    except OSError as e:
+        raise RuntimeError(f"libsecret write failed to launch: {e}") from e
     if result.returncode != 0:
         raise RuntimeError(
             f"libsecret write failed ({result.returncode}): {result.stderr.strip()}"
@@ -404,35 +421,61 @@ def delete_from_libsecret(key: str) -> None:
     """Remove a Conductor libsecret entry; silently OK if it doesn't exist."""
     if not libsecret_available():
         return
-    subprocess.run(
-        [
-            "secret-tool",
-            "clear",
-            "service",
-            CONDUCTOR_SECRET_SERVICE,
-            "account",
-            key,
-        ],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        subprocess.run(
+            [
+                "secret-tool",
+                "clear",
+                "service",
+                CONDUCTOR_SECRET_SERVICE,
+                "account",
+                key,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=CREDENTIAL_HELPER_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            f"conductor: warning: libsecret delete for {key} timed out after "
+            f"{CREDENTIAL_HELPER_TIMEOUT_SEC:.0f}s.",
+            file=sys.stderr,
+        )
+    except OSError as e:
+        print(
+            f"conductor: warning: libsecret delete for {key} failed to launch: {e}",
+            file=sys.stderr,
+        )
 
 
 def delete_from_keychain(key: str) -> None:
     """Remove a Conductor Keychain entry; silently OK if it doesn't exist."""
     if sys.platform != "darwin" or not shutil.which("security"):
         return
-    subprocess.run(
-        [
-            "security",
-            "delete-generic-password",
-            "-s",
-            CONDUCTOR_KEYCHAIN_SERVICE,
-            "-a",
-            key,
-        ],
-        capture_output=True,
-    )
+    try:
+        subprocess.run(
+            [
+                "security",
+                "delete-generic-password",
+                "-s",
+                CONDUCTOR_KEYCHAIN_SERVICE,
+                "-a",
+                key,
+            ],
+            capture_output=True,
+            timeout=CREDENTIAL_HELPER_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            f"conductor: warning: Keychain delete for {key} timed out after "
+            f"{CREDENTIAL_HELPER_TIMEOUT_SEC:.0f}s.",
+            file=sys.stderr,
+        )
+    except OSError as e:
+        print(
+            f"conductor: warning: Keychain delete for {key} failed to launch: {e}",
+            file=sys.stderr,
+        )
 
 
 def keychain_has(key: str) -> bool:
@@ -443,19 +486,34 @@ def keychain_has(key: str) -> bool:
 def _keychain_find(key: str) -> str | None:
     if not shutil.which("security"):
         return None
-    result = subprocess.run(
-        [
-            "security",
-            "find-generic-password",
-            "-s",
-            CONDUCTOR_KEYCHAIN_SERVICE,
-            "-a",
-            key,
-            "-w",
-        ],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "security",
+                "find-generic-password",
+                "-s",
+                CONDUCTOR_KEYCHAIN_SERVICE,
+                "-a",
+                key,
+                "-w",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=CREDENTIAL_HELPER_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            f"conductor: warning: Keychain lookup for {key} timed out after "
+            f"{CREDENTIAL_HELPER_TIMEOUT_SEC:.0f}s.",
+            file=sys.stderr,
+        )
+        return None
+    except OSError as e:
+        print(
+            f"conductor: warning: Keychain lookup for {key} failed to launch: {e}",
+            file=sys.stderr,
+        )
+        return None
     if result.returncode != 0:
         return None
     value = result.stdout.rstrip("\n")

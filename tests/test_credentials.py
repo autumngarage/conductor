@@ -50,6 +50,7 @@ def test_set_in_keychain_calls_security(mocker):
     assert args[1] == "add-generic-password"
     assert "-U" in args  # update-if-exists
     assert "-w" in args and args[args.index("-w") + 1] == "secret-value"
+    assert run_mock.call_args.kwargs["timeout"] == credentials.CREDENTIAL_HELPER_TIMEOUT_SEC
 
 
 def test_set_in_keychain_raises_on_non_zero(mocker):
@@ -62,6 +63,18 @@ def test_set_in_keychain_raises_on_non_zero(mocker):
     with pytest.raises(RuntimeError) as exc:
         credentials.set_in_keychain("K", "v")
     assert "denied" in str(exc.value)
+
+
+def test_set_in_keychain_times_out_raises(mocker):
+    mocker.patch.object(credentials.sys, "platform", "darwin")
+    mocker.patch("conductor.credentials.shutil.which", return_value="/usr/bin/security")
+    mocker.patch(
+        "conductor.credentials.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(["security"], 15),
+    )
+
+    with pytest.raises(RuntimeError, match="Keychain write timed out"):
+        credentials.set_in_keychain("K", "v")
 
 
 def test_set_in_keychain_raises_on_non_darwin(mocker):
@@ -89,6 +102,17 @@ def test_keychain_find_returns_none_on_non_zero(mocker):
     assert credentials._keychain_find("missing") is None
 
 
+def test_keychain_find_timeout_warns_and_returns_none(mocker, capsys):
+    mocker.patch("conductor.credentials.shutil.which", return_value="/usr/bin/security")
+    mocker.patch(
+        "conductor.credentials.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(["security"], 15),
+    )
+
+    assert credentials._keychain_find("K") is None
+    assert "Keychain lookup for K timed out" in capsys.readouterr().err
+
+
 def test_keychain_find_returns_none_when_security_absent(mocker):
     mocker.patch("conductor.credentials.shutil.which", return_value=None)
     assert credentials._keychain_find("K") is None
@@ -99,6 +123,44 @@ def test_keychain_has_shortcut(mocker):
     assert credentials.keychain_has("K") is True
     mocker.patch.object(credentials, "_keychain_find", return_value=None)
     assert credentials.keychain_has("K") is False
+
+
+def test_delete_from_keychain_timeout_warns(mocker, capsys):
+    mocker.patch.object(credentials.sys, "platform", "darwin")
+    mocker.patch("conductor.credentials.shutil.which", return_value="/usr/bin/security")
+    mocker.patch(
+        "conductor.credentials.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(["security"], 15),
+    )
+
+    credentials.delete_from_keychain("K")
+
+    assert "Keychain delete for K timed out" in capsys.readouterr().err
+
+
+def test_set_in_libsecret_times_out_raises(mocker):
+    mocker.patch.object(credentials.sys, "platform", "linux")
+    mocker.patch("conductor.credentials.shutil.which", return_value="/usr/bin/secret-tool")
+    mocker.patch(
+        "conductor.credentials.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(["secret-tool"], 15),
+    )
+
+    with pytest.raises(RuntimeError, match="libsecret write timed out"):
+        credentials.set_in_libsecret("K", "v")
+
+
+def test_delete_from_libsecret_timeout_warns(mocker, capsys):
+    mocker.patch.object(credentials.sys, "platform", "linux")
+    mocker.patch("conductor.credentials.shutil.which", return_value="/usr/bin/secret-tool")
+    mocker.patch(
+        "conductor.credentials.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(["secret-tool"], 15),
+    )
+
+    credentials.delete_from_libsecret("K")
+
+    assert "libsecret delete for K timed out" in capsys.readouterr().err
 
 
 # --------------------------------------------------------------------------- #

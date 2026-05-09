@@ -2046,6 +2046,52 @@ def test_exec_issue_missing_gh_errors_clearly(mocker):
     assert "--issue requires the gh CLI; install via brew install gh" in result.output
 
 
+def test_exec_issue_origin_timeout_errors_clearly(mocker):
+    _stub_all_configured(mocker, {"codex"})
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:4] == ["git", "config", "--get", "remote.origin.url"]:
+            raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+        raise AssertionError(f"unexpected command: {cmd!r}")
+
+    mocker.patch("conductor._issue_briefs.subprocess.run", side_effect=fake_run)
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--with", "codex", "--no-preflight", "--issue", "123"],
+    )
+
+    assert result.exit_code == 2
+    assert "--issue <N> timed out after 5s" in result.output
+
+
+def test_exec_issue_gh_timeout_errors_clearly(mocker):
+    _stub_all_configured(mocker, {"codex"})
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:4] == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout="git@github.com:autumngarage/conductor.git\n",
+                stderr="",
+            )
+        if cmd[:3] == ["gh", "issue", "view"]:
+            raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+        raise AssertionError(f"unexpected command: {cmd!r}")
+
+    mocker.patch("conductor._issue_briefs.subprocess.run", side_effect=fake_run)
+
+    result = CliRunner().invoke(
+        main,
+        ["exec", "--with", "codex", "--no-preflight", "--issue", "123"],
+    )
+
+    assert result.exit_code == 2
+    assert "timed out after 30s fetching GitHub issue" in result.output
+    assert "gh issue view 123 --repo autumngarage/conductor" in result.output
+
+
 def test_exec_issue_not_found_errors_with_recovery_command(mocker):
     _stub_all_configured(mocker, {"codex"})
 
