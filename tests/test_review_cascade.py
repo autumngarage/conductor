@@ -263,6 +263,7 @@ def test_review_exhausted_error_includes_tried_provider_trail(mocker) -> None:
     assert result.exit_code == 1
     assert "code review failed for all tried providers" in result.stderr
     assert "claude (rate-limit), codex (stall), openrouter (5xx)" in result.stderr
+    assert "ProviderHTTPError: OpenRouter returned HTTP 503" in result.stderr
     assert "Next step:" in result.stderr
 
 
