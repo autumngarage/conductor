@@ -119,6 +119,55 @@ def test_call_returns_normalized_response(configured):
     assert response.raw == body
 
 
+def test_call_empty_response_raises_provider_error(configured):
+    body = {
+        "model": OPENROUTER_DEFAULT_MODEL,
+        "choices": [{"message": {"content": ""}}],
+        "usage": {},
+    }
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(
+            return_value=httpx.Response(200, json=body)
+        )
+        with pytest.raises(ProviderHTTPError, match="empty response content"):
+            OpenRouterProvider().call("Review this.", model=OPENROUTER_DEFAULT_MODEL)
+
+
+def test_call_empty_response_retries_remaining_models(configured):
+    requests: list[dict] = []
+    responses = [
+        {
+            "model": "model-a",
+            "choices": [{"message": {"content": ""}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 0},
+        },
+        {
+            "model": "model-b",
+            "choices": [{"message": {"content": "usable"}}],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 2},
+        },
+    ]
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=responses[len(requests) - 1])
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        response = OpenRouterProvider().call(
+            "Review this.",
+            models=("model-a", "model-b"),
+            log_selection=False,
+        )
+
+    assert response.text == "usable"
+    assert requests[0]["models"] == ["model-a", "model-b"]
+    assert requests[1]["models"] == ["model-b"]
+    assert response.raw["empty_response_retries"] == [
+        {"reason": "empty-response", "model": "model-a"}
+    ]
+
+
 def test_call_raises_config_error_when_unconfigured(no_key):
     with pytest.raises(ProviderConfigError):
         OpenRouterProvider().call("hello")
@@ -521,6 +570,153 @@ def test_exec_with_tools_runs_openai_tool_loop(configured, tmp_path):
         "name": "Read",
         "content": "tool loop works",
     }
+
+
+def test_exec_without_tools_passes_timeout_to_call(configured, mocker):
+    provider = OpenRouterProvider()
+    call = mocker.patch.object(
+        provider,
+        "call",
+        return_value=CallResponse(
+            text="ok",
+            provider="openrouter",
+            model=OPENROUTER_DEFAULT_MODEL,
+            duration_ms=1,
+            usage={},
+            raw={},
+        ),
+    )
+
+    response = provider.exec(
+        "Summarize this.",
+        model=OPENROUTER_DEFAULT_MODEL,
+        timeout_sec=7,
+        max_stall_sec=3,
+    )
+
+    assert response.text == "ok"
+    assert call.call_args.kwargs["timeout_sec"] == 7
+    assert call.call_args.kwargs["max_stall_sec"] == 3
+
+
+def test_exec_with_tools_passes_remaining_timeout(configured, tmp_path, mocker):
+    provider = OpenRouterProvider()
+    observed_timeouts: list[float | None] = []
+
+    def _post_chat(payload: dict, *, timeout_sec: float | None = None) -> dict:
+        observed_timeouts.append(timeout_sec)
+        return {
+            "model": "openai/gpt-5.5",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "done",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }
+
+    mocker.patch.object(provider, "_post_chat", side_effect=_post_chat)
+
+    response = provider.exec(
+        "Read and summarize.",
+        model="openai/gpt-5.5",
+        tools=frozenset({"Read"}),
+        cwd=str(tmp_path),
+        timeout_sec=60,
+    )
+
+    assert response.text == "done"
+    assert len(observed_timeouts) == 1
+    assert observed_timeouts[0] is not None
+    assert 0 < observed_timeouts[0] <= 60
+
+
+def test_exec_with_tools_empty_final_response_raises(configured, tmp_path):
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "model": "openai/gpt-5.5",
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "",
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 0},
+                },
+            )
+        )
+        with pytest.raises(ProviderHTTPError, match="empty final response"):
+            OpenRouterProvider().exec(
+                "Review this.",
+                model="openai/gpt-5.5",
+                tools=frozenset({"Read"}),
+                cwd=str(tmp_path),
+            )
+
+
+def test_exec_with_tools_empty_final_response_retries_remaining_models(
+    configured, tmp_path
+):
+    requests: list[dict] = []
+    responses = [
+        {
+            "model": "model-a",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 0},
+        },
+        {
+            "model": "model-b",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "final verdict",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 3},
+        },
+    ]
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=responses[len(requests) - 1])
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        response = OpenRouterProvider().exec(
+            "Review this.",
+            models=("model-a", "model-b"),
+            tools=frozenset({"Read"}),
+            cwd=str(tmp_path),
+            log_selection=False,
+        )
+
+    assert response.text == "final verdict"
+    assert requests[0]["models"] == ["model-a", "model-b"]
+    assert requests[1]["models"] == ["model-b"]
+    assert response.usage["empty_response_retries"] == [
+        {"iteration": 1, "reason": "empty-response", "model": "model-a"}
+    ]
 
 
 def test_exec_with_tools_uses_curated_coding_stack_by_default(configured, tmp_path):

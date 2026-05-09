@@ -190,7 +190,7 @@ class OpenRouterProvider:
             return False, f"OpenRouter returned HTTP {resp.status_code}: {resp.text[:200]}"
         return True, None
 
-    def _post_chat(self, payload: dict, *, timeout_sec: int | None = None) -> dict:
+    def _post_chat(self, payload: dict, *, timeout_sec: float | None = None) -> dict:
         try:
             timeout = self._timeout_sec if timeout_sec is None else timeout_sec
             with provider_http_client(timeout=timeout) as client:
@@ -321,16 +321,40 @@ class OpenRouterProvider:
         if max_tokens is not None:
             payload["max_tokens"] = max(1, max_tokens)
 
+        attempts: list[dict[str, object]] = []
         start = time.monotonic()
-        body = self._post_chat(payload, timeout_sec=timeout_sec)
+        while True:
+            body = self._post_chat(
+                payload,
+                timeout_sec=_remaining_timeout_sec(
+                    start,
+                    timeout_sec=timeout_sec,
+                    provider_name=self.name,
+                ),
+            )
+            text = _call_response_text(body)
+            if text.strip():
+                break
+            retry_payload = _retry_payload_after_empty_response(
+                payload,
+                body,
+                attempts=attempts,
+            )
+            if retry_payload is None:
+                raise ProviderHTTPError("OpenRouter produced empty response content")
+            attempts.append(
+                {
+                    "reason": "empty-response",
+                    "model": _response_model(body, fallback=selected_model),
+                }
+            )
+            if log_selection:
+                _log_empty_response_retry(
+                    failed_model=_response_model(body, fallback=selected_model),
+                    retry_payload=retry_payload,
+                )
+            payload = retry_payload
         duration_ms = int((time.monotonic() - start) * 1000)
-
-        try:
-            text = body["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as e:
-            raise ProviderHTTPError(
-                f"OpenRouter response missing choices[0].message.content: {body!r:.500}"
-            ) from e
 
         usage = body.get("usage") or {}
         cost_usd = _usage_cost_usd(usage)
@@ -352,7 +376,7 @@ class OpenRouterProvider:
                 "thinking_budget": thinking_budget,
             },
             cost_usd=cost_usd,
-            raw=body,
+            raw={**body, "empty_response_retries": attempts} if attempts else body,
         )
 
     def exec(
@@ -392,6 +416,8 @@ class OpenRouterProvider:
                 prefer=prefer,
                 exclude=exclude,
                 log_selection=log_selection,
+                timeout_sec=timeout_sec,
+                max_stall_sec=max_stall_sec,
             )
 
         unknown = tools - self.supported_tools
@@ -440,6 +466,7 @@ class OpenRouterProvider:
         validation_failures: list[dict[str, object]] = []
         recent_tool_calls: list[dict[str, object]] = []
         missing_deliverables: list[MissingDeliverable] = []
+        empty_response_retries: list[dict[str, object]] = []
         completion_stretched = False
         repo_changing_task = _is_repo_changing_tool_task(effective_task_tags, tools)
         git_status_before = _git_clean_status(workdir) if repo_changing_task else None
@@ -455,7 +482,14 @@ class OpenRouterProvider:
                 "tools": tool_specs,
                 "tool_choice": "auto",
             }
-            body = self._post_chat(payload)
+            body = self._post_chat(
+                payload,
+                timeout_sec=_remaining_timeout_sec(
+                    start,
+                    timeout_sec=timeout_sec,
+                    provider_name=self.name,
+                ),
+            )
             final_body = body
             message = _first_message(body)
 
@@ -489,7 +523,31 @@ class OpenRouterProvider:
                 }
             )
 
+            tool_calls = message.get("tool_calls") or []
+            final_text = _message_content_text(message)
             actual_model = body.get("model")
+            if not tool_calls and not final_text.strip():
+                retry_payload = _retry_payload_after_empty_response(
+                    target_payload,
+                    body,
+                    attempts=empty_response_retries,
+                )
+                if retry_payload is not None:
+                    failed_model = _response_model(body, fallback=selected_model)
+                    empty_response_retries.append(
+                        {
+                            "iteration": iteration,
+                            "reason": "empty-response",
+                            "model": failed_model,
+                        }
+                    )
+                    if log_selection:
+                        _log_empty_response_retry(
+                            failed_model=failed_model,
+                            retry_payload=retry_payload,
+                        )
+                    target_payload = retry_payload
+                    continue
             if (
                 isinstance(actual_model, str)
                 and actual_model
@@ -500,9 +558,6 @@ class OpenRouterProvider:
                 reasoning = self._reasoning_payload(effort)
                 if reasoning is not None:
                     target_payload["reasoning"] = reasoning
-
-            tool_calls = message.get("tool_calls") or []
-            final_text = _message_content_text(message)
             if not tool_calls:
                 break
 
@@ -645,6 +700,8 @@ class OpenRouterProvider:
                 provider=self.name,
                 status=execution_status,
             )
+        if not final_text.strip():
+            raise ProviderHTTPError("OpenRouter exec produced empty final response")
 
         return CallResponse(
             text=final_text,
@@ -669,6 +726,7 @@ class OpenRouterProvider:
                 "write_success_count": write_success_count,
                 "tool_error_count": len(tool_errors),
                 "bash_failure_count": len(bash_failures),
+                "empty_response_retries": empty_response_retries,
                 "execution_status": execution_status,
                 "iterations": iterations_log,
             },
@@ -1121,6 +1179,80 @@ def _openrouter_attempted_models(payload: dict) -> list[str]:
 def _looks_like_model_restriction_error(response_text: str) -> bool:
     lowered = response_text.lower()
     return "no models match your request and model restrictions" in lowered
+
+
+def _remaining_timeout_sec(
+    start: float,
+    *,
+    timeout_sec: int | None,
+    provider_name: str,
+) -> float | None:
+    if timeout_sec is None:
+        return None
+    remaining = float(timeout_sec) - (time.monotonic() - start)
+    if remaining <= 0:
+        raise ProviderHTTPError(f"{provider_name} timed out after {timeout_sec:g}s")
+    return remaining
+
+
+def _call_response_text(body: dict) -> str:
+    try:
+        text = body["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as e:
+        raise ProviderHTTPError(
+            f"OpenRouter response missing choices[0].message.content: {body!r:.500}"
+        ) from e
+    if not isinstance(text, str):
+        raise ProviderHTTPError(
+            f"OpenRouter response content was not text: {type(text).__name__}"
+        )
+    return text
+
+
+def _response_model(body: dict, *, fallback: str | None) -> str:
+    model = body.get("model")
+    return model if isinstance(model, str) and model else fallback or "<unknown>"
+
+
+def _retry_payload_after_empty_response(
+    payload: dict,
+    body: dict,
+    *,
+    attempts: list[dict[str, object]],
+) -> dict | None:
+    if len(attempts) >= OPENROUTER_MODELS_ARRAY_MAX:
+        return None
+    raw_models = payload.get("models")
+    if not isinstance(raw_models, list) or not raw_models:
+        return None
+    models = [str(model) for model in raw_models if str(model).strip()]
+    if not models:
+        return None
+
+    failed_model = _response_model(body, fallback=models[0])
+    if failed_model in models:
+        remaining = [model for model in models if model != failed_model]
+    else:
+        remaining = models[1:]
+    if not remaining:
+        return None
+
+    retry_payload = dict(payload)
+    retry_payload["models"] = remaining
+    return retry_payload
+
+
+def _log_empty_response_retry(
+    *,
+    failed_model: str,
+    retry_payload: dict,
+) -> None:
+    target = retry_payload.get("models") or retry_payload.get("model") or "<unknown>"
+    sys.stderr.write(
+        "[conductor] openrouter empty response: "
+        f"model={failed_model}; retrying {target}\n"
+    )
+    sys.stderr.flush()
 
 
 def _first_message(body: dict) -> dict:
