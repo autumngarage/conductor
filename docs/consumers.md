@@ -301,6 +301,8 @@ Consumers pin a major version in their own dependency declarations (brew formula
 
 - `conductor list` — runtime provider readiness (READY column, missing-config diagnostics).
 - `conductor doctor` — environment checks, missing tools, configuration gaps.
+- `conductor update` — current-repo refresh for stale embedded Conductor wiring.
+- `conductor update-all` — batch refresh for configured consumer repos.
 - `conductor smoke` — minimal end-to-end test against each configured provider.
 - Routing decisions logged to stderr (suppress with `--silent-route` for clean piping).
 

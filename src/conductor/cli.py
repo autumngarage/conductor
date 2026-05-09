@@ -1,4 +1,4 @@
-"""Conductor CLI — call, exec, list, smoke, doctor, init, route, config.
+"""Conductor CLI — call, exec, list, smoke, doctor, init, update, route, config.
 
 v0.2 surface (call/exec):
   conductor call --with <id> [--effort max] --brief "..."
@@ -10,6 +10,8 @@ v0.1 surface (unchanged):
   conductor smoke [<id>] [--all] [--json]
   conductor doctor [--json]
   conductor init [--yes]
+  conductor update [--dry-run] [--check]
+  conductor update-all [--paths PATHS] [--config-file FILE]
 
 v0.2 additions:
   conductor route --tags a,b [--prefer best] [--tools X,Y] [--dry-run]
@@ -225,7 +227,7 @@ CONDUCTOR_REFRESH_HOOK_BLOCK = """- repo: local
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from conductor.agent_wiring import AgentArtifact
+    from conductor.agent_wiring import AgentArtifact, RepoScopeVersionDecision
 
 DEFAULT_REVIEW_MAX_FALLBACKS = 3
 DEFAULT_COUNCIL_ROUNDS = 1
@@ -3387,6 +3389,7 @@ AUTO_REFRESH_COMMANDS = frozenset(
         "init",
         "refresh-consumers",
         "route",
+        "update-all",
     }
 )
 AUTO_REFRESH_VIA_PR_ENV = "CONDUCTOR_AUTO_REFRESH_VIA_PR"
@@ -7845,8 +7848,8 @@ def doctor(as_json: bool) -> None:
         click.echo("    brew upgrade conductor       # CLAUDE.md @-import self-heals on upgrade")
         click.echo("    conductor init               # installs refresh hook by default")
         click.echo("  Immediate manual fallback:")
-        click.echo("    conductor init -y --remaining")
-        click.echo("    conductor refresh-consumers  # force-refresh configured consumer repos")
+        click.echo("    conductor update             # refresh this repo's embedded integrations")
+        click.echo("    conductor update-all         # force-refresh configured consumer repos")
         click.echo("  Prefer the auto paths unless an immediate cross-repo refresh is needed.")
 
     git_state = payload["git_state"]
@@ -8157,6 +8160,111 @@ def refresh_on_commit() -> None:
     sys.exit(_run_refresh_on_commit())
 
 
+@main.command("update")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Show stale repo integrations without writing files.",
+)
+@click.option(
+    "--check",
+    is_flag=True,
+    default=False,
+    help="Exit 1 if repo integrations are stale; do not write files.",
+)
+def update(dry_run: bool, check: bool) -> None:
+    """Refresh stale embedded Conductor repo integrations in this repo."""
+    sys.exit(_run_update_current_repo(dry_run=dry_run, check=check))
+
+
+def _run_update_current_repo(*, dry_run: bool, check: bool) -> int:
+    cwd = Path.cwd()
+    repo_check = _run_repo_command(cwd, ["git", "rev-parse", "--is-inside-work-tree"])
+    if repo_check.returncode != 0:
+        detail = (repo_check.stderr or repo_check.stdout or "").strip()
+        suffix = f": {detail}" if detail else ""
+        raise click.ClickException(f"not a git repository{suffix}")
+
+    stale = _stale_repo_integration_decisions(cwd)
+    if not stale:
+        click.echo("Conductor repo integrations are current.")
+        return 0
+
+    if dry_run or check:
+        heading = (
+            "Conductor repo integrations are stale:"
+            if check
+            else "Would refresh Conductor repo integrations:"
+        )
+        click.echo(heading)
+        _echo_repo_update_plan(stale, cwd=cwd)
+        if check:
+            click.echo("Run `conductor update` to refresh them.")
+            return 1
+        return 0
+
+    try:
+        touched = _refresh_stale_repo_integrations(cwd)
+    except OSError as e:
+        raise click.ClickException(f"refresh failed: {e}") from e
+    except Exception as e:
+        raise click.ClickException(f"internal refresh error: {e}") from e
+
+    if not touched:
+        click.echo("Conductor repo integrations are current.")
+        return 0
+
+    add = _run_repo_command(
+        cwd,
+        ["git", "add", "--", *[_repo_relative_path(path, cwd=cwd) for path in touched]],
+    )
+    if add.returncode != 0:
+        raise click.ClickException(_command_failure_detail(add, "git add"))
+
+    click.echo("Refreshed Conductor repo integrations:")
+    for path in touched:
+        click.echo(f"  {_repo_relative_path(path, cwd=cwd)}")
+    click.echo("Staged refreshed paths.")
+    return 0
+
+
+def _stale_repo_integration_decisions(cwd: Path) -> tuple[RepoScopeVersionDecision, ...]:
+    from conductor import agent_wiring
+
+    return tuple(
+        decision
+        for decision in agent_wiring.repo_scope_version_decisions(
+            cwd,
+            binary_version=__version__,
+        )
+        if decision.stale
+    )
+
+
+def _echo_repo_update_plan(
+    decisions: tuple[RepoScopeVersionDecision, ...],
+    *,
+    cwd: Path,
+) -> None:
+    target_version = __version__.split("+", 1)[0]
+    for decision in decisions:
+        version = decision.version or "unknown"
+        click.echo(
+            f"  {_repo_relative_path(decision.path, cwd=cwd)} "
+            f"(v{version} -> v{target_version})"
+        )
+
+
+def _repo_relative_path(path: Path, *, cwd: Path) -> str:
+    root = cwd.resolve()
+    candidate = path if path.is_absolute() else root / path
+    try:
+        return str(candidate.resolve().relative_to(root))
+    except ValueError:
+        return str(path)
+
+
 def _run_refresh_on_commit() -> int:
     cwd = Path.cwd()
     repo_check = _run_repo_command(cwd, ["git", "rev-parse", "--is-inside-work-tree"])
@@ -8264,8 +8372,13 @@ def _read_path_bytes(path: Path) -> bytes | None:
 
 
 # --------------------------------------------------------------------------- #
-# refresh-consumers — refresh explicit downstream repo wiring
+# update-all / refresh-consumers — refresh explicit downstream repo wiring
 # --------------------------------------------------------------------------- #
+
+
+_REFRESH_CONSUMERS_DEPRECATION = (
+    "[conductor] `refresh-consumers` is deprecated; use `conductor update-all`."
+)
 
 
 @dataclass(frozen=True)
@@ -8281,51 +8394,52 @@ class _ConsumerRefreshResult:
     stash_status: str = "none"
 
 
-@main.command("refresh-consumers")
-@click.option(
-    "--paths",
-    default=None,
-    help="Comma-separated consumer repo paths to refresh. Defaults to empty.",
-)
-@click.option(
-    "--config-file",
-    type=click.Path(path_type=Path, dir_okay=False, exists=True),
-    default=None,
-    help=(
-        'TOML file with operator-owned consumer paths, for example `paths = ["~/repos/Sentinel"]`.'
-    ),
-)
-@click.option(
-    "--branch",
-    "branch_name",
-    default=None,
-    help="Branch name to create or reuse in each repo.",
-)
-@click.option(
-    "--no-auto-stash",
-    "no_auto_stash",
-    is_flag=True,
-    default=False,
-    help=(
-        "Skip repos with uncommitted changes instead of auto-stashing them. "
-        "Default: auto-stash uncommitted changes, refresh, then pop the stash back."
-    ),
-)
-def refresh_consumers(
+def _consumer_refresh_options(function):
+    function = click.option(
+        "--no-auto-stash",
+        "no_auto_stash",
+        is_flag=True,
+        default=False,
+        help=(
+            "Skip repos with uncommitted changes instead of auto-stashing them. "
+            "Default: auto-stash uncommitted changes, refresh, then pop the stash back."
+        ),
+    )(function)
+    function = click.option(
+        "--branch",
+        "branch_name",
+        default=None,
+        help="Branch name to create or reuse in each repo.",
+    )(function)
+    function = click.option(
+        "--config-file",
+        type=click.Path(path_type=Path, dir_okay=False, exists=True),
+        default=None,
+        help=(
+            "TOML file with operator-owned consumer paths, for example "
+            '`paths = ["~/repos/Sentinel"]`.'
+        ),
+    )(function)
+    function = click.option(
+        "--paths",
+        default=None,
+        help="Comma-separated consumer repo paths to refresh. Defaults to empty.",
+    )(function)
+    return function
+
+
+@main.command("update-all")
+@_consumer_refresh_options
+def update_all(
     paths: str | None,
     config_file: Path | None,
     branch_name: str | None,
     no_auto_stash: bool,
 ) -> None:
-    """Refresh Conductor integration blocks in explicitly configured repos.
+    """Refresh Conductor integration blocks in configured consumer repos.
 
-    Manual force-refresh backstop. After `brew upgrade conductor`, drift should
-    self-heal via the CLAUDE.md @-import path and, for embed-only files
-    (Cursor .mdc, AGENTS.md, GEMINI.md), the pre-commit refresh hook installed
-    by default by `conductor init`.
-
-    Use `refresh-consumers` only when you need an immediate cross-repo refresh
-    without waiting for the next commit in each repo.
+    Canonical batch operator. Walks explicit consumer paths and refreshes each
+    repo on a review branch so operators can inspect the integration updates.
 
     Repos with uncommitted changes are auto-stashed by default: stash → refresh
     → pop. If the pop conflicts (rare; happens when operator changes overlap
@@ -8333,6 +8447,44 @@ def refresh_consumers(
     `stash@{0}` for manual resolution. Pass `--no-auto-stash` to revert to the
     older skip-on-dirty behavior.
     """
+    _run_update_all(
+        paths=paths,
+        config_file=config_file,
+        branch_name=branch_name,
+        no_auto_stash=no_auto_stash,
+    )
+
+
+@main.command("refresh-consumers")
+@_consumer_refresh_options
+def refresh_consumers(
+    paths: str | None,
+    config_file: Path | None,
+    branch_name: str | None,
+    no_auto_stash: bool,
+) -> None:
+    """Deprecated alias for `conductor update-all`.
+
+    The alias remains for compatibility while scripts migrate to the shared
+    Autumn Garage `update-all` verb.
+    """
+    click.echo(_REFRESH_CONSUMERS_DEPRECATION, err=True)
+    _run_update_all(
+        paths=paths,
+        config_file=config_file,
+        branch_name=branch_name,
+        no_auto_stash=no_auto_stash,
+    )
+
+
+def _run_update_all(
+    *,
+    paths: str | None,
+    config_file: Path | None,
+    branch_name: str | None,
+    no_auto_stash: bool,
+) -> None:
+    """Refresh Conductor integration blocks in explicitly configured repos."""
     try:
         consumer_paths = _resolve_consumer_repo_paths(paths, config_file)
     except ValueError as e:

@@ -770,12 +770,12 @@ def test_doctor_warns_before_next_steps_when_one_integration_file_is_behind(
     assert "    brew upgrade conductor" in result.output
     assert "    conductor init               # installs refresh hook by default" in result.output
     assert "  Immediate manual fallback:" in result.output
-    assert "    conductor init -y --remaining" in result.output
-    assert "    conductor refresh-consumers" in result.output
+    assert "    conductor update" in result.output
+    assert "    conductor update-all" in result.output
     assert (
         result.output.index("Auto refresh paths:")
         < result.output.index("Immediate manual fallback:")
-        < result.output.index("conductor refresh-consumers")
+        < result.output.index("conductor update")
     )
     assert (
         result.output.index("Repo integration files behind binary")
@@ -966,23 +966,45 @@ def test_doctor_json_includes_agent_integration(mocker, monkeypatch, tmp_path):
     assert ai["managed_files"] == []
 
 
-def test_refresh_consumers_defaults_to_empty():
-    result = CliRunner().invoke(main, ["refresh-consumers"])
+def test_doctor_exits_nonzero_on_malformed_muted_provider_state():
+    from conductor.agent_wiring import conductor_home
+
+    muted_file = conductor_home() / "muted-providers.toml"
+    muted_file.parent.mkdir(parents=True, exist_ok=True)
+    muted_file.write_text("muted = [", encoding="utf-8")
+
+    result = CliRunner().invoke(main, ["doctor"])
+
+    assert result.exit_code != 0
+    assert "not valid TOML" in result.output
+
+
+def test_update_all_defaults_to_empty():
+    result = CliRunner().invoke(main, ["update-all"])
     assert result.exit_code == 0, result.output
     assert "No consumer repos configured." in result.output
 
 
-def test_refresh_consumers_help_positions_command_as_manual_backstop():
-    result = CliRunner().invoke(main, ["refresh-consumers", "--help"])
+def test_update_all_help_positions_command_as_batch_operator():
+    result = CliRunner().invoke(main, ["update-all", "--help"])
     assert result.exit_code == 0, result.output
     assert "Refresh Conductor integration blocks" in result.output
-    assert "Manual force-refresh backstop" in result.output
-    assert "CLAUDE.md @-import" in result.output
-    assert "conductor init`" in result.output
-    assert "Use `refresh-consumers` only" in result.output
+    assert "Canonical batch operator" in result.output
+    assert "--paths" in result.output
+    assert "--config-file" in result.output
+    assert "--branch" in result.output
+    assert "--no-auto-stash" in result.output
 
 
-def test_refresh_consumers_commits_updated_repo_integration(mocker, tmp_path):
+def test_refresh_consumers_alias_warns_and_still_works():
+    result = CliRunner().invoke(main, ["refresh-consumers"])
+    assert result.exit_code == 0, result.output
+    assert "`refresh-consumers` is deprecated" in result.stderr
+    assert "use `conductor update-all`" in result.stderr
+    assert "No consumer repos configured." in result.output
+
+
+def test_update_all_commits_updated_repo_integration(mocker, tmp_path):
     _stub_all_unconfigured(mocker)
     version = cli_mod.__version__.split("+", 1)[0]
 
@@ -1001,7 +1023,7 @@ def test_refresh_consumers_commits_updated_repo_integration(mocker, tmp_path):
     result = CliRunner().invoke(
         main,
         [
-            "refresh-consumers",
+            "update-all",
             "--paths",
             str(consumer),
             "--branch",
