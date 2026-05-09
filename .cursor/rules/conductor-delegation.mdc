@@ -2,7 +2,7 @@
 description: Use when delegating or routing tasks to a different LLM via the conductor CLI — e.g., cheap second opinions, long-context reads, web search, or offline runs.
 globs: ""
 alwaysApply: false
-managed-by: conductor v0.10.8
+managed-by: conductor v0.10.9
 ---
 
 # Conductor delegation
