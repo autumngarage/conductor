@@ -2292,6 +2292,81 @@ def test_exec_cli_no_max_stall_seconds_defaults_to_360(mocker):
     assert exec_mock.call_args.kwargs["max_stall_sec"] == 360
 
 
+def test_exec_auto_default_stall_caps_under_timeout_for_fallback(mocker):
+    from conductor.providers.interface import ProviderStalledError
+
+    _stub_all_configured(mocker, {"claude", "codex"})
+    mocker.patch(
+        "conductor.cli.get_network_profile",
+        return_value=NetworkProfile(None, "https://api.openai.com", 1_000),
+    )
+    claude_exec = mocker.patch.object(
+        ClaudeProvider,
+        "exec",
+        side_effect=ProviderStalledError("claude CLI stalled"),
+    )
+    codex_exec = mocker.patch.object(
+        CodexProvider,
+        "exec",
+        return_value=_fake_response("codex"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--auto",
+            "--prefer",
+            "best",
+            "--timeout",
+            "300",
+            "--tools",
+            "Read",
+            "--task",
+            "Review the diff.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert claude_exec.call_args.kwargs["max_stall_sec"] == 75
+    assert codex_exec.call_args.kwargs["max_stall_sec"] == 75
+    assert "claude failed (timeout)" in result.stderr
+
+
+def test_exec_auto_code_review_derives_budget_without_timeout(mocker):
+    _stub_all_configured(mocker, {"claude", "codex"})
+    mocker.patch(
+        "conductor.cli.get_network_profile",
+        return_value=NetworkProfile(None, "https://api.openai.com", 1_000),
+    )
+    exec_mock = mocker.patch.object(
+        ClaudeProvider,
+        "exec",
+        return_value=_fake_response("claude"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--auto",
+            "--prefer",
+            "best",
+            "--tags",
+            "code-review",
+            "--tools",
+            "Read",
+            "--task",
+            "Review the diff.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert exec_mock.call_args.kwargs["timeout_sec"] == 300
+    assert exec_mock.call_args.kwargs["max_stall_sec"] == 75
+    assert "review gate budget: timeout=300s stall=75s" in result.stderr
+
+
 def test_exec_cli_max_stall_seconds_zero_disables_watchdog(mocker):
     _stub_all_configured(mocker, {"codex"})
     exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))

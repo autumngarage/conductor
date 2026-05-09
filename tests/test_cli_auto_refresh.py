@@ -68,8 +68,27 @@ def test_auto_refresh_stale_user_scope_updates_files(tmp_path, monkeypatch):
     }
 
 
-def test_auto_refresh_stale_repo_scope_updates_files(tmp_path, monkeypatch):
+def test_auto_refresh_stale_repo_scope_does_not_update_by_default(tmp_path, monkeypatch):
     _isolate_user_scope(tmp_path, monkeypatch)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(cli_mod, "__version__", "0.9.0")
+    aw.wire_agents_md(cwd=repo, version="0.8.0")
+
+    result = CliRunner().invoke(main, ["doctor", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert "refreshed repo-scope" not in result.stderr
+    assert "<!-- conductor:begin v0.8.0 -->" in (
+        repo / "AGENTS.md"
+    ).read_text(encoding="utf-8")
+
+
+def test_auto_refresh_stale_repo_scope_opt_in_updates_files(tmp_path, monkeypatch):
+    _isolate_user_scope(tmp_path, monkeypatch)
+    monkeypatch.setenv("CONDUCTOR_AUTO_REFRESH_REPO_SCOPE", "1")
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_git_repo(repo)
@@ -93,6 +112,7 @@ def test_auto_refresh_stale_repo_scope_on_default_branch_uses_refresh_branch(
     tmp_path, monkeypatch
 ):
     _isolate_user_scope(tmp_path, monkeypatch)
+    monkeypatch.setenv("CONDUCTOR_AUTO_REFRESH_REPO_SCOPE", "1")
     repo = tmp_path / "repo-default-branch"
     repo.mkdir()
     _init_git_repo(repo)
@@ -127,6 +147,7 @@ def test_auto_refresh_default_branch_restores_operator_changes(
     tmp_path, monkeypatch
 ):
     _isolate_user_scope(tmp_path, monkeypatch)
+    monkeypatch.setenv("CONDUCTOR_AUTO_REFRESH_REPO_SCOPE", "1")
     repo = tmp_path / "repo-dirty-default"
     repo.mkdir()
     _init_git_repo(repo)
@@ -159,6 +180,7 @@ def test_auto_refresh_default_branch_restores_operator_changes(
 
 def test_auto_refresh_via_pr_never_keeps_in_place_behavior(tmp_path, monkeypatch):
     _isolate_user_scope(tmp_path, monkeypatch)
+    monkeypatch.setenv("CONDUCTOR_AUTO_REFRESH_REPO_SCOPE", "1")
     monkeypatch.setenv("CONDUCTOR_AUTO_REFRESH_VIA_PR", "never")
     repo = tmp_path / "repo-never"
     repo.mkdir()
@@ -198,6 +220,7 @@ def test_auto_refresh_clean_repo_scope_is_silent(tmp_path, monkeypatch):
 
 def test_auto_refresh_repo_scope_skips_import_mode_claude_md(tmp_path, monkeypatch):
     _isolate_user_scope(tmp_path, monkeypatch)
+    monkeypatch.setenv("CONDUCTOR_AUTO_REFRESH_REPO_SCOPE", "1")
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_git_repo(repo)

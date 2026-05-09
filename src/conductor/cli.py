@@ -235,6 +235,13 @@ DEFAULT_COUNCIL_TIMEOUT_SEC = 180
 DEFAULT_COUNCIL_MAX_OUTPUT_TOKENS = 6_000
 DEFAULT_COUNCIL_MAX_COST_USD = 0.25
 ESTIMATED_CHARS_PER_TOKEN = 4
+AUTO_FALLBACK_STALL_FRACTION = 4
+AUTO_FALLBACK_MIN_STALL_SEC = 30
+REVIEW_GATE_BASE_TIMEOUT_SEC = 240
+REVIEW_GATE_MIN_TIMEOUT_SEC = 300
+REVIEW_GATE_MAX_TIMEOUT_SEC = 1_200
+REVIEW_GATE_SECONDS_PER_1K_INPUT_TOKENS = 8
+REVIEW_GATE_MAX_STALL_SEC = 180
 
 
 @dataclass(frozen=True)
@@ -355,6 +362,94 @@ def _scale_dispatch_defaults(
         resolved_max_stall = None if scaled_stall is None else math.ceil(scaled_stall)
 
     return resolved_timeout, resolved_max_stall
+
+
+def _cap_default_auto_fallback_stall(
+    *,
+    timeout_sec: int | None,
+    max_stall_sec: int | None,
+    max_stall_is_default: bool,
+    candidate_count: int,
+) -> int | None:
+    """Keep default stall watchdogs short enough for auto fallback.
+
+    Invariant: when the caller supplies a finite command timeout and leaves
+    max-stall at its default, a silent primary provider must not consume the
+    whole invocation budget before the router can try the next candidate.
+    """
+    if (
+        not max_stall_is_default
+        or timeout_sec is None
+        or max_stall_sec is None
+        or candidate_count < 2
+    ):
+        return max_stall_sec
+    cap = max(AUTO_FALLBACK_MIN_STALL_SEC, timeout_sec // AUTO_FALLBACK_STALL_FRACTION)
+    if cap >= timeout_sec:
+        cap = max(1, timeout_sec - 1)
+    return min(max_stall_sec, cap)
+
+
+def _review_gate_timeout_sec(estimated_input_tokens: int) -> int:
+    token_units = math.ceil(max(1, estimated_input_tokens) / 1_000)
+    derived = (
+        REVIEW_GATE_BASE_TIMEOUT_SEC
+        + token_units * REVIEW_GATE_SECONDS_PER_1K_INPUT_TOKENS
+    )
+    return min(
+        REVIEW_GATE_MAX_TIMEOUT_SEC,
+        max(REVIEW_GATE_MIN_TIMEOUT_SEC, derived),
+    )
+
+
+def _review_gate_stall_sec(timeout_sec: int, *, candidate_count: int) -> int:
+    effective_candidates = max(1, candidate_count)
+    cap = max(
+        AUTO_FALLBACK_MIN_STALL_SEC,
+        timeout_sec // max(AUTO_FALLBACK_STALL_FRACTION, effective_candidates + 1),
+    )
+    if cap >= timeout_sec:
+        cap = max(1, timeout_sec - 1)
+    return min(REVIEW_GATE_MAX_STALL_SEC, cap)
+
+
+def _apply_review_gate_auto_budget(
+    *,
+    timeout_sec: int | None,
+    max_stall_sec: int | None,
+    timeout_is_default: bool,
+    max_stall_is_default: bool,
+    estimated_input_tokens: int,
+    candidate_count: int,
+    silent: bool,
+) -> tuple[int | None, int | None]:
+    derived_timeout = False
+    derived_stall = False
+    if timeout_is_default:
+        timeout_sec = _review_gate_timeout_sec(estimated_input_tokens)
+        derived_timeout = True
+    if max_stall_is_default and timeout_sec is not None:
+        max_stall_sec = _review_gate_stall_sec(
+            timeout_sec,
+            candidate_count=candidate_count,
+        )
+        derived_stall = True
+    else:
+        max_stall_sec = _cap_default_auto_fallback_stall(
+            timeout_sec=timeout_sec,
+            max_stall_sec=max_stall_sec,
+            max_stall_is_default=max_stall_is_default,
+            candidate_count=candidate_count,
+        )
+    if not silent and (derived_timeout or derived_stall):
+        stall_label = "disabled" if max_stall_sec is None else f"{max_stall_sec}s"
+        click.echo(
+            "[conductor] review gate budget: "
+            f"timeout={timeout_sec}s stall={stall_label} "
+            f"candidates={candidate_count} est_input={estimated_input_tokens:,} tokens",
+            err=True,
+        )
+    return timeout_sec, max_stall_sec
 
 
 def _read_task(
@@ -904,6 +999,14 @@ _UPSTREAM_DOWN_ERROR_SIGNALS = (
     "api is down",
 )
 
+_EMPTY_RESPONSE_ERROR_SIGNALS = (
+    "empty response",
+    "empty final response",
+    "empty response content",
+    "produced empty stdout",
+    "produced empty final",
+)
+
 
 def _is_retryable(err: Exception) -> tuple[bool, str]:
     """Classify an error as retryable-with-fallback or fatal.
@@ -921,6 +1024,8 @@ def _is_retryable(err: Exception) -> tuple[bool, str]:
     msg = str(err).lower()
     if "429" in msg or any(sig in msg for sig in _RATE_LIMIT_ERROR_SIGNALS):
         return True, "rate-limit"
+    if any(sig in msg for sig in _EMPTY_RESPONSE_ERROR_SIGNALS):
+        return True, "empty-response"
     if any(sig in msg for sig in _NETWORK_ERROR_SIGNALS):
         return True, "network"
     if "timed out" in msg or "timeout" in msg or "stalled" in msg:
@@ -3392,6 +3497,7 @@ AUTO_REFRESH_COMMANDS = frozenset(
         "update-all",
     }
 )
+REPO_SCOPE_AUTO_REFRESH_ENV = "CONDUCTOR_AUTO_REFRESH_REPO_SCOPE"
 AUTO_REFRESH_VIA_PR_ENV = "CONDUCTOR_AUTO_REFRESH_VIA_PR"
 AUTO_REFRESH_VIA_PR_MODES = frozenset({"auto", "always", "never"})
 
@@ -3462,6 +3568,8 @@ def _maybe_auto_refresh(ctx: click.Context) -> None:
             f"user-scope integration files: {e}",
             err=True,
         )
+    if not _env_flag_enabled(REPO_SCOPE_AUTO_REFRESH_ENV):
+        return
     try:
         from conductor import agent_wiring
 
@@ -3819,6 +3927,13 @@ def ask(
     if plan.mode == "review":
         review_exclude, review_reasons = _review_exclude_set(frozenset())
         exclude_set = _semantic_candidate_exclude_set(plan, review_exclude)
+        review_estimated_input_tokens = _estimate_review_input_tokens(
+            body,
+            base=base,
+            commit=commit,
+            uncommitted=uncommitted,
+            cwd=cwd,
+        )
         try:
             _provider, decision = pick(
                 list(plan.tags),
@@ -3827,13 +3942,7 @@ def ask(
                 exclude=exclude_set,
                 priority=_semantic_priority(plan),
                 shadow=True,
-                estimated_input_tokens=_estimate_review_input_tokens(
-                    body,
-                    base=base,
-                    commit=commit,
-                    uncommitted=uncommitted,
-                    cwd=cwd,
-                ),
+                estimated_input_tokens=review_estimated_input_tokens,
             )
         except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
             click.echo(f"conductor: {_native_review_unavailable_message(review_reasons)}", err=True)
@@ -3847,6 +3956,15 @@ def ask(
             max_stall_sec=max_stall_sec,
             timeout_is_default=timeout_is_default,
             max_stall_is_default=max_stall_is_default,
+        )
+        timeout_sec, max_stall_sec = _apply_review_gate_auto_budget(
+            timeout_sec=timeout_sec,
+            max_stall_sec=max_stall_sec,
+            timeout_is_default=timeout_is_default,
+            max_stall_is_default=max_stall_is_default,
+            estimated_input_tokens=review_estimated_input_tokens,
+            candidate_count=len(decision.ranked),
+            silent=silent_route or as_json,
         )
         max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
         try:
@@ -3931,6 +4049,12 @@ def ask(
         max_stall_sec=max_stall_sec,
         timeout_is_default=timeout_is_default,
         max_stall_is_default=max_stall_is_default,
+    )
+    max_stall_sec = _cap_default_auto_fallback_stall(
+        timeout_sec=timeout_sec,
+        max_stall_sec=max_stall_sec,
+        max_stall_is_default=max_stall_is_default,
+        candidate_count=len(decision.ranked),
     )
     max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
 
@@ -4331,6 +4455,23 @@ def call(
             timeout_is_default=timeout_is_default,
             max_stall_is_default=max_stall_is_default,
         )
+        if NATIVE_REVIEW_TAG in decision.task_tags:
+            timeout_sec, max_stall_sec = _apply_review_gate_auto_budget(
+                timeout_sec=timeout_sec,
+                max_stall_sec=max_stall_sec,
+                timeout_is_default=timeout_is_default,
+                max_stall_is_default=max_stall_is_default,
+                estimated_input_tokens=estimated_input_tokens,
+                candidate_count=len(decision.ranked),
+                silent=silent_route or as_json,
+            )
+        else:
+            max_stall_sec = _cap_default_auto_fallback_stall(
+                timeout_sec=timeout_sec,
+                max_stall_sec=max_stall_sec,
+                max_stall_is_default=max_stall_is_default,
+                candidate_count=len(decision.ranked),
+            )
         max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
 
         try:
@@ -4728,6 +4869,15 @@ def review(
             max_stall_sec=max_stall_sec,
             timeout_is_default=timeout_is_default,
             max_stall_is_default=max_stall_is_default,
+        )
+        timeout_sec, max_stall_sec = _apply_review_gate_auto_budget(
+            timeout_sec=timeout_sec,
+            max_stall_sec=max_stall_sec,
+            timeout_is_default=timeout_is_default,
+            max_stall_is_default=max_stall_is_default,
+            estimated_input_tokens=estimated_input_tokens,
+            candidate_count=min(max_fallbacks, len(decision.ranked)),
+            silent=silent_route or as_json,
         )
         max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
         try:
@@ -5535,6 +5685,32 @@ def _run_exec_phase_dispatch(
             timeout_is_default=timeout_is_default,
             max_stall_is_default=max_stall_is_default,
         )
+        if NATIVE_REVIEW_TAG in decision.task_tags:
+            timeout_sec, max_stall_sec = _apply_review_gate_auto_budget(
+                timeout_sec=timeout_sec,
+                max_stall_sec=max_stall_sec,
+                timeout_is_default=timeout_is_default,
+                max_stall_is_default=max_stall_is_default,
+                estimated_input_tokens=estimated_input_tokens,
+                candidate_count=len(decision.ranked),
+                silent=silent_route or as_json,
+            )
+            session_log.emit(
+                "review_gate_budget",
+                {
+                    "timeout_sec": timeout_sec,
+                    "max_stall_sec": max_stall_sec,
+                    "estimated_input_tokens": estimated_input_tokens,
+                    "candidate_count": len(decision.ranked),
+                },
+            )
+        else:
+            max_stall_sec = _cap_default_auto_fallback_stall(
+                timeout_sec=timeout_sec,
+                max_stall_sec=max_stall_sec,
+                max_stall_is_default=max_stall_is_default,
+                candidate_count=len(decision.ranked),
+            )
         max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
         if preflight:
             # `provider` may arrive as a Provider object (real `pick()` return)
