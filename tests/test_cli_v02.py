@@ -2367,6 +2367,45 @@ def test_exec_auto_code_review_derives_budget_without_timeout(mocker):
     assert "review gate budget: timeout=300s stall=75s" in result.stderr
 
 
+def test_exec_auto_code_review_ignores_caller_timeout_budget(mocker):
+    _stub_all_configured(mocker, {"claude", "codex"})
+    mocker.patch(
+        "conductor.cli.get_network_profile",
+        return_value=NetworkProfile(None, "https://api.openai.com", 1_000),
+    )
+    exec_mock = mocker.patch.object(
+        ClaudeProvider,
+        "exec",
+        return_value=_fake_response("claude"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--auto",
+            "--prefer",
+            "best",
+            "--tags",
+            "code-review",
+            "--timeout",
+            "10",
+            "--max-stall-seconds",
+            "999",
+            "--tools",
+            "Read",
+            "--task",
+            "Review the diff.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert exec_mock.call_args.kwargs["timeout_sec"] == 300
+    assert exec_mock.call_args.kwargs["max_stall_sec"] == 75
+    assert "review gate budget: timeout=300s stall=75s" in result.stderr
+    assert "ignored caller timeout=10s max-stall=999s" in result.stderr
+
+
 def test_exec_cli_max_stall_seconds_zero_disables_watchdog(mocker):
     _stub_all_configured(mocker, {"codex"})
     exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))

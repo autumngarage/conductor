@@ -423,30 +423,32 @@ def _apply_review_gate_auto_budget(
     candidate_count: int,
     silent: bool,
 ) -> tuple[int | None, int | None]:
-    derived_timeout = False
-    derived_stall = False
-    if timeout_is_default:
-        timeout_sec = _review_gate_timeout_sec(estimated_input_tokens)
-        derived_timeout = True
-    if max_stall_is_default and timeout_sec is not None:
-        max_stall_sec = _review_gate_stall_sec(
-            timeout_sec,
-            candidate_count=candidate_count,
-        )
-        derived_stall = True
-    else:
-        max_stall_sec = _cap_default_auto_fallback_stall(
-            timeout_sec=timeout_sec,
-            max_stall_sec=max_stall_sec,
-            max_stall_is_default=max_stall_is_default,
-            candidate_count=candidate_count,
-        )
-    if not silent and (derived_timeout or derived_stall):
+    budget_timeout_sec = _review_gate_timeout_sec(estimated_input_tokens)
+    budget_stall_sec = _review_gate_stall_sec(
+        budget_timeout_sec,
+        candidate_count=candidate_count,
+    )
+    caller_timeout_sec = None if timeout_is_default else timeout_sec
+    caller_stall_sec = None if max_stall_is_default else max_stall_sec
+    timeout_sec = budget_timeout_sec
+    max_stall_sec = budget_stall_sec
+    if not silent:
         stall_label = "disabled" if max_stall_sec is None else f"{max_stall_sec}s"
+        ignored_parts: list[str] = []
+        if caller_timeout_sec is not None and caller_timeout_sec != timeout_sec:
+            ignored_parts.append(f"timeout={caller_timeout_sec}s")
+        if caller_stall_sec is not None and caller_stall_sec != max_stall_sec:
+            ignored_parts.append(f"max-stall={caller_stall_sec}s")
+        ignored = (
+            " ignored caller " + " ".join(ignored_parts)
+            if ignored_parts
+            else ""
+        )
         click.echo(
             "[conductor] review gate budget: "
             f"timeout={timeout_sec}s stall={stall_label} "
-            f"candidates={candidate_count} est_input={estimated_input_tokens:,} tokens",
+            f"candidates={candidate_count} est_input={estimated_input_tokens:,} tokens"
+            f"{ignored}",
             err=True,
         )
     return timeout_sec, max_stall_sec
@@ -3685,7 +3687,8 @@ def main(ctx: click.Context) -> None:
     type=int,
     help=(
         "Wall-clock timeout in seconds for review/exec provider calls. "
-        "Unbounded by default. Council uses --council-timeout for its total cap."
+        "Unbounded by default. Review-tagged auto routes derive their own "
+        "provider budget. Council uses --council-timeout for its total cap."
     ),
 )
 @click.option(
@@ -3693,7 +3696,10 @@ def main(ctx: click.Context) -> None:
     "max_stall_sec",
     default=DEFAULT_EXEC_MAX_STALL_SEC,
     type=int,
-    help="Kill streaming exec/review providers after this many silent seconds. Set 0 to disable.",
+    help=(
+        "Kill streaming exec/review providers after this many silent seconds. "
+        "Review-tagged auto routes derive their own stall budget. Set 0 to disable."
+    ),
 )
 @click.option(
     "--council-timeout",
@@ -4244,7 +4250,10 @@ def ask(
     "timeout_sec",
     default=None,
     type=int,
-    help="Wall-clock timeout in seconds. Unbounded by default.",
+    help=(
+        "Wall-clock timeout in seconds. Unbounded by default. Review-tagged "
+        "auto routes derive their own provider budget."
+    ),
 )
 @click.option(
     "--max-stall-seconds",
@@ -4253,7 +4262,8 @@ def ask(
     type=int,
     help=(
         "Kill streaming CLI-backed calls after this many silent seconds. "
-        "Default: 360, scaled up on slow networks. Set 0 to disable."
+        "Default: 360, scaled up on slow networks. Review-tagged auto routes "
+        "derive their own stall budget. Set 0 to disable."
     ),
 )
 @click.option(
@@ -4669,7 +4679,10 @@ def call(
     "timeout_sec",
     default=None,
     type=int,
-    help=("Wall-clock timeout in seconds for the native review command. Unbounded by default."),
+    help=(
+        "Wall-clock timeout in seconds for the native review command. "
+        "Review auto-routing derives its own provider budget."
+    ),
 )
 @click.option(
     "--max-stall-seconds",
@@ -4678,7 +4691,7 @@ def call(
     type=int,
     help=(
         "Kill streaming review providers if they produce no output for this "
-        "many seconds. Set 0 to disable."
+        "many seconds. Review auto-routing derives its own stall budget."
     ),
 )
 @click.option(
@@ -6124,7 +6137,8 @@ def _run_exec_phase_dispatch(
     type=int,
     help=(
         "Wall-clock timeout in seconds. Unbounded by default. Set explicitly "
-        "(e.g. --timeout 600) for CI or unattended runs that need a fixed bound."
+        "(e.g. --timeout 600) for non-review CI or unattended runs that need "
+        "a fixed bound; review-tagged auto routes derive their own provider budget."
     ),
 )
 @click.option(
@@ -6136,7 +6150,8 @@ def _run_exec_phase_dispatch(
         "Kill the underlying provider if it produces no output for this many "
         "seconds. Default: 360, just past codex's 5-minute internal websocket "
         "idle (openai/codex#17003) so codex gets one retry attempt before "
-        "conductor kills it. Set 0 to disable."
+        "conductor kills it. Review-tagged auto routes derive their own stall "
+        "budget. Set 0 to disable."
     ),
 )
 @click.option(
