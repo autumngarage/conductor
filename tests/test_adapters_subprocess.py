@@ -1651,6 +1651,24 @@ def test_codex_review_rejects_missing_requested_sentinel(mocker):
         )
 
 
+def test_codex_review_accepts_sentinel_with_footer(mocker):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    mocker.patch(
+        "conductor.providers.codex.subprocess.run",
+        return_value=_fake_completed(
+            stdout="No blocking issues found.\nCODEX_REVIEW_CLEAN\n---\nreview complete\n"
+        ),
+    )
+
+    response = CodexProvider().review(
+        "Return a final standalone CODEX_REVIEW_CLEAN or CODEX_REVIEW_BLOCKED line.",
+    )
+
+    assert response.text == (
+        "No blocking issues found.\n---\nreview complete\nCODEX_REVIEW_CLEAN"
+    )
+
+
 def test_codex_review_uses_wall_clock_timeout_not_stall_watchdog(mocker):
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
     captured_timeout: float | None = None
