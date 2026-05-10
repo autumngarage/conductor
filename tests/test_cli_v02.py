@@ -43,6 +43,7 @@ from conductor.providers import (
     OllamaProvider,
     OpenRouterProvider,
     ProviderConfigError,
+    ProviderError,
     ProviderExecutionError,
 )
 from conductor.router import RouteDecision, reset_health
@@ -1022,6 +1023,82 @@ def test_ask_council_marks_incomplete_cost_accounting(mocker):
         None,
         0.03,
     ]
+
+
+def test_ask_council_continues_after_member_failure(mocker):
+    _stub_all_configured(mocker, {"openrouter"})
+    responses = [
+        _fake_response("openrouter", "member-a", cost_usd=0.01),
+        ProviderError("OpenRouter produced empty response content: finish_reason=length"),
+        _fake_response("openrouter", "member-c", cost_usd=0.03),
+        _fake_response("openrouter", "synthesis", cost_usd=0.04),
+    ]
+    call_mock = mocker.patch.object(OpenRouterProvider, "call", side_effect=responses)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "council",
+            "--effort",
+            "medium",
+            "--brief",
+            "Debate this architecture decision.",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert call_mock.call_count == 4
+    assert call_mock.call_args_list[2].kwargs["model"] == "deepseek/deepseek-v4-pro"
+    synthesis_prompt = call_mock.call_args_list[3].args[0]
+    assert "## Member 2: ~moonshotai/kimi-latest" in synthesis_prompt
+    assert "council member failed: ProviderError" in synthesis_prompt
+    payload = json.loads(result.stdout)
+    council = payload["raw"]["conductor_council"]
+    assert payload["usage"]["council_complete"] is True
+    assert payload["usage"]["council_failed_members"] == 1
+    assert payload["usage"]["cost_accounting_complete"] is False
+    assert payload["cost_usd"] is None
+    assert council["member_errors"] == [
+        {
+            "model": "~moonshotai/kimi-latest",
+            "type": "ProviderError",
+            "message": "OpenRouter produced empty response content: finish_reason=length",
+        }
+    ]
+
+
+def test_ask_council_fails_when_all_members_fail(mocker):
+    _stub_all_configured(mocker, {"openrouter"})
+    call_mock = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        side_effect=[
+            ProviderError("member one failed"),
+            ProviderError("member two failed"),
+            ProviderError("member three failed"),
+        ],
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "council",
+            "--effort",
+            "medium",
+            "--brief",
+            "Debate this architecture decision.",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert call_mock.call_count == 3
+    assert "council failed: all member calls failed" in result.output
 
 
 def test_ask_council_known_cost_cap_returns_partial_error(mocker):

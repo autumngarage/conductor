@@ -2331,19 +2331,32 @@ def _invoke_council(
         )
         if not silent:
             click.echo(f"[conductor] council member {idx}: {model}", err=True)
-        response = _openrouter_council_provider(
-            provider=provider,
-            timeout_sec=timeout_sec,
-            remaining_sec=_council_remaining_sec(caps, elapsed_ms),
-        ).call(
-            member_prompt,
-            model=model,
-            effort=effort,
-            task_tags=list(plan.tags),
-            prefer=plan.prefer,
-            log_selection=False,
-            max_tokens=_council_remaining_output_tokens(caps, member_responses),
-        )
+        try:
+            response = _openrouter_council_provider(
+                provider=provider,
+                timeout_sec=timeout_sec,
+                remaining_sec=_council_remaining_sec(caps, elapsed_ms),
+            ).call(
+                member_prompt,
+                model=model,
+                effort=effort,
+                task_tags=list(plan.tags),
+                prefer=plan.prefer,
+                log_selection=False,
+                max_tokens=_council_remaining_output_tokens(caps, member_responses),
+            )
+        except ProviderError as exc:
+            response = _council_member_failure_response(
+                model=model,
+                error=exc,
+                elapsed_ms=_council_elapsed_ms(started_at),
+            )
+            if not silent:
+                click.echo(
+                    f"[conductor] council member {idx} failed: {type(exc).__name__}: {exc} "
+                    "- continuing",
+                    err=True,
+                )
         member_responses.append(response)
         member_delegation_id = _record_response_delegation(
             "council",
@@ -2372,6 +2385,13 @@ def _invoke_council(
             model=model,
             elapsed_ms=_council_elapsed_ms(started_at),
         )
+
+    if not any(_council_member_succeeded(response) for response in member_responses):
+        errors = "; ".join(
+            str((response.raw or {}).get("conductor_council_member_error") or response.model)
+            for response in member_responses
+        )
+        raise ProviderError(f"council failed: all member calls failed ({errors})")
 
     elapsed_ms = _council_elapsed_ms(started_at)
     _raise_if_council_cap_hit(
@@ -2441,6 +2461,37 @@ def _invoke_council(
         synthesis_delegation_id=synthesis_delegation_id,
     )
     return parent_response
+
+
+def _council_member_failure_response(
+    *,
+    model: str,
+    error: ProviderError,
+    elapsed_ms: int,
+) -> CallResponse:
+    error_payload = {
+        "model": model,
+        "type": type(error).__name__,
+        "message": str(error),
+    }
+    return CallResponse(
+        text=f"[council member failed: {error_payload['type']}: {error_payload['message']}]",
+        provider="openrouter",
+        model=model,
+        duration_ms=elapsed_ms,
+        usage={
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "thinking_tokens": 0,
+            "cached_tokens": 0,
+        },
+        cost_usd=None,
+        raw={"conductor_council_member_error": error_payload},
+    )
+
+
+def _council_member_succeeded(response: CallResponse) -> bool:
+    return "conductor_council_member_error" not in (response.raw or {})
 
 
 def _openrouter_council_provider(
@@ -2657,6 +2708,11 @@ def _council_response_metadata(
         "member_models": [response.model for response in member_responses],
         "requested_member_models": list(plan.council_member_models),
         "requested_synthesis_models": list(synthesis_models),
+        "member_errors": [
+            (response.raw or {}).get("conductor_council_member_error")
+            for response in member_responses
+            if (response.raw or {}).get("conductor_council_member_error") is not None
+        ],
         "rounds": rounds,
         "member_usage": [response.usage for response in member_responses],
         "member_cost_usd": member_costs,
@@ -2725,6 +2781,9 @@ def _council_usage_payload(
     usage.update(
         {
             "council_members": len(member_responses),
+            "council_failed_members": sum(
+                1 for response in member_responses if not _council_member_succeeded(response)
+            ),
             "council_rounds": rounds,
             "council_complete": cap_hit is None and synthesis is not None,
             "council_cap_hit": cap_hit,
