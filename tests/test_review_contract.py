@@ -61,6 +61,16 @@ def test_review_sentinel_contract_rejects_multiple_sentinels():
         )
 
 
+def test_review_sentinel_contract_accepts_footer_and_normalizes_final_sentinel():
+    validated = validate_requested_review_sentinel(
+        provider_name="codex",
+        prompt=STRICT_SENTINEL_PROMPT,
+        text="Review body.\nCODEX_REVIEW_CLEAN\n---\nreview complete\n",
+    )
+
+    assert validated == "Review body.\n---\nreview complete\nCODEX_REVIEW_CLEAN"
+
+
 def test_legacy_review_sentinel_repair_helper_fails_closed():
     repaired = ensure_requested_review_sentinel(
         provider_name="codex",

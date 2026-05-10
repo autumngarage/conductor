@@ -265,9 +265,9 @@ def validate_requested_review_sentinel(
     """Validate the Touchstone sentinel when the caller requested it.
 
     Invariant: requested review verdicts are accepted only when the provider
-    emits exactly one standalone sentinel and it is the final non-empty line.
-    Violations are provider output failures so the router can try fallback
-    reviewers instead of manufacturing a verdict.
+    emits exactly one standalone sentinel. The accepted text is normalized so
+    the sentinel is the final line, matching Touchstone's shell extractor while
+    keeping downstream consumers' simpler final-line contract.
     """
     if not _prompt_requests_review_sentinel(prompt):
         return text
@@ -288,12 +288,18 @@ def _review_sentinel_violation(text: str) -> tuple[str | None, str, list[str]]:
     sentinel_indexes = [
         idx for idx, line in enumerate(lines) if _REVIEW_SENTINEL_RE.match(line)
     ]
-    if len(sentinel_indexes) == 1 and sentinel_indexes[0] == len(lines) - 1:
-        return None, stripped, lines
+    if len(sentinel_indexes) == 1:
+        sentinel_idx = sentinel_indexes[0]
+        sentinel = lines[sentinel_idx].strip()
+        body_lines = [
+            line for idx, line in enumerate(lines)
+            if idx != sentinel_idx
+        ]
+        body = "\n".join(body_lines).rstrip()
+        normalized = f"{body}\n{sentinel}" if body else sentinel
+        return None, normalized, lines
     if not sentinel_indexes:
         return "missing", stripped, lines
-    if len(sentinel_indexes) == 1:
-        return "misplaced", stripped, lines
     return "multiple", stripped, lines
 
 

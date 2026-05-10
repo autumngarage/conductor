@@ -1616,6 +1616,46 @@ def test_review_auto_codex_subprocess_rejects_missing_requested_sentinel(mocker)
     assert "codex (output-contract)" in result.stderr
 
 
+def test_review_auto_codex_subprocess_accepts_sentinel_with_footer(mocker):
+    _stub_all_configured(mocker, {"codex", "claude"})
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    captured = mocker.patch(
+        "conductor.providers.codex.subprocess.run",
+        return_value=subprocess.CompletedProcess(
+            args=["codex", "review"],
+            returncode=0,
+            stdout="No blocking issues found.\nCODEX_REVIEW_CLEAN\n---\nreview complete\n",
+            stderr="",
+        ),
+    )
+    claude_review = mocker.patch.object(
+        ClaudeProvider,
+        "review",
+        return_value=_fake_response("claude", "sonnet"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--silent-route",
+            "--brief",
+            (
+                "The LAST line of your output must be exactly one of these "
+                "three sentinels: CODEX_REVIEW_CLEAN, CODEX_REVIEW_FIXED, "
+                "or CODEX_REVIEW_BLOCKED."
+            ),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured.called
+    assert not claude_review.called
+    assert result.stdout.strip().endswith("CODEX_REVIEW_CLEAN")
+    assert "review complete\nCODEX_REVIEW_CLEAN" in result.stdout
+
+
 def test_review_with_gemini_emits_plain_text_without_json_envelope(mocker):
     _stub_all_configured(mocker, {"gemini"})
     mocker.patch.object(GeminiProvider, "review_configured", return_value=(True, None))
