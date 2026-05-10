@@ -1626,17 +1626,19 @@ def test_codex_review_uses_native_review_command(mocker):
     assert args[0:2] == ["codex", "review"]
     assert "-c" in args
     assert args[args.index("-c") + 1] == "model_reasoning_effort=medium"
-    assert args[args.index("--base") + 1] == "origin/main"
-    assert args[args.index("--title") + 1] == "PR review"
+    assert "--base" not in args
+    assert "--title" not in args
     assert args[-1] == "-"
     prompt = captured.call_args.kwargs["input"]
-    assert prompt == "Use AGENTS.md rubric."
+    assert "Review changes against base branch/ref: origin/main" in prompt
+    assert "Review title: PR review" in prompt
+    assert "Use AGENTS.md rubric." in prompt
     assert response.provider == "codex"
     assert response.model == "codex-review"
     assert response.text == "LGTM"
 
 
-def test_codex_review_forwards_commit_flag(mocker):
+def test_codex_review_encodes_commit_target_in_prompt(mocker):
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
     captured = mocker.patch(
         "conductor.providers.codex.subprocess.run",
@@ -1650,13 +1652,15 @@ def test_codex_review_forwards_commit_flag(mocker):
 
     args = captured.call_args.args[0]
     assert args[0:2] == ["codex", "review"]
-    assert args[args.index("--commit") + 1] == "abc123"
+    assert "--commit" not in args
     assert "--uncommitted" not in args
     assert args[-1] == "-"
-    assert captured.call_args.kwargs["input"] == "Use AGENTS.md rubric."
+    prompt = captured.call_args.kwargs["input"]
+    assert "Review commit: abc123" in prompt
+    assert "Use AGENTS.md rubric." in prompt
 
 
-def test_codex_review_forwards_uncommitted_flag(mocker):
+def test_codex_review_encodes_uncommitted_target_in_prompt(mocker):
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
     captured = mocker.patch(
         "conductor.providers.codex.subprocess.run",
@@ -1670,10 +1674,12 @@ def test_codex_review_forwards_uncommitted_flag(mocker):
 
     args = captured.call_args.args[0]
     assert args[0:2] == ["codex", "review"]
-    assert "--uncommitted" in args
+    assert "--uncommitted" not in args
     assert "--commit" not in args
     assert args[-1] == "-"
-    assert captured.call_args.kwargs["input"] == "Use AGENTS.md rubric."
+    prompt = captured.call_args.kwargs["input"]
+    assert "Include staged, unstaged, and untracked changes." in prompt
+    assert "Use AGENTS.md rubric." in prompt
 
 
 def test_codex_review_retries_missing_requested_sentinel_once(mocker):
@@ -1695,9 +1701,10 @@ def test_codex_review_retries_missing_requested_sentinel_once(mocker):
     first_args = captured.call_args_list[0].args[0]
     second_args = captured.call_args_list[1].args[0]
     assert first_args == second_args
-    assert second_args[second_args.index("--base") + 1] == "origin/main"
+    assert "--base" not in second_args
     retry_prompt = captured.call_args_list[1].kwargs["input"]
     assert "Conductor review output contract retry" in retry_prompt
+    assert "Review changes against base branch/ref: origin/main" in retry_prompt
     assert "Contract failure: missing" in retry_prompt
     assert "Do not include any text after the sentinel." in retry_prompt
     assert "No blocking issues were found." in retry_prompt

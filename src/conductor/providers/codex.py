@@ -617,18 +617,16 @@ class CodexProvider:
         codex_effort_flag = (
             _EFFORT_TO_CODEX_FLAG.get(effort) if isinstance(effort, str) else None
         )
-        review_prompt = task
+        review_prompt = self._build_review_prompt(
+            task,
+            base=base,
+            commit=commit,
+            uncommitted=uncommitted,
+            title=title,
+        )
         args = [self._cli, "review"]
         if codex_effort_flag:
             args.extend(["-c", f"model_reasoning_effort={codex_effort_flag}"])
-        if base:
-            args.extend(["--base", base])
-        if commit:
-            args.extend(["--commit", commit])
-        if uncommitted:
-            args.append("--uncommitted")
-        if title:
-            args.extend(["--title", title])
         args.append("-")
 
         # `codex review` is not a streaming interface: it commonly writes no
@@ -723,6 +721,28 @@ class CodexProvider:
             },
             raw=raw,
         )
+
+    @staticmethod
+    def _build_review_prompt(
+        task: str,
+        *,
+        base: str | None,
+        commit: str | None,
+        uncommitted: bool,
+        title: str | None,
+    ) -> str:
+        target_lines: list[str] = []
+        if base:
+            target_lines.append(f"- Review changes against base branch/ref: {base}")
+        if commit:
+            target_lines.append(f"- Review commit: {commit}")
+        if uncommitted:
+            target_lines.append("- Include staged, unstaged, and untracked changes.")
+        if title:
+            target_lines.append(f"- Review title: {title}")
+        if not target_lines:
+            return task
+        return "Review target:\n" + "\n".join(target_lines) + "\n\n" + task
 
     def _parse_ndjson(
         self, stdout: str
