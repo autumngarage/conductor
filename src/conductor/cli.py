@@ -191,6 +191,7 @@ GIT_RECOVERY_COMMAND_TIMEOUT_SEC = 2.0
 GIT_RECOVERY_MAX_COMMITS = 5
 GIT_RECOVERY_MAX_STATUS_PATHS = 8
 NATIVE_REVIEW_TAG = "code-review"
+REVIEW_IGNORED_TASK_TAGS = frozenset({"tool-use"})
 DEFAULT_SESSION_PRUNE_OLDER_THAN = "30d"
 DEFAULT_SESSION_PRUNE_PROTECT_LAST = 50
 REPO_INTEGRATION_KINDS = frozenset(
@@ -1401,6 +1402,17 @@ def _with_user_semantic_tags(
     return replace(plan, tags=tuple(tags))
 
 
+def _with_review_semantic_tags(
+    plan: SemanticPlan,
+    user_tags: tuple[str, ...],
+) -> SemanticPlan:
+    plan = _with_user_semantic_tags(plan, user_tags)
+    tags = tuple(tag for tag in plan.tags if tag not in REVIEW_IGNORED_TASK_TAGS)
+    if NATIVE_REVIEW_TAG not in tags:
+        tags = (NATIVE_REVIEW_TAG, *tags)
+    return replace(plan, tags=tags)
+
+
 def _semantic_plan_contains_ollama(plan: SemanticPlan) -> bool:
     return any(candidate.provider == "ollama" for candidate in plan.candidates)
 
@@ -2154,6 +2166,7 @@ def _invoke_review_with_fallback(
 
     for idx, candidate in enumerate(candidates):
         provider = get_provider(candidate.name)
+        contract_prompt = task
         try:
             if isinstance(provider, NativeReviewProvider):
                 response = provider.review(
@@ -2168,16 +2181,17 @@ def _invoke_review_with_fallback(
                     title=title,
                 )
             elif isinstance(provider, OpenRouterProvider):
+                contract_prompt = build_review_task_prompt(
+                    task,
+                    base=base,
+                    commit=commit,
+                    uncommitted=uncommitted,
+                    title=title,
+                    cwd=cwd,
+                    include_patch=True,
+                )
                 response = provider.call(
-                    build_review_task_prompt(
-                        task,
-                        base=base,
-                        commit=commit,
-                        uncommitted=uncommitted,
-                        title=title,
-                        cwd=cwd,
-                        include_patch=True,
-                    ),
+                    contract_prompt,
                     models=(models_by_provider or {}).get(candidate.name),
                     effort=effort,
                     task_tags=list(decision.task_tags),
@@ -2187,23 +2201,24 @@ def _invoke_review_with_fallback(
                     max_stall_sec=max_stall_sec,
                 )
             else:
+                contract_prompt = build_review_task_prompt(
+                    task,
+                    base=base,
+                    commit=commit,
+                    uncommitted=uncommitted,
+                    title=title,
+                    cwd=cwd,
+                    include_patch=True,
+                )
                 response = provider.call(
-                    build_review_task_prompt(
-                        task,
-                        base=base,
-                        commit=commit,
-                        uncommitted=uncommitted,
-                        title=title,
-                        cwd=cwd,
-                        include_patch=True,
-                    ),
+                    contract_prompt,
                     effort=effort,
                     timeout_sec=timeout_sec,
                     max_stall_sec=max_stall_sec,
                 )
             validated_text = validate_requested_review_sentinel(
                 provider_name=response.provider,
-                prompt=task,
+                prompt=contract_prompt,
                 text=response.text,
             )
             if validated_text != response.text:
@@ -3939,7 +3954,10 @@ def ask(
     effort_value = _parse_effort(effort)
     plan = plan_for(kind, effort_value)
     user_tags = tuple(_parse_csv(tags))
-    plan = _with_user_semantic_tags(plan, user_tags)
+    if plan.kind == "review":
+        plan = _with_review_semantic_tags(plan, user_tags)
+    else:
+        plan = _with_user_semantic_tags(plan, user_tags)
     council_caps = CouncilCaps(
         timeout_sec=council_timeout_sec,
         max_output_tokens=council_max_output_tokens,
@@ -4770,7 +4788,10 @@ def call(
 @click.option(
     "--tags",
     default=None,
-    help=("Comma-separated review tags. code-review is always included for this subcommand."),
+    help=(
+        "Comma-separated review tags. code-review is always included; "
+        "tool-use is ignored for this read-only subcommand."
+    ),
 )
 @click.option(
     "--prefer",
@@ -4976,7 +4997,7 @@ def review(
     if auto_route:
         plan = plan_for("review", effort_value)
         user_tags = tuple(_parse_csv(tags))
-        plan = _with_user_semantic_tags(plan, user_tags)
+        plan = _with_review_semantic_tags(plan, user_tags)
         user_exclude = frozenset(_parse_csv(exclude))
         review_exclude, review_reasons = _review_exclude_set(user_exclude)
         exclude_set = _semantic_candidate_exclude_set(plan, review_exclude)
@@ -5075,7 +5096,7 @@ def review(
         max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
         try:
             if provider_id == "openrouter" and isinstance(provider, OpenRouterProvider):
-                plan = _with_user_semantic_tags(
+                plan = _with_review_semantic_tags(
                     plan_for("review", effort_value),
                     tuple(_parse_csv(tags)),
                 )
@@ -5084,16 +5105,17 @@ def review(
                     for candidate in plan.candidates
                     if candidate.models
                 }
+                contract_prompt = build_review_task_prompt(
+                    body,
+                    base=base,
+                    commit=commit,
+                    uncommitted=uncommitted,
+                    title=title,
+                    cwd=cwd,
+                    include_patch=True,
+                )
                 response = provider.call(
-                    build_review_task_prompt(
-                        body,
-                        base=base,
-                        commit=commit,
-                        uncommitted=uncommitted,
-                        title=title,
-                        cwd=cwd,
-                        include_patch=True,
-                    ),
+                    contract_prompt,
                     models=models_by_provider.get(provider_id),
                     effort=effort_value,
                     task_tags=list(plan.tags),
@@ -5104,7 +5126,7 @@ def review(
                 )
                 validated_text = validate_requested_review_sentinel(
                     provider_name=response.provider,
-                    prompt=body,
+                    prompt=contract_prompt,
                     text=response.text,
                 )
                 if validated_text != response.text:

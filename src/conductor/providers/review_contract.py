@@ -10,6 +10,15 @@ from pathlib import Path
 from conductor.providers.interface import ProviderError
 
 _REVIEW_SENTINEL_RE = re.compile(r"^\s*(CODEX_REVIEW_(?:CLEAN|FIXED|BLOCKED))\s*$")
+_MISSING_REVIEW_CONTEXT_RE = re.compile(
+    r"\b("
+    r"no files? (?:were )?provided|"
+    r"no (?:code )?changes? (?:were )?provided|"
+    r"no diff (?:was )?provided|"
+    r"provide (?:the )?(?:code changes?|diff|file diffs?|files? themselves)"
+    r")\b",
+    re.IGNORECASE,
+)
 _REVIEW_SENTINELS = (
     "CODEX_REVIEW_CLEAN",
     "CODEX_REVIEW_FIXED",
@@ -84,6 +93,11 @@ def build_review_task_prompt(
             uncommitted=uncommitted,
             cwd=cwd,
             max_bytes=max_patch_bytes,
+        )
+        patch = (
+            "Use the embedded patch below as the review input. Do not ask the "
+            "caller to provide files or a diff.\n\n"
+            f"{patch}"
         )
         prompt_parts.append(patch)
     prompt_parts.append(task)
@@ -272,6 +286,14 @@ def validate_requested_review_sentinel(
     if not _prompt_requests_review_sentinel(prompt):
         return text
 
+    context_reason = _review_context_failure_reason(prompt=prompt, text=text)
+    if context_reason is not None:
+        raise ReviewOutputContractError(
+            provider_name=provider_name,
+            reason=context_reason,
+            output_preview=_contract_error_preview(text),
+        )
+
     reason, stripped, _lines = _review_sentinel_violation(text)
     if reason is not None:
         raise ReviewOutputContractError(
@@ -280,6 +302,31 @@ def validate_requested_review_sentinel(
             output_preview=_contract_error_preview(text),
         )
     return stripped
+
+
+def _review_context_failure_reason(*, prompt: str, text: str) -> str | None:
+    if not _prompt_contains_non_empty_patch(prompt):
+        return None
+    if _MISSING_REVIEW_CONTEXT_RE.search(text):
+        return "missing-context"
+    return None
+
+
+def _prompt_contains_non_empty_patch(prompt: str) -> bool:
+    marker = "Patch context for generic review fallback:\n```diff\n"
+    start = prompt.find(marker)
+    if start == -1:
+        return False
+    patch_start = start + len(marker)
+    end = prompt.find("\n```", patch_start)
+    if end == -1:
+        return False
+    patch = prompt[patch_start:end].strip()
+    return bool(
+        patch
+        and patch != "<empty patch>"
+        and not patch.startswith("No explicit review target was provided.")
+    )
 
 
 def _review_sentinel_violation(text: str) -> tuple[str | None, str, list[str]]:

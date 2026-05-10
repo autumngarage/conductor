@@ -1368,6 +1368,8 @@ def test_review_with_openrouter_uses_hosted_review_prompt(mocker, tmp_path):
             str(repo),
             "--base",
             "HEAD~1",
+            "--tags",
+            "code-review,tool-use",
             "--brief",
             (
                 "Review this merge. The LAST line of your output must be exactly "
@@ -1515,6 +1517,8 @@ def test_review_auto_generic_fallback_prompt_includes_diff(mocker, tmp_path):
             str(repo),
             "--base",
             "HEAD~1",
+            "--tags",
+            "code-review,tool-use",
             "--brief",
             "Review this merge using the project reviewer guide.",
         ],
@@ -1522,6 +1526,7 @@ def test_review_auto_generic_fallback_prompt_includes_diff(mocker, tmp_path):
 
     assert result.exit_code == 0, result.output
     assert openrouter_call.call_args.kwargs["models"] == OPENROUTER_CODING_HIGH
+    assert openrouter_call.call_args.kwargs["task_tags"] == ["code-review"]
     assert openrouter_call.call_args.kwargs["timeout_sec"] == 300
     assert openrouter_call.call_args.kwargs["max_stall_sec"] == 75
     prompt = openrouter_call.call_args.args[0]
@@ -1569,6 +1574,8 @@ def test_ask_review_uses_openrouter_code_stack_instead_of_gemini(mocker, tmp_pat
             str(repo),
             "--base",
             "HEAD~1",
+            "--tags",
+            "code-review,tool-use",
             "--brief",
             "Review this merge using the project reviewer guide.",
             "--json",
@@ -1579,6 +1586,7 @@ def test_ask_review_uses_openrouter_code_stack_instead_of_gemini(mocker, tmp_pat
     assert not gemini_review.called
     assert openrouter_call.called
     assert openrouter_call.call_args.kwargs["models"] == OPENROUTER_CODING_HIGH
+    assert openrouter_call.call_args.kwargs["task_tags"] == ["code-review"]
     assert openrouter_call.call_args.kwargs["timeout_sec"] == 300
     assert openrouter_call.call_args.kwargs["max_stall_sec"] == 75
     prompt = openrouter_call.call_args.args[0]

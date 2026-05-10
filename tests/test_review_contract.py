@@ -4,6 +4,7 @@ import pytest
 
 from conductor.providers.review_contract import (
     ReviewOutputContractError,
+    build_review_task_prompt,
     ensure_requested_review_sentinel,
     validate_requested_review_sentinel,
 )
@@ -69,6 +70,66 @@ def test_review_sentinel_contract_accepts_footer_and_normalizes_final_sentinel()
     )
 
     assert validated == "Review body.\n---\nreview complete\nCODEX_REVIEW_CLEAN"
+
+
+def test_review_sentinel_contract_rejects_missing_context_claim_with_embedded_patch():
+    prompt = (
+        STRICT_SENTINEL_PROMPT
+        + "\n\nPatch context for generic review fallback:\n"
+        + "```diff\n"
+        + "diff --git a/app.py b/app.py\n"
+        + "+print('review me')\n"
+        + "```"
+    )
+
+    with pytest.raises(ReviewOutputContractError, match="missing-context") as exc_info:
+        validate_requested_review_sentinel(
+            provider_name="openrouter",
+            prompt=prompt,
+            text=(
+                "There are no files provided for review. Please provide the "
+                "code changes to review.\nCODEX_REVIEW_BLOCKED"
+            ),
+        )
+
+    assert exc_info.value.reason == "missing-context"
+
+
+def test_review_sentinel_contract_allows_missing_context_claim_without_patch():
+    prompt = (
+        STRICT_SENTINEL_PROMPT
+        + "\n\nPatch context for generic review fallback:\n"
+        + "```diff\n"
+        + "No explicit review target was provided. Review the repository context "
+        + "described in the brief.\n"
+        + "```"
+    )
+
+    validated = validate_requested_review_sentinel(
+        provider_name="openrouter",
+        prompt=prompt,
+        text="There are no files provided for review.\nCODEX_REVIEW_BLOCKED",
+    )
+
+    assert validated == "There are no files provided for review.\nCODEX_REVIEW_BLOCKED"
+
+
+def test_review_prompt_tells_generic_fallback_to_use_embedded_patch(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    prompt = build_review_task_prompt(
+        STRICT_SENTINEL_PROMPT,
+        base=None,
+        commit=None,
+        uncommitted=False,
+        title=None,
+        cwd=str(repo),
+        include_patch=True,
+    )
+
+    assert "Use the embedded patch below as the review input" in prompt
+    assert "Do not ask the caller to provide files or a diff." in prompt
 
 
 def test_legacy_review_sentinel_repair_helper_fails_closed():
