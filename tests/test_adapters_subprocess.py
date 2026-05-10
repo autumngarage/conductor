@@ -1626,16 +1626,54 @@ def test_codex_review_uses_native_review_command(mocker):
     assert args[0:2] == ["codex", "review"]
     assert "-c" in args
     assert args[args.index("-c") + 1] == "model_reasoning_effort=medium"
-    assert "--base" not in args
-    assert "--title" not in args
+    assert args[args.index("--base") + 1] == "origin/main"
+    assert args[args.index("--title") + 1] == "PR review"
     assert args[-1] == "-"
     prompt = captured.call_args.kwargs["input"]
-    assert "Review changes against base branch/ref: origin/main" in prompt
-    assert "Review title: PR review" in prompt
-    assert "Use AGENTS.md rubric." in prompt
+    assert prompt == "Use AGENTS.md rubric."
     assert response.provider == "codex"
     assert response.model == "codex-review"
     assert response.text == "LGTM"
+
+
+def test_codex_review_forwards_commit_flag(mocker):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    captured = mocker.patch(
+        "conductor.providers.codex.subprocess.run",
+        return_value=_fake_completed(stdout="LGTM\n"),
+    )
+
+    CodexProvider().review(
+        "Use AGENTS.md rubric.",
+        commit="abc123",
+    )
+
+    args = captured.call_args.args[0]
+    assert args[0:2] == ["codex", "review"]
+    assert args[args.index("--commit") + 1] == "abc123"
+    assert "--uncommitted" not in args
+    assert args[-1] == "-"
+    assert captured.call_args.kwargs["input"] == "Use AGENTS.md rubric."
+
+
+def test_codex_review_forwards_uncommitted_flag(mocker):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    captured = mocker.patch(
+        "conductor.providers.codex.subprocess.run",
+        return_value=_fake_completed(stdout="LGTM\n"),
+    )
+
+    CodexProvider().review(
+        "Use AGENTS.md rubric.",
+        uncommitted=True,
+    )
+
+    args = captured.call_args.args[0]
+    assert args[0:2] == ["codex", "review"]
+    assert "--uncommitted" in args
+    assert "--commit" not in args
+    assert args[-1] == "-"
+    assert captured.call_args.kwargs["input"] == "Use AGENTS.md rubric."
 
 
 def test_codex_review_rejects_missing_requested_sentinel(mocker):
