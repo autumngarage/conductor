@@ -1676,17 +1676,50 @@ def test_codex_review_forwards_uncommitted_flag(mocker):
     assert captured.call_args.kwargs["input"] == "Use AGENTS.md rubric."
 
 
-def test_codex_review_rejects_missing_requested_sentinel(mocker):
+def test_codex_review_retries_missing_requested_sentinel_once(mocker):
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
-    mocker.patch(
+    captured = mocker.patch(
         "conductor.providers.codex.subprocess.run",
-        return_value=_fake_completed(stdout="The changes need operator review.\n"),
+        side_effect=[
+            _fake_completed(stdout="No blocking issues were found.\n"),
+            _fake_completed(stdout="No blocking issues were found.\nCODEX_REVIEW_CLEAN\n"),
+        ],
+    )
+
+    response = CodexProvider().review(
+        "Return a final standalone CODEX_REVIEW_CLEAN or CODEX_REVIEW_BLOCKED line.",
+        base="origin/main",
+    )
+
+    assert captured.call_count == 2
+    first_args = captured.call_args_list[0].args[0]
+    second_args = captured.call_args_list[1].args[0]
+    assert first_args == second_args
+    assert second_args[second_args.index("--base") + 1] == "origin/main"
+    retry_prompt = captured.call_args_list[1].kwargs["input"]
+    assert "Conductor review output contract retry" in retry_prompt
+    assert "Contract failure: missing" in retry_prompt
+    assert "Do not include any text after the sentinel." in retry_prompt
+    assert "No blocking issues were found." in retry_prompt
+    assert response.text == "No blocking issues were found.\nCODEX_REVIEW_CLEAN"
+    assert response.raw["contract_retry"]["reason"] == "missing"
+
+
+def test_codex_review_rejects_missing_requested_sentinel_after_retry(mocker):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    captured = mocker.patch(
+        "conductor.providers.codex.subprocess.run",
+        side_effect=[
+            _fake_completed(stdout="The changes need operator review.\n"),
+            _fake_completed(stdout="The changes still need operator review.\n"),
+        ],
     )
 
     with pytest.raises(ReviewOutputContractError, match="codex review output"):
         CodexProvider().review(
             "Return a final standalone CODEX_REVIEW_CLEAN or CODEX_REVIEW_BLOCKED line.",
         )
+    assert captured.call_count == 2
 
 
 def test_codex_review_accepts_sentinel_with_footer(mocker):

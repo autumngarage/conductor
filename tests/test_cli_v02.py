@@ -1701,6 +1701,56 @@ def test_review_auto_codex_subprocess_rejects_missing_requested_sentinel(mocker)
     assert "codex (output-contract)" in result.stderr
 
 
+def test_review_auto_codex_subprocess_retries_missing_requested_sentinel(mocker):
+    _stub_all_configured(mocker, {"codex", "claude"})
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    captured = mocker.patch(
+        "conductor.providers.codex.subprocess.run",
+        side_effect=[
+            subprocess.CompletedProcess(
+                args=["codex", "review"],
+                returncode=0,
+                stdout="No blocking issues were found in the diff.\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["codex", "review"],
+                returncode=0,
+                stdout=(
+                    "No blocking issues were found in the diff.\n"
+                    "CODEX_REVIEW_CLEAN\n"
+                ),
+                stderr="",
+            ),
+        ],
+    )
+    claude_review = mocker.patch.object(
+        ClaudeProvider,
+        "review",
+        return_value=_fake_response("claude", "sonnet"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--silent-route",
+            "--brief",
+            (
+                "The LAST line of your output must be exactly one of these "
+                "three sentinels: CODEX_REVIEW_CLEAN, CODEX_REVIEW_FIXED, "
+                "or CODEX_REVIEW_BLOCKED."
+            ),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured.call_count == 2
+    assert not claude_review.called
+    assert result.stdout.strip().endswith("CODEX_REVIEW_CLEAN")
+
+
 def test_review_auto_codex_subprocess_accepts_sentinel_with_footer(mocker):
     _stub_all_configured(mocker, {"codex", "claude"})
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
