@@ -1687,6 +1687,8 @@ def test_review_auto_codex_subprocess_rejects_missing_requested_sentinel(mocker)
             "review",
             "--auto",
             "--silent-route",
+            "--base",
+            "origin/main",
             "--brief",
             (
                 "The LAST line of your output must be exactly one of these "
@@ -1736,6 +1738,8 @@ def test_review_auto_codex_subprocess_retries_missing_requested_sentinel(mocker)
             "review",
             "--auto",
             "--silent-route",
+            "--base",
+            "origin/main",
             "--brief",
             (
                 "The LAST line of your output must be exactly one of these "
@@ -1747,6 +1751,10 @@ def test_review_auto_codex_subprocess_retries_missing_requested_sentinel(mocker)
 
     assert result.exit_code == 0, result.output
     assert captured.call_count == 2
+    assert "--base" not in captured.call_args_list[0].args[0]
+    assert "Review changes against base branch/ref: origin/main" in (
+        captured.call_args_list[1].kwargs["input"]
+    )
     assert not claude_review.called
     assert result.stdout.strip().endswith("CODEX_REVIEW_CLEAN")
 
