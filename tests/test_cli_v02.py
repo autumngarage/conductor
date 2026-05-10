@@ -3502,6 +3502,7 @@ def test_call_fallback_on_rate_limit(mocker):
 
     assert result.exit_code == 0
     assert "claude failed (rate-limit)" in result.stderr
+    assert "ProviderHTTPError: Anthropic returned 429 rate limit" in result.stderr
 
 
 def test_call_no_fallback_on_auth_error(mocker):

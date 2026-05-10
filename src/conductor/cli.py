@@ -1009,6 +1009,8 @@ _EMPTY_RESPONSE_ERROR_SIGNALS = (
     "produced empty final",
 )
 
+_FALLBACK_ERROR_DETAIL_MAX_CHARS = 500
+
 
 def _is_retryable(err: Exception) -> tuple[bool, str]:
     """Classify an error as retryable-with-fallback or fatal.
@@ -1039,6 +1041,17 @@ def _is_retryable(err: Exception) -> tuple[bool, str]:
     if isinstance(err, ProviderHTTPError):
         return True, "provider-error"
     return False, "other"
+
+
+def _format_fallback_error_detail(err: Exception) -> str:
+    """Return a compact one-line error detail for fallback diagnostics."""
+    message = " ".join(str(err).strip().split())
+    if not message:
+        message = "(no message)"
+    detail = f"{err.__class__.__name__}: {message}"
+    if len(detail) <= _FALLBACK_ERROR_DETAIL_MAX_CHARS:
+        return detail
+    return detail[: _FALLBACK_ERROR_DETAIL_MAX_CHARS - 3].rstrip() + "..."
 
 
 def _review_failure_mode(err: Exception) -> str:
@@ -2035,6 +2048,7 @@ def _invoke_with_fallback(
                 failure_event: dict[str, object] = {
                     "provider": candidate.name,
                     "category": category,
+                    "error_class": e.__class__.__name__,
                     "error": str(e),
                 }
                 if isinstance(e, ProviderExecutionError):
@@ -2076,6 +2090,7 @@ def _invoke_with_fallback(
                 if not silent:
                     click.echo(
                         f"[conductor] {candidate.name} failed ({category}) · "
+                        f"{_format_fallback_error_detail(e)} · "
                         f"falling through to {next_name} (falling back → {next_name})",
                         err=True,
                     )
@@ -2199,8 +2214,14 @@ def _invoke_review_with_fallback(
             tried.append((candidate.name, "review-context"))
 
         if idx + 1 < len(candidates) and not silent:
+            detail = (
+                _format_fallback_error_detail(last_exc)
+                if last_exc is not None
+                else "unknown error"
+            )
             click.echo(
                 f"[conductor] {candidate.name} review failed ({tried[-1][1]}) · "
+                f"{detail} · "
                 f"falling back → {candidates[idx + 1].name}",
                 err=True,
             )
@@ -2208,12 +2229,14 @@ def _invoke_review_with_fallback(
     assert last_exc is not None
     if tried:
         trail = _format_tried_providers(tried)
+        last_detail = _format_fallback_error_detail(last_exc)
         hint = (
             "increase --max-fallbacks, exclude failing providers, or run "
             "`conductor list` to check configured code-review providers"
         )
         raise ProviderError(
-            f"code review failed for all tried providers: {trail}. Next step: {hint}."
+            f"code review failed for all tried providers: {trail}. "
+            f"Last error: {last_detail}. Next step: {hint}."
         ) from last_exc
     raise last_exc
 
