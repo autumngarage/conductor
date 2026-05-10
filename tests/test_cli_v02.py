@@ -1275,6 +1275,49 @@ def test_review_auto_exhausted_fallback_names_stalled_codex_and_claude(mocker):
     assert "claude (timeout), codex (stall)" in result.stderr
 
 
+def test_review_auto_output_contract_failure_falls_through_to_next_provider(mocker):
+    _stub_all_configured(mocker, {"codex", "claude"})
+    mocker.patch.object(CodexProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(ClaudeProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(
+        ClaudeProvider,
+        "review",
+        return_value=_fake_response(
+            "claude",
+            "sonnet",
+            text="The patch looks safe, but I omitted the required marker.",
+        ),
+    )
+    mocker.patch.object(
+        CodexProvider,
+        "review",
+        return_value=_fake_response(
+            "codex",
+            "codex-review",
+            text="No blocking issues found.\nCODEX_REVIEW_CLEAN",
+        ),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--brief",
+            (
+                "The LAST line of your output must be exactly one of these "
+                "three sentinels: CODEX_REVIEW_CLEAN, CODEX_REVIEW_FIXED, "
+                "or CODEX_REVIEW_BLOCKED."
+            ),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip().endswith("CODEX_REVIEW_CLEAN")
+    assert "claude review failed (output-contract)" in result.stderr
+    assert "falling back" in result.stderr
+
+
 def test_review_auto_generic_fallback_prompt_includes_diff(mocker, tmp_path):
     from conductor.providers.interface import ProviderStalledError
 
@@ -1381,12 +1424,13 @@ def test_ask_review_uses_openrouter_code_stack_instead_of_gemini(mocker, tmp_pat
     assert payload["semantic"]["candidates"][2]["models"] == list(OPENROUTER_CODING_HIGH)
 
 
-def test_review_auto_generic_fallback_repairs_requested_sentinel(mocker, tmp_path):
+def test_review_auto_generic_fallback_rejects_missing_requested_sentinel(
+    mocker, tmp_path
+):
     from conductor.providers.interface import ProviderStalledError
 
-    # Regression for issue #137's weak point: before the CLI-level guard, a
-    # call()-based review fallback returned this prose unchanged and the hook
-    # later failed closed with malformed-sentinel.
+    # Missing review sentinels are provider contract failures. The CLI must not
+    # manufacture a verdict for a generic call()-based review fallback.
     repo = _make_diff_repo(tmp_path)
     _stub_all_configured(mocker, {"codex", "claude", "openrouter"})
     mocker.patch.object(CodexProvider, "review_configured", return_value=(True, None))
@@ -1437,14 +1481,13 @@ def test_review_auto_generic_fallback_repairs_requested_sentinel(mocker, tmp_pat
         ],
     )
 
-    assert result.exit_code == 0, result.output
-    lines = result.stdout.strip().splitlines()
-    assert lines[-1] == "CODEX_REVIEW_BLOCKED"
-    assert sum(1 for line in lines if line.startswith("CODEX_REVIEW_")) == 1
-    assert "review repaired missing Touchstone sentinel" in result.stderr
+    assert result.exit_code == 1
+    assert "code review failed for all tried providers" in result.stderr
+    assert "openrouter (output-contract)" in result.stderr
+    assert "ReviewOutputContractError" in result.stderr
 
 
-def test_review_auto_codex_subprocess_repairs_requested_sentinel(mocker):
+def test_review_auto_codex_subprocess_rejects_missing_requested_sentinel(mocker):
     # Exercises the same conductor review --auto -> codex subprocess path used
     # by scripts/codex-review.sh when codex is the selected native reviewer.
     _stub_all_configured(mocker, {"codex"})
@@ -1477,10 +1520,9 @@ def test_review_auto_codex_subprocess_repairs_requested_sentinel(mocker):
         ],
     )
 
-    assert result.exit_code == 0, result.output
-    lines = result.stdout.strip().splitlines()
-    assert lines[-1] == "CODEX_REVIEW_BLOCKED"
-    assert sum(1 for line in lines if line.startswith("CODEX_REVIEW_")) == 1
+    assert result.exit_code == 1
+    assert "code review failed for all tried providers" in result.stderr
+    assert "codex (output-contract)" in result.stderr
 
 
 def test_review_with_gemini_emits_plain_text_without_json_envelope(mocker):

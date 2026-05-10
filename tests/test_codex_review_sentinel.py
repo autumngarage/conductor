@@ -289,6 +289,61 @@ def test_codex_review_wrapper_blocks_malformed_sentinel_even_fail_open(
     assert "regardless of on_error=fail-open" in result.stdout
 
 
+def test_codex_review_wrapper_required_review_blocks_reviewer_error_fail_open(
+    tmp_path: Path,
+) -> None:
+    repo, env = _make_review_repo(tmp_path)
+    fakes = tmp_path / "fakes"
+    fakes.mkdir()
+    conductor = fakes / "conductor"
+    conductor.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            case "$1" in
+              doctor)
+                printf '{"configured": true}\\n'
+                ;;
+              review|exec)
+                cat >/dev/null
+                printf 'provider chain exhausted after rate limits\\n' >&2
+                exit 1
+                ;;
+              *)
+                exit 1
+                ;;
+            esac
+            """
+        ),
+        encoding="utf-8",
+    )
+    conductor.chmod(0o755)
+
+    script = Path(__file__).resolve().parent.parent / "scripts" / "codex-review.sh"
+    result = subprocess.run(
+        ["bash", str(script)],
+        cwd=repo,
+        env={
+            **env,
+            "PATH": f"{fakes}:{os.environ.get('PATH', '')}",
+            "CODEX_REVIEW_BASE": "HEAD~1",
+            "CODEX_REVIEW_MODE": "review-only",
+            "CODEX_REVIEW_REQUIRED": "1",
+            "CODEX_REVIEW_DISABLE_CACHE": "1",
+            "CODEX_REVIEW_TIMEOUT": "5",
+            "NO_COLOR": "1",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "review failed with exit 1" in result.stdout
+    assert "required review did not complete" in result.stderr
+    assert "on_error=fail-open ignored" in result.stderr
+
+
 def test_codex_review_wrapper_falls_back_when_conductor_lacks_review(
     tmp_path: Path,
 ) -> None:

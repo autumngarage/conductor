@@ -113,9 +113,10 @@ from conductor.providers import (
 )
 from conductor.providers.review_contract import (
     ReviewContextError,
+    ReviewOutputContractError,
     build_review_patch_context,
     build_review_task_prompt,
-    ensure_requested_review_sentinel,
+    validate_requested_review_sentinel,
 )
 from conductor.router import (
     DEFAULT_ESTIMATED_INPUT_TOKENS,
@@ -1021,6 +1022,8 @@ def _is_retryable(err: Exception) -> tuple[bool, str]:
     so the offline-mode prompt can fire on the real thing (DNS/TCP failure)
     rather than on a slow-but-reachable upstream.
     """
+    if isinstance(err, ReviewOutputContractError):
+        return True, "output-contract"
     if isinstance(err, ProviderStalledError):
         return True, "timeout"
     if isinstance(err, ProviderExecutionError):
@@ -2173,13 +2176,13 @@ def _invoke_review_with_fallback(
                     timeout_sec=timeout_sec,
                     max_stall_sec=max_stall_sec,
                 )
-            repaired_text = ensure_requested_review_sentinel(
+            validated_text = validate_requested_review_sentinel(
                 provider_name=response.provider,
                 prompt=task,
                 text=response.text,
             )
-            if repaired_text != response.text:
-                response = replace(response, text=repaired_text)
+            if validated_text != response.text:
+                response = replace(response, text=validated_text)
             mark_outcome(candidate.name, "success")
             tried.append((candidate.name, "success"))
             if not silent and len(tried) > 1:

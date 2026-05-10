@@ -523,6 +523,7 @@ run_merge_review() {
     CODEX_REVIEW_BRANCH_NAME="$pr_head_branch" \
     CODEX_REVIEW_FORCE=1 \
     CODEX_REVIEW_MODE=review-only \
+    CODEX_REVIEW_REQUIRED=1 \
     bash "$REVIEW_SCRIPT"
 }
 
