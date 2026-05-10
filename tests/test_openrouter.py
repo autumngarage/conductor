@@ -168,6 +168,63 @@ def test_call_empty_response_retries_remaining_models(configured):
     ]
 
 
+def test_call_none_response_retries_remaining_models(configured):
+    requests: list[dict] = []
+    responses = [
+        {
+            "model": "model-a",
+            "choices": [
+                {"message": {"content": None}, "finish_reason": "stop"}
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 0},
+        },
+        {
+            "model": "model-b",
+            "choices": [{"message": {"content": "usable"}}],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 2},
+        },
+    ]
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=responses[len(requests) - 1])
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        response = OpenRouterProvider().call(
+            "Review this.",
+            models=("model-a", "model-b"),
+            log_selection=False,
+        )
+
+    assert response.text == "usable"
+    assert requests[0]["models"] == ["model-a", "model-b"]
+    assert requests[1]["models"] == ["model-b"]
+    assert response.raw["empty_response_retries"] == [
+        {"reason": "empty-response", "model": "model-a"}
+    ]
+
+
+def test_call_none_response_without_fallback_includes_response_shape(configured):
+    body = {
+        "model": "model-a",
+        "choices": [{"message": {"content": None}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 0},
+    }
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(
+            return_value=httpx.Response(200, json=body)
+        )
+        with pytest.raises(ProviderHTTPError) as exc:
+            OpenRouterProvider().call("Review this.", model="model-a")
+
+    message = str(exc.value)
+    assert "empty response content" in message
+    assert "model=model-a" in message
+    assert "content_type=NoneType" in message
+    assert "finish_reason=stop" in message
+
+
 def test_call_raises_config_error_when_unconfigured(no_key):
     with pytest.raises(ProviderConfigError):
         OpenRouterProvider().call("hello")

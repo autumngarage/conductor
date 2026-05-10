@@ -1711,11 +1711,16 @@ def test_codex_call_reads_output_backstop_when_ndjson_loses_agent_message(
     assert response.raw["output_path"] == str(output_path)
 
 
-def test_codex_call_translates_effort_to_reasoning_effort_config(mocker):
+def test_codex_call_clamps_minimal_effort_to_codex_compatible_low(mocker):
     """Codex CLI 0.125.0 dropped --effort in favor of `-c model_reasoning_effort=`.
     Conductor must emit the new form. Regression test for the silent breakage
     where conductor's call passed `--effort minimal` to a 0.125.0 codex CLI,
-    which exited 2 with `error: unexpected argument '--effort' found`."""
+    which exited 2 with `error: unexpected argument '--effort' found`.
+
+    Codex later rejected `model_reasoning_effort=minimal` when implicit built-in
+    tools were enabled, so Conductor clamps `minimal` to Codex's lowest
+    compatible tier.
+    """
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
     captured = mocker.patch(
         "conductor.providers.codex.subprocess.run",
@@ -1728,12 +1733,31 @@ def test_codex_call_translates_effort_to_reasoning_effort_config(mocker):
         "codex CLI >= 0.125.0 removed --effort; conductor must use -c instead. "
         f"args={args!r}"
     )
-    # New form: -c model_reasoning_effort=minimal must be present together.
+    # New form: -c model_reasoning_effort=low must be present together.
     assert "-c" in args, f"missing -c flag, args={args!r}"
     c_idx = args.index("-c")
-    assert args[c_idx + 1] == "model_reasoning_effort=minimal", (
-        f"expected `model_reasoning_effort=minimal`, got {args[c_idx + 1]!r}"
+    assert args[c_idx + 1] == "model_reasoning_effort=low", (
+        f"expected `model_reasoning_effort=low`, got {args[c_idx + 1]!r}"
     )
+
+
+def test_codex_exec_clamps_minimal_effort_to_codex_compatible_low(mocker):
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    fake = _FakePopen(
+        stdout_schedule=[(0, line) for line in CODEX_NDJSON.splitlines(keepends=True)]
+    )
+    _patch_codex_popen(mocker, fake)
+
+    CodexProvider().exec("hi", effort="minimal")
+
+    assert fake.args is not None
+    config_values = [
+        fake.args[idx + 1]
+        for idx, value in enumerate(fake.args)
+        if value == "-c"
+    ]
+    assert "model_reasoning_effort=low" in config_values
+    assert "model_reasoning_effort=minimal" not in config_values
 
 
 def test_codex_call_with_resume_uses_resume_subcommand(mocker):
