@@ -1190,11 +1190,20 @@ def test_ask_council_rejects_offline():
 # ---------------------------------------------------------------------------
 
 
-def test_review_auto_routes_by_router_tag_order(mocker):
+def test_review_auto_uses_semantic_priority_over_router_scoring(
+    mocker, monkeypatch, tmp_path
+):
+    defaults = tmp_path / "router.toml"
+    defaults.write_text('[tag_defaults]\ncode-review = "claude"\n', encoding="utf-8")
+    monkeypatch.setenv("CONDUCTOR_ROUTER_DEFAULTS_FILE", str(defaults))
+    monkeypatch.setenv(
+        "CONDUCTOR_REPO_ROUTER_DEFAULTS_FILE",
+        str(tmp_path / "missing-repo-router.toml"),
+    )
     _stub_all_configured(mocker, {"codex", "claude"})
     mocker.patch.object(CodexProvider, "review_configured", return_value=(True, None))
     mocker.patch.object(ClaudeProvider, "review_configured", return_value=(True, None))
-    review_mock = mocker.patch.object(
+    codex_review = mocker.patch.object(
         CodexProvider,
         "review",
         return_value=_fake_response("codex", "codex-review"),
@@ -1218,10 +1227,87 @@ def test_review_auto_routes_by_router_tag_order(mocker):
     )
 
     assert result.exit_code == 0, result.output
-    assert claude_review.called
-    assert not review_mock.called
-    assert claude_review.call_args.kwargs["base"] == "origin/main"
-    assert "→ claude" in result.stderr
+    assert codex_review.called
+    assert not claude_review.called
+    assert codex_review.call_args.kwargs["base"] == "origin/main"
+    assert "→ codex" in result.stderr
+
+
+def test_review_without_auto_or_with_uses_semantic_review_route(mocker, tmp_path):
+    brief = tmp_path / "review.md"
+    brief.write_text("Review this merge using the project reviewer guide.", encoding="utf-8")
+    _stub_all_configured(mocker, {"codex", "claude"})
+    mocker.patch.object(CodexProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(ClaudeProvider, "review_configured", return_value=(True, None))
+    codex_review = mocker.patch.object(
+        CodexProvider,
+        "review",
+        return_value=_fake_response("codex", "codex-review"),
+    )
+    claude_review = mocker.patch.object(
+        ClaudeProvider,
+        "review",
+        return_value=_fake_response("claude", "sonnet"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--base",
+            "origin/main",
+            "--brief-file",
+            str(brief),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert codex_review.called
+    assert not claude_review.called
+    assert codex_review.call_args.kwargs["base"] == "origin/main"
+    assert "→ codex" in result.stderr
+
+
+def test_review_with_openrouter_uses_hosted_review_prompt(mocker, tmp_path):
+    repo = _make_diff_repo(tmp_path)
+    _stub_all_configured(mocker, {"openrouter"})
+    openrouter_call = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response(
+            "openrouter",
+            OPENROUTER_CODING_HIGH[0],
+            text="No blocking issues found.\nCODEX_REVIEW_CLEAN",
+        ),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--with",
+            "openrouter",
+            "--cwd",
+            str(repo),
+            "--base",
+            "HEAD~1",
+            "--brief",
+            (
+                "Review this merge. The LAST line of your output must be exactly "
+                "CODEX_REVIEW_CLEAN or CODEX_REVIEW_BLOCKED."
+            ),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert openrouter_call.called
+    assert openrouter_call.call_args.kwargs["models"] == OPENROUTER_CODING_HIGH
+    assert openrouter_call.call_args.kwargs["task_tags"] == ["code-review"]
+    assert openrouter_call.call_args.kwargs["prefer"] == "best"
+    prompt = openrouter_call.call_args.args[0]
+    assert "Patch context for generic review fallback" in prompt
+    assert "diff --git a/README.md b/README.md" in prompt
+    assert result.stdout.strip().endswith("CODEX_REVIEW_CLEAN")
 
 
 def test_review_auto_does_not_route_to_generic_code_review_tag_provider(mocker):
@@ -1272,7 +1358,7 @@ def test_review_auto_exhausted_fallback_names_stalled_codex_and_claude(mocker):
 
     assert result.exit_code == 1
     assert "code review failed for all tried providers" in result.stderr
-    assert "claude (timeout), codex (stall)" in result.stderr
+    assert "codex (stall), claude (timeout)" in result.stderr
 
 
 def test_review_auto_output_contract_failure_falls_through_to_next_provider(mocker):
@@ -1280,20 +1366,20 @@ def test_review_auto_output_contract_failure_falls_through_to_next_provider(mock
     mocker.patch.object(CodexProvider, "review_configured", return_value=(True, None))
     mocker.patch.object(ClaudeProvider, "review_configured", return_value=(True, None))
     mocker.patch.object(
-        ClaudeProvider,
-        "review",
-        return_value=_fake_response(
-            "claude",
-            "sonnet",
-            text="The patch looks safe, but I omitted the required marker.",
-        ),
-    )
-    mocker.patch.object(
         CodexProvider,
         "review",
         return_value=_fake_response(
             "codex",
             "codex-review",
+            text="The patch looks safe, but I omitted the required marker.",
+        ),
+    )
+    mocker.patch.object(
+        ClaudeProvider,
+        "review",
+        return_value=_fake_response(
+            "claude",
+            "sonnet",
             text="No blocking issues found.\nCODEX_REVIEW_CLEAN",
         ),
     )
@@ -1314,7 +1400,7 @@ def test_review_auto_output_contract_failure_falls_through_to_next_provider(mock
 
     assert result.exit_code == 0, result.output
     assert result.stdout.strip().endswith("CODEX_REVIEW_CLEAN")
-    assert "claude review failed (output-contract)" in result.stderr
+    assert "codex review failed (output-contract)" in result.stderr
     assert "falling back" in result.stderr
 
 
@@ -1358,6 +1444,7 @@ def test_review_auto_generic_fallback_prompt_includes_diff(mocker, tmp_path):
     )
 
     assert result.exit_code == 0, result.output
+    assert openrouter_call.call_args.kwargs["models"] == OPENROUTER_CODING_HIGH
     prompt = openrouter_call.call_args.args[0]
     assert "Patch context for generic review fallback" in prompt
     assert "diff --git a/README.md b/README.md" in prompt

@@ -1184,6 +1184,31 @@ def _semantic_priority(plan: SemanticPlan) -> tuple[str, ...]:
     return tuple(candidate.provider for candidate in plan.candidates)
 
 
+def _apply_semantic_priority_to_decision(
+    decision: RouteDecision,
+    plan: SemanticPlan,
+) -> RouteDecision:
+    """Make the semantic candidate order the dispatch order after router filters."""
+    priority = {provider: idx for idx, provider in enumerate(_semantic_priority(plan))}
+    ranked = tuple(
+        sorted(decision.ranked, key=lambda candidate: priority.get(candidate.name, len(priority)))
+    )
+    if not ranked:
+        return decision
+    winner = ranked[0]
+    return replace(
+        decision,
+        provider=winner.name,
+        thinking_budget=winner.estimated_thinking_tokens,
+        tier=winner.tier,
+        matched_tags=winner.matched_tags,
+        ranked=ranked,
+        estimated_input_tokens=winner.estimated_input_tokens,
+        estimated_output_tokens=winner.estimated_output_tokens,
+        estimated_thinking_tokens=winner.estimated_thinking_tokens,
+    )
+
+
 def _requires_strong_code_provider(plan: SemanticPlan) -> bool:
     return plan.kind == "code" and plan.effort_bucket in {"high", "max"}
 
@@ -3976,6 +4001,7 @@ def ask(
                 shadow=True,
                 estimated_input_tokens=review_estimated_input_tokens,
             )
+            decision = _apply_semantic_priority_to_decision(decision, plan)
         except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
             click.echo(f"conductor: {_native_review_unavailable_message(review_reasons)}", err=True)
             click.echo(f"conductor: {e}", err=True)
@@ -4576,7 +4602,7 @@ def call(
         )
         max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
         try:
-            if isinstance(provider, OpenRouterProvider):
+            if provider_id == "openrouter" and isinstance(provider, OpenRouterProvider):
                 response = provider.call(
                     body,
                     model=model,
@@ -4663,7 +4689,10 @@ def call(
     "--with",
     "provider_id",
     default=None,
-    help="Native review provider identifier (codex, claude, gemini).",
+    help=(
+        "Review provider identifier. Native review providers use their review "
+        "entrypoint; openrouter uses a hosted review prompt."
+    ),
 )
 @click.option(
     "--profile",
@@ -4849,10 +4878,11 @@ def review(
     )
     exclude = _resolve_layered_value(exclude, env_key="CONDUCTOR_EXCLUDE")
 
+    implicit_auto = provider_id is None
+    auto_route = auto or implicit_auto
+
     if auto and provider_id:
         raise click.UsageError("--with and --auto are mutually exclusive.")
-    if not auto and not provider_id:
-        raise click.UsageError("pass --with <id> or --auto.")
     if provider_id and exclude and provider_id in _parse_csv(exclude):
         raise click.UsageError(
             f"--with {provider_id} and --exclude {exclude} contradict each other."
@@ -4881,21 +4911,27 @@ def review(
     )
     dispatch_started_at = time.monotonic()
     max_fallbacks = _validate_max_fallbacks(max_fallbacks)
-    prefer_value = _validate_prefer(prefer) if prefer is not None else "best"
+    prefer_value = _validate_prefer(prefer) if prefer is not None else None
 
     decision: RouteDecision | None = None
-    if auto:
+    if auto_route:
+        plan = plan_for("review", effort_value)
+        user_tags = tuple(_parse_csv(tags))
+        plan = _with_user_semantic_tags(plan, user_tags)
         user_exclude = frozenset(_parse_csv(exclude))
         review_exclude, review_reasons = _review_exclude_set(user_exclude)
+        exclude_set = _semantic_candidate_exclude_set(plan, review_exclude)
         try:
             _provider, decision = pick(
-                _review_tags(tags),
-                prefer=prefer_value,
+                list(plan.tags),
+                prefer=prefer_value or plan.prefer,
                 effort=effort_value,
-                exclude=review_exclude,
+                exclude=exclude_set,
+                priority=_semantic_priority(plan),
                 shadow=True,
                 estimated_input_tokens=estimated_input_tokens,
             )
+            decision = _apply_semantic_priority_to_decision(decision, plan)
         except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
             click.echo(f"conductor: {_native_review_unavailable_message(review_reasons)}", err=True)
             click.echo(f"conductor: {e}", err=True)
@@ -4933,6 +4969,11 @@ def review(
                 title=title,
                 silent=silent_route or as_json,
                 max_fallbacks=max_fallbacks,
+                models_by_provider={
+                    candidate.provider: candidate.models
+                    for candidate in plan.candidates
+                    if candidate.models
+                },
             )
         except ProviderConfigError as e:
             _record_failed_delegation(
@@ -4964,14 +5005,7 @@ def review(
             provider = get_provider(provider_id)
         except KeyError as e:
             raise click.UsageError(str(e)) from e
-        review_provider = _review_provider_or_none(provider)
-        if review_provider is None:
-            raise click.UsageError(f"provider {provider_id!r} does not expose native code review.")
         print_caller_banner(provider_id, silent=silent_route or as_json)
-        ok, reason = review_provider.review_configured()
-        if not ok:
-            click.echo(f"conductor: {reason or 'native review is not configured'}", err=True)
-            sys.exit(2)
         timeout_sec, max_stall_sec = _scale_dispatch_defaults(
             provider_id=provider_id,
             timeout_sec=timeout_sec,
@@ -4981,17 +5015,65 @@ def review(
         )
         max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
         try:
-            response = review_provider.review(
-                body,
-                effort=effort_value,
-                cwd=cwd,
-                timeout_sec=timeout_sec,
-                max_stall_sec=max_stall_sec,
-                base=base,
-                commit=commit,
-                uncommitted=uncommitted,
-                title=title,
-            )
+            if provider_id == "openrouter" and isinstance(provider, OpenRouterProvider):
+                plan = _with_user_semantic_tags(
+                    plan_for("review", effort_value),
+                    tuple(_parse_csv(tags)),
+                )
+                models_by_provider = {
+                    candidate.provider: candidate.models
+                    for candidate in plan.candidates
+                    if candidate.models
+                }
+                response = provider.call(
+                    build_review_task_prompt(
+                        body,
+                        base=base,
+                        commit=commit,
+                        uncommitted=uncommitted,
+                        title=title,
+                        cwd=cwd,
+                        include_patch=True,
+                    ),
+                    models=models_by_provider.get(provider_id),
+                    effort=effort_value,
+                    task_tags=list(plan.tags),
+                    prefer=prefer_value or plan.prefer,
+                    log_selection=not (silent_route or as_json),
+                    timeout_sec=timeout_sec,
+                    max_stall_sec=max_stall_sec,
+                )
+                validated_text = validate_requested_review_sentinel(
+                    provider_name=response.provider,
+                    prompt=body,
+                    text=response.text,
+                )
+                if validated_text != response.text:
+                    response = replace(response, text=validated_text)
+            else:
+                review_provider = _review_provider_or_none(provider)
+                if review_provider is None:
+                    raise click.UsageError(
+                        f"provider {provider_id!r} does not expose native code review."
+                    )
+                ok, reason = review_provider.review_configured()
+                if not ok:
+                    click.echo(
+                        f"conductor: {reason or 'native review is not configured'}",
+                        err=True,
+                    )
+                    sys.exit(2)
+                response = review_provider.review(
+                    body,
+                    effort=effort_value,
+                    cwd=cwd,
+                    timeout_sec=timeout_sec,
+                    max_stall_sec=max_stall_sec,
+                    base=base,
+                    commit=commit,
+                    uncommitted=uncommitted,
+                    title=title,
+                )
         except ProviderConfigError as e:
             _record_failed_delegation(
                 "review",
@@ -5014,8 +5096,19 @@ def review(
             )
             click.echo(f"conductor: {e}", err=True)
             sys.exit(1)
+        except ReviewContextError as e:
+            _record_failed_delegation(
+                "review",
+                provider_id=provider_id,
+                model=None,
+                effort=effort_value,
+                started_at=dispatch_started_at,
+                error=e,
+            )
+            click.echo(f"conductor: {e}", err=True)
+            sys.exit(1)
 
-    if auto and not as_json:
+    if auto_route and not as_json:
         _emit_usage_log(response, silent=silent_route)
     _record_response_delegation(
         "review",

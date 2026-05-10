@@ -30,8 +30,8 @@ conductor call --with <provider> [options]
 # Force the local provider
 conductor call --offline [options]
 
-# Native code-review mode
-conductor review --auto --base <branch-or-ref> [options]
+# Code-review mode; auto-routed by default when --with is absent
+conductor review --base <branch-or-ref> [options]
 conductor review --with <provider> --base <branch-or-ref> [options]
 
 # Agentic code/edit mode
@@ -41,9 +41,9 @@ conductor exec --with <provider> --permission-profile <read-only|patch|full> [op
 
 Use `conductor ask` when the caller knows the semantic kind but does not want to reason about providers. It applies Conductor's deterministic `kind × effort` matrix, then delegates to `call`, `exec`, `review`, or council fan-out internally. Provider/model/tag/tool overrides intentionally stay on the lower-level `call`, `exec`, and `review` commands.
 
-Usually, exactly one of `--auto` or `--with` is required for `call`, `exec`, and `review`. `--auto` runs the router using `--tags`, `--prefer`, and `--exclude` to pick a configured provider; `--with` bypasses the router for direct provider use. `--offline` is the exception: it may be used without `--auto` or `--with`, sets the sticky offline flag, and rewrites the call to `--with ollama`. Passing `--offline --with <non-ollama>` is an error. `--no-offline` clears the sticky flag, then normal `--auto` / `--with` rules apply.
+Usually, exactly one of `--auto` or `--with` is required for `call` and `exec`. `review` is auto-routed by default when `--with` is absent; `--auto` remains accepted for compatibility. `--auto` runs the router using `--tags`, `--prefer`, and `--exclude` to pick a configured provider; `--with` bypasses the router for direct provider use. `--offline` is the exception for `call` and `exec`: it may be used without `--auto` or `--with`, sets the sticky offline flag, and rewrites the call to `--with ollama`. Passing `--offline --with <non-ollama>` is an error. `--no-offline` clears the sticky flag, then normal `--auto` / `--with` rules apply.
 
-Use `conductor review` for code review. It only routes to providers with native review entrypoints: Codex `codex review`, Claude Code `/review`, and Gemini CLI `/code-review` when the Code Review extension is installed. Use `conductor exec` for engineering or auto-fix tasks that may edit files.
+Use `conductor review` for code review. Its auto route uses the same semantic review cascade as `conductor ask --kind review`: Codex `codex review`, Claude Code `/review`, then an OpenRouter hosted review prompt. Use `--with codex` / `--with claude` for a native-review hard pin, or `--with openrouter` for a hosted-review hard pin. Use `conductor exec` for engineering or auto-fix tasks that may edit files.
 
 ## Semantic matrix
 
@@ -57,7 +57,7 @@ Use `conductor review` for code review. It only routes to providers with native 
 | `code` | `minimal`, `low` | `call` | `openrouter` auto with coding/cheap bias → `ollama` |
 | `code` | `medium` | `call` | `openrouter` auto with coding/thinking bias → `ollama` |
 | `code` | `high`, `max` | `exec` | `codex` -> `claude` -> `openrouter` -> `ollama`, with `Read,Grep,Glob,Edit,Write,Bash`; exec runs unsandboxed, and callers can opt into tool permission profiles |
-| `review` | all levels | `review` | `codex` → `claude` → `gemini`, native review only |
+| `review` | all levels | `review` | `codex` -> `claude` -> `openrouter` hosted review prompt |
 | `council` | `minimal`, `low` | `council` | OpenRouter fan-out: `~google/gemini-flash-latest`, `~openai/gpt-mini-latest`; synthesize with the same stack |
 | `council` | `medium` | `council` | OpenRouter fan-out: `~google/gemini-pro-latest`, `~moonshotai/kimi-latest`, `deepseek/deepseek-v4-pro`; synthesize with `~google/gemini-pro-latest` → `~openai/gpt-latest` |
 | `council` | `high`, `max` | `council` | OpenRouter fan-out: `~google/gemini-pro-latest`, `~anthropic/claude-sonnet-latest`, `~openai/gpt-latest`, `deepseek/deepseek-v4-pro`, `qwen/qwen3.6-max-preview`; synthesize with `~openai/gpt-latest` → `~anthropic/claude-sonnet-latest` |
@@ -237,10 +237,10 @@ Consumers should handle `0` as success and treat every non-zero code as failure.
 
 ### Touchstone — code review
 
-Merge and pre-push review-only gates call Conductor's native review intent:
+Merge and pre-push review-only gates call Conductor's review intent:
 
 ```bash
-conductor review --auto --tags code-review --effort medium \
+conductor review --effort medium \
   --base origin/main --brief-file /tmp/review-prompt.txt \
   --json --silent-route
 ```
@@ -280,7 +280,7 @@ conductor ask --kind council --effort medium --brief-file /tmp/brief.md \
   --council-max-cost-usd 0.10 --json
 ```
 
-For merge review, Touchstone should continue to use `conductor review` or `conductor ask --kind review`; both must trigger native review mode, not generic code chat.
+For merge review, Touchstone should continue to use `conductor review` or `conductor ask --kind review`; both must trigger the review cascade, not generic code chat.
 
 ## Versioning policy
 
