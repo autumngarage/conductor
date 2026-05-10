@@ -34,7 +34,7 @@ from conductor.providers.interface import (
     ProviderHTTPError,
     resolve_effort_tokens,
 )
-from conductor.providers.review_contract import ensure_requested_review_sentinel
+from conductor.providers.review_contract import validate_requested_review_sentinel
 
 if TYPE_CHECKING:
     from conductor.session_log import SessionLog
@@ -365,7 +365,7 @@ class GeminiProvider:
         except json.JSONDecodeError:
             if not stdout:
                 raise ProviderHTTPError("gemini review produced empty stdout") from None
-            content = ensure_requested_review_sentinel(
+            content = validate_requested_review_sentinel(
                 provider_name=self.name,
                 prompt=prompt,
                 text=stdout,
@@ -388,7 +388,7 @@ class GeminiProvider:
             )
 
         content = _extract_review_response_text(data.get("response", ""))
-        content = ensure_requested_review_sentinel(
+        content = validate_requested_review_sentinel(
             provider_name=self.name,
             prompt=prompt,
             text=content,

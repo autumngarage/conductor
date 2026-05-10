@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from conductor.providers.interface import ProviderError
+
 _REVIEW_SENTINEL_RE = re.compile(r"^\s*(CODEX_REVIEW_(?:CLEAN|FIXED|BLOCKED))\s*$")
 _REVIEW_SENTINELS = (
     "CODEX_REVIEW_CLEAN",
@@ -16,10 +18,33 @@ _REVIEW_SENTINELS = (
 _SAFE_BLOCKED_SENTINEL = "CODEX_REVIEW_BLOCKED"
 _DEFAULT_PATCH_CONTEXT_MAX_BYTES = 200_000
 _REVIEW_GIT_TIMEOUT_SEC = 30.0
+_CONTRACT_ERROR_PREVIEW_CHARS = 240
 
 
 class ReviewContextError(RuntimeError):
     """Raised when generic review fallback cannot build required patch context."""
+
+
+class ReviewOutputContractError(ProviderError):
+    """Raised when a review provider violates the requested verdict contract."""
+
+    def __init__(
+        self,
+        *,
+        provider_name: str,
+        reason: str,
+        output_preview: str,
+    ) -> None:
+        self.provider_name = provider_name
+        self.reason = reason
+        self.output_preview = output_preview
+        preview = f"; output tail: {output_preview!r}" if output_preview else ""
+        super().__init__(
+            f"{provider_name} review output did not match the expected sentinel "
+            f"contract ({reason}); expected exactly one final standalone "
+            "CODEX_REVIEW_CLEAN, CODEX_REVIEW_FIXED, or CODEX_REVIEW_BLOCKED line"
+            f"{preview}"
+        )
 
 
 def build_review_task_prompt(
@@ -213,19 +238,10 @@ def ensure_requested_review_sentinel(
     if not _prompt_requests_review_sentinel(prompt):
         return text
 
-    stripped = text.strip()
-    lines = stripped.splitlines()
-    sentinel_indexes: list[int] = []
-    for idx, line in enumerate(lines):
-        if _REVIEW_SENTINEL_RE.match(line):
-            sentinel_indexes.append(idx)
-
-    if len(sentinel_indexes) == 1 and sentinel_indexes[0] == len(lines) - 1:
+    reason, stripped, lines = _review_sentinel_violation(text)
+    if reason is None:
         return stripped
 
-    reason = "missing"
-    if sentinel_indexes:
-        reason = "misplaced" if len(sentinel_indexes) == 1 else "multiple"
     print(
         f"[conductor] {provider_name} review repaired {reason} "
         f"Touchstone sentinel; appending {_SAFE_BLOCKED_SENTINEL}",
@@ -238,6 +254,54 @@ def ensure_requested_review_sentinel(
     if body:
         return f"{body}\n{_SAFE_BLOCKED_SENTINEL}"
     return _SAFE_BLOCKED_SENTINEL
+
+
+def validate_requested_review_sentinel(
+    *,
+    provider_name: str,
+    prompt: str,
+    text: str,
+) -> str:
+    """Validate the Touchstone sentinel when the caller requested it.
+
+    Invariant: requested review verdicts are accepted only when the provider
+    emits exactly one standalone sentinel and it is the final non-empty line.
+    Violations are provider output failures so the router can try fallback
+    reviewers instead of manufacturing a verdict.
+    """
+    if not _prompt_requests_review_sentinel(prompt):
+        return text
+
+    reason, stripped, _lines = _review_sentinel_violation(text)
+    if reason is not None:
+        raise ReviewOutputContractError(
+            provider_name=provider_name,
+            reason=reason,
+            output_preview=_contract_error_preview(text),
+        )
+    return stripped
+
+
+def _review_sentinel_violation(text: str) -> tuple[str | None, str, list[str]]:
+    stripped = text.strip()
+    lines = stripped.splitlines()
+    sentinel_indexes = [
+        idx for idx, line in enumerate(lines) if _REVIEW_SENTINEL_RE.match(line)
+    ]
+    if len(sentinel_indexes) == 1 and sentinel_indexes[0] == len(lines) - 1:
+        return None, stripped, lines
+    if not sentinel_indexes:
+        return "missing", stripped, lines
+    if len(sentinel_indexes) == 1:
+        return "misplaced", stripped, lines
+    return "multiple", stripped, lines
+
+
+def _contract_error_preview(text: str) -> str:
+    normalized = " ".join(text.strip().split())
+    if len(normalized) <= _CONTRACT_ERROR_PREVIEW_CHARS:
+        return normalized
+    return normalized[-_CONTRACT_ERROR_PREVIEW_CHARS:]
 
 
 def _prompt_requests_review_sentinel(prompt: str) -> bool:

@@ -42,7 +42,7 @@ from conductor.providers.interface import (
     ProviderStalledError,
     resolve_effort_tokens,
 )
-from conductor.providers.review_contract import ensure_requested_review_sentinel
+from conductor.providers.review_contract import validate_requested_review_sentinel
 from conductor.providers.terminal_signals import (
     append_recent_text,
     detect_retriable_provider_failure,
@@ -604,7 +604,7 @@ class CodexProvider:
             raise ProviderHTTPError(
                 f"codex review produced empty stdout: {result.stderr[:500]!r}"
             )
-        content = ensure_requested_review_sentinel(
+        content = validate_requested_review_sentinel(
             provider_name=self.name,
             prompt=review_prompt,
             text=content,

@@ -43,6 +43,7 @@ from conductor.providers.interface import (
     ProviderStalledError,
     ProviderStartupStalledError,
 )
+from conductor.providers.review_contract import ReviewOutputContractError
 from conductor.session_log import (
     SESSION_DATA_TOKEN_COUNT,
     SESSION_DATA_USAGE,
@@ -400,7 +401,7 @@ def test_claude_review_uses_native_review_slash_command_read_only(mocker):
     assert response.text == "hello from claude"
 
 
-def test_claude_review_repairs_missing_requested_sentinel(mocker, capsys):
+def test_claude_review_rejects_missing_requested_sentinel(mocker):
     mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
     fake = _FakePopen(
         stdout_schedule=[
@@ -420,13 +421,8 @@ def test_claude_review_repairs_missing_requested_sentinel(mocker, capsys):
         side_effect=lambda args, **kwargs: fake,
     )
 
-    response = ClaudeProvider().review("End with CODEX_REVIEW_CLEAN or BLOCKED.")
-
-    assert response.text.endswith("\nCODEX_REVIEW_BLOCKED")
-    assert "CODEX_REVIEW_CLEAN" not in response.text
-    assert "[conductor] claude review repaired missing Touchstone sentinel" in (
-        capsys.readouterr().err
-    )
+    with pytest.raises(ReviewOutputContractError, match="claude review output"):
+        ClaudeProvider().review("End with CODEX_REVIEW_CLEAN or BLOCKED.")
 
 
 def test_claude_call_passes_resume_session_id_as_resume_flag(mocker):
@@ -1642,23 +1638,17 @@ def test_codex_review_uses_native_review_command(mocker):
     assert response.text == "LGTM"
 
 
-def test_codex_review_repairs_missing_requested_sentinel(mocker, capsys):
+def test_codex_review_rejects_missing_requested_sentinel(mocker):
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
     mocker.patch(
         "conductor.providers.codex.subprocess.run",
         return_value=_fake_completed(stdout="The changes need operator review.\n"),
     )
 
-    response = CodexProvider().review(
-        "Return a final standalone CODEX_REVIEW_CLEAN or CODEX_REVIEW_BLOCKED line.",
-    )
-
-    assert response.text == (
-        "The changes need operator review.\nCODEX_REVIEW_BLOCKED"
-    )
-    assert "[conductor] codex review repaired missing Touchstone sentinel" in (
-        capsys.readouterr().err
-    )
+    with pytest.raises(ReviewOutputContractError, match="codex review output"):
+        CodexProvider().review(
+            "Return a final standalone CODEX_REVIEW_CLEAN or CODEX_REVIEW_BLOCKED line.",
+        )
 
 
 def test_codex_review_stall_watchdog_fails_fast(mocker):
@@ -3161,10 +3151,9 @@ def test_gemini_review_uses_code_review_extension_command(mocker, monkeypatch):
     assert response.text == "hello from gemini"
 
 
-def test_gemini_review_repairs_missing_requested_sentinel(
+def test_gemini_review_rejects_missing_requested_sentinel(
     mocker,
     monkeypatch,
-    capsys,
 ):
     mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
     _strip_gemini_auth_env(monkeypatch)
@@ -3183,12 +3172,8 @@ def test_gemini_review_repairs_missing_requested_sentinel(
         side_effect=lambda args, **kwargs: fake,
     )
 
-    response = GeminiProvider().review("End with CODEX_REVIEW_CLEAN or BLOCKED.")
-
-    assert response.text == "Plain review without the marker.\nCODEX_REVIEW_BLOCKED"
-    assert "[conductor] gemini review repaired missing Touchstone sentinel" in (
-        capsys.readouterr().err
-    )
+    with pytest.raises(ReviewOutputContractError, match="gemini review output"):
+        GeminiProvider().review("End with CODEX_REVIEW_CLEAN or BLOCKED.")
 
 
 def test_gemini_review_extracts_inner_json_response_and_preserves_sentinel(

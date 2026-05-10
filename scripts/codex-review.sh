@@ -71,6 +71,7 @@
 #                                       as the stall threshold (the legacy semantics shipped on
 #                                       a wall-clock cap; the new semantics are stall-based).
 #   CODEX_REVIEW_ON_ERROR             — fail-open (default) or fail-closed
+#   CODEX_REVIEW_REQUIRED             — true/1 means infrastructure errors block regardless of on_error
 #   CODEX_REVIEW_DISABLE_CACHE        — set to true/1 to force a fresh review
 #   CODEX_REVIEW_FORCE                — set to true/1 to run even on non-default-branch pushes
 #   CODEX_REVIEW_NO_AUTOFIX           — set to true/1 for review-only mode (backward compat)
@@ -127,6 +128,7 @@ REVIEW_ENABLED="${CODEX_REVIEW_ENABLED:-true}"
 REVIEW_MAX_STALL_SEC="${CODEX_REVIEW_MAX_STALL_SEC:-${CODEX_REVIEW_TIMEOUT:-300}}"
 REVIEW_TIMEOUT="$REVIEW_MAX_STALL_SEC"  # back-compat alias for legacy callers
 ON_ERROR="${CODEX_REVIEW_ON_ERROR:-fail-open}"
+REVIEW_REQUIRED="${CODEX_REVIEW_REQUIRED:-false}"
 UNSAFE_PATHS=""
 REVIEWER_CASCADE=()
 # Legacy local-reviewer env vars — no longer drive behavior in 2.0+, but
@@ -1316,6 +1318,11 @@ run_reviewer_with_timeout() {
 
 handle_error() {
   local reason="$1"
+
+  if is_truthy "$REVIEW_REQUIRED"; then
+    echo "==> ERROR ($reason) — blocking push (required review did not complete; on_error=$ON_ERROR ignored)." >&2
+    exit 1
+  fi
 
   if [ "$ON_ERROR" = "fail-closed" ]; then
     echo "==> ERROR ($reason) — blocking push (on_error=fail-closed)." >&2

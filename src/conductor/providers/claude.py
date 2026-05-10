@@ -34,7 +34,7 @@ from conductor.providers.interface import (
     ProviderStartupStalledError,
     resolve_effort_tokens,
 )
-from conductor.providers.review_contract import ensure_requested_review_sentinel
+from conductor.providers.review_contract import validate_requested_review_sentinel
 
 if TYPE_CHECKING:
     from conductor.session_log import SessionLog
@@ -462,7 +462,7 @@ class ClaudeProvider:
             )
 
         usage = data.get("usage") or {}
-        content = ensure_requested_review_sentinel(
+        content = validate_requested_review_sentinel(
             provider_name=self.name,
             prompt=review_prompt,
             text=data.get("result", ""),
