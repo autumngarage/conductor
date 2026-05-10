@@ -32,11 +32,51 @@ permissions:
   contents: read
 
 jobs:
+  source-validation:
+    # Validate the exact release tag before the tap is bumped. A GitHub
+    # Release can still be created manually, but Homebrew promotion waits for
+    # the internal suite to pass on the tag being published.
+    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag_name || github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name || github.event.release.tag_name }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Run pre-commit hygiene
+        env:
+          SKIP: no-commit-to-branch
+        run: |
+          pipx install pre-commit
+          pre-commit run --all-files --hook-stage pre-commit --show-diff-on-failure
+
+      - name: Run touchstone validate
+        run: uv run bash scripts/touchstone-run.sh validate
+
+      - name: Compile source and tests
+        run: uv run python -m compileall -q src tests
+
   bump-tap:
     # On the auto-trigger, skip prereleases (RCs, betas) — they shouldn't
     # land in the tap. Manual dispatch always runs so we can re-bump on
     # demand for any tag.
     if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
+    needs: source-validation
     uses: autumngarage/autumn-garage/.github/workflows/homebrew-bump.yml@v1
     with:
       formula-name: conductor
