@@ -567,12 +567,12 @@ class CodexProvider:
         # the target in the prompt instead of forwarding --base/--commit.
         args.append("-")
 
+        # `codex review` is not a streaming interface: it commonly writes no
+        # stdout until the final review text. Applying max_stall_sec here turns
+        # normal long reviews into false stalls. The streaming `codex exec`
+        # path still enforces the no-output watchdog.
+        _ = max_stall_sec
         timeout = self._timeout_sec if timeout_sec is None else timeout_sec
-        effective_timeout = timeout
-        watchdog_timeout = False
-        if max_stall_sec is not None and (timeout is None or max_stall_sec < timeout):
-            effective_timeout = max_stall_sec
-            watchdog_timeout = True
         start = time.monotonic()
         try:
             result = subprocess.run(
@@ -580,15 +580,11 @@ class CodexProvider:
                 input=review_prompt,
                 capture_output=True,
                 text=True,
-                timeout=effective_timeout,
+                timeout=timeout,
                 cwd=cwd,
             )
         except subprocess.TimeoutExpired as e:
             elapsed = time.monotonic() - start
-            if watchdog_timeout:
-                raise ProviderStalledError(
-                    f"codex review stalled after {max_stall_sec:g}s with no stdout"
-                ) from e
             raise ProviderError(
                 f"codex review timed out after {elapsed:.0f}s"
             ) from e
