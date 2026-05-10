@@ -341,7 +341,9 @@ class OpenRouterProvider:
                 attempts=attempts,
             )
             if retry_payload is None:
-                raise ProviderHTTPError("OpenRouter produced empty response content")
+                raise ProviderHTTPError(
+                    _empty_call_response_message(body, fallback_model=selected_model)
+                )
             attempts.append(
                 {
                     "reason": "empty-response",
@@ -1197,16 +1199,51 @@ def _remaining_timeout_sec(
 
 def _call_response_text(body: dict) -> str:
     try:
-        text = body["choices"][0]["message"]["content"]
+        message = body["choices"][0]["message"]
     except (KeyError, IndexError, TypeError) as e:
         raise ProviderHTTPError(
             f"OpenRouter response missing choices[0].message.content: {body!r:.500}"
         ) from e
-    if not isinstance(text, str):
+    if not isinstance(message, dict):
         raise ProviderHTTPError(
-            f"OpenRouter response content was not text: {type(text).__name__}"
+            f"OpenRouter response choices[0].message was not an object: {message!r:.500}"
+        )
+    if "content" not in message:
+        raise ProviderHTTPError(
+            f"OpenRouter response missing choices[0].message.content: {body!r:.500}"
+        )
+    text = message["content"]
+    if text is None:
+        return ""
+    if not isinstance(text, str):
+        finish_reason = _first_finish_reason(body)
+        raise ProviderHTTPError(
+            "OpenRouter response content was not text: "
+            f"model={_response_model(body, fallback=None)} "
+            f"content_type={type(text).__name__} "
+            f"finish_reason={finish_reason or '<unknown>'}"
         )
     return text
+
+
+def _empty_call_response_message(body: dict, *, fallback_model: str | None) -> str:
+    message = _first_message(body)
+    content = message.get("content")
+    finish_reason = _first_finish_reason(body)
+    return (
+        "OpenRouter produced empty response content: "
+        f"model={_response_model(body, fallback=fallback_model)} "
+        f"content_type={type(content).__name__} "
+        f"finish_reason={finish_reason or '<unknown>'}"
+    )
+
+
+def _first_finish_reason(body: dict) -> str | None:
+    try:
+        finish_reason = body["choices"][0].get("finish_reason")
+    except (AttributeError, IndexError, KeyError, TypeError):
+        return None
+    return finish_reason if isinstance(finish_reason, str) else None
 
 
 def _response_model(body: dict, *, fallback: str | None) -> str:

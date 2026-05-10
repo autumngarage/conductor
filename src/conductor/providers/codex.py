@@ -92,13 +92,18 @@ CODEX_STREAM_EXIT_READER_JOIN_SEC = 0.2
 # only in the first case; explicit None means run unbounded.
 _USE_DEFAULT: object = object()
 
-# Map symbolic effort → codex's reasoning-effort value.
-# Codex natively exposes minimal|low|medium|high. The CLI plumbs this via
-# `-c model_reasoning_effort=<value>` as of codex-cli 0.125.0 (the older
-# `--effort` flag was removed in that release). We always emit the new
-# form; users on pre-0.125.0 codex will need to upgrade.
+# Map symbolic effort → codex's reasoning-effort value. The CLI plumbs this
+# via `-c model_reasoning_effort=<value>` as of codex-cli 0.125.0 (the older
+# `--effort` flag was removed in that release). We always emit the new form;
+# users on pre-0.125.0 codex will need to upgrade.
+#
+# Codex CLI's default tool configuration currently rejects
+# `model_reasoning_effort=minimal` because built-in tools such as web_search
+# and image_gen are not allowed at that reasoning tier. Conductor cannot fully
+# control those implicit tools from its narrow Provider contract, so `minimal`
+# dispatches at Codex's lowest compatible tier: `low`.
 _EFFORT_TO_CODEX_FLAG = {
-    "minimal": "minimal",
+    "minimal": "low",
     "low": "low",
     "medium": "medium",
     "high": "high",
