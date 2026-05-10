@@ -84,9 +84,9 @@ Manual provider calls are the escape hatch, not the default:
 
     conductor call --with <provider> --brief "..."
 
-Read-only code review using native provider review mode:
+Read-only code review using Conductor's review cascade:
 
-    conductor review --auto --base origin/main \\
+    conductor review --base origin/main \\
         --brief-file /tmp/review-brief.md
 
 Pipe content in as the brief:
@@ -597,8 +597,8 @@ Use it when:
 - You want a cheap second opinion (`conductor call --with kimi --brief "..."`).
 - You need fresh web information (`conductor call --with gemini --brief "..."`).
 - You want to stay local / offline (`conductor call --with ollama --brief "..."`).
-- You want a native code review:
-  `conductor review --auto --base origin/main --brief-file /tmp/review.md`.
+- You want a code review cascade:
+  `conductor review --base origin/main --brief-file /tmp/review.md`.
 - You're not sure which provider fits — let the router pick:
   `conductor call --auto --tags <tag1>,<tag2> --brief "..."`.
 
@@ -653,9 +653,9 @@ When invoked:
    - `offline` — user explicitly asked for local-only
    Pick 1–3 tags; do NOT invent new ones.
 3. If the task is a code review and you are not using `ask`, use
-   native review mode:
+   Conductor's review cascade:
 
-       conductor review --auto --tags code-review,<tag> --base <base-ref> \\
+       conductor review --tags code-review,<tag> --base <base-ref> \\
            --brief-file /tmp/conductor-review-brief.md --json
 
    Use this for PR/merge review. Do not use it for auto-fix work; fixes

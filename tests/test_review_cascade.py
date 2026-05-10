@@ -126,7 +126,7 @@ def test_review_chain_walks_past_codex_to_next_code_review_provider(mocker) -> N
     assert result.stdout == "openrouter reviewed\n"
     assert "claude review failed (stall)" in result.stderr
     assert "codex review failed (stall)" in result.stderr
-    assert "claude (stall), codex (stall), openrouter (success)" in result.stderr
+    assert "codex (stall), claude (stall), openrouter (success)" in result.stderr
 
 
 def test_review_fallback_call_uses_conductor_owned_budget(mocker) -> None:
@@ -224,7 +224,7 @@ def test_review_max_fallbacks_caps_total_attempts(mocker) -> None:
 
     assert result.exit_code == 1
     assert not openrouter_call.called
-    assert "claude (stall), codex (stall)" in result.stderr
+    assert "codex (stall), claude (stall)" in result.stderr
     assert "openrouter" not in result.stderr
 
 
@@ -262,7 +262,7 @@ def test_review_exhausted_error_includes_tried_provider_trail(mocker) -> None:
 
     assert result.exit_code == 1
     assert "code review failed for all tried providers" in result.stderr
-    assert "claude (rate-limit), codex (stall), openrouter (5xx)" in result.stderr
+    assert "codex (stall), claude (rate-limit), openrouter (5xx)" in result.stderr
     assert "ProviderHTTPError: OpenRouter returned HTTP 503" in result.stderr
     assert "Next step:" in result.stderr
 
