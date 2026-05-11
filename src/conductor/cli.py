@@ -28,6 +28,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tomllib
@@ -5538,6 +5539,24 @@ SWARM_WORKTREE_LOCK = threading.Lock()
 SWARM_GIT_TIMEOUT_SEC = 30.0
 SWARM_GH_TIMEOUT_SEC = 30.0
 SWARM_SHIP_TIMEOUT_SEC = 1800.0
+_SWARM_FENCED_CODE_BLOCK_RE = re.compile(r"(?ms)^```.*?^```")
+_SWARM_CLOSING_LINE_RE = re.compile(
+    r"(?im)^\s*(?:Closes|Fixes|Resolves)\s+"
+    r"(?:https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/)?"
+    r"(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#|#)?"
+    r"(?P<number>[1-9]\d*)\s*\.?\s*$"
+)
+_SWARM_ISSUE_LINE_RE = re.compile(
+    r"(?im)^\s*Issue:\s+"
+    r"(?:https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/)?"
+    r"(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#|#)?"
+    r"(?P<number>[1-9]\d*)\s*\.?\s*$"
+)
+_SWARM_GENERATED_ISSUE_HEADER_RE = re.compile(
+    r"(?im)^\s*#\s+Issue:.*\([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#"
+    r"(?P<number>[1-9]\d*)\)\s*$"
+)
+_SWARM_ISSUE_PATH_SEGMENT_RE = re.compile(r"(?i)^issue[-_](?P<number>[1-9]\d*)\b")
 
 
 @dataclass
@@ -5583,6 +5602,112 @@ def _swarm_branch_for_brief(path: str) -> str:
 
 def _swarm_worktree_for_brief(path: str, *, repo_root: Path) -> Path:
     return (repo_root / ".cache" / "conductor" / "swarm" / _sanitize_swarm_stem(path)).resolve()
+
+
+def _append_unique_issue_ref(refs: list[str], seen: set[str], number: str) -> None:
+    ref = f"#{number}"
+    if ref in seen:
+        return
+    seen.add(ref)
+    refs.append(ref)
+
+
+def _swarm_github_repo_slug(repo_root: Path) -> str | None:
+    remote_url = _run_swarm_git(
+        ["config", "--get", "remote.origin.url"],
+        cwd=repo_root,
+        check=False,
+    ).stdout.strip()
+    match = re.search(
+        r"github\.com[:/](?P<owner>[A-Za-z0-9_.-]+)/"
+        r"(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?$",
+        remote_url,
+    )
+    if match is None:
+        return None
+    return f"{match.group('owner')}/{match.group('repo')}".lower()
+
+
+def _swarm_issue_ref_matches_repo(match_text: str, repo_slug: str | None) -> bool:
+    url_match = re.search(
+        r"github\.com/(?P<slug>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/issues/[1-9]\d*",
+        match_text,
+        flags=re.IGNORECASE,
+    )
+    shorthand_match = re.search(
+        r"(?<![\w.-])(?P<slug>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#[1-9]\d*",
+        match_text,
+        flags=re.IGNORECASE,
+    )
+    repo_match = url_match or shorthand_match
+    if repo_match is None:
+        return True
+    return repo_slug is not None and repo_match.group("slug").lower() == repo_slug
+
+
+def _swarm_issue_closing_refs(
+    brief_body: str,
+    brief_path: str | Path | None = None,
+    *,
+    repo_slug: str | None = None,
+) -> list[str]:
+    """Return explicit issue refs that should be copied into the swarm PR body."""
+    refs: list[str] = []
+    seen: set[str] = set()
+    searchable_body = _SWARM_FENCED_CODE_BLOCK_RE.sub("", brief_body)
+    for pattern in (
+        _SWARM_CLOSING_LINE_RE,
+        _SWARM_ISSUE_LINE_RE,
+        _SWARM_GENERATED_ISSUE_HEADER_RE,
+    ):
+        for match in pattern.finditer(searchable_body):
+            if _swarm_issue_ref_matches_repo(match.group(0), repo_slug):
+                _append_unique_issue_ref(refs, seen, match.group("number"))
+
+    if brief_path is None:
+        return refs
+    path = Path(brief_path)
+    parts = path.parts
+    for index, part in enumerate(parts):
+        if part.lower() == "issues" and index + 1 < len(parts):
+            stem = Path(parts[index + 1]).stem
+            if stem.isdecimal() and not stem.startswith("0"):
+                _append_unique_issue_ref(refs, seen, stem)
+        path_match = _SWARM_ISSUE_PATH_SEGMENT_RE.match(Path(part).stem)
+        if path_match:
+            _append_unique_issue_ref(refs, seen, path_match.group("number"))
+    return refs
+
+
+def _append_swarm_closing_refs_to_head_commit(worktree: Path, refs: list[str]) -> None:
+    if not refs:
+        return
+    existing_body = _run_swarm_git(["log", "-1", "--format=%b"], cwd=worktree).stdout
+    missing = [
+        ref
+        for ref in refs
+        if not re.search(rf"(?im)^\s*Closes\s+{re.escape(ref)}\s*\.?\s*$", existing_body)
+    ]
+    if not missing:
+        return
+
+    message = _run_swarm_git(["log", "-1", "--format=%B"], cwd=worktree).stdout.rstrip()
+    updated_message = f"{message}\n\n" + "\n".join(f"Closes {ref}" for ref in missing) + "\n"
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            prefix="conductor-swarm-commit-",
+            suffix=".msg",
+            delete=False,
+        ) as handle:
+            handle.write(updated_message)
+            temp_path = Path(handle.name)
+        _run_swarm_git(["commit", "--amend", "-F", str(temp_path)], cwd=worktree)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
 
 
 def _validate_swarm_briefs(briefs: tuple[str, ...], *, repo_root: Path) -> None:
@@ -5827,6 +5952,11 @@ def _run_swarm_task(
         raise click.UsageError(f"could not read --brief {brief_path!r}: {e.strerror or e}") from e
     if not body:
         raise click.UsageError(f"brief is empty after stripping whitespace: {brief_path!r}")
+    closing_refs = _swarm_issue_closing_refs(
+        body,
+        brief_path=brief,
+        repo_slug=_swarm_github_repo_slug(repo_root),
+    )
 
     created_worktree = False
     status = "failed"
@@ -5890,6 +6020,7 @@ def _run_swarm_task(
             if commits == 0:
                 status = "no-changes"
             else:
+                _append_swarm_closing_refs_to_head_commit(worktree, closing_refs)
                 shipped_status, shipped_pr_url, shipped_detail = _ship_swarm_pr(
                     worktree,
                     base_branch=base_branch,

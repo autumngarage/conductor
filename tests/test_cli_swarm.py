@@ -85,6 +85,53 @@ def _fake_ship(worktree: Path, *, base_branch: str, branch: str, auto_merge: boo
     return "pushed-not-merged", "https://github.com/example/repo/pull/123", None
 
 
+@pytest.mark.parametrize(
+    ("brief_body", "repo_slug", "expected"),
+    [
+        ("Issue: #358\n\nImplement the fix.", None, ["#358"]),
+        (
+            "Issue: https://github.com/autumngarage/conductor/issues/358",
+            "autumngarage/conductor",
+            ["#358"],
+        ),
+        ("Closes #358", None, ["#358"]),
+        ("Handle numbers 358 and 2026-05-11, but no issue marker.", None, []),
+    ],
+)
+def test_swarm_issue_closing_refs_from_brief_body(
+    brief_body: str,
+    repo_slug: str | None,
+    expected: list[str],
+) -> None:
+    assert cli._swarm_issue_closing_refs(brief_body, repo_slug=repo_slug) == expected
+
+
+def test_swarm_issue_closing_refs_accepts_only_matching_repo_refs() -> None:
+    assert cli._swarm_issue_closing_refs(
+        "# Issue: Brief from issue (autumngarage/conductor#358)",
+        repo_slug="autumngarage/conductor",
+    ) == ["#358"]
+    assert cli._swarm_issue_closing_refs(
+        "Issue: https://github.com/other/repo/issues/358",
+        repo_slug="autumngarage/conductor",
+    ) == []
+    assert cli._swarm_issue_closing_refs(
+        "Closes other/repo#358",
+        repo_slug="autumngarage/conductor",
+    ) == []
+    assert cli._swarm_issue_closing_refs(
+        "Issue: autumngarage/conductor#358",
+        repo_slug=None,
+    ) == []
+
+
+def test_swarm_github_repo_slug_parses_origin(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _git(repo, "remote", "add", "origin", "git@github.com:autumngarage/conductor.git")
+
+    assert cli._swarm_github_repo_slug(repo) == "autumngarage/conductor"
+
+
 def test_run_swarm_git_timeout_surfaces_runtime_error(monkeypatch) -> None:
     def fake_run(*args, **kwargs):
         raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
@@ -194,6 +241,84 @@ def test_swarm_one_brief_succeeds_as_shipped(monkeypatch, tmp_path: Path) -> Non
     assert payload["shipped_count"] == 1
     assert payload["tasks"][0]["status"] == "shipped"
     assert payload["tasks"][0]["commits"] == 1
+
+
+def test_swarm_ship_appends_closing_ref_to_last_commit_body(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md", "Issue: #358\n\nmake a focused change")
+    monkeypatch.chdir(repo)
+
+    def fake_exec(**kwargs):
+        worktree = Path(kwargs["cwd"])
+        _commit_change(worktree, "feature.txt", "feature")
+        return (
+            CallResponse(
+                text="done",
+                provider="codex",
+                model="codex",
+                duration_ms=1,
+            ),
+            None,
+            None,
+        )
+
+    def fake_ship(worktree: Path, *, base_branch: str, branch: str, auto_merge: bool):
+        _ = (base_branch, branch, auto_merge)
+        body = _git(worktree, "log", "-1", "--format=%b").stdout
+        assert "Closes #358" in body
+        return "shipped", "https://github.com/example/repo/pull/123", "abc1234"
+
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", fake_exec)
+    monkeypatch.setattr(cli, "_ship_swarm_pr", fake_ship)
+
+    result = CliRunner().invoke(
+        main,
+        ["swarm", "--provider", "codex", "--brief", str(brief), "--auto-merge", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+
+
+def test_swarm_ship_does_not_add_closing_ref_without_explicit_issue(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md", "Handle case 358 without an issue marker.")
+    monkeypatch.chdir(repo)
+
+    def fake_exec(**kwargs):
+        worktree = Path(kwargs["cwd"])
+        _commit_change(worktree, "feature.txt", "feature")
+        return (
+            CallResponse(
+                text="done",
+                provider="codex",
+                model="codex",
+                duration_ms=1,
+            ),
+            None,
+            None,
+        )
+
+    def fake_ship(worktree: Path, *, base_branch: str, branch: str, auto_merge: bool):
+        _ = (base_branch, branch, auto_merge)
+        body = _git(worktree, "log", "-1", "--format=%b").stdout
+        assert "Closes #358" not in body
+        return "shipped", "https://github.com/example/repo/pull/123", "abc1234"
+
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", fake_exec)
+    monkeypatch.setattr(cli, "_ship_swarm_pr", fake_ship)
+
+    result = CliRunner().invoke(
+        main,
+        ["swarm", "--provider", "codex", "--brief", str(brief), "--auto-merge", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
 
 
 def test_swarm_two_briefs_both_succeed(monkeypatch, tmp_path: Path) -> None:
