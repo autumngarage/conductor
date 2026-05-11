@@ -808,6 +808,31 @@ def _estimate_review_input_tokens(
     return estimated + _estimate_text_tokens(patch_context)
 
 
+def _semantic_tool_context_warning(
+    plan: SemanticPlan,
+    *,
+    cwd: str | None,
+    issue: str | None,
+    estimated_input_tokens: int,
+) -> str | None:
+    if plan.kind != "code" or plan.mode != "exec":
+        return None
+    if cwd is None and issue is None:
+        return None
+    context_sources = []
+    if cwd is not None:
+        context_sources.append("--cwd")
+    if issue is not None:
+        context_sources.append("--issue")
+    source_text = " + ".join(context_sources)
+    return (
+        "[conductor] token estimate is prompt-only "
+        f"({estimated_input_tokens:,} input tokens from the brief). "
+        f"Because {source_text} routes to a tool-using code agent, repository "
+        "reads and agent/tool context are not bounded by this estimate."
+    )
+
+
 def _ordered_tools_csv(tools: frozenset[str]) -> str:
     return ",".join(tool for tool in VALID_TOOLS if tool in tools)
 
@@ -4260,6 +4285,14 @@ def ask(
         _emit_session_route_decision(session_log, decision)
     print_caller_banner(decision.provider, silent=silent_route or as_json)
     _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
+    token_warning = _semantic_tool_context_warning(
+        plan,
+        cwd=cwd,
+        issue=issue,
+        estimated_input_tokens=estimated_input_tokens,
+    )
+    if token_warning is not None and not (silent_route or as_json):
+        click.echo(token_warning, err=True)
     if plan.mode == "exec" and preflight:
         provider_obj = _provider_for_preflight(provider)
         ok, reason = provider_obj.health_probe()

@@ -3728,6 +3728,35 @@ def test_ask_exec_mode_injects_auto_close_instructions_into_provider_task(mocker
     assert "Closes #5" in task
 
 
+def test_ask_code_exec_with_repo_issue_warns_estimate_is_prompt_only(mocker, tmp_path):
+    _stub_all_configured(mocker, {"codex"})
+    _mock_issue_subprocess(mocker)
+    mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "code",
+            "--effort",
+            "high",
+            "--cwd",
+            str(tmp_path),
+            "--issue",
+            "123",
+            "--no-preflight",
+            "--allow-short-brief",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "est:" in result.stderr
+    assert "token estimate is prompt-only" in result.stderr
+    assert "agent/tool context are not bounded by this estimate" in result.stderr
+    assert "--cwd + --issue" in result.stderr
+
+
 def test_review_auto_route_includes_patch_size_estimate(mocker, tmp_path):
     repo = _make_diff_repo(tmp_path)
     _stub_all_configured(mocker, {"claude"})
