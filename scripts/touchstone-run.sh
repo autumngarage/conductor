@@ -166,22 +166,42 @@ run_shell_command() {
   bash -c "$command"
 }
 
+resolve_cortex_command() {
+  if command -v cortex >/dev/null 2>&1; then
+    printf 'cortex\n'
+    return 0
+  fi
+
+  if ! command -v uv >/dev/null 2>&1; then
+    return 1
+  fi
+
+  if uv run cortex --version >/dev/null 2>&1; then
+    printf 'uv run cortex\n'
+    return 0
+  fi
+
+  return 1
+}
+
 run_cortex_update_check() {
+  local cortex_cmd
+
   [ -d .cortex ] || return 0
 
-  if command -v cortex >/dev/null 2>&1; then
-    if [ ! -f .cortex/.index.json ]; then
-      run_shell_command "cortex refresh-index --path ."
-    fi
-    run_shell_command "cortex update --check --path ."
-  elif command -v uv >/dev/null 2>&1 && uv run cortex --version >/dev/null 2>&1; then
-    if [ ! -f .cortex/.index.json ]; then
-      run_shell_command "uv run cortex refresh-index --path ."
-    fi
-    run_shell_command "uv run cortex update --check --path ."
-  else
-    warn "skipping cortex update check: cortex CLI is not installed"
+  if ! cortex_cmd="$(resolve_cortex_command)"; then
+    warn "skipping cortex update check: cortex CLI is not available"
+    warn "install cortex, then rebuild generated state with: cortex refresh-index --path ."
+    warn "if this repo provides cortex through uv, use: uv run cortex refresh-index --path ."
+    return 0
   fi
+
+  if [ ! -f .cortex/.index.json ]; then
+    warn ".cortex/.index.json is generated and missing; rebuilding with: $cortex_cmd refresh-index --path ."
+    run_shell_command "$cortex_cmd refresh-index --path ."
+  fi
+
+  run_shell_command "$cortex_cmd update --check --path ."
 }
 
 configured_command_for_action() {
