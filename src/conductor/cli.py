@@ -5788,6 +5788,74 @@ def _remove_swarm_worktree(worktree: Path, *, repo_root: Path) -> None:
         _run_swarm_git(["worktree", "remove", str(worktree)], cwd=repo_root)
 
 
+def _swarm_branch_worktrees(branch: str, *, repo_root: Path) -> list[str]:
+    output = _run_swarm_git(["worktree", "list", "--porcelain"], cwd=repo_root).stdout
+    attached: list[str] = []
+    current_path: str | None = None
+    for raw_line in output.splitlines():
+        if not raw_line:
+            current_path = None
+            continue
+        key, _, value = raw_line.partition(" ")
+        if key == "worktree":
+            current_path = value
+        elif key == "branch" and value == f"refs/heads/{branch}" and current_path is not None:
+            attached.append(current_path)
+    return attached
+
+
+def _delete_shipped_swarm_branch(
+    branch: str,
+    *,
+    repo_root: Path,
+    merge_sha: str | None,
+) -> str | None:
+    if not branch.startswith(f"{SWARM_BRANCH_PREFIX}/"):
+        return f"refusing to delete non-swarm branch {branch!r}"
+    if merge_sha is None:
+        return f"preserving local branch {branch!r}: shipped PR has no merge commit SHA"
+
+    branch_ref = f"refs/heads/{branch}"
+    branch_exists = _run_swarm_git(
+        ["show-ref", "--verify", "--quiet", branch_ref],
+        cwd=repo_root,
+        check=False,
+    )
+    if branch_exists.returncode != 0:
+        return None
+
+    try:
+        branch_tree = _run_swarm_git(
+            ["rev-parse", f"{branch_ref}^{{tree}}"],
+            cwd=repo_root,
+        ).stdout.strip()
+        merge_tree = _run_swarm_git(
+            ["rev-parse", f"{merge_sha}^{{tree}}"],
+            cwd=repo_root,
+        ).stdout.strip()
+    except RuntimeError as e:
+        return f"preserving local branch {branch!r}: could not verify shipped tree: {e}"
+
+    if branch_tree != merge_tree:
+        return (
+            f"preserving local branch {branch!r}: branch tree {branch_tree} does not "
+            f"match merge commit {merge_sha} tree {merge_tree}"
+        )
+
+    attached_worktrees = _swarm_branch_worktrees(branch, repo_root=repo_root)
+    if attached_worktrees:
+        return (
+            f"preserving local branch {branch!r}: still checked out in "
+            + ", ".join(attached_worktrees)
+        )
+
+    try:
+        _run_swarm_git(["branch", "-D", branch], cwd=repo_root)
+    except RuntimeError as e:
+        return f"could not delete local branch {branch!r} after shipped cleanup: {e}"
+    return None
+
+
 def _extract_pr_url(output: str) -> str | None:
     match = re.search(r"https://github\.com/[^\s]+/pull/\d+", output)
     return match.group(0) if match else None
@@ -6063,6 +6131,15 @@ def _run_swarm_task(
     ):
         try:
             _remove_swarm_worktree(worktree, repo_root=repo_root)
+            if result.status == "shipped":
+                cleanup_warning = _delete_shipped_swarm_branch(
+                    branch,
+                    repo_root=repo_root,
+                    merge_sha=merge_sha,
+                )
+                if cleanup_warning is not None:
+                    click.echo(f"[conductor] warning: {cleanup_warning}", err=True)
+                    result.failure_reason = cleanup_warning
         except RuntimeError as e:
             result.status = "failed"
             result.failure_reason = f"{result.failure_reason or result.status}; cleanup failed: {e}"

@@ -23,6 +23,16 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _git_returncode(repo: Path, *args: str) -> int:
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        check=False,
+        capture_output=True,
+        text=True,
+    ).returncode
+
+
 def _repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -83,6 +93,25 @@ def _fake_ship(worktree: Path, *, base_branch: str, branch: str, auto_merge: boo
     if auto_merge:
         return "shipped", "https://github.com/example/repo/pull/123", "abc1234"
     return "pushed-not-merged", "https://github.com/example/repo/pull/123", None
+
+
+def _fake_merged_ship(repo: Path):
+    def fake_ship(worktree: Path, *, base_branch: str, branch: str, auto_merge: bool):
+        _ = (branch, auto_merge)
+        tree = _git(worktree, "rev-parse", "HEAD^{tree}").stdout.strip()
+        merge_sha = _git(
+            repo,
+            "commit-tree",
+            tree,
+            "-p",
+            base_branch,
+            "-m",
+            "squash merge",
+        ).stdout.strip()
+        _git(repo, "update-ref", f"refs/heads/{base_branch}", merge_sha)
+        return "shipped", "https://github.com/example/repo/pull/123", merge_sha
+
+    return fake_ship
 
 
 @pytest.mark.parametrize(
@@ -228,7 +257,7 @@ def test_swarm_one_brief_succeeds_as_shipped(monkeypatch, tmp_path: Path) -> Non
     brief = _brief(repo, "foo.md")
     monkeypatch.chdir(repo)
     monkeypatch.setattr(cli, "_run_exec_phase_dispatch", _fake_exec_factory())
-    monkeypatch.setattr(cli, "_ship_swarm_pr", _fake_ship)
+    monkeypatch.setattr(cli, "_ship_swarm_pr", _fake_merged_ship(repo))
 
     result = CliRunner().invoke(
         main,
@@ -241,6 +270,11 @@ def test_swarm_one_brief_succeeds_as_shipped(monkeypatch, tmp_path: Path) -> Non
     assert payload["shipped_count"] == 1
     assert payload["tasks"][0]["status"] == "shipped"
     assert payload["tasks"][0]["commits"] == 1
+    assert not Path(payload["tasks"][0]["worktree"]).exists()
+    assert (
+        _git_returncode(repo, "show-ref", "--verify", "--quiet", "refs/heads/feat/swarm/foo")
+        == 1
+    )
 
 
 def test_swarm_ship_appends_closing_ref_to_last_commit_body(
@@ -383,6 +417,10 @@ def test_swarm_second_failure_preserves_worktree(monkeypatch, tmp_path: Path) ->
     assert [task["status"] for task in payload["tasks"]] == ["shipped", "failed"]
     failed_worktree = Path(payload["tasks"][1]["worktree"])
     assert failed_worktree.exists()
+    assert (
+        _git_returncode(repo, "show-ref", "--verify", "--quiet", "refs/heads/feat/swarm/bar")
+        == 0
+    )
     assert payload["tasks"][1]["failure_reason"] == "max-iterations cap reached"
 
 
@@ -425,6 +463,46 @@ def test_swarm_auto_merge_off_leaves_pushed_not_merged(monkeypatch, tmp_path: Pa
     assert payload["ok"] is False
     assert payload["tasks"][0]["status"] == "pushed-not-merged"
     assert payload["tasks"][0]["pr_url"] == "https://github.com/example/repo/pull/123"
+    assert Path(payload["tasks"][0]["worktree"]).exists()
+    assert (
+        _git_returncode(repo, "show-ref", "--verify", "--quiet", "refs/heads/feat/swarm/foo")
+        == 0
+    )
+
+
+def test_swarm_shipped_branch_delete_failure_is_reported(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md")
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", _fake_exec_factory())
+    monkeypatch.setattr(cli, "_ship_swarm_pr", _fake_merged_ship(repo))
+    original_run_swarm_git = cli._run_swarm_git
+
+    def fake_run_swarm_git(args, **kwargs):
+        if args == ["branch", "-D", "feat/swarm/foo"]:
+            raise RuntimeError("branch delete failed for test")
+        return original_run_swarm_git(args, **kwargs)
+
+    monkeypatch.setattr(cli, "_run_swarm_git", fake_run_swarm_git)
+
+    result = CliRunner().invoke(
+        main,
+        ["swarm", "--provider", "codex", "--brief", str(brief), "--auto-merge", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["tasks"][0]["status"] == "shipped"
+    assert "branch delete failed for test" in payload["tasks"][0]["failure_reason"]
+    assert "branch delete failed for test" in result.stderr
+    assert not Path(payload["tasks"][0]["worktree"]).exists()
+    assert (
+        _git_returncode(repo, "show-ref", "--verify", "--quiet", "refs/heads/feat/swarm/foo")
+        == 0
+    )
 
 
 def test_swarm_sanitizes_brief_stem_for_branch(monkeypatch, tmp_path: Path) -> None:
