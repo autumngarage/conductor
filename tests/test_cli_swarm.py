@@ -186,6 +186,52 @@ def test_run_swarm_git_timeout_surfaces_runtime_error(monkeypatch) -> None:
         cli._run_swarm_git(["status"], cwd=None)
 
 
+def test_swarm_metrics_aggregate_mixed_task_statuses() -> None:
+    metrics = cli._swarm_metrics_from_task_records(
+        [
+            {"status": "shipped", "commits": 2},
+            {"status": "failed", "commits": 1},
+            {"status": "no-changes", "commits": 0},
+            {"status": "review-blocked", "commits": 3},
+            {"status": "pushed-not-merged", "commits": 4},
+        ],
+        duration_ms=3_600_000,
+    )
+
+    assert metrics == {
+        "schema_version": 1,
+        "total_tasks": 5,
+        "shipped_count": 1,
+        "failed_count": 1,
+        "no_changes_count": 1,
+        "review_blocked_count": 1,
+        "pushed_not_merged_count": 1,
+        "duration_ms": 3_600_000,
+        "per_status_counts": {
+            "failed": 1,
+            "no-changes": 1,
+            "pushed-not-merged": 1,
+            "review-blocked": 1,
+            "shipped": 1,
+        },
+        "total_commits": 10,
+        "completed_tasks_per_hour": 2.0,
+    }
+
+
+@pytest.mark.parametrize("duration_ms", [0, None])
+def test_swarm_metrics_zero_or_missing_duration_has_zero_throughput(
+    duration_ms: int | None,
+) -> None:
+    metrics = cli._swarm_metrics_from_task_records(
+        [{"status": "shipped", "commits": 1}],
+        duration_ms=duration_ms,
+    )
+
+    assert metrics["duration_ms"] == duration_ms
+    assert metrics["completed_tasks_per_hour"] == 0.0
+
+
 def test_ship_swarm_pr_timeout_preserves_detected_pr_url(monkeypatch, tmp_path: Path) -> None:
     scripts = tmp_path / "scripts"
     scripts.mkdir()
@@ -320,6 +366,17 @@ def test_swarm_writes_manifest_for_successful_run(monkeypatch, tmp_path: Path) -
     assert manifest["shipped_count"] == 1
     assert manifest["failed_count"] == 0
     assert manifest["no_changes_count"] == 0
+    assert manifest["metrics"]["schema_version"] == 1
+    assert manifest["metrics"]["total_tasks"] == 1
+    assert manifest["metrics"]["shipped_count"] == 1
+    assert manifest["metrics"]["failed_count"] == 0
+    assert manifest["metrics"]["no_changes_count"] == 0
+    assert manifest["metrics"]["review_blocked_count"] == 0
+    assert manifest["metrics"]["pushed_not_merged_count"] == 0
+    assert manifest["metrics"]["duration_ms"] == manifest["duration_ms"]
+    assert manifest["metrics"]["per_status_counts"] == {"shipped": 1}
+    assert manifest["metrics"]["total_commits"] == 1
+    assert manifest["metrics"]["completed_tasks_per_hour"] >= 0.0
     assert manifest["tasks"][0]["brief"] == str(brief)
     assert manifest["tasks"][0]["branch"] == "feat/swarm/foo"
     assert manifest["tasks"][0]["status"] == "shipped"
@@ -443,6 +500,11 @@ def test_swarm_status_latest_and_explicit_lookup(monkeypatch, tmp_path: Path) ->
     assert latest_result.exit_code == 0, latest_result.output
     assert f"swarm run {run_id} (ok)" in latest_result.output
     assert "shipped=1 failed=0 no-changes=0" in latest_result.output
+    assert (
+        "metrics: total=1 review-blocked=0 pushed-not-merged=0 commits=1 completed/hour="
+        in latest_result.output
+    )
+    assert "status-counts: shipped=1" in latest_result.output
     assert "shipped:" in latest_result.output
 
     id_result = runner.invoke(main, ["swarm", "status", run_id])
