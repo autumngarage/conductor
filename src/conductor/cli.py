@@ -60,6 +60,7 @@ from conductor.delegation_ledger import (
     read_delegations,
     record_delegation,
 )
+from conductor.exec_completion import brief_declares_read_only_text_output
 from conductor.git_state import (
     DEFAULT_BRANCH_SCAN_LIMIT,
     DEFAULT_KEEP_WORKTREE_DAYS,
@@ -621,6 +622,8 @@ def _warn_if_short_exec_brief(
 
 
 def _call_mode_side_effect_reason(body: str) -> str | None:
+    if brief_declares_read_only_text_output(body):
+        return None
     patterns = (
         (
             re.compile(

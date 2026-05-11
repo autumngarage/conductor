@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from conductor.exec_completion import detect_missing_deliverables
+from conductor.exec_completion import (
+    brief_declares_read_only_text_output,
+    detect_missing_deliverables,
+)
 
 
 def test_tests_requested_without_test_path_change_is_flagged() -> None:
@@ -22,6 +25,33 @@ def test_tests_requested_with_test_path_change_is_not_flagged() -> None:
     )
 
     assert missing == []
+
+
+def test_read_only_test_recommendations_are_text_output_not_required_edits() -> None:
+    brief = """
+Goal:
+Investigate the failure. Do not edit files; this is read-only.
+
+Expected output:
+- Root cause
+- Regression tests to add/update
+"""
+
+    missing = detect_missing_deliverables(
+        brief,
+        changed_paths=(),
+        recent_tool_calls=[],
+    )
+
+    assert missing == []
+
+
+def test_read_only_classifier_requires_explicit_no_edit_semantics() -> None:
+    assert brief_declares_read_only_text_output("Read-only investigation; no diff.")
+    assert brief_declares_read_only_text_output("Do not edit files; report findings.")
+    assert not brief_declares_read_only_text_output(
+        "Implement the fix, but do not edit generated files."
+    )
 
 
 def test_validation_command_requested_without_recent_tool_call_is_flagged() -> None:

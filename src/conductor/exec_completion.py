@@ -89,7 +89,11 @@ def detect_missing_deliverables(
 
     missing: list[MissingDeliverable] = []
     tool_calls = list(recent_tool_calls)[-RECENT_TOOL_CALL_LIMIT:]
-    if _brief_requests_tests(brief) and not _has_test_path_change(changed_paths):
+    if (
+        _brief_requests_tests(brief)
+        and not brief_declares_read_only_text_output(brief)
+        and not _has_test_path_change(changed_paths)
+    ):
         missing.append(
             MissingDeliverable(
                 "tests",
@@ -139,6 +143,28 @@ def completion_stretch_prompt(missing: Iterable[MissingDeliverable]) -> str:
         "You're at the iteration cap. Detected unfinished: "
         f"{labels}. Spend this final turn finishing them or surfacing why you can't."
     )
+
+
+def brief_declares_read_only_text_output(brief: str) -> bool:
+    """Return true when the brief explicitly forbids workspace mutation.
+
+    This is intentionally narrow: it captures read-only investigations and
+    text-only asks, but does not treat every mention of editing restrictions as
+    permission to skip implementation-task deliverables.
+    """
+
+    patterns = (
+        r"(?i)\bread[- ]?only\b",
+        r"(?i)\banalysis[- ]only\b",
+        r"(?i)\binvestigation[- ]only\b",
+        r"(?i)\btext[- ]only\b",
+        r"(?i)\bno\s+(?:file\s+)?(?:edits?|changes?|writes?)\b",
+        r"(?i)\bno\s+diff\b",
+        r"(?i)\bdo\s+not\s+(?:edit|modify|write|change)\s+(?:local\s+)?files?\b",
+        r"(?i)\bdon't\s+(?:edit|modify|write|change)\s+(?:local\s+)?files?\b",
+        r"(?i)\bwithout\s+(?:editing|modifying|writing|changing)\s+(?:local\s+)?files?\b",
+    )
+    return any(re.search(pattern, brief) for pattern in patterns)
 
 
 def _brief_requests_tests(brief: str) -> bool:

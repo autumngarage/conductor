@@ -538,6 +538,34 @@ def test_ask_research_rejects_repo_side_effect_brief(mocker):
     assert "conductor ask --kind code --effort high" in result.output
 
 
+def test_ask_call_mode_allows_read_only_text_recommendations(mocker):
+    _stub_all_configured(mocker, {"openrouter"})
+    call_mock = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response("openrouter", "openrouter/auto"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "code",
+            "--effort",
+            "low",
+            "--brief",
+            (
+                "Read-only investigation; do not edit files. "
+                "Expected output: files to update and regression tests to add/update."
+            ),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert call_mock.called
+
+
 def test_ask_code_high_routes_to_codex_exec_with_default_tools(mocker):
     _stub_all_configured(mocker, {"codex"})
     exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
