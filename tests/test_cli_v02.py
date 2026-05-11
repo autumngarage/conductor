@@ -566,6 +566,62 @@ def test_ask_call_mode_allows_read_only_text_recommendations(mocker):
     assert call_mock.called
 
 
+def test_ask_research_allows_text_only_test_recommendation_brief(mocker):
+    _stub_all_configured(mocker, {"openrouter"})
+    call_mock = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response("openrouter", "openrouter/auto"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "research",
+            "--effort",
+            "medium",
+            "--brief",
+            (
+                "Read-only analysis task. Do not modify files, commit changes, "
+                "push, or open a PR. Recommend focused regression tests only."
+            ),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert call_mock.called
+
+
+def test_ask_code_call_mode_allows_text_only_code_analysis(mocker):
+    _stub_all_configured(mocker, {"openrouter"})
+    call_mock = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response("openrouter", "openrouter/auto"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "code",
+            "--effort",
+            "low",
+            "--brief",
+            (
+                "Text-only code analysis. Do not modify files or implement the fix. "
+                "Explain the likely root cause and recommend tests to add."
+            ),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert call_mock.called
+
+
 def test_ask_code_high_routes_to_codex_exec_with_default_tools(mocker):
     _stub_all_configured(mocker, {"codex"})
     exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
@@ -2483,6 +2539,37 @@ def test_exec_permission_profile_auto_routes_to_enforcing_provider(mocker):
     assert not gemini_exec.called
     assert claude_exec.call_args.kwargs["tools"] == frozenset({"Read", "Grep", "Glob"})
     assert "→ claude" in result.stderr
+
+
+def test_exec_read_only_brief_with_test_recommendations_returns_text(mocker):
+    _stub_all_configured(mocker, {"claude"})
+    exec_mock = mocker.patch.object(
+        ClaudeProvider,
+        "exec",
+        return_value=_fake_response("claude", text="Root cause analysis."),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--auto",
+            "--permission-profile",
+            "read-only",
+            "--no-preflight",
+            "--allow-short-brief",
+            "--task",
+            (
+                "Read-only analysis task. Do not modify files. "
+                "Recommend focused regression tests only."
+            ),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert exec_mock.called
+    assert exec_mock.call_args.kwargs["tools"] == frozenset({"Read", "Grep", "Glob"})
+    assert "Root cause analysis." in result.output
 
 
 def test_exec_permission_profile_rejects_non_enforcing_direct_provider(mocker):

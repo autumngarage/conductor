@@ -17,6 +17,33 @@ def test_tests_requested_without_test_path_change_is_flagged() -> None:
     assert "diff did not add to tests/" in missing[0].message
 
 
+def test_read_only_test_recommendations_do_not_require_test_path_change() -> None:
+    missing = detect_missing_deliverables(
+        (
+            "Read-only analysis task. Do not modify files.\n\n"
+            "Recommend focused regression tests only; do not implement or commit changes."
+        ),
+        changed_paths=(),
+        recent_tool_calls=[],
+    )
+
+    assert missing == []
+
+
+def test_implementation_brief_still_requires_requested_tests() -> None:
+    missing = detect_missing_deliverables(
+        (
+            "Implement the fix.\n\n"
+            "Do not modify files outside src/conductor.\n\n"
+            "## Tests\nAdd regression tests."
+        ),
+        changed_paths=("src/conductor/foo.py",),
+        recent_tool_calls=[],
+    )
+
+    assert [item.kind for item in missing] == ["tests"]
+
+
 def test_tests_requested_with_test_path_change_is_not_flagged() -> None:
     missing = detect_missing_deliverables(
         "Implement it.\n\n## Tests\nAdd regression coverage.",

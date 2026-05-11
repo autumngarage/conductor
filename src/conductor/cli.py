@@ -661,6 +661,8 @@ def _call_mode_side_effect_reason(body: str) -> str | None:
 
 
 def _reject_call_mode_side_effect_brief(kind: str, body: str) -> None:
+    if brief_declares_read_only_text_output(body):
+        return
     reason = _call_mode_side_effect_reason(body)
     if reason is None:
         return

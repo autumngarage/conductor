@@ -149,23 +149,36 @@ def completion_stretch_prompt(missing: Iterable[MissingDeliverable]) -> str:
 def brief_declares_read_only_text_output(brief: str) -> bool:
     """Return true when the brief explicitly forbids workspace mutation.
 
-    This is intentionally narrow: it captures read-only investigations and
-    text-only asks, but does not treat every mention of editing restrictions as
-    permission to skip implementation-task deliverables.
+    Test-shape language is common in read-only diagnosis. The invariant is that
+    an explicit no-edit/read-only brief may discuss tests to recommend, but it
+    is not an implementation task unless the caller separately asks for edits.
     """
 
-    patterns = (
-        r"(?i)\bread[- ]?only\b",
-        r"(?i)\banalysis[- ]only\b",
-        r"(?i)\binvestigation[- ]only\b",
-        r"(?i)\btext[- ]only\b",
-        r"(?i)\bno\s+(?:file\s+)?(?:edits?|changes?|writes?)\b",
-        r"(?i)\bno\s+diff\b",
-        r"(?i)\bdo\s+not\s+(?:edit|modify|write|change)\s+(?:local\s+)?files?\b",
-        r"(?i)\bdon't\s+(?:edit|modify|write|change)\s+(?:local\s+)?files?\b",
-        r"(?i)\bwithout\s+(?:editing|modifying|writing|changing)\s+(?:local\s+)?files?\b",
+    no_edit_patterns = (
+        r"(?i)\bdo\s+not\s+(modify|edit|write|change|create|update)\s+"
+        r"(files?|the\s+repo|the\s+repository|the\s+worktree|code|the\s+codebase)\b",
+        r"(?i)\bdon't\s+(modify|edit|write|change|create|update)\s+"
+        r"(files?|the\s+repo|the\s+repository|the\s+worktree|code|the\s+codebase)\b",
+        r"(?i)\bwithout\s+(modifying|editing|writing|changing)\s+"
+        r"(files?|the\s+repo|the\s+repository|the\s+worktree|code|the\s+codebase)\b",
+        r"(?i)\bno\s+(file\s+)?(edits?|changes?|modifications?|writes?)\b",
+        r"(?i)\bno\s+implementation\b",
+        r"(?i)\bdo\s+not\s+implement\b",
+        r"(?i)\bdon't\s+implement\b",
+        r"(?i)\bread[- ]only\s+"
+        r"(delegation|task|brief|prompt|analysis|investigation|diagnos(?:is|tic)|mode)\b",
+        r"(?i)\b(permission[- ]profile|profile)\s+read[- ]only\b",
+        r"(?i)\btext[- ]only\s+(delegation|task|brief|prompt|analysis|output|response)\b",
+        r"(?i)\banalysis\s+only\b",
+        r"(?i)\brecommend\s+(focused\s+)?(regression\s+)?tests?\s+only\b",
     )
-    return any(re.search(pattern, brief) for pattern in patterns)
+    if not any(re.search(pattern, brief) for pattern in no_edit_patterns):
+        return False
+
+    implementation_patterns = (
+        r"(?im)^\s*[-*]?\s*(implement|fix|modify|edit|write|create|update)\b",
+    )
+    return not any(re.search(pattern, brief) for pattern in implementation_patterns)
 
 
 def _brief_requests_tests(brief: str) -> bool:
