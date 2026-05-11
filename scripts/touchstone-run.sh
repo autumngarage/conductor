@@ -169,13 +169,12 @@ run_shell_command() {
 run_cortex_update_check() {
   [ -d .cortex ] || return 0
 
-  if command -v uv >/dev/null 2>&1; then
-    run_shell_command "uv run cortex update --check --path ."
-  elif command -v cortex >/dev/null 2>&1; then
+  if command -v cortex >/dev/null 2>&1; then
     run_shell_command "cortex update --check --path ."
+  elif command -v uv >/dev/null 2>&1 && uv run cortex --version >/dev/null 2>&1; then
+    run_shell_command "uv run cortex update --check --path ."
   else
-    echo "ERROR: cortex update check requires uv or cortex on PATH." >&2
-    return 1
+    warn "skipping cortex update check: cortex CLI is not installed"
   fi
 }
 
