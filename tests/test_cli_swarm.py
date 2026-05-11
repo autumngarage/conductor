@@ -78,8 +78,8 @@ def _fake_exec_factory(*, fail_on: set[str] | None = None, no_change_on: set[str
     return fake_exec
 
 
-def _fake_ship(worktree: Path, *, base_branch: str, auto_merge: bool):
-    _ = (worktree, base_branch)
+def _fake_ship(worktree: Path, *, base_branch: str, branch: str, auto_merge: bool):
+    _ = (worktree, base_branch, branch)
     if auto_merge:
         return "shipped", "https://github.com/example/repo/pull/123", "abc1234"
     return "pushed-not-merged", "https://github.com/example/repo/pull/123", None
@@ -99,6 +99,7 @@ def test_ship_swarm_pr_timeout_preserves_detected_pr_url(monkeypatch, tmp_path: 
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     monkeypatch.setattr(cli, "_swarm_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_ensure_swarm_branch_checked_out", lambda *_args: None)
 
     def fake_run(args, **kwargs):
         assert kwargs["timeout"] == cli.SWARM_SHIP_TIMEOUT_SEC
@@ -113,6 +114,7 @@ def test_ship_swarm_pr_timeout_preserves_detected_pr_url(monkeypatch, tmp_path: 
     status, pr_url, reason = cli._ship_swarm_pr(
         tmp_path,
         base_branch="main",
+        branch="feat/swarm/foo",
         auto_merge=True,
     )
 
@@ -120,6 +122,58 @@ def test_ship_swarm_pr_timeout_preserves_detected_pr_url(monkeypatch, tmp_path: 
     assert pr_url == "https://github.com/example/repo/pull/123"
     assert reason is not None
     assert "open-pr.sh timed out" in reason
+
+
+def test_ship_swarm_pr_repairs_detached_head_before_open_pr(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    monkeypatch.chdir(repo)
+    worktree = tmp_path / "task-worktree"
+    _git(repo, "worktree", "add", str(worktree), "-b", "feat/swarm/foo", "main")
+    _commit_change(worktree, "feature.txt", "feature")
+    head_sha = _git(worktree, "rev-parse", "HEAD").stdout.strip()
+    _git(worktree, "checkout", "--detach", "HEAD")
+
+    scripts = repo / "scripts"
+    scripts.mkdir()
+    open_pr = scripts / "open-pr.sh"
+    open_pr.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf "branch=%s\\n" "$(git branch --show-current)"\n'
+        'printf "https://github.com/example/repo/pull/123\\n"\n',
+        encoding="utf-8",
+    )
+    open_pr.chmod(0o755)
+    monkeypatch.setattr(cli, "_swarm_pr_merge_sha", lambda *_args, **_kwargs: "merge123")
+
+    status, pr_url, merge_sha = cli._ship_swarm_pr(
+        worktree,
+        base_branch="main",
+        branch="feat/swarm/foo",
+        auto_merge=True,
+    )
+
+    assert status == "shipped"
+    assert pr_url == "https://github.com/example/repo/pull/123"
+    assert merge_sha == "merge123"
+    assert _git(worktree, "branch", "--show-current").stdout.strip() == "feat/swarm/foo"
+    assert _git(worktree, "rev-parse", "HEAD").stdout.strip() == head_sha
+
+
+def test_ship_swarm_pr_refuses_named_branch_mismatch(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    worktree = tmp_path / "task-worktree"
+    _git(repo, "worktree", "add", str(worktree), "-b", "feat/swarm/foo", "main")
+    _commit_change(worktree, "feature.txt", "feature")
+    _git(worktree, "checkout", "-b", "scratch")
+
+    with pytest.raises(RuntimeError, match="refusing to retarget a named branch"):
+        cli._ensure_swarm_branch_checked_out(worktree, "feat/swarm/foo")
+
+    assert _git(worktree, "branch", "--show-current").stdout.strip() == "scratch"
 
 
 def test_swarm_one_brief_succeeds_as_shipped(monkeypatch, tmp_path: Path) -> None:
