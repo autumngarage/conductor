@@ -55,6 +55,16 @@ def _brief(repo: Path, name: str, body: str = "make a focused change") -> Path:
     return path
 
 
+def _configure_cortex_pr_merged(repo: Path) -> None:
+    template = repo / ".cortex" / "templates" / "journal" / "pr-merged.md"
+    template.parent.mkdir(parents=True, exist_ok=True)
+    template.write_text("# PR #{{ nnn }} merged\n", encoding="utf-8")
+    (repo / ".cortex" / "protocol.md").write_text(
+        "T1.9 requires journal/pr-merged.md\n",
+        encoding="utf-8",
+    )
+
+
 def _swarm_manifests(repo: Path) -> list[Path]:
     return sorted((repo / ".cache" / "conductor" / "swarm" / "runs").glob("*.json"))
 
@@ -456,6 +466,153 @@ def test_swarm_writes_manifest_for_successful_run(monkeypatch, tmp_path: Path) -
     assert manifest["tasks"][0]["pr_url"] == "https://github.com/example/repo/pull/123"
     assert manifest["tasks"][0]["merge_sha"]
     assert manifest["tasks"][0]["cleanup_status"] == "removed"
+
+
+def test_swarm_queues_cortex_post_merge_bookkeeping_for_configured_repo(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    _configure_cortex_pr_merged(repo)
+    brief = _brief(repo, "issue-365.md", "Issue: #365\n\nmake a focused change")
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", _fake_exec_factory())
+    monkeypatch.setattr(cli, "_ship_swarm_pr", _fake_merged_ship(repo))
+
+    result = CliRunner().invoke(
+        main,
+        ["swarm", "--provider", "codex", "--brief", str(brief), "--auto-merge", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert set(payload) == {
+        "tasks",
+        "ok",
+        "shipped_count",
+        "failed_count",
+        "no_changes_count",
+    }
+    assert "Cortex post-merge bookkeeping required" in result.stderr
+    manifest = json.loads(_swarm_manifests(repo)[0].read_text(encoding="utf-8"))
+    bookkeeping = manifest["post_merge_bookkeeping"]
+    assert bookkeeping["schema_version"] == 1
+    assert bookkeeping["required"] is True
+    assert bookkeeping["status"] == "follow-up-brief-queued"
+    assert bookkeeping["follow_up_command"].startswith("conductor swarm --provider codex")
+    assert bookkeeping["merged_prs"][0]["pr_number"] == "123"
+    assert bookkeeping["merged_prs"][0]["closed_issues"] == ["#365"]
+    assert bookkeeping["merged_prs"][0]["merge_sha"] == manifest["tasks"][0]["merge_sha"]
+    context_path = Path(bookkeeping["context_path"])
+    assert context_path.exists()
+    context = context_path.read_text(encoding="utf-8")
+    assert "PR #123: https://github.com/example/repo/pull/123" in context
+    assert "closes issues: #365" in context
+    assert f"merge commit: {manifest['tasks'][0]['merge_sha']}" in context
+    assert "validation status: swarm auto-merge completed" in context
+    assert "known residual risks: none recorded by swarm" in context
+    assert ".cortex/journal/" in context
+    assert ".cortex/state.md" in context
+
+
+def test_swarm_cortex_bookkeeping_reads_relative_brief_from_repo_root(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    _configure_cortex_pr_merged(repo)
+    _brief(repo, "issue-365.md", "Issue: #365\n\nmake a focused change")
+    subdir = repo / "subdir"
+    subdir.mkdir()
+    monkeypatch.chdir(subdir)
+
+    entry = cli._swarm_cortex_bookkeeping_entry(
+        {
+            "status": "shipped",
+            "pr_url": "https://github.com/example/repo/pull/123",
+            "brief": "tasks/issue-365.md",
+            "branch": "feat/swarm/issue-365",
+            "merge_sha": "abc1234",
+            "commits": 1,
+        },
+        repo_root=repo,
+        repo_slug="example/repo",
+    )
+
+    assert entry is not None
+    assert entry["closed_issues"] == ["#365"]
+
+
+def test_swarm_cortex_manual_commands_guard_existing_journal_entries(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+
+    commands = cli._swarm_cortex_manual_commands(
+        run_id="20260511T000000000001Z-test",
+        manifest_path=manifest_path,
+        merged_prs=[
+            {
+                "pr_number": "123",
+                "pr_url": "https://github.com/example/repo/pull/123",
+            }
+        ],
+        hook_path=None,
+    )
+
+    assert any("test ! -e .cortex/journal/" in command for command in commands)
+    assert any("already exists; inspect it before writing" in command for command in commands)
+    assert any(
+        command.startswith("cp .cortex/templates/journal/pr-merged.md")
+        for command in commands
+    )
+
+
+def test_swarm_status_reports_cortex_post_merge_follow_up(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    _configure_cortex_pr_merged(repo)
+    brief = _brief(repo, "issue-365.md", "Issue: #365\n\nmake a focused change")
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", _fake_exec_factory())
+    monkeypatch.setattr(cli, "_ship_swarm_pr", _fake_merged_ship(repo))
+    runner = CliRunner()
+
+    run_result = runner.invoke(
+        main,
+        ["swarm", "--provider", "codex", "--brief", str(brief), "--auto-merge", "--json"],
+    )
+    assert run_result.exit_code == 0, run_result.output
+    manifest_path = _swarm_manifests(repo)[0]
+
+    status_result = runner.invoke(main, ["swarm", "status", str(manifest_path)])
+
+    assert status_result.exit_code == 0, status_result.output
+    assert "cortex-post-merge: follow-up-brief-queued" in status_result.output
+    assert "context:" in status_result.output
+    assert "command: conductor swarm --provider codex" in status_result.output
+
+
+def test_swarm_does_not_queue_cortex_bookkeeping_when_not_configured(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "issue-365.md", "Issue: #365\n\nmake a focused change")
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", _fake_exec_factory())
+    monkeypatch.setattr(cli, "_ship_swarm_pr", _fake_merged_ship(repo))
+
+    result = CliRunner().invoke(
+        main,
+        ["swarm", "--provider", "codex", "--brief", str(brief), "--auto-merge", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Cortex post-merge bookkeeping required" not in result.stderr
+    manifest = json.loads(_swarm_manifests(repo)[0].read_text(encoding="utf-8"))
+    assert manifest["post_merge_bookkeeping"]["required"] is False
+    assert manifest["post_merge_bookkeeping"]["status"] == "not-configured"
 
 
 def test_swarm_manifest_contains_preflight_plan(monkeypatch, tmp_path: Path) -> None:

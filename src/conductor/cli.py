@@ -5591,6 +5591,7 @@ SWARM_SHIP_TIMEOUT_SEC = 1800.0
 SWARM_MANIFEST_SCHEMA_VERSION = 1
 SWARM_METRICS_SCHEMA_VERSION = 1
 SWARM_PREFLIGHT_SCHEMA_VERSION = 1
+SWARM_CORTEX_BOOKKEEPING_SCHEMA_VERSION = 1
 SWARM_PREFLIGHT_SUBSYSTEMS = frozenset(
     {
         "swarm",
@@ -5678,6 +5679,27 @@ _SWARM_PROVIDER_TRANSIENT_SIGNALS = (
 )
 
 
+@dataclass(frozen=True)
+class SwarmCortexBookkeeping:
+    required: bool
+    status: str
+    context_path: str | None
+    follow_up_command: str | None
+    merged_prs: list[dict[str, object]]
+    residual_risks: list[str]
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "schema_version": SWARM_CORTEX_BOOKKEEPING_SCHEMA_VERSION,
+            "required": self.required,
+            "status": self.status,
+            "context_path": self.context_path,
+            "follow_up_command": self.follow_up_command,
+            "merged_prs": self.merged_prs,
+            "residual_risks": self.residual_risks,
+        }
+
+
 @dataclass
 class SwarmTaskResult:
     brief: str
@@ -5725,6 +5747,10 @@ def _swarm_worktree_for_brief(path: str, *, repo_root: Path) -> Path:
 
 def _swarm_runs_dir(repo_root: Path) -> Path:
     return repo_root / ".cache" / "conductor" / "swarm" / "runs"
+
+
+def _swarm_bookkeeping_dir(repo_root: Path) -> Path:
+    return repo_root / ".cache" / "conductor" / "swarm" / "bookkeeping"
 
 
 def _new_swarm_run_id(started_at: datetime) -> str:
@@ -5808,6 +5834,355 @@ def _swarm_issue_closing_refs(
         if path_match:
             _append_unique_issue_ref(refs, seen, path_match.group("number"))
     return refs
+
+
+def _swarm_pr_number(pr_url: object) -> str | None:
+    if not isinstance(pr_url, str) or not pr_url:
+        return None
+    tail = pr_url.rstrip("/").rsplit("/", 1)[-1]
+    if tail.isdecimal() and not tail.startswith("0"):
+        return tail
+    return None
+
+
+def _swarm_cortex_post_merge_required(repo_root: Path) -> bool:
+    cortex_dir = repo_root / ".cortex"
+    if not cortex_dir.is_dir():
+        return False
+    template_path = cortex_dir / "templates" / "journal" / "pr-merged.md"
+    if template_path.is_file():
+        return True
+    protocol_path = cortex_dir / "protocol.md"
+    if not protocol_path.is_file():
+        return False
+    try:
+        protocol = protocol_path.read_text(encoding="utf-8")
+    except OSError as e:
+        click.echo(
+            f"[conductor] warning: could not inspect Cortex protocol at {protocol_path}: {e}",
+            err=True,
+        )
+        return False
+    return "T1.9" in protocol and "journal/pr-merged.md" in protocol
+
+
+def _swarm_cortex_hook_path(repo_root: Path) -> Path | None:
+    hook_path = repo_root / "scripts" / "cortex-pr-merged-hook.sh"
+    if hook_path.is_file():
+        return hook_path
+    return None
+
+
+def _swarm_read_brief_for_bookkeeping(brief_path: object, *, repo_root: Path) -> str:
+    if not isinstance(brief_path, str) or not brief_path:
+        return ""
+    path = Path(brief_path)
+    if not path.is_absolute():
+        path = repo_root / path
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as e:
+        click.echo(
+            f"[conductor] warning: could not read swarm brief for Cortex bookkeeping "
+            f"at {path}: {e}",
+            err=True,
+        )
+        return ""
+
+
+def _swarm_task_validation_status(task: dict[str, object]) -> str:
+    if task.get("status") != "shipped":
+        return f"not merged by swarm; status={task.get('status', 'unknown')}"
+    if task.get("merge_sha"):
+        return "swarm auto-merge completed; merge-gate details are in the PR/checks"
+    return "swarm auto-merge completed; merge commit SHA was not captured"
+
+
+def _swarm_task_residual_risk(task: dict[str, object]) -> str:
+    reason = task.get("failure_reason")
+    if isinstance(reason, str) and reason:
+        return reason
+    return "none recorded by swarm"
+
+
+def _swarm_bookkeeping_string_values(entry: dict[str, object], key: str) -> tuple[str, ...]:
+    values = entry.get(key)
+    if not isinstance(values, list):
+        return ()
+    return tuple(str(value) for value in values)
+
+
+def _swarm_cortex_bookkeeping_entry(
+    task: dict[str, object],
+    *,
+    repo_root: Path,
+    repo_slug: str | None,
+) -> dict[str, object] | None:
+    if task.get("status") != "shipped":
+        return None
+    pr_number = _swarm_pr_number(task.get("pr_url"))
+    if pr_number is None:
+        return None
+    brief_path = task.get("brief")
+    brief_ref: str | Path | None = brief_path if isinstance(brief_path, str) else None
+    brief_body = _swarm_read_brief_for_bookkeeping(brief_path, repo_root=repo_root)
+    closed_issues = _swarm_issue_closing_refs(
+        brief_body,
+        brief_ref,
+        repo_slug=repo_slug,
+    )
+    return {
+        "pr_number": pr_number,
+        "pr_url": task.get("pr_url"),
+        "branch": task.get("branch"),
+        "brief": task.get("brief"),
+        "merge_sha": task.get("merge_sha"),
+        "commits": _as_nonnegative_int(task.get("commits")),
+        "closed_issues": closed_issues,
+        "validation_status": _swarm_task_validation_status(task),
+        "residual_risks": [_swarm_task_residual_risk(task)],
+    }
+
+
+def _swarm_cortex_manual_commands(
+    *,
+    run_id: str,
+    manifest_path: Path,
+    merged_prs: list[dict[str, object]],
+    hook_path: Path | None,
+) -> list[str]:
+    commands = [f"conductor swarm status {shlex.quote(str(manifest_path))}"]
+    if hook_path is not None:
+        for entry in merged_prs:
+            commands.append(
+                "TOUCHSTONE_MERGED_PR={pr} bash {hook}".format(
+                    pr=shlex.quote(str(entry["pr_number"])),
+                    hook=shlex.quote(str(hook_path)),
+                )
+            )
+        return commands
+
+    today = datetime.now(UTC).date().isoformat()
+    commands.extend(
+        [
+            "git checkout -b "
+            + shlex.quote(f"docs/cortex-swarm-{run_id[:24]}"),
+            "mkdir -p .cortex/journal",
+        ]
+    )
+    for entry in merged_prs:
+        path = f".cortex/journal/{today}-pr-{entry['pr_number']}-merged.md"
+        quoted_path = shlex.quote(path)
+        commands.append(
+            "test ! -e {path} || {{ echo {message} >&2; exit 1; }}".format(
+                path=quoted_path,
+                message=shlex.quote(
+                    f"ERROR: {path} already exists; inspect it before writing"
+                ),
+            )
+        )
+        commands.append(
+            "cp .cortex/templates/journal/pr-merged.md " + quoted_path
+        )
+        commands.append("${EDITOR:-vi} " + shlex.quote(path))
+    commands.extend(
+        [
+            "cortex refresh-state --path .",
+            "bash scripts/touchstone-run.sh validate",
+            "git add .cortex/journal .cortex/state.md",
+            "git commit -m "
+            + shlex.quote(f"Record Cortex post-merge notes for swarm {run_id}"),
+            "bash scripts/open-pr.sh --auto-merge",
+        ]
+    )
+    return commands
+
+
+def _swarm_write_cortex_bookkeeping_brief(
+    *,
+    repo_root: Path,
+    run_id: str,
+    manifest_path: Path,
+    base_branch: object,
+    base_ref: object,
+    merged_prs: list[dict[str, object]],
+    non_merged_tasks: list[dict[str, object]],
+    hook_path: Path | None,
+) -> tuple[Path, str]:
+    brief_path = _swarm_bookkeeping_dir(repo_root) / f"{run_id}-cortex-post-merge.md"
+    commands = _swarm_cortex_manual_commands(
+        run_id=run_id,
+        manifest_path=manifest_path,
+        merged_prs=merged_prs,
+        hook_path=hook_path,
+    )
+    lines = [
+        f"# Cortex post-merge bookkeeping for swarm run {run_id}",
+        "",
+        "Goal",
+        "Create the repo-level Cortex post-merge bookkeeping PR for this swarm run.",
+        "Write append-only `journal/pr-merged.md` entries for every merged PR below and "
+        "refresh generated state only through the repo's normal Cortex workflow.",
+        "",
+        "Constraints",
+        "- Preserve append-only Cortex journal history.",
+        "- Do not hand-edit protected/generated files except via the normal Cortex "
+        "refresh command.",
+        "- Include merged PRs, closed issues, commit SHAs, validation status, and residual risks.",
+        "",
+        "Context",
+        f"- Manifest: {manifest_path}",
+        f"- Repo root: {repo_root}",
+        f"- Base: {base_branch}@{base_ref}",
+        "- Cortex trigger: T1.9, pull request merged to the default branch -> "
+        "`journal/pr-merged.md`.",
+        "",
+        "Merged PRs",
+    ]
+    for entry in merged_prs:
+        closed = (
+            ", ".join(_swarm_bookkeeping_string_values(entry, "closed_issues"))
+            or "none detected"
+        )
+        risks = "; ".join(_swarm_bookkeeping_string_values(entry, "residual_risks"))
+        lines.extend(
+            [
+                f"- PR #{entry['pr_number']}: {entry['pr_url']}",
+                f"  - branch: {entry['branch']}",
+                f"  - brief: {entry['brief']}",
+                f"  - merge commit: {entry['merge_sha'] or 'not captured'}",
+                f"  - worker commits: {entry['commits']}",
+                f"  - closes issues: {closed}",
+                f"  - validation status: {entry['validation_status']}",
+                f"  - known residual risks: {risks}",
+            ]
+        )
+    if non_merged_tasks:
+        lines.extend(["", "Non-Merged Swarm Tasks"])
+        for task in non_merged_tasks:
+            lines.append(
+                "- {status}: {brief} -> {branch}; reason: {reason}".format(
+                    status=task.get("status", "unknown"),
+                    brief=task.get("brief", ""),
+                    branch=task.get("branch", ""),
+                    reason=task.get("failure_reason") or "none recorded",
+                )
+            )
+    lines.extend(["", "Exact Follow-Up Commands"])
+    lines.extend(f"```bash\n{command}\n```" for command in commands)
+    lines.append("")
+    lines.append("Expected output")
+    lines.append(
+        "A follow-up PR that adds one `.cortex/journal/YYYY-MM-DD-pr-N-merged.md` "
+        "entry per merged PR and refreshes `.cortex/state.md` when the project "
+        "workflow requires it."
+    )
+
+    brief_path.parent.mkdir(parents=True, exist_ok=True)
+    brief_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    follow_up_command = (
+        "conductor swarm --provider codex --brief "
+        + shlex.quote(str(brief_path))
+        + " --auto-merge"
+    )
+    return brief_path, follow_up_command
+
+
+def _swarm_build_cortex_bookkeeping(
+    *,
+    repo_root: Path,
+    run_id: str,
+    manifest_path: Path,
+    payload: dict[str, object],
+) -> SwarmCortexBookkeeping | None:
+    tasks = _swarm_manifest_tasks(payload, path=manifest_path)
+    repo_slug = _swarm_github_repo_slug(repo_root)
+    merged_prs = [
+        entry
+        for task in tasks
+        if (
+            entry := _swarm_cortex_bookkeeping_entry(
+                task,
+                repo_root=repo_root,
+                repo_slug=repo_slug,
+            )
+        )
+        is not None
+    ]
+    if not merged_prs:
+        return None
+    required = _swarm_cortex_post_merge_required(repo_root)
+    if not required:
+        return SwarmCortexBookkeeping(
+            required=False,
+            status="not-configured",
+            context_path=None,
+            follow_up_command=None,
+            merged_prs=merged_prs,
+            residual_risks=[],
+        )
+
+    non_merged_tasks = [task for task in tasks if task.get("status") != "shipped"]
+    hook_path = _swarm_cortex_hook_path(repo_root)
+    context_path, follow_up_command = _swarm_write_cortex_bookkeeping_brief(
+        repo_root=repo_root,
+        run_id=run_id,
+        manifest_path=manifest_path,
+        base_branch=payload.get("base_branch", ""),
+        base_ref=payload.get("base_ref", ""),
+        merged_prs=merged_prs,
+        non_merged_tasks=non_merged_tasks,
+        hook_path=hook_path,
+    )
+    residual_risks = [
+        f"{task.get('brief')}: {task.get('failure_reason') or task.get('status')}"
+        for task in non_merged_tasks
+    ]
+    return SwarmCortexBookkeeping(
+        required=True,
+        status="follow-up-brief-queued",
+        context_path=str(context_path),
+        follow_up_command=follow_up_command,
+        merged_prs=merged_prs,
+        residual_risks=residual_risks,
+    )
+
+
+def _swarm_payload_with_cortex_bookkeeping(
+    *,
+    repo_root: Path,
+    run_id: str,
+    manifest_path: Path,
+    payload: dict[str, object],
+) -> tuple[dict[str, object], SwarmCortexBookkeeping | None]:
+    bookkeeping = _swarm_build_cortex_bookkeeping(
+        repo_root=repo_root,
+        run_id=run_id,
+        manifest_path=manifest_path,
+        payload=payload,
+    )
+    if bookkeeping is None:
+        return payload, None
+    updated = dict(payload)
+    updated["post_merge_bookkeeping"] = bookkeeping.to_json()
+    return updated, bookkeeping
+
+
+def _emit_swarm_cortex_bookkeeping_notice(
+    bookkeeping: SwarmCortexBookkeeping | None,
+    *,
+    err: bool,
+) -> None:
+    if bookkeeping is None or not bookkeeping.required:
+        return
+    click.echo(
+        "[conductor] Cortex post-merge bookkeeping required for merged swarm PRs.",
+        err=err,
+    )
+    if bookkeeping.context_path is not None:
+        click.echo(f"[conductor] Bookkeeping brief: {bookkeeping.context_path}", err=err)
+    if bookkeeping.follow_up_command is not None:
+        click.echo(f"[conductor] Follow-up command: {bookkeeping.follow_up_command}", err=err)
 
 
 def _append_swarm_closing_refs_to_head_commit(worktree: Path, refs: list[str]) -> None:
@@ -6732,6 +7107,15 @@ def _run_swarm_retry_ship_command(
         task_index=task_index,
         auto_merge=auto_merge,
     )
+    repo_root_value = updated.get("repo_root")
+    repo_root = Path(repo_root_value) if isinstance(repo_root_value, str) else _swarm_repo_root()
+    run_id = str(updated.get("run_id") or path.stem)
+    updated, bookkeeping = _swarm_payload_with_cortex_bookkeeping(
+        repo_root=repo_root,
+        run_id=run_id,
+        manifest_path=path,
+        payload=updated,
+    )
     _write_swarm_manifest(path, updated)
     updated_task = _swarm_manifest_tasks(updated, path=path)[task_index]
     detail = "{status}: {brief} -> {branch}".format(
@@ -6742,6 +7126,7 @@ def _run_swarm_retry_ship_command(
     if updated_task.get("pr_url"):
         detail += f" ({updated_task['pr_url']})"
     click.echo(detail)
+    _emit_swarm_cortex_bookkeeping_notice(bookkeeping, err=False)
     if updated_task.get("status") not in SWARM_SUCCESS_STATUSES:
         sys.exit(1)
 
@@ -6835,6 +7220,19 @@ def _format_swarm_manifest_status(payload: dict[str, object], *, path: Path) -> 
             if raw_task.get("failure_reason"):
                 line += f" reason={raw_task['failure_reason']}"
             lines.append(line)
+    bookkeeping = payload.get("post_merge_bookkeeping")
+    if isinstance(bookkeeping, dict):
+        required = bookkeeping.get("required")
+        if required is True:
+            lines.append(
+                "cortex-post-merge: {status}".format(
+                    status=bookkeeping.get("status", "unknown"),
+                )
+            )
+            if bookkeeping.get("context_path"):
+                lines.append(f"  context: {bookkeeping['context_path']}")
+            if bookkeeping.get("follow_up_command"):
+                lines.append(f"  command: {bookkeeping['follow_up_command']}")
     return lines
 
 
@@ -8269,23 +8667,28 @@ def swarm(
     ended_at = _swarm_now_iso()
     duration_ms = int((time.monotonic() - run_started_monotonic) * 1000)
     manifest_tasks = _swarm_manifest_task_records(results)
-    _write_swarm_manifest(
-        manifest_path,
-        _swarm_manifest_payload(
-            run_id=run_id,
-            repo_root=repo_root,
-            base_branch=base_branch,
-            base_ref=base_ref,
-            started_at=started_at,
-            ended_at=ended_at,
-            duration_ms=duration_ms,
-            tasks=manifest_tasks,
-            preflight=preflight,
-        ),
+    manifest_payload = _swarm_manifest_payload(
+        run_id=run_id,
+        repo_root=repo_root,
+        base_branch=base_branch,
+        base_ref=base_ref,
+        started_at=started_at,
+        ended_at=ended_at,
+        duration_ms=duration_ms,
+        tasks=manifest_tasks,
+        preflight=preflight,
     )
+    manifest_payload, cortex_bookkeeping = _swarm_payload_with_cortex_bookkeeping(
+        repo_root=repo_root,
+        run_id=run_id,
+        manifest_path=manifest_path,
+        payload=manifest_payload,
+    )
+    _write_swarm_manifest(manifest_path, manifest_payload)
 
     payload = _swarm_summary(results)
     if as_json:
+        _emit_swarm_cortex_bookkeeping_notice(cortex_bookkeeping, err=True)
         click.echo(json.dumps(payload, indent=2))
     else:
         for result in results:
@@ -8304,6 +8707,7 @@ def swarm(
             "no-changes={no_changes_count} "
             "provider-failed={provider_failed_count}".format(**summary_display)
         )
+        _emit_swarm_cortex_bookkeeping_notice(cortex_bookkeeping, err=False)
     if not payload["ok"]:
         sys.exit(1)
 
