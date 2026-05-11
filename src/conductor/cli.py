@@ -32,6 +32,7 @@ import tempfile
 import threading
 import time
 import tomllib
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
@@ -5539,6 +5540,7 @@ SWARM_WORKTREE_LOCK = threading.Lock()
 SWARM_GIT_TIMEOUT_SEC = 30.0
 SWARM_GH_TIMEOUT_SEC = 30.0
 SWARM_SHIP_TIMEOUT_SEC = 1800.0
+SWARM_MANIFEST_SCHEMA_VERSION = 1
 _SWARM_FENCED_CODE_BLOCK_RE = re.compile(r"(?ms)^```.*?^```")
 _SWARM_CLOSING_LINE_RE = re.compile(
     r"(?im)^\s*(?:Closes|Fixes|Resolves)\s+"
@@ -5602,6 +5604,18 @@ def _swarm_branch_for_brief(path: str) -> str:
 
 def _swarm_worktree_for_brief(path: str, *, repo_root: Path) -> Path:
     return (repo_root / ".cache" / "conductor" / "swarm" / _sanitize_swarm_stem(path)).resolve()
+
+
+def _swarm_runs_dir(repo_root: Path) -> Path:
+    return repo_root / ".cache" / "conductor" / "swarm" / "runs"
+
+
+def _new_swarm_run_id(started_at: datetime) -> str:
+    return f"{started_at.strftime('%Y%m%dT%H%M%S%fZ')}-{uuid.uuid4().hex[:8]}"
+
+
+def _swarm_now_iso() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _append_unique_issue_ref(refs: list[str], seen: set[str], number: str) -> None:
@@ -5713,6 +5727,12 @@ def _append_swarm_closing_refs_to_head_commit(worktree: Path, refs: list[str]) -
 def _validate_swarm_briefs(briefs: tuple[str, ...], *, repo_root: Path) -> None:
     seen_branches: dict[str, str] = {}
     for brief_path in briefs:
+        stem = _sanitize_swarm_stem(brief_path)
+        if stem == "runs":
+            raise click.UsageError(
+                f"--brief {brief_path!r} maps to reserved swarm worktree slug 'runs'; "
+                "rename the brief file."
+            )
         branch = _swarm_branch_for_brief(brief_path)
         if branch in seen_branches:
             raise click.UsageError(
@@ -5992,6 +6012,171 @@ def _swarm_summary(results: list[SwarmTaskResult]) -> dict[str, object]:
         "failed_count": failed_count,
         "no_changes_count": no_changes_count,
     }
+
+
+def _swarm_initial_task_records(
+    briefs: tuple[str, ...],
+    *,
+    repo_root: Path,
+) -> list[dict[str, object]]:
+    tasks: list[dict[str, object]] = []
+    for brief_path in briefs:
+        tasks.append(
+            {
+                "brief": brief_path,
+                "branch": _swarm_branch_for_brief(brief_path),
+                "worktree": str(_swarm_worktree_for_brief(brief_path, repo_root=repo_root)),
+                "status": "pending",
+                "commits": 0,
+                "pr_url": None,
+                "merge_sha": None,
+                "duration_ms": 0,
+                "failure_reason": None,
+                "cleanup_status": "pending",
+            }
+        )
+    return tasks
+
+
+def _swarm_manifest_payload(
+    *,
+    run_id: str,
+    repo_root: Path,
+    base_branch: str,
+    base_ref: str | None,
+    started_at: str,
+    ended_at: str | None,
+    duration_ms: int | None,
+    tasks: list[dict[str, object]],
+) -> dict[str, object]:
+    shipped_count = sum(1 for task in tasks if task.get("status") == "shipped")
+    failed_count = sum(1 for task in tasks if task.get("status") == "failed")
+    no_changes_count = sum(1 for task in tasks if task.get("status") == "no-changes")
+    ok = bool(tasks) and all(task.get("status") in SWARM_SUCCESS_STATUSES for task in tasks)
+    return {
+        "schema_version": SWARM_MANIFEST_SCHEMA_VERSION,
+        "run_id": run_id,
+        "repo_root": str(repo_root),
+        "base_branch": base_branch,
+        "base_ref": base_ref,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "duration_ms": duration_ms,
+        "tasks": tasks,
+        "ok": ok,
+        "shipped_count": shipped_count,
+        "failed_count": failed_count,
+        "no_changes_count": no_changes_count,
+    }
+
+
+def _write_swarm_manifest(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        temp_path.replace(path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _swarm_manifest_task_records(results: list[SwarmTaskResult]) -> list[dict[str, object]]:
+    tasks: list[dict[str, object]] = []
+    for result in results:
+        task = result.to_json()
+        task["cleanup_status"] = "removed" if not Path(result.worktree).exists() else "preserved"
+        tasks.append(task)
+    return tasks
+
+
+def _read_swarm_manifest(path: Path) -> dict[str, object]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as e:
+        raise click.ClickException(f"could not read swarm manifest {path}: {e}") from e
+    except json.JSONDecodeError as e:
+        raise click.ClickException(f"invalid swarm manifest JSON at {path}: {e}") from e
+    if not isinstance(payload, dict):
+        raise click.ClickException(
+            f"invalid swarm manifest at {path}: top-level value is not an object"
+        )
+    return payload
+
+
+def _latest_swarm_manifest_path(repo_root: Path) -> Path:
+    runs_dir = _swarm_runs_dir(repo_root)
+    manifests = sorted(runs_dir.glob("*.json"), key=lambda path: path.stem, reverse=True)
+    if not manifests:
+        raise click.ClickException(f"no swarm manifests found in {runs_dir}")
+    return manifests[0]
+
+
+def _resolve_swarm_manifest_path(run_id_or_path: str | None, *, latest: bool) -> Path:
+    if latest:
+        return _latest_swarm_manifest_path(_swarm_repo_root())
+    if run_id_or_path is None:
+        raise click.UsageError("pass --latest or a run id/path.")
+    candidate = Path(run_id_or_path).expanduser()
+    if candidate.exists():
+        return candidate
+    repo_root = _swarm_repo_root()
+    run_id_path = _swarm_runs_dir(repo_root) / f"{run_id_or_path.removesuffix('.json')}.json"
+    if run_id_path.exists():
+        return run_id_path
+    raise click.ClickException(f"swarm manifest not found: {run_id_or_path}")
+
+
+def _format_swarm_manifest_status(payload: dict[str, object], *, path: Path) -> list[str]:
+    run_id = payload.get("run_id", path.stem)
+    ok = payload.get("ok")
+    if payload.get("ended_at") is None:
+        status = "running"
+    else:
+        status = "ok" if ok is True else "failed" if ok is False else "unknown"
+    lines = [
+        f"swarm run {run_id} ({status})",
+        f"manifest: {path}",
+        (
+            "repo: {repo} base: {branch}@{ref}".format(
+                repo=payload.get("repo_root", ""),
+                branch=payload.get("base_branch", ""),
+                ref=payload.get("base_ref", ""),
+            )
+        ),
+        (
+            "started: {started} ended: {ended} duration_ms={duration}".format(
+                started=payload.get("started_at", ""),
+                ended=payload.get("ended_at") or "running",
+                duration=payload.get("duration_ms"),
+            )
+        ),
+        (
+            "ok={ok} shipped={shipped} failed={failed} no-changes={no_changes}".format(
+                ok=payload.get("ok"),
+                shipped=payload.get("shipped_count", 0),
+                failed=payload.get("failed_count", 0),
+                no_changes=payload.get("no_changes_count", 0),
+            )
+        ),
+    ]
+    tasks = payload.get("tasks", [])
+    if isinstance(tasks, list):
+        for raw_task in tasks:
+            if not isinstance(raw_task, dict):
+                continue
+            line = (
+                "- {status}: {brief} -> {branch}".format(
+                    status=raw_task.get("status", "unknown"),
+                    brief=raw_task.get("brief", ""),
+                    branch=raw_task.get("branch", ""),
+                )
+            )
+            if raw_task.get("pr_url"):
+                line += f" ({raw_task['pr_url']})"
+            if raw_task.get("failure_reason"):
+                line += f" reason={raw_task['failure_reason']}"
+            lines.append(line)
+    return lines
 
 
 def _run_swarm_task(
@@ -7246,18 +7431,17 @@ def exec_cmd(
 # --------------------------------------------------------------------------- #
 
 
-@main.command(name="swarm")
+@main.group(name="swarm", invoke_without_command=True)
+@click.pass_context
 @click.option(
     "--brief",
     "briefs",
     multiple=True,
-    required=True,
     help="Path to one task brief. Repeat for multiple independent tasks.",
 )
 @click.option(
     "--provider",
     "provider_id",
-    required=True,
     help="Provider to run for every task. v0 supports codex only.",
 )
 @click.option(
@@ -7313,8 +7497,9 @@ def exec_cmd(
     help="Maximum number of swarm tasks to run concurrently.",
 )
 def swarm(
+    ctx: click.Context,
     briefs: tuple[str, ...],
-    provider_id: str,
+    provider_id: str | None,
     base_branch: str,
     auto_merge: bool,
     max_iterations: int | None,
@@ -7325,6 +7510,12 @@ def swarm(
     max_parallel: int,
 ) -> None:
     """Run independent coding briefs under Conductor's supervisor."""
+    if ctx.invoked_subcommand is not None:
+        return
+    if not briefs:
+        raise click.UsageError("pass at least one --brief.")
+    if provider_id is None:
+        raise click.UsageError("pass --provider <id>.")
     if provider_id != "codex":
         raise click.UsageError("conductor swarm currently supports --provider codex only.")
 
@@ -7338,6 +7529,25 @@ def swarm(
         ).stdout.strip()
     except RuntimeError as e:
         raise click.UsageError(str(e)) from e
+    run_started_monotonic = time.monotonic()
+    started_datetime = datetime.now(UTC)
+    started_at = started_datetime.isoformat().replace("+00:00", "Z")
+    run_id = _new_swarm_run_id(started_datetime)
+    manifest_path = _swarm_runs_dir(repo_root) / f"{run_id}.json"
+    manifest_tasks = _swarm_initial_task_records(briefs, repo_root=repo_root)
+    _write_swarm_manifest(
+        manifest_path,
+        _swarm_manifest_payload(
+            run_id=run_id,
+            repo_root=repo_root,
+            base_branch=base_branch,
+            base_ref=base_ref,
+            started_at=started_at,
+            ended_at=None,
+            duration_ms=None,
+            tasks=manifest_tasks,
+        ),
+    )
 
     def run_one(brief_path: str) -> SwarmTaskResult:
         return _run_swarm_task(
@@ -7355,7 +7565,10 @@ def swarm(
 
     if max_parallel == 1 or len(briefs) == 1:
         for brief_path in briefs:
-            results.append(run_one(brief_path))
+            try:
+                results.append(run_one(brief_path))
+            except Exception as e:
+                results.append(_failed_swarm_thread_result(brief_path, e))
     else:
         result_slots: list[SwarmTaskResult | None] = [None] * len(briefs)
         with ThreadPoolExecutor(max_workers=max_parallel) as executor:
@@ -7372,6 +7585,23 @@ def swarm(
                     result_slots[index] = _failed_swarm_thread_result(brief_path, e)
         results = [result for result in result_slots if result is not None]
 
+    ended_at = _swarm_now_iso()
+    duration_ms = int((time.monotonic() - run_started_monotonic) * 1000)
+    manifest_tasks = _swarm_manifest_task_records(results)
+    _write_swarm_manifest(
+        manifest_path,
+        _swarm_manifest_payload(
+            run_id=run_id,
+            repo_root=repo_root,
+            base_branch=base_branch,
+            base_ref=base_ref,
+            started_at=started_at,
+            ended_at=ended_at,
+            duration_ms=duration_ms,
+            tasks=manifest_tasks,
+        ),
+    )
+
     payload = _swarm_summary(results)
     if as_json:
         click.echo(json.dumps(payload, indent=2))
@@ -7387,6 +7617,22 @@ def swarm(
         )
     if not payload["ok"]:
         sys.exit(1)
+
+
+@swarm.command(name="status")
+@click.argument("run_id_or_path", required=False)
+@click.option(
+    "--latest",
+    is_flag=True,
+    default=False,
+    help="Inspect the newest manifest in .cache/conductor/swarm/runs.",
+)
+def swarm_status(run_id_or_path: str | None, latest: bool) -> None:
+    """Print a concise status view for a swarm run manifest."""
+    path = _resolve_swarm_manifest_path(run_id_or_path, latest=latest)
+    payload = _read_swarm_manifest(path)
+    for line in _format_swarm_manifest_status(payload, path=path):
+        click.echo(line)
 
 
 # --------------------------------------------------------------------------- #

@@ -39,6 +39,9 @@ build/
 .next/
 out/
 
+# Conductor runtime cache
+.cache/conductor/
+
 # Touchstone
 *.bak
 .cortex/.index.json
