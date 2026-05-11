@@ -95,6 +95,27 @@ def test_review_sentinel_contract_rejects_missing_context_claim_with_embedded_pa
     assert exc_info.value.reason == "missing-context"
 
 
+def test_review_sentinel_contract_rejects_no_tool_access_claim_with_embedded_patch():
+    prompt = (
+        STRICT_SENTINEL_PROMPT
+        + "\n\nPatch context for generic review fallback:\n"
+        + "```diff\n"
+        + "diff --git a/app.py b/app.py\n"
+        + "+print('review me')\n"
+        + "```"
+    )
+
+    with pytest.raises(ReviewOutputContractError, match="missing-context"):
+        validate_requested_review_sentinel(
+            provider_name="openrouter",
+            prompt=prompt,
+            text=(
+                "I cannot access repository tools or inspect the diff, so I "
+                "cannot perform a meaningful review.\nCODEX_REVIEW_BLOCKED"
+            ),
+        )
+
+
 def test_review_sentinel_contract_allows_missing_context_claim_without_patch():
     prompt = (
         STRICT_SENTINEL_PROMPT

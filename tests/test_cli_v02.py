@@ -1697,6 +1697,74 @@ def test_review_auto_generic_fallback_rejects_missing_requested_sentinel(
     assert "ReviewOutputContractError" in result.stderr
 
 
+def test_review_auto_openrouter_no_context_blocked_is_infrastructure_failure(
+    mocker, tmp_path
+):
+    from conductor.providers.interface import ProviderStalledError
+
+    repo = _make_diff_repo(tmp_path)
+    _stub_all_configured(mocker, {"codex", "claude", "openrouter"})
+    mocker.patch.object(CodexProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(ClaudeProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(
+        CodexProvider,
+        "review",
+        side_effect=ProviderStalledError("codex review stalled"),
+    )
+    mocker.patch.object(
+        ClaudeProvider,
+        "review",
+        side_effect=ProviderStalledError("claude review stalled"),
+    )
+    openrouter_call = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=CallResponse(
+            text=(
+                "I cannot access repository tools or inspect the diff, so I "
+                "cannot provide an actionable code review.\nCODEX_REVIEW_BLOCKED"
+            ),
+            provider="openrouter",
+            model="test-model",
+            duration_ms=10,
+            usage={},
+            raw={},
+        ),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--max-fallbacks",
+            "3",
+            "--cwd",
+            str(repo),
+            "--base",
+            "HEAD~1",
+            "--tags",
+            "code-review,tool-use",
+            "--brief",
+            (
+                "The LAST line of your output must be exactly one of these "
+                "three sentinels: CODEX_REVIEW_CLEAN, CODEX_REVIEW_FIXED, "
+                "or CODEX_REVIEW_BLOCKED."
+            ),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    prompt = openrouter_call.call_args.args[0]
+    assert "Patch context for generic review fallback" in prompt
+    assert "diff --git a/README.md b/README.md" in prompt
+    assert "+fallback diff marker" in prompt
+    assert "openrouter (output-contract)" in result.stderr
+    assert "missing-context" in result.stderr
+    assert "cannot provide an actionable code review" in result.stderr
+
+
 def test_review_auto_codex_subprocess_rejects_missing_requested_sentinel(mocker):
     # Exercises the same conductor review --auto -> codex subprocess path used
     # by scripts/codex-review.sh when codex is the selected native reviewer.
