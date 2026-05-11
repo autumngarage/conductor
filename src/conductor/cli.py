@@ -5583,6 +5583,7 @@ def _append_previous_phase_results(body: str, summaries: list[str]) -> str:
 
 SWARM_SUCCESS_STATUSES = frozenset({"shipped", "no-changes"})
 SWARM_PROVIDER_FAILED_STATUS = "provider-failed"
+SWARM_CONFLICT_STATUS = "needs-human-conflict-resolution"
 SWARM_BRANCH_PREFIX = "feat/swarm"
 SWARM_WORKTREE_LOCK = threading.Lock()
 SWARM_GIT_TIMEOUT_SEC = 30.0
@@ -5591,6 +5592,7 @@ SWARM_SHIP_TIMEOUT_SEC = 1800.0
 SWARM_MANIFEST_SCHEMA_VERSION = 1
 SWARM_METRICS_SCHEMA_VERSION = 1
 SWARM_PREFLIGHT_SCHEMA_VERSION = 1
+SWARM_MERGE_PLAN_SCHEMA_VERSION = 1
 SWARM_CORTEX_BOOKKEEPING_SCHEMA_VERSION = 1
 SWARM_PREFLIGHT_SUBSYSTEMS = frozenset(
     {
@@ -5625,6 +5627,7 @@ _SWARM_GENERATED_ISSUE_HEADER_RE = re.compile(
     r"(?P<number>[1-9]\d*)\)\s*$"
 )
 _SWARM_ISSUE_PATH_SEGMENT_RE = re.compile(r"(?i)^issue[-_](?P<number>[1-9]\d*)\b")
+_SWARM_DEPENDS_ON_RE = re.compile(r"(?im)^\s*Depends-On:\s*(?P<target>.+?)\s*$")
 _SWARM_PROVIDER_TRANSIENT_SIGNALS = (
     "websocket",
     "connection closed",
@@ -6278,11 +6281,20 @@ def _swarm_preflight_lane(
         if re.search(rf"(?<![A-Za-z0-9_-]){re.escape(subsystem)}(?![A-Za-z0-9_-])", lowered)
     )
     issue_refs = _swarm_issue_closing_refs(body, resolved_path, repo_slug=repo_slug)
+    depends_on = sorted(
+        {
+            target.strip("`'\" ")
+            for match in _SWARM_DEPENDS_ON_RE.finditer(searchable_body)
+            for target in re.split(r"[, ]+", match.group("target"))
+            if target.strip("`'\" ")
+        }
+    )
     return {
         "brief": brief_path,
         "file_paths": file_paths,
         "subsystems": subsystems,
         "issue_refs": issue_refs,
+        "depends_on": depends_on,
     }
 
 
@@ -6436,6 +6448,23 @@ def _swarm_commit_count(worktree: Path, base_branch: str) -> int:
 def _swarm_dirty_paths(worktree: Path) -> list[str]:
     output = _run_swarm_git(["status", "--porcelain"], cwd=worktree).stdout
     return [line for line in output.splitlines() if line.strip()]
+
+
+def _swarm_changed_files(worktree: Path, base_ref: str) -> list[str]:
+    output = _run_swarm_git(
+        ["diff", "--name-only", f"{base_ref}...HEAD"],
+        cwd=worktree,
+    ).stdout
+    return sorted(line for line in output.splitlines() if line.strip())
+
+
+def _swarm_unmerged_files(worktree: Path) -> list[str]:
+    output = _run_swarm_git(
+        ["diff", "--name-only", "--diff-filter=U"],
+        cwd=worktree,
+        check=False,
+    ).stdout
+    return sorted({line for line in output.splitlines() if line.strip()})
 
 
 def _remove_swarm_worktree(worktree: Path, *, repo_root: Path) -> None:
@@ -6651,7 +6680,9 @@ def _timeout_output_text(value: str | bytes | None) -> str:
 
 def _swarm_summary(results: list[SwarmTaskResult]) -> dict[str, object]:
     shipped_count = sum(1 for result in results if result.status == "shipped")
-    failed_count = sum(1 for result in results if result.status == "failed")
+    failed_count = sum(
+        1 for result in results if result.status in {"failed", SWARM_CONFLICT_STATUS}
+    )
     no_changes_count = sum(1 for result in results if result.status == "no-changes")
     ok = all(result.status in SWARM_SUCCESS_STATUSES for result in results)
     return {
@@ -6659,6 +6690,42 @@ def _swarm_summary(results: list[SwarmTaskResult]) -> dict[str, object]:
             result.to_json(include_provider_details=False)
             for result in results
         ],
+        "ok": ok,
+        "shipped_count": shipped_count,
+        "failed_count": failed_count,
+        "no_changes_count": no_changes_count,
+    }
+
+
+def _swarm_summary_from_task_records(tasks: list[dict[str, object]]) -> dict[str, object]:
+    shipped_count = sum(1 for task in tasks if task.get("status") == "shipped")
+    failed_count = sum(
+        1 for task in tasks if task.get("status") in {"failed", SWARM_CONFLICT_STATUS}
+    )
+    no_changes_count = sum(1 for task in tasks if task.get("status") == "no-changes")
+    ok = all(task.get("status") in SWARM_SUCCESS_STATUSES for task in tasks)
+    public_tasks = []
+    for task in tasks:
+        public_tasks.append(
+            {
+                key: value
+                for key, value in task.items()
+                if key
+                in {
+                    "brief",
+                    "branch",
+                    "worktree",
+                    "status",
+                    "commits",
+                    "pr_url",
+                    "merge_sha",
+                    "duration_ms",
+                    "failure_reason",
+                }
+            }
+        )
+    return {
+        "tasks": public_tasks,
         "ok": ok,
         "shipped_count": shipped_count,
         "failed_count": failed_count,
@@ -6698,10 +6765,12 @@ def _swarm_metrics_from_task_records(
         "schema_version": SWARM_METRICS_SCHEMA_VERSION,
         "total_tasks": len(tasks),
         "shipped_count": shipped_count,
-        "failed_count": status_counts.get("failed", 0),
+        "failed_count": status_counts.get("failed", 0)
+        + status_counts.get(SWARM_CONFLICT_STATUS, 0),
         "provider_failed_count": status_counts.get(SWARM_PROVIDER_FAILED_STATUS, 0),
         "no_changes_count": no_changes_count,
         "review_blocked_count": status_counts.get("review-blocked", 0),
+        "needs_human_conflict_resolution_count": status_counts.get(SWARM_CONFLICT_STATUS, 0),
         "pushed_not_merged_count": status_counts.get("pushed-not-merged", 0),
         "duration_ms": duration_ms,
         "per_status_counts": dict(sorted(status_counts.items())),
@@ -6771,7 +6840,9 @@ def _swarm_manifest_payload(
     preflight: dict[str, object] | None = None,
 ) -> dict[str, object]:
     shipped_count = sum(1 for task in tasks if task.get("status") == "shipped")
-    failed_count = sum(1 for task in tasks if task.get("status") == "failed")
+    failed_count = sum(
+        1 for task in tasks if task.get("status") in {"failed", SWARM_CONFLICT_STATUS}
+    )
     provider_failed_count = sum(
         1 for task in tasks if task.get("status") == SWARM_PROVIDER_FAILED_STATUS
     )
@@ -6800,6 +6871,167 @@ def _swarm_manifest_payload(
     return payload
 
 
+def _swarm_list_values(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return sorted(str(item) for item in value if isinstance(item, str) and item)
+
+
+def _swarm_dict_list(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    items: list[dict[str, object]] = []
+    for item in value:
+        if isinstance(item, dict):
+            items.append({str(key): val for key, val in item.items()})
+    return items
+
+
+def _swarm_preflight_lane_for_brief(
+    preflight: dict[str, object] | None,
+    brief: object,
+) -> dict[str, object]:
+    if not isinstance(brief, str) or not isinstance(preflight, dict):
+        return {}
+    lanes = preflight.get("lanes")
+    if not isinstance(lanes, list):
+        return {}
+    for lane in lanes:
+        if isinstance(lane, dict) and lane.get("brief") == brief:
+            return lane
+    return {}
+
+
+def _swarm_dependency_targets(
+    task: dict[str, object],
+    *,
+    preflight: dict[str, object] | None,
+) -> set[str]:
+    value = task.get("depends_on")
+    if value is None:
+        value = _swarm_preflight_lane_for_brief(preflight, task.get("brief")).get("depends_on")
+    if isinstance(value, str) and value:
+        return {value}
+    if not isinstance(value, list):
+        return set()
+    return {str(item) for item in value if isinstance(item, str) and item}
+
+
+def _swarm_merge_order(
+    tasks: list[dict[str, object]],
+    *,
+    preflight: dict[str, object] | None,
+) -> list[int]:
+    ready_indexes = [
+        index
+        for index, task in enumerate(tasks)
+        if task.get("status") == "ready-to-ship"
+    ]
+    remaining = set(ready_indexes)
+    ordered: list[int] = []
+
+    def task_tokens(index: int) -> set[str]:
+        task = tasks[index]
+        return {
+            str(value)
+            for value in (task.get("brief"), task.get("branch"))
+            if isinstance(value, str) and value
+        }
+
+    def shared_issue_group(index: int) -> str:
+        task = tasks[index]
+        lane = _swarm_preflight_lane_for_brief(preflight, task.get("brief"))
+        issue_refs = set(_swarm_list_values(lane.get("issue_refs")))
+        shared_issues: set[str] = set()
+        for other in sorted(remaining):
+            if other == index:
+                continue
+            other_task = tasks[other]
+            other_lane = _swarm_preflight_lane_for_brief(
+                preflight,
+                other_task.get("brief"),
+            )
+            shared_issues.update(issue_refs.intersection(_swarm_list_values(other_lane.get("issue_refs"))))
+        if not shared_issues:
+            return ""
+        return sorted(shared_issues)[0]
+
+    while remaining:
+        blocked_by_deps: set[int] = set()
+        for index in remaining:
+            deps = _swarm_dependency_targets(tasks[index], preflight=preflight)
+            if not deps:
+                continue
+            for other in remaining:
+                if other != index and deps.intersection(task_tokens(other)):
+                    blocked_by_deps.add(index)
+                    break
+        candidates = sorted(remaining - blocked_by_deps)
+        if not candidates:
+            candidates = sorted(remaining)
+
+        def score(index: int) -> tuple[int, str, int]:
+            task = tasks[index]
+            changed_files = set(_swarm_list_values(task.get("changed_files")))
+            overlaps = 0
+            for other in remaining:
+                if other == index:
+                    continue
+                other_task = tasks[other]
+                if changed_files.intersection(_swarm_list_values(other_task.get("changed_files"))):
+                    overlaps += 1
+            issue_group = shared_issue_group(index)
+            return (-overlaps, issue_group, index)
+
+        selected = min(candidates, key=score)
+        ordered.append(selected)
+        remaining.remove(selected)
+    return ordered
+
+
+def _swarm_merge_plan(
+    tasks: list[dict[str, object]],
+    *,
+    preflight: dict[str, object] | None,
+) -> dict[str, object]:
+    order = _swarm_merge_order(tasks, preflight=preflight)
+    plan_lanes: list[dict[str, object]] = []
+    for position, index in enumerate(order, start=1):
+        task = tasks[index]
+        lane = _swarm_preflight_lane_for_brief(preflight, task.get("brief"))
+        changed_files = _swarm_list_values(task.get("changed_files"))
+        overlaps = sorted(
+            {
+                str(tasks[other].get("brief"))
+                for other in order
+                if other != index
+                and set(changed_files).intersection(
+                    _swarm_list_values(tasks[other].get("changed_files"))
+                )
+            }
+        )
+        plan_lanes.append(
+            {
+                "position": position,
+                "task_index": index + 1,
+                "brief": task.get("brief"),
+                "branch": task.get("branch"),
+                "changed_files": changed_files,
+                "depends_on": sorted(
+                    _swarm_dependency_targets(task, preflight=preflight)
+                ),
+                "issue_refs": _swarm_list_values(lane.get("issue_refs")),
+                "overlaps_with": overlaps,
+            }
+        )
+    return {
+        "schema_version": SWARM_MERGE_PLAN_SCHEMA_VERSION,
+        "strategy": "dependency-aware-file-overlap-order",
+        "generated_from": "changed_files, preflight issue grouping, depends_on",
+        "lanes": plan_lanes,
+    }
+
+
 def _write_swarm_manifest(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
@@ -6817,6 +7049,218 @@ def _swarm_manifest_task_records(results: list[SwarmTaskResult]) -> list[dict[st
         task["cleanup_status"] = "removed" if not Path(result.worktree).exists() else "preserved"
         tasks.append(task)
     return tasks
+
+
+def _swarm_conflict_recovery(
+    *,
+    worktree: Path,
+    branch: str,
+    manifest_path: Path,
+    selector: str,
+    conflicted_files: list[str],
+) -> dict[str, object]:
+    return {
+        "status": SWARM_CONFLICT_STATUS,
+        "conflicted_files": conflicted_files,
+        "recovery_commands": [
+            f"cd {shlex.quote(str(worktree))}",
+            "git status --short --branch",
+            "git diff --name-only --diff-filter=U",
+            "# resolve conflicts, then: git add <resolved-files> && git rebase --continue",
+            (
+                "conductor swarm retry-ship "
+                f"{shlex.quote(str(manifest_path))} {shlex.quote(selector)}"
+            ),
+        ],
+        "abort_command": f"cd {shlex.quote(str(worktree))} && git rebase --abort",
+        "branch": branch,
+    }
+
+
+def _swarm_mark_conflict(
+    task: dict[str, object],
+    *,
+    worktree: Path,
+    branch: str,
+    manifest_path: Path,
+    selector: str,
+    reason: str,
+) -> None:
+    conflicted_files = _swarm_unmerged_files(worktree)
+    task["status"] = SWARM_CONFLICT_STATUS
+    task["failure_reason"] = reason
+    task["cleanup_status"] = "preserved"
+    task["conflict_state"] = _swarm_conflict_recovery(
+        worktree=worktree,
+        branch=branch,
+        manifest_path=manifest_path,
+        selector=selector,
+        conflicted_files=conflicted_files,
+    )
+
+
+def _swarm_rebase_ready_task(
+    task: dict[str, object],
+    *,
+    base_ref: str,
+    manifest_path: Path,
+    selector: str,
+) -> bool:
+    branch = task.get("branch")
+    raw_worktree = task.get("worktree")
+    if not isinstance(branch, str) or not branch:
+        task["status"] = "failed"
+        task["failure_reason"] = "swarm merge orchestration missing branch"
+        return False
+    if not isinstance(raw_worktree, str) or not raw_worktree:
+        task["status"] = "failed"
+        task["failure_reason"] = "swarm merge orchestration missing worktree"
+        return False
+    worktree = Path(raw_worktree)
+    if not worktree.exists():
+        task["status"] = "failed"
+        task["failure_reason"] = f"swarm merge orchestration missing worktree: {worktree}"
+        return False
+    try:
+        _require_swarm_branch_checked_out(worktree, branch, selector=selector)
+        dirty_paths = _swarm_dirty_paths(worktree)
+    except RuntimeError as e:
+        task["status"] = "failed"
+        task["failure_reason"] = str(e)
+        return False
+    except click.ClickException as e:
+        task["status"] = "failed"
+        task["failure_reason"] = e.message
+        return False
+    if dirty_paths:
+        task["status"] = "failed"
+        task["failure_reason"] = (
+            "swarm merge orchestration found uncommitted changes before rebase: "
+            + ", ".join(path[:200] for path in dirty_paths[:10])
+        )
+        return False
+    result = _run_swarm_git(["rebase", base_ref], cwd=worktree, check=False)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        _swarm_mark_conflict(
+            task,
+            worktree=worktree,
+            branch=branch,
+            manifest_path=manifest_path,
+            selector=selector,
+            reason=(
+                f"automatic rebase onto {base_ref} conflicted"
+                + (f": {detail}" if detail else "")
+            ),
+        )
+        return False
+    try:
+        task["commits"] = _swarm_commit_count(worktree, base_ref)
+        task["changed_files"] = _swarm_changed_files(worktree, base_ref)
+    except RuntimeError as e:
+        task["status"] = "failed"
+        task["failure_reason"] = str(e)
+        return False
+    if task["commits"] == 0:
+        task["status"] = "no-changes"
+        task["cleanup_status"] = "preserved"
+        return False
+    return True
+
+
+def _orchestrate_swarm_auto_merge(
+    *,
+    tasks: list[dict[str, object]],
+    repo_root: Path,
+    base_branch: str,
+    manifest_path: Path,
+    preflight: dict[str, object] | None,
+) -> dict[str, object] | None:
+    for task in tasks:
+        if task.get("status") != "ready-to-ship":
+            continue
+        raw_worktree = task.get("worktree")
+        base_ref = _run_swarm_git(
+            ["rev-parse", "--verify", base_branch],
+            cwd=repo_root,
+        ).stdout.strip()
+        if isinstance(raw_worktree, str) and raw_worktree:
+            worktree = Path(raw_worktree)
+            if worktree.exists():
+                try:
+                    task["changed_files"] = _swarm_changed_files(worktree, base_ref)
+                except RuntimeError as e:
+                    task["status"] = "failed"
+                    task["failure_reason"] = str(e)
+    merge_plan = _swarm_merge_plan(tasks, preflight=preflight)
+    order: list[int] = []
+    for lane in _swarm_dict_list(merge_plan.get("lanes")):
+        task_index = lane.get("task_index")
+        if isinstance(task_index, int):
+            order.append(task_index - 1)
+    for index in order:
+        task = tasks[index]
+        if task.get("status") != "ready-to-ship":
+            continue
+        selector = str(index + 1)
+        current_base = _run_swarm_git(
+            ["rev-parse", "--verify", base_branch],
+            cwd=repo_root,
+        ).stdout.strip()
+        if not _swarm_rebase_ready_task(
+            task,
+            base_ref=current_base,
+            manifest_path=manifest_path,
+            selector=selector,
+        ):
+            continue
+        branch = _swarm_task_string(task, "branch", selector=selector)
+        worktree = Path(_swarm_task_string(task, "worktree", selector=selector))
+        shipped_status, shipped_pr_url, shipped_detail = _ship_swarm_pr(
+            worktree,
+            base_branch=base_branch,
+            branch=branch,
+            auto_merge=True,
+        )
+        task["status"] = shipped_status
+        task["pr_url"] = shipped_pr_url
+        if shipped_status == "shipped":
+            task["merge_sha"] = shipped_detail
+            task["failure_reason"] = None
+            try:
+                _remove_swarm_worktree(worktree, repo_root=repo_root)
+                cleanup_warning = _delete_shipped_swarm_branch(
+                    branch,
+                    repo_root=repo_root,
+                    merge_sha=shipped_detail,
+                )
+                if cleanup_warning is not None:
+                    click.echo(f"[conductor] warning: {cleanup_warning}", err=True)
+                    task["failure_reason"] = cleanup_warning
+            except RuntimeError as e:
+                task["status"] = "failed"
+                task["failure_reason"] = f"cleanup failed after merge: {e}"
+            updated_base = _run_swarm_git(
+                ["rev-parse", "--verify", base_branch],
+                cwd=repo_root,
+            ).stdout.strip()
+            for remaining_index in order:
+                if remaining_index == index:
+                    continue
+                remaining_task = tasks[remaining_index]
+                if remaining_task.get("status") != "ready-to-ship":
+                    continue
+                _swarm_rebase_ready_task(
+                    remaining_task,
+                    base_ref=updated_base,
+                    manifest_path=manifest_path,
+                    selector=str(remaining_index + 1),
+                )
+        elif shipped_status in {"failed", "review-blocked"}:
+            task["failure_reason"] = shipped_detail
+        task["cleanup_status"] = "removed" if not worktree.exists() else "preserved"
+
+    return merge_plan if merge_plan["lanes"] else None
 
 
 def _read_swarm_manifest(path: Path) -> dict[str, object]:
@@ -6988,6 +7432,18 @@ def _format_swarm_resume(
         f"worktree branch: {branch_state}",
         "suggested commands:",
     ]
+    conflict_state = task.get("conflict_state")
+    if isinstance(conflict_state, dict):
+        files = conflict_state.get("conflicted_files")
+        if isinstance(files, list):
+            lines.append(
+                "conflicted files: "
+                + (", ".join(str(path) for path in files) or "unknown")
+            )
+        commands = conflict_state.get("recovery_commands")
+        if isinstance(commands, list) and commands:
+            lines.append("conflict recovery:")
+            lines.extend(f"  {command}" for command in commands if isinstance(command, str))
     if worktree is not None:
         lines.append(
             f"  inspect worktree: cd {shlex.quote(str(worktree))} && git status --short --branch"
@@ -7020,6 +7476,11 @@ def _retry_ship_swarm_task(
     base_ref = payload.get("base_ref")
     if not isinstance(base_ref, str) or not base_ref:
         raise click.ClickException(f"swarm manifest {manifest_path} has no base_ref")
+    if task.get("status") == SWARM_CONFLICT_STATUS:
+        base_ref = _run_swarm_git(
+            ["rev-parse", "--verify", base_branch],
+            cwd=repo_root,
+        ).stdout.strip()
 
     branch = _swarm_task_string(task, "branch", selector=selector)
     worktree = Path(_swarm_task_string(task, "worktree", selector=selector))
@@ -7224,6 +7685,20 @@ def _format_swarm_manifest_status(payload: dict[str, object], *, path: Path) -> 
             )
         ),
     ]
+    conflict_count = metrics.get("needs_human_conflict_resolution_count", 0)
+    if isinstance(conflict_count, int) and not isinstance(conflict_count, bool) and conflict_count:
+        lines.append(f"conflicts: needs-human-conflict-resolution={conflict_count}")
+    merge_plan = payload.get("merge_plan")
+    if isinstance(merge_plan, dict):
+        lanes = merge_plan.get("lanes")
+        if isinstance(lanes, list) and lanes:
+            order = [
+                str(lane.get("task_index"))
+                for lane in lanes
+                if isinstance(lane, dict) and lane.get("task_index") is not None
+            ]
+            if order:
+                lines.append("merge-plan: " + " -> ".join(order))
     if tasks:
         per_status = metrics.get("per_status_counts")
         if isinstance(per_status, dict) and per_status:
@@ -7254,6 +7729,20 @@ def _format_swarm_manifest_status(payload: dict[str, object], *, path: Path) -> 
             if raw_task.get("failure_reason"):
                 line += f" reason={raw_task['failure_reason']}"
             lines.append(line)
+            conflict_state = raw_task.get("conflict_state")
+            if isinstance(conflict_state, dict):
+                files = conflict_state.get("conflicted_files")
+                if isinstance(files, list):
+                    lines.append(
+                        "  conflicted files: "
+                        + (", ".join(str(path) for path in files) or "unknown")
+                    )
+                commands = conflict_state.get("recovery_commands")
+                if isinstance(commands, list) and commands:
+                    lines.append("  recovery commands:")
+                    lines.extend(
+                        f"    {command}" for command in commands if isinstance(command, str)
+                    )
     bookkeeping = payload.get("post_merge_bookkeeping")
     if isinstance(bookkeeping, dict):
         required = bookkeeping.get("required")
@@ -7283,6 +7772,7 @@ def _run_swarm_task(
     timeout_sec: int | None,
     keep_worktrees_on_failure: bool,
     as_json: bool,
+    defer_ship: bool = False,
 ) -> SwarmTaskResult:
     started_at = time.monotonic()
     repo_root = _swarm_repo_root()
@@ -7440,6 +7930,9 @@ def _run_swarm_task(
                 commits = _swarm_commit_count(worktree, base_ref)
                 if commits == 0:
                     status = "no-changes"
+                elif defer_ship:
+                    _append_swarm_closing_refs_to_head_commit(worktree, closing_refs)
+                    status = "ready-to-ship"
                 else:
                     _append_swarm_closing_refs_to_head_commit(worktree, closing_refs)
                     shipped_status, shipped_pr_url, shipped_detail = _ship_swarm_pr(
@@ -7488,6 +7981,7 @@ def _run_swarm_task(
     if (
         created_worktree
         and result.status != SWARM_PROVIDER_FAILED_STATUS
+        and result.status != "ready-to-ship"
         and (result.status in SWARM_SUCCESS_STATUSES or not keep_worktrees_on_failure)
     ):
         try:
@@ -7513,6 +8007,11 @@ def _run_swarm_task(
     elif result.status == "review-blocked":
         click.echo(
             f"[conductor] swarm task review-blocked: {brief_path}; inspect {worktree}",
+            err=True,
+        )
+    elif result.status == "ready-to-ship":
+        click.echo(
+            f"[conductor] swarm task ready-to-ship: {brief_path}; inspect {worktree}",
             err=True,
         )
     elif not as_json:
@@ -8841,6 +9340,7 @@ def swarm(
             timeout_sec=timeout_sec,
             keep_worktrees_on_failure=keep_worktrees_on_failure,
             as_json=as_json,
+            defer_ship=auto_merge,
         )
 
     if max_parallel == 1 or len(briefs) == 1:
@@ -8868,6 +9368,15 @@ def swarm(
     ended_at = _swarm_now_iso()
     duration_ms = int((time.monotonic() - run_started_monotonic) * 1000)
     manifest_tasks = _swarm_manifest_task_records(results)
+    merge_plan = None
+    if auto_merge:
+        merge_plan = _orchestrate_swarm_auto_merge(
+            tasks=manifest_tasks,
+            repo_root=repo_root,
+            base_branch=base_branch,
+            manifest_path=manifest_path,
+            preflight=preflight,
+        )
     manifest_payload = _swarm_manifest_payload(
         run_id=run_id,
         repo_root=repo_root,
@@ -8879,6 +9388,8 @@ def swarm(
         tasks=manifest_tasks,
         preflight=preflight,
     )
+    if merge_plan is not None:
+        manifest_payload["merge_plan"] = merge_plan
     manifest_payload, cortex_bookkeeping = _swarm_payload_with_cortex_bookkeeping(
         repo_root=repo_root,
         run_id=run_id,
@@ -8887,20 +9398,25 @@ def swarm(
     )
     _write_swarm_manifest(manifest_path, manifest_payload)
 
-    payload = _swarm_summary(results)
+    payload = _swarm_summary_from_task_records(manifest_tasks)
     if as_json:
         _emit_swarm_cortex_bookkeeping_notice(cortex_bookkeeping, err=True)
         click.echo(json.dumps(payload, indent=2))
     else:
-        for result in results:
-            detail = f"{result.status}: {result.brief} -> {result.branch}"
-            if result.pr_url:
-                detail += f" ({result.pr_url})"
+        for task in manifest_tasks:
+            detail = "{status}: {brief} -> {branch}".format(
+                status=task.get("status", "unknown"),
+                brief=task.get("brief", ""),
+                branch=task.get("branch", ""),
+            )
+            pr_url = task.get("pr_url")
+            if isinstance(pr_url, str) and pr_url:
+                detail += f" ({pr_url})"
             click.echo(detail)
         summary_display = {
             **payload,
             "provider_failed_count": sum(
-                1 for result in results if result.status == SWARM_PROVIDER_FAILED_STATUS
+                1 for task in manifest_tasks if task.get("status") == SWARM_PROVIDER_FAILED_STATUS
             ),
         }
         click.echo(
