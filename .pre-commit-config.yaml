@@ -86,7 +86,12 @@ repos:
     hooks:
       - id: conductor-refresh
         name: Refresh conductor integrations if stale
-        entry: uv run conductor refresh-on-commit
+        entry: >-
+          /usr/bin/env bash -c 'if command -v conductor >/dev/null 2>&1; then
+          exec conductor refresh-on-commit; fi; if command -v uv >/dev/null
+          2>&1; then exec uv run conductor refresh-on-commit; fi; echo
+          "conductor-refresh: skipping because neither conductor nor uv is
+          installed; install this project or run uv sync to enable." >&2'
         language: system
         pass_filenames: false
         always_run: true
