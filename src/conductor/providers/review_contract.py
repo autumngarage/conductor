@@ -35,6 +35,16 @@ _SAFE_BLOCKED_SENTINEL = "CODEX_REVIEW_BLOCKED"
 _DEFAULT_PATCH_CONTEXT_MAX_BYTES = 200_000
 _REVIEW_GIT_TIMEOUT_SEC = 30.0
 _CONTRACT_ERROR_PREVIEW_CHARS = 240
+_POSSIBLE_FINDING_RE = re.compile(
+    r"("
+    r"^\s*blocking issues?\s*:?\s*$|"
+    r"\b(?:bug|regression|breaks?|incorrect|"
+    r"race|deadlock|crash|leak|silent failure|security|vulnerability)\b|"
+    r"\b(?:must|needs? to|should)\s+(?:fix|change|reject|block|handle)\b|"
+    r"\b[A-Za-z0-9_./-]+\.(?:py|ts|tsx|js|jsx|go|rs|java|rb|sh|md):\d+\b"
+    r")",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 class ReviewContextError(RuntimeError):
@@ -50,16 +60,23 @@ class ReviewOutputContractError(ProviderError):
         provider_name: str,
         reason: str,
         output_preview: str,
+        possible_findings: bool = False,
     ) -> None:
         self.provider_name = provider_name
         self.reason = reason
         self.output_preview = output_preview
+        self.possible_findings = possible_findings
         preview = f"; output tail: {output_preview!r}" if output_preview else ""
+        quarantine = (
+            "; possible actionable review content was quarantined"
+            if possible_findings
+            else ""
+        )
         super().__init__(
             f"{provider_name} review output did not match the expected sentinel "
             f"contract ({reason}); expected exactly one final standalone "
             "CODEX_REVIEW_CLEAN, CODEX_REVIEW_FIXED, or CODEX_REVIEW_BLOCKED line"
-            f"{preview}"
+            f"{quarantine}{preview}"
         )
 
 
@@ -299,6 +316,7 @@ def validate_requested_review_sentinel(
             provider_name=provider_name,
             reason=context_reason,
             output_preview=_contract_error_preview(text),
+            possible_findings=_has_possible_actionable_review_content(text),
         )
 
     reason, stripped, _lines = _review_sentinel_violation(text)
@@ -307,6 +325,7 @@ def validate_requested_review_sentinel(
             provider_name=provider_name,
             reason=reason,
             output_preview=_contract_error_preview(text),
+            possible_findings=_has_possible_actionable_review_content(text),
         )
     return stripped
 
@@ -362,6 +381,11 @@ def _contract_error_preview(text: str) -> str:
     if len(normalized) <= _CONTRACT_ERROR_PREVIEW_CHARS:
         return normalized
     return normalized[-_CONTRACT_ERROR_PREVIEW_CHARS:]
+
+
+def _has_possible_actionable_review_content(text: str) -> bool:
+    normalized = " ".join(text.strip().split())
+    return bool(normalized and _POSSIBLE_FINDING_RE.search(normalized))
 
 
 def _prompt_requests_review_sentinel(prompt: str) -> bool:

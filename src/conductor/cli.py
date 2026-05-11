@@ -1141,10 +1141,25 @@ def _format_fallback_error_detail(err: Exception) -> str:
 
 
 def _review_failure_mode(err: Exception) -> str:
+    if isinstance(err, ReviewOutputContractError) and err.possible_findings:
+        return "output-contract/quarantined-findings"
     if isinstance(err, ProviderStalledError):
         return "stall"
     _retryable, category = _is_retryable(err)
     return category
+
+
+def _format_quarantined_review_outputs(
+    quarantined: list[ReviewOutputContractError],
+) -> str:
+    details: list[str] = []
+    for err in quarantined:
+        preview = " ".join(err.output_preview.strip().split())
+        detail = f"{err.provider_name} ({err.reason})"
+        if preview:
+            detail = f"{detail}: {preview}"
+        details.append(detail)
+    return "; ".join(details)
 
 
 def _format_tried_providers(tried: list[tuple[str, str]]) -> str:
@@ -2275,6 +2290,7 @@ def _invoke_review_with_fallback(
     fallbacks: list[str] = []
     tried: list[tuple[str, str]] = []
     statuses: list[ReviewProviderStatus] = []
+    quarantined_contract_errors: list[ReviewOutputContractError] = []
     candidates = list(decision.ranked[:max_fallbacks])
 
     for idx, candidate in enumerate(candidates):
@@ -2343,6 +2359,14 @@ def _invoke_review_with_fallback(
             )
             if validated_text != response.text:
                 response = replace(response, text=validated_text)
+            if quarantined_contract_errors:
+                details = _format_quarantined_review_outputs(quarantined_contract_errors)
+                raise ProviderError(
+                    "code review found possible findings in malformed provider "
+                    "output before a later provider returned a valid verdict. "
+                    "The malformed output was not accepted as a review result; "
+                    f"quarantined possible findings: {details}."
+                )
             mark_outcome(candidate.name, "success")
             tried.append((candidate.name, "success"))
             if statuses:
@@ -2386,6 +2410,8 @@ def _invoke_review_with_fallback(
             )
         except ProviderError as e:
             retryable, category = _is_retryable(e)
+            if isinstance(e, ReviewOutputContractError) and e.possible_findings:
+                quarantined_contract_errors.append(e)
             if category == "rate-limit":
                 mark_rate_limited(candidate.name)
             mark_outcome(candidate.name, category)
@@ -2434,6 +2460,12 @@ def _invoke_review_with_fallback(
         trail = _format_tried_providers(tried)
         last_detail = _format_fallback_error_detail(last_exc)
         status_summary = _format_review_status_summary(statuses)
+        quarantine = (
+            " Quarantined possible findings: "
+            f"{_format_quarantined_review_outputs(quarantined_contract_errors)}."
+            if quarantined_contract_errors
+            else ""
+        )
         direct_work = (
             "Conductor did not complete a review; continue the coding/review "
             "task directly in the driving agent, and do not treat this "
@@ -2448,7 +2480,7 @@ def _invoke_review_with_fallback(
             f"review infrastructure failed before any provider returned a "
             f"valid verdict; no review findings were emitted. Tried providers: "
             f"{trail}. Provider status: {status_summary}. "
-            f"Last error: {last_detail}. Next step: {direct_work}. "
+            f"Last error: {last_detail}.{quarantine} Next step: {direct_work}. "
             f"Operator follow-up: {operator_hint}."
         ) from last_exc
     raise last_exc
