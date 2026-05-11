@@ -51,6 +51,23 @@ def test_review_sentinel_contract_rejects_prose_without_standalone_sentinel():
             ),
         )
     assert "output tail:" in str(exc_info.value)
+    assert exc_info.value.possible_findings is False
+
+
+def test_review_sentinel_contract_quarantines_possible_findings():
+    with pytest.raises(ReviewOutputContractError, match="possible actionable") as exc_info:
+        validate_requested_review_sentinel(
+            provider_name="codex",
+            prompt=STRICT_SENTINEL_PROMPT,
+            text=(
+                "Blocking issues\n"
+                "- src/conductor/cli.py:2280 drops the review finding during "
+                "fallback, so this must block the review gate.\n"
+            ),
+        )
+
+    assert exc_info.value.possible_findings is True
+    assert "src/conductor/cli.py:2280" in exc_info.value.output_preview
 
 
 def test_review_sentinel_contract_rejects_multiple_sentinels():

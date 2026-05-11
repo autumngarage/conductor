@@ -1606,6 +1606,54 @@ def test_review_auto_output_contract_failure_falls_through_to_next_provider(mock
     assert "falling back" in result.stderr
 
 
+def test_review_auto_quarantines_invalid_output_with_possible_findings(mocker):
+    _stub_all_configured(mocker, {"codex", "claude"})
+    mocker.patch.object(CodexProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(ClaudeProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(
+        CodexProvider,
+        "review",
+        return_value=_fake_response(
+            "codex",
+            "codex-review",
+            text=(
+                "Blocking issues\n"
+                "- src/conductor/router.py:42 drops provider failures during "
+                "fallback, so this must block the review gate.\n"
+            ),
+        ),
+    )
+    mocker.patch.object(
+        ClaudeProvider,
+        "review",
+        return_value=_fake_response(
+            "claude",
+            "sonnet",
+            text="No blocking issues found.\nCODEX_REVIEW_CLEAN",
+        ),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--brief",
+            (
+                "The LAST line of your output must be exactly one of these "
+                "three sentinels: CODEX_REVIEW_CLEAN, CODEX_REVIEW_FIXED, "
+                "or CODEX_REVIEW_BLOCKED."
+            ),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "CODEX_REVIEW_CLEAN" not in result.stdout
+    assert "quarantined possible findings" in result.stderr
+    assert "src/conductor/router.py:42" in result.stderr
+    assert "malformed output was not accepted as a review result" in result.stderr
+
+
 def test_review_auto_generic_fallback_prompt_includes_diff(mocker, tmp_path):
     from conductor.providers.interface import ProviderStalledError
 
