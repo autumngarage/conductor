@@ -232,6 +232,7 @@ if TYPE_CHECKING:
     from conductor.agent_wiring import AgentArtifact, RepoScopeVersionDecision
 
 DEFAULT_REVIEW_MAX_FALLBACKS = 3
+REVIEW_GATE_MAX_EXEC_ITERATIONS = 12
 DEFAULT_COUNCIL_ROUNDS = 1
 DEFAULT_COUNCIL_TIMEOUT_SEC = 180
 DEFAULT_COUNCIL_MAX_OUTPUT_TOKENS = 6_000
@@ -454,6 +455,43 @@ def _apply_review_gate_auto_budget(
             err=True,
         )
     return timeout_sec, max_stall_sec
+
+
+def _review_gate_deadline(timeout_sec: int | None) -> float | None:
+    if timeout_sec is None:
+        return None
+    return time.monotonic() + timeout_sec
+
+
+def _bounded_attempt_budget(
+    *,
+    timeout_sec: int | None,
+    max_stall_sec: int | None,
+    deadline_monotonic: float | None,
+    budget_label: str,
+    provider_name: str,
+) -> tuple[int | None, int | None]:
+    """Return the per-attempt budget remaining under a shared route deadline.
+
+    Invariant: a fallback chain with a finite deadline never hands a later
+    provider more wall-clock or stall budget than remains in the chain.
+    """
+    if deadline_monotonic is None:
+        return timeout_sec, max_stall_sec
+
+    remaining = deadline_monotonic - time.monotonic()
+    if remaining <= 0:
+        raise ProviderStalledError(
+            f"{budget_label} exhausted before trying {provider_name}"
+        )
+    remaining_sec = max(1, math.ceil(remaining))
+    attempt_timeout_sec = (
+        remaining_sec if timeout_sec is None else min(timeout_sec, remaining_sec)
+    )
+    attempt_max_stall_sec = max_stall_sec
+    if attempt_max_stall_sec is not None:
+        attempt_max_stall_sec = min(attempt_max_stall_sec, attempt_timeout_sec)
+    return attempt_timeout_sec, attempt_max_stall_sec
 
 
 def _read_task(
@@ -1831,6 +1869,8 @@ def _invoke_with_fallback(
     write_validation: bool = True,
     strict_stall: bool = False,
     allow_completion_stretch: bool = False,
+    fallback_deadline_monotonic: float | None = None,
+    fallback_budget_label: str = "fallback budget",
 ) -> tuple[CallResponse, list[str]]:
     """Try the decision's ranked providers in order; fallback on retryable errors.
 
@@ -1936,6 +1976,13 @@ def _invoke_with_fallback(
                     "resume_session_id": resume_session_id,
                 },
             )
+        attempt_timeout_sec, attempt_max_stall_sec = _bounded_attempt_budget(
+            timeout_sec=timeout_sec,
+            max_stall_sec=max_stall_sec,
+            deadline_monotonic=fallback_deadline_monotonic,
+            budget_label=fallback_budget_label,
+            provider_name=candidate.name,
+        )
         try:
             if mode == "exec":
                 if isinstance(provider, OpenRouterProvider):
@@ -1950,8 +1997,8 @@ def _invoke_with_fallback(
                         tools=tools,
                         sandbox=sandbox,
                         cwd=cwd,
-                        timeout_sec=timeout_sec,
-                        max_stall_sec=max_stall_sec,
+                        timeout_sec=attempt_timeout_sec,
+                        max_stall_sec=attempt_max_stall_sec,
                         resume_session_id=resume_session_id,
                         session_log=session_log,
                         max_iterations=max_iterations,
@@ -1967,8 +2014,8 @@ def _invoke_with_fallback(
                         tools=tools,
                         sandbox=sandbox,
                         cwd=cwd,
-                        timeout_sec=timeout_sec,
-                        max_stall_sec=max_stall_sec,
+                        timeout_sec=attempt_timeout_sec,
+                        max_stall_sec=attempt_max_stall_sec,
                         start_timeout_sec=start_timeout_sec,
                         resume_session_id=resume_session_id,
                         session_log=session_log,
@@ -1982,8 +2029,8 @@ def _invoke_with_fallback(
                         tools=tools,
                         sandbox=sandbox,
                         cwd=cwd,
-                        timeout_sec=timeout_sec,
-                        max_stall_sec=max_stall_sec,
+                        timeout_sec=attempt_timeout_sec,
+                        max_stall_sec=attempt_max_stall_sec,
                         resume_session_id=resume_session_id,
                         session_log=session_log,
                         attachments=attachments,
@@ -1999,8 +2046,8 @@ def _invoke_with_fallback(
                         tools=tools,
                         sandbox=sandbox,
                         cwd=cwd,
-                        timeout_sec=timeout_sec,
-                        max_stall_sec=max_stall_sec,
+                        timeout_sec=attempt_timeout_sec,
+                        max_stall_sec=attempt_max_stall_sec,
                         resume_session_id=resume_session_id,
                         session_log=session_log,
                         max_iterations=max_iterations,
@@ -2016,8 +2063,8 @@ def _invoke_with_fallback(
                         tools=tools,
                         sandbox=sandbox,
                         cwd=cwd,
-                        timeout_sec=timeout_sec,
-                        max_stall_sec=max_stall_sec,
+                        timeout_sec=attempt_timeout_sec,
+                        max_stall_sec=attempt_max_stall_sec,
                         resume_session_id=resume_session_id,
                         session_log=session_log,
                     )
@@ -2032,8 +2079,8 @@ def _invoke_with_fallback(
                         task_tags=list(decision.task_tags),
                         prefer=decision.prefer,
                         log_selection=not silent,
-                        timeout_sec=timeout_sec,
-                        max_stall_sec=max_stall_sec,
+                        timeout_sec=attempt_timeout_sec,
+                        max_stall_sec=attempt_max_stall_sec,
                         resume_session_id=resume_session_id,
                     )
                 elif isinstance(provider, CodexProvider):
@@ -2041,8 +2088,8 @@ def _invoke_with_fallback(
                         task,
                         model=model,
                         effort=effort,
-                        timeout_sec=timeout_sec,
-                        max_stall_sec=max_stall_sec,
+                        timeout_sec=attempt_timeout_sec,
+                        max_stall_sec=attempt_max_stall_sec,
                         resume_session_id=resume_session_id,
                         attachments=attachments,
                     )
@@ -2052,8 +2099,8 @@ def _invoke_with_fallback(
                         task,
                         model=model,
                         effort=effort,
-                        timeout_sec=timeout_sec,
-                        max_stall_sec=max_stall_sec,
+                        timeout_sec=attempt_timeout_sec,
+                        max_stall_sec=attempt_max_stall_sec,
                         resume_session_id=resume_session_id,
                     )
             mark_outcome(candidate.name, "success")
@@ -2157,6 +2204,7 @@ def _invoke_review_with_fallback(
     silent: bool,
     max_fallbacks: int = DEFAULT_REVIEW_MAX_FALLBACKS,
     models_by_provider: dict[str, tuple[str, ...]] | None = None,
+    fallback_deadline_monotonic: float | None = None,
 ) -> tuple[CallResponse, list[str]]:
     """Try code-review providers in route order."""
     last_exc: Exception | None = None
@@ -2167,14 +2215,21 @@ def _invoke_review_with_fallback(
     for idx, candidate in enumerate(candidates):
         provider = get_provider(candidate.name)
         contract_prompt = task
+        attempt_timeout_sec, attempt_max_stall_sec = _bounded_attempt_budget(
+            timeout_sec=timeout_sec,
+            max_stall_sec=max_stall_sec,
+            deadline_monotonic=fallback_deadline_monotonic,
+            budget_label="review gate budget",
+            provider_name=candidate.name,
+        )
         try:
             if isinstance(provider, NativeReviewProvider):
                 response = provider.review(
                     task,
                     effort=effort,
                     cwd=cwd,
-                    timeout_sec=timeout_sec,
-                    max_stall_sec=max_stall_sec,
+                    timeout_sec=attempt_timeout_sec,
+                    max_stall_sec=attempt_max_stall_sec,
                     base=base,
                     commit=commit,
                     uncommitted=uncommitted,
@@ -2197,8 +2252,8 @@ def _invoke_review_with_fallback(
                     task_tags=list(decision.task_tags),
                     prefer=decision.prefer,
                     log_selection=not silent,
-                    timeout_sec=timeout_sec,
-                    max_stall_sec=max_stall_sec,
+                    timeout_sec=attempt_timeout_sec,
+                    max_stall_sec=attempt_max_stall_sec,
                 )
             else:
                 contract_prompt = build_review_task_prompt(
@@ -2213,8 +2268,8 @@ def _invoke_review_with_fallback(
                 response = provider.call(
                     contract_prompt,
                     effort=effort,
-                    timeout_sec=timeout_sec,
-                    max_stall_sec=max_stall_sec,
+                    timeout_sec=attempt_timeout_sec,
+                    max_stall_sec=attempt_max_stall_sec,
                 )
             validated_text = validate_requested_review_sentinel(
                 provider_name=response.provider,
@@ -4102,6 +4157,7 @@ def ask(
             silent=silent_route or as_json,
         )
         max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
+        review_deadline = _review_gate_deadline(timeout_sec)
         try:
             response, _fallbacks = _invoke_review_with_fallback(
                 decision,
@@ -4120,6 +4176,7 @@ def ask(
                     for candidate in plan.candidates
                     if candidate.models
                 },
+                fallback_deadline_monotonic=review_deadline,
             )
         except ProviderConfigError as e:
             _record_failed_delegation(
@@ -4594,6 +4651,7 @@ def call(
             timeout_is_default=timeout_is_default,
             max_stall_is_default=max_stall_is_default,
         )
+        review_deadline = None
         if NATIVE_REVIEW_TAG in decision.task_tags:
             timeout_sec, max_stall_sec = _apply_review_gate_auto_budget(
                 timeout_sec=timeout_sec,
@@ -4604,6 +4662,7 @@ def call(
                 candidate_count=len(decision.ranked),
                 silent=silent_route or as_json,
             )
+            review_deadline = _review_gate_deadline(timeout_sec)
         else:
             max_stall_sec = _cap_default_auto_fallback_stall(
                 timeout_sec=timeout_sec,
@@ -4629,6 +4688,8 @@ def call(
                 retry_on_stall=0,
                 silent=silent_route or as_json,
                 attachments=attachments,
+                fallback_deadline_monotonic=review_deadline,
+                fallback_budget_label="review gate budget",
             )
         except ProviderConfigError as e:
             _record_failed_delegation(
@@ -4679,7 +4740,7 @@ def call(
         )
         max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
         try:
-            if provider_id == "openrouter" and isinstance(provider, OpenRouterProvider):
+            if isinstance(provider, OpenRouterProvider):
                 response = provider.call(
                     body,
                     model=model,
@@ -5035,6 +5096,7 @@ def review(
             silent=silent_route or as_json,
         )
         max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
+        review_deadline = _review_gate_deadline(timeout_sec)
         try:
             response, _fallbacks = _invoke_review_with_fallback(
                 decision,
@@ -5054,6 +5116,7 @@ def review(
                     for candidate in plan.candidates
                     if candidate.models
                 },
+                fallback_deadline_monotonic=review_deadline,
             )
         except ProviderConfigError as e:
             _record_failed_delegation(
@@ -5095,7 +5158,7 @@ def review(
         )
         max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
         try:
-            if provider_id == "openrouter" and isinstance(provider, OpenRouterProvider):
+            if isinstance(provider, OpenRouterProvider):
                 plan = _with_review_semantic_tags(
                     plan_for("review", effort_value),
                     tuple(_parse_csv(tags)),
@@ -5495,14 +5558,33 @@ def _swarm_pr_merge_sha(worktree: Path, pr_url: str | None) -> str | None:
     return result.stdout.strip() or None
 
 
+def _ensure_swarm_branch_checked_out(worktree: Path, branch: str) -> None:
+    current = _run_swarm_git(
+        ["branch", "--show-current"],
+        cwd=worktree,
+    ).stdout.strip()
+    if current == branch:
+        return
+    if current:
+        raise RuntimeError(
+            f"swarm worktree is on {current!r}, expected {branch!r}; "
+            "refusing to retarget a named branch"
+        )
+    head_sha = _run_swarm_git(["rev-parse", "HEAD"], cwd=worktree).stdout.strip()
+    _run_swarm_git(["branch", "-f", branch, head_sha], cwd=worktree)
+    _run_swarm_git(["checkout", branch], cwd=worktree)
+
+
 def _ship_swarm_pr(
     worktree: Path,
     *,
     base_branch: str,
+    branch: str,
     auto_merge: bool,
 ) -> tuple[str, str | None, str | None]:
     repo_root = _swarm_repo_root()
     script = repo_root / "scripts" / "open-pr.sh"
+    _ensure_swarm_branch_checked_out(worktree, branch)
     args = ["bash", str(script), "--base", base_branch]
     if auto_merge:
         args.append("--auto-merge")
@@ -5654,6 +5736,7 @@ def _run_swarm_task(
                 shipped_status, shipped_pr_url, shipped_detail = _ship_swarm_pr(
                     worktree,
                     base_branch=base_branch,
+                    branch=branch,
                     auto_merge=auto_merge,
                 )
                 status = shipped_status
@@ -5884,6 +5967,12 @@ def _run_exec_phase_dispatch(
         _emit_session_route_decision(session_log, decision)
         print_caller_banner(decision.provider, silent=silent_route or as_json)
         _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
+        review_gate_route = NATIVE_REVIEW_TAG in decision.task_tags
+        if review_gate_route and not max_iterations_explicit:
+            max_iterations_value = min(
+                max_iterations_value,
+                REVIEW_GATE_MAX_EXEC_ITERATIONS,
+            )
         if _provider_supports_exec_max_iterations(decision.provider) and not (
             silent_route or as_json
         ):
@@ -5898,7 +5987,8 @@ def _run_exec_phase_dispatch(
             timeout_is_default=timeout_is_default,
             max_stall_is_default=max_stall_is_default,
         )
-        if NATIVE_REVIEW_TAG in decision.task_tags:
+        review_deadline = None
+        if review_gate_route:
             timeout_sec, max_stall_sec = _apply_review_gate_auto_budget(
                 timeout_sec=timeout_sec,
                 max_stall_sec=max_stall_sec,
@@ -5917,6 +6007,7 @@ def _run_exec_phase_dispatch(
                     "candidate_count": len(decision.ranked),
                 },
             )
+            review_deadline = _review_gate_deadline(timeout_sec)
         else:
             max_stall_sec = _cap_default_auto_fallback_stall(
                 timeout_sec=timeout_sec,
@@ -5979,6 +6070,8 @@ def _run_exec_phase_dispatch(
                 allow_completion_stretch=allow_completion_stretch,
                 write_validation=write_validation,
                 strict_stall=strict_stall,
+                fallback_deadline_monotonic=review_deadline,
+                fallback_budget_label="review gate budget",
             )
         except UnsupportedCapability as e:
             if session_log is not None:

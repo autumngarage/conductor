@@ -1,5 +1,5 @@
 
-<!-- conductor:begin v0.10.17 -->
+<!-- conductor:begin v0.10.18 -->
 ## Conductor delegation
 
 This project has [conductor](https://github.com/autumngarage/conductor)

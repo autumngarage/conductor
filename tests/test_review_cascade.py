@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from conductor import cli
 from conductor.cli import main
 from conductor.providers import (
     CallResponse,
@@ -33,7 +34,7 @@ from conductor.providers import (
     OpenRouterProvider,
     review_contract,
 )
-from conductor.router import reset_health
+from conductor.router import RankedCandidate, RouteDecision, reset_health
 
 SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "codex-review.sh"
 LEGACY_SKIP_REASON = "pre-2.0 shell cascade contract; conductor routing tests cover issue #127"
@@ -84,6 +85,36 @@ def _fake_response(provider: str) -> CallResponse:
         duration_ms=10,
         usage={},
         raw={},
+    )
+
+
+def _candidate(name: str) -> RankedCandidate:
+    return RankedCandidate(
+        name=name,
+        tier="frontier",
+        tier_rank=4,
+        matched_tags=("code-review",),
+        tag_score=1,
+        cost_score=0.0,
+        latency_ms=1,
+        health_penalty=0.0,
+        combined_score=1.0,
+    )
+
+
+def _decision(*names: str) -> RouteDecision:
+    return RouteDecision(
+        provider=names[0],
+        prefer="best",
+        effort="high",
+        thinking_budget=0,
+        tier="frontier",
+        task_tags=("code-review",),
+        matched_tags=("code-review",),
+        tools_requested=(),
+        sandbox="none",
+        ranked=tuple(_candidate(name) for name in names),
+        candidates_skipped=(),
     )
 
 
@@ -166,10 +197,104 @@ def test_review_fallback_call_uses_conductor_owned_budget(mocker) -> None:
     )
 
     assert result.exit_code == 0, result.output
-    assert openrouter_call.call_args.kwargs["timeout_sec"] == 300
+    assert 250 <= openrouter_call.call_args.kwargs["timeout_sec"] <= 300
     assert openrouter_call.call_args.kwargs["max_stall_sec"] == 75
     assert "review gate budget: timeout=300s stall=75s" in result.stderr
     assert "ignored caller timeout=7s max-stall=3s" in result.stderr
+
+
+def test_review_fallback_attempts_share_one_deadline(mocker, monkeypatch) -> None:
+    from conductor.providers.interface import ProviderStalledError
+
+    now = [1_000.0]
+    seen: list[tuple[str, int | None, int | None]] = []
+    monkeypatch.setattr(cli.time, "monotonic", lambda: now[0])
+
+    def claude_stalls(*_args, timeout_sec=None, max_stall_sec=None, **_kwargs):
+        seen.append(("claude", timeout_sec, max_stall_sec))
+        now[0] += 225
+        raise ProviderStalledError("claude review stalled")
+
+    def codex_succeeds(*_args, timeout_sec=None, max_stall_sec=None, **_kwargs):
+        seen.append(("codex", timeout_sec, max_stall_sec))
+        return _fake_response("codex")
+
+    mocker.patch.object(ClaudeProvider, "review", side_effect=claude_stalls)
+    mocker.patch.object(CodexProvider, "review", side_effect=codex_succeeds)
+
+    response, _fallbacks = cli._invoke_review_with_fallback(
+        _decision("claude", "codex"),
+        task="Review this merge using the project reviewer guide.",
+        effort="high",
+        cwd=None,
+        timeout_sec=300,
+        max_stall_sec=180,
+        base=None,
+        commit=None,
+        uncommitted=False,
+        title=None,
+        silent=True,
+        fallback_deadline_monotonic=cli._review_gate_deadline(300),
+    )
+
+    assert response.provider == "codex"
+    assert seen == [("claude", 300, 180), ("codex", 75, 75)]
+
+
+def test_exec_code_review_routes_cap_default_agent_iterations(mocker) -> None:
+    invoke = mocker.patch(
+        "conductor.cli._invoke_with_fallback",
+        return_value=(_fake_response("codex"), []),
+    )
+    mocker.patch("conductor.cli.pick", return_value=(CodexProvider(), _decision("codex")))
+    mocker.patch(
+        "conductor.cli._scale_dispatch_defaults",
+        side_effect=lambda **kwargs: (kwargs["timeout_sec"], kwargs["max_stall_sec"]),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--auto",
+            "--tags",
+            "code-review",
+            "--effort",
+            "high",
+            "--no-preflight",
+            "--silent-route",
+            "--brief",
+            "Review this merge using the project reviewer guide.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert invoke.call_args.kwargs["max_iterations"] == cli.REVIEW_GATE_MAX_EXEC_ITERATIONS
+    assert invoke.call_args.kwargs["fallback_deadline_monotonic"] is not None
+    assert invoke.call_args.kwargs["fallback_budget_label"] == "review gate budget"
+
+
+def test_review_with_openrouter_backed_provider_uses_call_prompt(mocker) -> None:
+    openrouter_call = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response("deepseek-reasoner"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--with",
+            "deepseek-reasoner",
+            "--brief",
+            "Review this merge using the project reviewer guide.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "deepseek-reasoner reviewed\n"
+    assert openrouter_call.called
 
 
 def test_review_patch_context_git_timeout_surfaces_context_error(

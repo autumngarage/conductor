@@ -1825,14 +1825,22 @@ def test_review_with_gemini_emits_plain_text_without_json_envelope(mocker):
     assert not result.stdout.lstrip().startswith("{")
 
 
-def test_review_with_provider_without_native_review_errors():
+def test_review_with_openrouter_backed_provider_uses_call_prompt(mocker):
+    _stub_all_configured(mocker, {"kimi"})
+    openrouter_call = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response("kimi"),
+    )
+
     result = CliRunner().invoke(
         main,
         ["review", "--with", "kimi", "--brief", "Review the PR."],
     )
 
-    assert result.exit_code == 2
-    assert "does not expose native code review" in result.output
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "hello\n"
+    assert openrouter_call.call_args.kwargs["task_tags"] == ["code-review"]
 
 
 # ---------------------------------------------------------------------------
