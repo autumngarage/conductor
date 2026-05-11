@@ -1469,6 +1469,98 @@ def test_review_auto_exhausted_fallback_names_stalled_codex_and_claude(mocker):
         in result.stderr
     )
     assert "codex (stall), claude (timeout)" in result.stderr
+    assert "Provider status:" in result.stderr
+    assert "codex: stall - ProviderStalledError: codex review stalled" in result.stderr
+    assert "claude: timeout - ProviderError: claude review timed out" in result.stderr
+    assert "continue the coding/review task directly in the driving agent" in result.stderr
+    assert "do not treat this Conductor output as clean or complete" in result.stderr
+
+
+def test_review_auto_claude_rate_limit_falls_through_to_next_provider(mocker):
+    from conductor.providers.interface import ProviderHTTPError
+
+    _stub_all_configured(mocker, {"claude", "openrouter"})
+    mocker.patch.object(ClaudeProvider, "review_configured", return_value=(True, None))
+    claude_review = mocker.patch.object(
+        ClaudeProvider,
+        "review",
+        side_effect=ProviderHTTPError("Anthropic returned 429 rate limit"),
+    )
+    openrouter_call = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response(
+            "openrouter",
+            OPENROUTER_CODING_HIGH[0],
+            text="No blocking issues found.\nCODEX_REVIEW_CLEAN",
+        ),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--exclude",
+            "codex",
+            "--brief",
+            "Review this merge. End with CODEX_REVIEW_CLEAN or BLOCKED.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert claude_review.called
+    assert openrouter_call.called
+    assert result.stdout.strip().endswith("CODEX_REVIEW_CLEAN")
+    assert "claude review unavailable (rate-limit)" in result.stderr
+    assert "falling back" in result.stderr
+    assert "code review failed for all tried providers" not in result.stderr
+
+
+def test_review_auto_next_provider_success_json_reports_winner_and_status(mocker):
+    from conductor.providers.interface import ProviderHTTPError
+
+    _stub_all_configured(mocker, {"claude", "openrouter"})
+    mocker.patch.object(ClaudeProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(
+        ClaudeProvider,
+        "review",
+        side_effect=ProviderHTTPError("Anthropic returned 429 rate limit"),
+    )
+    mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response(
+            "openrouter",
+            OPENROUTER_CODING_HIGH[0],
+            text="No blocking issues found.\nCODEX_REVIEW_CLEAN",
+        ),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--exclude",
+            "codex",
+            "--json",
+            "--brief",
+            "Review this merge. End with CODEX_REVIEW_CLEAN or BLOCKED.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["provider"] == "openrouter"
+    assert payload["text"].endswith("CODEX_REVIEW_CLEAN")
+    assert payload["raw"]["review_provider_statuses"] == [
+        {
+            "provider": "claude",
+            "status": "rate-limit",
+            "detail": "ProviderHTTPError: Anthropic returned 429 rate limit",
+        }
+    ]
 
 
 def test_review_auto_output_contract_failure_falls_through_to_next_provider(mocker):

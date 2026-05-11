@@ -297,6 +297,13 @@ class SessionPrunePlan:
     items: tuple[SessionPruneItem, ...]
 
 
+@dataclass(frozen=True)
+class ReviewProviderStatus:
+    provider: str
+    status: str
+    detail: str
+
+
 # --------------------------------------------------------------------------- #
 # Shared helpers
 # --------------------------------------------------------------------------- #
@@ -1084,10 +1091,10 @@ def _is_retryable(err: Exception) -> tuple[bool, str]:
     """Classify an error as retryable-with-fallback or fatal.
 
     Returns (retryable, category) — category is "rate-limit" | "5xx" |
-    "timeout" | "network" | "provider-error" | "other" for health-tracking
-    and fallback-UX routing purposes. "network" is separate from "timeout"
-    so the offline-mode prompt can fire on the real thing (DNS/TCP failure)
-    rather than on a slow-but-reachable upstream.
+    "timeout" | "network" | "transport" | "provider-error" | "other" for
+    health-tracking and fallback-UX routing purposes. "network" is separate
+    from "timeout" so the offline-mode prompt can fire on the real thing
+    (DNS/TCP failure) rather than on a slow-but-reachable upstream.
     """
     if isinstance(err, ReviewOutputContractError):
         return True, "output-contract"
@@ -1118,7 +1125,7 @@ def _is_retryable(err: Exception) -> tuple[bool, str]:
     if any(sig in msg for sig in _UPSTREAM_DOWN_ERROR_SIGNALS):
         return True, "5xx"
     if isinstance(err, ProviderHTTPError):
-        return True, "provider-error"
+        return True, "transport"
     return False, "other"
 
 
@@ -1142,6 +1149,26 @@ def _review_failure_mode(err: Exception) -> str:
 
 def _format_tried_providers(tried: list[tuple[str, str]]) -> str:
     return ", ".join(f"{name} ({mode})" for name, mode in tried)
+
+
+def _format_review_status_summary(statuses: list[ReviewProviderStatus]) -> str:
+    return "; ".join(
+        f"{status.provider}: {status.status} - {status.detail}"
+        for status in statuses
+    )
+
+
+def _review_attempt_log_state(status: str) -> str:
+    availability_statuses = {
+        "5xx",
+        "config",
+        "network",
+        "rate-limit",
+        "stall",
+        "timeout",
+        "transport",
+    }
+    return "unavailable" if status in availability_statuses else "failed"
 
 
 def _validate_max_fallbacks(raw: int) -> int:
@@ -2247,6 +2274,7 @@ def _invoke_review_with_fallback(
     last_exc: Exception | None = None
     fallbacks: list[str] = []
     tried: list[tuple[str, str]] = []
+    statuses: list[ReviewProviderStatus] = []
     candidates = list(decision.ranked[:max_fallbacks])
 
     for idx, candidate in enumerate(candidates):
@@ -2317,6 +2345,16 @@ def _invoke_review_with_fallback(
                 response = replace(response, text=validated_text)
             mark_outcome(candidate.name, "success")
             tried.append((candidate.name, "success"))
+            if statuses:
+                response = replace(
+                    response,
+                    raw={
+                        **response.raw,
+                        "review_provider_statuses": [
+                            asdict(status) for status in statuses
+                        ],
+                    },
+                )
             if not silent and len(tried) > 1:
                 click.echo(
                     f"[conductor] review tried providers: {_format_tried_providers(tried)}",
@@ -2328,10 +2366,24 @@ def _invoke_review_with_fallback(
             mark_outcome(candidate.name, "config")
             fallbacks.append(candidate.name)
             tried.append((candidate.name, "config"))
+            statuses.append(
+                ReviewProviderStatus(
+                    candidate.name,
+                    "config",
+                    _format_fallback_error_detail(e),
+                )
+            )
         except UnsupportedCapability as e:
             last_exc = e
             fallbacks.append(candidate.name)
             tried.append((candidate.name, "unsupported"))
+            statuses.append(
+                ReviewProviderStatus(
+                    candidate.name,
+                    "unsupported",
+                    _format_fallback_error_detail(e),
+                )
+            )
         except ProviderError as e:
             retryable, category = _is_retryable(e)
             if category == "rate-limit":
@@ -2341,12 +2393,27 @@ def _invoke_review_with_fallback(
             if not retryable:
                 raise
             fallbacks.append(candidate.name)
-            tried.append((candidate.name, _review_failure_mode(e)))
+            mode = _review_failure_mode(e)
+            tried.append((candidate.name, mode))
+            statuses.append(
+                ReviewProviderStatus(
+                    candidate.name,
+                    mode,
+                    _format_fallback_error_detail(e),
+                )
+            )
         except ReviewContextError as e:
             last_exc = e
             mark_outcome(candidate.name, "review-context")
             fallbacks.append(candidate.name)
             tried.append((candidate.name, "review-context"))
+            statuses.append(
+                ReviewProviderStatus(
+                    candidate.name,
+                    "review-context",
+                    _format_fallback_error_detail(e),
+                )
+            )
 
         if idx + 1 < len(candidates) and not silent:
             detail = (
@@ -2355,7 +2422,8 @@ def _invoke_review_with_fallback(
                 else "unknown error"
             )
             click.echo(
-                f"[conductor] {candidate.name} review failed ({tried[-1][1]}) · "
+                f"[conductor] {candidate.name} review "
+                f"{_review_attempt_log_state(tried[-1][1])} ({tried[-1][1]}) · "
                 f"{detail} · "
                 f"falling back → {candidates[idx + 1].name}",
                 err=True,
@@ -2365,14 +2433,23 @@ def _invoke_review_with_fallback(
     if tried:
         trail = _format_tried_providers(tried)
         last_detail = _format_fallback_error_detail(last_exc)
-        hint = (
-            "increase --max-fallbacks, exclude failing providers, or run "
-            "`conductor list` to check configured code-review providers"
+        status_summary = _format_review_status_summary(statuses)
+        direct_work = (
+            "Conductor did not complete a review; continue the coding/review "
+            "task directly in the driving agent, and do not treat this "
+            "Conductor output as clean or complete"
+        )
+        operator_hint = (
+            "Then inspect provider status, increase --max-fallbacks, exclude "
+            "failing providers, or run `conductor list` to check configured "
+            "code-review providers"
         )
         raise ProviderError(
             f"review infrastructure failed before any provider returned a "
             f"valid verdict; no review findings were emitted. Tried providers: "
-            f"{trail}. Last error: {last_detail}. Next step: {hint}."
+            f"{trail}. Provider status: {status_summary}. "
+            f"Last error: {last_detail}. Next step: {direct_work}. "
+            f"Operator follow-up: {operator_hint}."
         ) from last_exc
     raise last_exc
 
