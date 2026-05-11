@@ -25,6 +25,7 @@ import json
 import math
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -6233,6 +6234,97 @@ def _swarm_task_string(task: dict[str, object], key: str, *, selector: str) -> s
     return value
 
 
+def _swarm_worktree_branch_state(worktree: Path) -> str:
+    current = _run_swarm_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=worktree).stdout.strip()
+    if current != "HEAD":
+        return current
+    head_sha = _run_swarm_git(["rev-parse", "--short", "HEAD"], cwd=worktree).stdout.strip()
+    return f"detached at {head_sha}"
+
+
+def _swarm_readonly_worktree_state(worktree: Path | None) -> tuple[bool, str, str]:
+    if worktree is None or not worktree.exists():
+        return False, "unknown (worktree missing)", "unknown (worktree missing)"
+    try:
+        dirty_paths = _swarm_dirty_paths(worktree)
+        dirty = "yes" if dirty_paths else "no"
+        if dirty_paths:
+            dirty += f" ({', '.join(path[:200] for path in dirty_paths[:10])})"
+    except RuntimeError as e:
+        dirty = f"unknown ({e})"
+    try:
+        branch_state = _swarm_worktree_branch_state(worktree)
+    except RuntimeError as e:
+        branch_state = f"unknown ({e})"
+    return True, dirty, branch_state
+
+
+def _format_swarm_resume(
+    *,
+    payload: dict[str, object],
+    path: Path,
+    task_index: int,
+    task: dict[str, object],
+) -> list[str]:
+    selector = str(task_index + 1)
+    run_id = str(payload.get("run_id") or path.stem)
+    brief = str(task.get("brief") or "")
+    branch = str(task.get("branch") or "")
+    raw_worktree = task.get("worktree")
+    worktree = Path(raw_worktree) if isinstance(raw_worktree, str) and raw_worktree else None
+    exists, dirty, branch_state = _swarm_readonly_worktree_state(worktree)
+    worktree_display = str(worktree) if worktree is not None else ""
+    raw_commits = task.get("commits")
+    commits = (
+        raw_commits
+        if isinstance(raw_commits, int) and not isinstance(raw_commits, bool)
+        else 0
+    )
+    retry_available = exists and commits > 0
+    retry_command = (
+        f"conductor swarm retry-ship {shlex.quote(str(path))} {shlex.quote(selector)}"
+    )
+    rerun_parts = ["conductor", "swarm", "--provider", "codex"]
+    base_branch = payload.get("base_branch")
+    if isinstance(base_branch, str) and base_branch:
+        rerun_parts.extend(["--base-branch", base_branch])
+    if brief:
+        rerun_parts.extend(["--brief", brief])
+    rerun_command = " ".join(shlex.quote(part) for part in rerun_parts)
+
+    lines = [
+        f"swarm resume {run_id} task {task_index + 1}",
+        f"manifest: {path}",
+        f"run id: {run_id}",
+        f"task index: {task_index + 1}",
+        f"status: {task.get('status', 'unknown')}",
+        f"provider: {task.get('provider') or payload.get('provider') or 'codex'}",
+        f"brief: {brief}",
+        f"branch: {branch}",
+        f"worktree: {worktree_display}",
+        f"commits: {commits}",
+        f"pr url: {task.get('pr_url') or ''}",
+        f"failure reason: {task.get('failure_reason') or ''}",
+        f"base: {payload.get('base_branch', '')}@{payload.get('base_ref', '')}",
+        f"worktree exists: {'yes' if exists else 'no'}",
+        f"worktree dirty: {dirty}",
+        f"worktree branch: {branch_state}",
+        "suggested commands:",
+    ]
+    if worktree is not None:
+        lines.append(
+            f"  inspect worktree: cd {shlex.quote(str(worktree))} && git status --short --branch"
+        )
+    if retry_available:
+        lines.append(f"  retry shipping: {retry_command}")
+    else:
+        lines.append("  retry shipping: unavailable until the worktree exists and has commits")
+    if branch:
+        lines.append(f"  inspect branch: git log --oneline {shlex.quote(branch)} --")
+    lines.append(f"  rerun implementation: {rerun_command}")
+    return lines
+
+
 def _retry_ship_swarm_task(
     *,
     manifest_path: Path,
@@ -6343,6 +6435,38 @@ def _retry_ship_swarm_task(
         duration_ms=run_duration_ms,
         tasks=tasks,
     )
+
+
+def _run_swarm_retry_ship_command(
+    *,
+    run_id_or_path: str,
+    task_selector: str,
+    auto_merge: bool,
+) -> None:
+    path = _resolve_swarm_manifest_path(run_id_or_path, latest=False)
+    payload = _read_swarm_manifest(path)
+    tasks = _swarm_manifest_tasks(payload, path=path)
+    task_index, task = _select_swarm_manifest_task(tasks, task_selector)
+    branch = task.get("branch")
+    brief = task.get("brief")
+    updated = _retry_ship_swarm_task(
+        manifest_path=path,
+        payload=payload,
+        task_index=task_index,
+        auto_merge=auto_merge,
+    )
+    _write_swarm_manifest(path, updated)
+    updated_task = _swarm_manifest_tasks(updated, path=path)[task_index]
+    detail = "{status}: {brief} -> {branch}".format(
+        status=updated_task.get("status", "unknown"),
+        brief=brief or updated_task.get("brief", ""),
+        branch=branch or updated_task.get("branch", ""),
+    )
+    if updated_task.get("pr_url"):
+        detail += f" ({updated_task['pr_url']})"
+    click.echo(detail)
+    if updated_task.get("status") not in SWARM_SUCCESS_STATUSES:
+        sys.exit(1)
 
 
 def _format_swarm_manifest_status(payload: dict[str, object], *, path: Path) -> list[str]:
@@ -7890,6 +8014,52 @@ def swarm_status(run_id_or_path: str | None, latest: bool) -> None:
         click.echo(line)
 
 
+@swarm.command(name="resume")
+@click.argument("run_id_or_path")
+@click.argument("task_selector")
+@click.option(
+    "--retry-ship",
+    is_flag=True,
+    default=False,
+    help="Delegate to swarm retry-ship for the selected task.",
+)
+@click.option(
+    "--auto-merge/--no-auto-merge",
+    default=True,
+    show_default=True,
+    help="When --retry-ship is set, retry shipping with open-pr.sh auto-merge enabled.",
+)
+def swarm_resume(
+    run_id_or_path: str,
+    task_selector: str,
+    retry_ship: bool,
+    auto_merge: bool,
+) -> None:
+    """Orient recovery for one manifest task without rerunning implementation.
+
+    TASK_SELECTOR is a 1-based task index, exact branch name, or exact brief path
+    from the manifest.
+    """
+    if retry_ship:
+        _run_swarm_retry_ship_command(
+            run_id_or_path=run_id_or_path,
+            task_selector=task_selector,
+            auto_merge=auto_merge,
+        )
+        return
+    path = _resolve_swarm_manifest_path(run_id_or_path, latest=False)
+    payload = _read_swarm_manifest(path)
+    tasks = _swarm_manifest_tasks(payload, path=path)
+    task_index, task = _select_swarm_manifest_task(tasks, task_selector)
+    for line in _format_swarm_resume(
+        payload=payload,
+        path=path,
+        task_index=task_index,
+        task=task,
+    ):
+        click.echo(line)
+
+
 @swarm.command(name="retry-ship")
 @click.argument("run_id_or_path")
 @click.argument("task_selector")
@@ -7905,30 +8075,11 @@ def swarm_retry_ship(run_id_or_path: str, task_selector: str, auto_merge: bool) 
     TASK_SELECTOR is a 1-based task index, exact branch name, or exact brief path
     from the manifest.
     """
-    path = _resolve_swarm_manifest_path(run_id_or_path, latest=False)
-    payload = _read_swarm_manifest(path)
-    tasks = _swarm_manifest_tasks(payload, path=path)
-    task_index, task = _select_swarm_manifest_task(tasks, task_selector)
-    branch = task.get("branch")
-    brief = task.get("brief")
-    updated = _retry_ship_swarm_task(
-        manifest_path=path,
-        payload=payload,
-        task_index=task_index,
+    _run_swarm_retry_ship_command(
+        run_id_or_path=run_id_or_path,
+        task_selector=task_selector,
         auto_merge=auto_merge,
     )
-    _write_swarm_manifest(path, updated)
-    updated_task = _swarm_manifest_tasks(updated, path=path)[task_index]
-    detail = "{status}: {brief} -> {branch}".format(
-        status=updated_task.get("status", "unknown"),
-        brief=brief or updated_task.get("brief", ""),
-        branch=branch or updated_task.get("branch", ""),
-    )
-    if updated_task.get("pr_url"):
-        detail += f" ({updated_task['pr_url']})"
-    click.echo(detail)
-    if updated_task.get("status") not in SWARM_SUCCESS_STATUSES:
-        sys.exit(1)
 
 
 # --------------------------------------------------------------------------- #

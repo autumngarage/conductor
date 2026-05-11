@@ -596,6 +596,244 @@ def test_swarm_retry_ship_updates_review_blocked_manifest(
     assert not Path(task["worktree"]).exists()
 
 
+def test_swarm_resume_reports_failed_lane_with_worktree_and_commits(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md")
+    base_ref = _git(repo, "rev-parse", "main").stdout.strip()
+    worktree = repo / ".cache" / "conductor" / "swarm" / "foo"
+    _git(repo, "worktree", "add", str(worktree), "-b", "feat/swarm/foo", base_ref)
+    _commit_change(worktree, "feature.txt", "feature")
+    monkeypatch.chdir(repo)
+    manifest_path = _manual_swarm_manifest(
+        repo,
+        base_ref=base_ref,
+        tasks=[
+            {
+                "brief": str(brief),
+                "branch": "feat/swarm/foo",
+                "worktree": str(worktree),
+                "status": "review-blocked",
+                "commits": 1,
+                "pr_url": "https://github.com/example/repo/pull/123",
+                "merge_sha": None,
+                "duration_ms": 10,
+                "failure_reason": "review flaked",
+                "cleanup_status": "preserved",
+            }
+        ],
+    )
+
+    result = CliRunner().invoke(main, ["swarm", "resume", str(manifest_path), "1"])
+
+    assert result.exit_code == 0, result.output
+    assert f"manifest: {manifest_path}" in result.output
+    assert f"run id: {manifest_path.stem}" in result.output
+    assert "task index: 1" in result.output
+    assert "status: review-blocked" in result.output
+    assert f"brief: {brief}" in result.output
+    assert "branch: feat/swarm/foo" in result.output
+    assert f"worktree: {worktree}" in result.output
+    assert "commits: 1" in result.output
+    assert "pr url: https://github.com/example/repo/pull/123" in result.output
+    assert "failure reason: review flaked" in result.output
+    assert "worktree exists: yes" in result.output
+    assert "worktree dirty: no" in result.output
+    assert "worktree branch: feat/swarm/foo" in result.output
+    assert f"retry shipping: conductor swarm retry-ship {manifest_path} 1" in result.output
+    assert (
+        f"rerun implementation: conductor swarm --provider codex "
+        f"--base-branch main --brief {brief}"
+    ) in result.output
+
+
+def test_swarm_resume_reports_missing_worktree(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md")
+    worktree = repo / ".cache" / "conductor" / "swarm" / "foo"
+    monkeypatch.chdir(repo)
+    manifest_path = _manual_swarm_manifest(
+        repo,
+        tasks=[
+            {
+                "brief": str(brief),
+                "branch": "feat/swarm/foo",
+                "worktree": str(worktree),
+                "status": "failed",
+                "commits": 1,
+                "pr_url": None,
+                "merge_sha": None,
+                "duration_ms": 10,
+                "failure_reason": "implementation failed",
+                "cleanup_status": "preserved",
+            }
+        ],
+    )
+
+    result = CliRunner().invoke(main, ["swarm", "resume", str(manifest_path), "1"])
+
+    assert result.exit_code == 0, result.output
+    assert "worktree exists: no" in result.output
+    assert "worktree dirty: unknown (worktree missing)" in result.output
+    assert "worktree branch: unknown (worktree missing)" in result.output
+    assert "retry shipping: unavailable until the worktree exists and has commits" in result.output
+
+
+@pytest.mark.parametrize("selector_kind", ["index", "branch", "brief"])
+def test_swarm_resume_selects_by_index_branch_or_brief(
+    tmp_path: Path,
+    monkeypatch,
+    selector_kind: str,
+) -> None:
+    repo = _repo(tmp_path)
+    first = _brief(repo, "foo.md")
+    second = _brief(repo, "bar.md")
+    base_ref = _git(repo, "rev-parse", "main").stdout.strip()
+    foo_worktree = repo / ".cache" / "conductor" / "swarm" / "foo"
+    bar_worktree = repo / ".cache" / "conductor" / "swarm" / "bar"
+    _git(repo, "worktree", "add", str(foo_worktree), "-b", "feat/swarm/foo", base_ref)
+    _commit_change(foo_worktree, "foo.txt", "foo")
+    _git(repo, "worktree", "add", str(bar_worktree), "-b", "feat/swarm/bar", base_ref)
+    _commit_change(bar_worktree, "bar.txt", "bar")
+    monkeypatch.chdir(repo)
+    manifest_path = _manual_swarm_manifest(
+        repo,
+        base_ref=base_ref,
+        tasks=[
+            {
+                "brief": str(first),
+                "branch": "feat/swarm/foo",
+                "worktree": str(foo_worktree),
+                "status": "failed",
+                "commits": 1,
+                "pr_url": None,
+                "merge_sha": None,
+                "duration_ms": 10,
+                "failure_reason": "push failed",
+                "cleanup_status": "preserved",
+            },
+            {
+                "brief": str(second),
+                "branch": "feat/swarm/bar",
+                "worktree": str(bar_worktree),
+                "status": "review-blocked",
+                "commits": 1,
+                "pr_url": "https://github.com/example/repo/pull/124",
+                "merge_sha": None,
+                "duration_ms": 10,
+                "failure_reason": "review flaked",
+                "cleanup_status": "preserved",
+            },
+        ],
+    )
+    selector = {
+        "index": "2",
+        "branch": "feat/swarm/bar",
+        "brief": str(second),
+    }[selector_kind]
+
+    result = CliRunner().invoke(main, ["swarm", "resume", str(manifest_path), selector])
+
+    assert result.exit_code == 0, result.output
+    assert "task index: 2" in result.output
+    assert f"brief: {second}" in result.output
+    assert "branch: feat/swarm/bar" in result.output
+    assert "failure reason: review flaked" in result.output
+
+
+def test_swarm_resume_retry_ship_delegates_to_retry_ship_update_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md")
+    base_ref = _git(repo, "rev-parse", "main").stdout.strip()
+    worktree = repo / ".cache" / "conductor" / "swarm" / "foo"
+    _git(repo, "worktree", "add", str(worktree), "-b", "feat/swarm/foo", base_ref)
+    _commit_change(worktree, "feature.txt", "feature")
+    monkeypatch.chdir(repo)
+    manifest_path = _manual_swarm_manifest(
+        repo,
+        base_ref=base_ref,
+        tasks=[
+            {
+                "brief": str(brief),
+                "branch": "feat/swarm/foo",
+                "worktree": str(worktree),
+                "status": "review-blocked",
+                "commits": 1,
+                "pr_url": "https://github.com/example/repo/pull/123",
+                "merge_sha": None,
+                "duration_ms": 10,
+                "failure_reason": "review flaked",
+                "cleanup_status": "preserved",
+            }
+        ],
+    )
+    monkeypatch.setattr(cli, "_ship_swarm_pr", _fake_merged_ship(repo))
+
+    result = CliRunner().invoke(main, ["swarm", "resume", str(manifest_path), "1", "--retry-ship"])
+
+    assert result.exit_code == 0, result.output
+    assert "shipped:" in result.output
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    task = manifest["tasks"][0]
+    assert manifest["ok"] is True
+    assert manifest["metrics"]["shipped_count"] == 1
+    assert task["status"] == "shipped"
+    assert task["cleanup_status"] == "removed"
+    assert not worktree.exists()
+
+
+def test_swarm_resume_reports_dirty_detached_worktree_read_only(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md")
+    base_ref = _git(repo, "rev-parse", "main").stdout.strip()
+    worktree = repo / ".cache" / "conductor" / "swarm" / "foo"
+    _git(repo, "worktree", "add", str(worktree), "-b", "feat/swarm/foo", base_ref)
+    _commit_change(worktree, "feature.txt", "feature")
+    branch_head = _git(worktree, "rev-parse", "HEAD").stdout.strip()
+    _git(worktree, "checkout", "--detach", "HEAD")
+    (worktree / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+    monkeypatch.chdir(repo)
+    manifest_path = _manual_swarm_manifest(
+        repo,
+        base_ref=base_ref,
+        tasks=[
+            {
+                "brief": str(brief),
+                "branch": "feat/swarm/foo",
+                "worktree": str(worktree),
+                "status": "failed",
+                "commits": 1,
+                "pr_url": None,
+                "merge_sha": None,
+                "duration_ms": 10,
+                "failure_reason": "ship failed",
+                "cleanup_status": "preserved",
+            }
+        ],
+    )
+
+    result = CliRunner().invoke(main, ["swarm", "resume", str(manifest_path), "1"])
+
+    assert result.exit_code == 0, result.output
+    assert "worktree dirty: yes" in result.output
+    assert "dirty.txt" in result.output
+    assert "worktree branch: detached at " in result.output
+    assert _git(repo, "rev-parse", "feat/swarm/foo").stdout.strip() == branch_head
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["tasks"][0]["status"] == "failed"
+
+
 def test_swarm_retry_ship_refuses_missing_worktree(tmp_path: Path, monkeypatch) -> None:
     repo = _repo(tmp_path)
     brief = _brief(repo, "foo.md")
