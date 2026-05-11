@@ -6,6 +6,7 @@ import subprocess
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import pytest
 from click.testing import CliRunner
@@ -56,6 +57,14 @@ def _brief(repo: Path, name: str, body: str = "make a focused change") -> Path:
 
 def _swarm_manifests(repo: Path) -> list[Path]:
     return sorted((repo / ".cache" / "conductor" / "swarm" / "runs").glob("*.json"))
+
+
+def _preflight_overlap_list(plan: dict[str, object], key: str) -> list[dict[str, object]]:
+    overlaps = plan["overlaps"]
+    assert isinstance(overlaps, dict)
+    value = overlaps[key]
+    assert isinstance(value, list)
+    return cast("list[dict[str, object]]", value)
 
 
 def _manual_swarm_manifest(
@@ -257,6 +266,42 @@ def test_swarm_metrics_zero_or_missing_duration_has_zero_throughput(
     assert metrics["completed_tasks_per_hour"] == 0.0
 
 
+def test_swarm_preflight_detects_duplicate_file_paths(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    first = _brief(repo, "first.md", "Edit `src/conductor/session_log.py`.")
+    second = _brief(repo, "second.md", "Update src/conductor/session_log.py too.")
+
+    plan = cli._swarm_preflight_plan((str(first), str(second)), repo_root=repo)
+
+    assert _preflight_overlap_list(plan, "file_paths") == [
+        {"value": "src/conductor/session_log.py", "briefs": [str(first), str(second)]}
+    ]
+
+
+def test_swarm_preflight_detects_shared_subsystems(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    first = _brief(repo, "first.md", "Adjust swarm resume behavior.")
+    second = _brief(repo, "second.md", "Audit swarm retry behavior.")
+
+    plan = cli._swarm_preflight_plan((str(first), str(second)), repo_root=repo)
+
+    assert _preflight_overlap_list(plan, "subsystems") == [
+        {"value": "swarm", "briefs": [str(first), str(second)]}
+    ]
+
+
+def test_swarm_preflight_detects_duplicate_issue_refs(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    first = _brief(repo, "first.md", "Issue: #369\n\nImplement part one.")
+    second = _brief(repo, "second.md", "Issue: #369\n\nImplement part two.")
+
+    plan = cli._swarm_preflight_plan((str(first), str(second)), repo_root=repo)
+
+    assert _preflight_overlap_list(plan, "issue_refs") == [
+        {"value": "#369", "briefs": [str(first), str(second)]}
+    ]
+
+
 def test_ship_swarm_pr_timeout_preserves_detected_pr_url(monkeypatch, tmp_path: Path) -> None:
     scripts = tmp_path / "scripts"
     scripts.mkdir()
@@ -411,6 +456,108 @@ def test_swarm_writes_manifest_for_successful_run(monkeypatch, tmp_path: Path) -
     assert manifest["tasks"][0]["pr_url"] == "https://github.com/example/repo/pull/123"
     assert manifest["tasks"][0]["merge_sha"]
     assert manifest["tasks"][0]["cleanup_status"] == "removed"
+
+
+def test_swarm_manifest_contains_preflight_plan(monkeypatch, tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    first = _brief(repo, "first.md", "Touch src/conductor/session_log.py")
+    second = _brief(repo, "second.md", "Also touch src/conductor/session_log.py")
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(
+        cli,
+        "_run_exec_phase_dispatch",
+        _fake_exec_factory(no_change_on={first.read_text(), second.read_text()}),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "swarm",
+            "--provider",
+            "codex",
+            "--brief",
+            str(first),
+            "--brief",
+            str(second),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    manifest = json.loads(_swarm_manifests(repo)[0].read_text(encoding="utf-8"))
+    assert manifest["preflight"]["schema_version"] == 1
+    assert manifest["preflight"]["overlaps"]["file_paths"] == [
+        {"value": "src/conductor/session_log.py", "briefs": [str(first), str(second)]}
+    ]
+
+
+def test_swarm_json_stdout_omits_preflight_plan(monkeypatch, tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    first = _brief(repo, "first.md", "Touch src/conductor/session_log.py")
+    second = _brief(repo, "second.md", "Also touch src/conductor/session_log.py")
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(
+        cli,
+        "_run_exec_phase_dispatch",
+        _fake_exec_factory(no_change_on={first.read_text(), second.read_text()}),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "swarm",
+            "--provider",
+            "codex",
+            "--brief",
+            str(first),
+            "--brief",
+            str(second),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert set(payload) == {"tasks", "ok", "shipped_count", "failed_count", "no_changes_count"}
+    assert "preflight" not in payload
+
+
+def test_swarm_preflight_only_writes_plan_without_worktrees(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    first = _brief(repo, "first.md", "Touch src/conductor/session_log.py")
+    second = _brief(repo, "second.md", "Also touch src/conductor/session_log.py")
+    monkeypatch.chdir(repo)
+
+    def fail_exec(**kwargs):
+        _ = kwargs
+        raise AssertionError("preflight-only must not execute workers")
+
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", fail_exec)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "swarm",
+            "--provider",
+            "codex",
+            "--brief",
+            str(first),
+            "--brief",
+            str(second),
+            "--preflight-only",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "swarm preflight: 2 lane(s), 1 warning(s)" in result.output
+    assert "file paths:" in result.output
+    assert not (repo / ".cache" / "conductor" / "swarm" / "first").exists()
+    assert not (repo / ".cache" / "conductor" / "swarm" / "second").exists()
+    manifest = json.loads(_swarm_manifests(repo)[0].read_text(encoding="utf-8"))
+    assert manifest["preflight"]["has_warnings"] is True
 
 
 def test_swarm_writes_manifest_for_failed_run(monkeypatch, tmp_path: Path) -> None:
