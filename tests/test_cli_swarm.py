@@ -213,6 +213,7 @@ def test_swarm_metrics_aggregate_mixed_task_statuses() -> None:
         [
             {"status": "shipped", "commits": 2},
             {"status": "failed", "commits": 1},
+            {"status": "provider-failed", "commits": 0},
             {"status": "no-changes", "commits": 0},
             {"status": "review-blocked", "commits": 3},
             {"status": "pushed-not-merged", "commits": 4},
@@ -222,9 +223,10 @@ def test_swarm_metrics_aggregate_mixed_task_statuses() -> None:
 
     assert metrics == {
         "schema_version": 1,
-        "total_tasks": 5,
+        "total_tasks": 6,
         "shipped_count": 1,
         "failed_count": 1,
+        "provider_failed_count": 1,
         "no_changes_count": 1,
         "review_blocked_count": 1,
         "pushed_not_merged_count": 1,
@@ -232,6 +234,7 @@ def test_swarm_metrics_aggregate_mixed_task_statuses() -> None:
         "per_status_counts": {
             "failed": 1,
             "no-changes": 1,
+            "provider-failed": 1,
             "pushed-not-merged": 1,
             "review-blocked": 1,
             "shipped": 1,
@@ -387,11 +390,13 @@ def test_swarm_writes_manifest_for_successful_run(monkeypatch, tmp_path: Path) -
     assert manifest["ok"] is True
     assert manifest["shipped_count"] == 1
     assert manifest["failed_count"] == 0
+    assert manifest["provider_failed_count"] == 0
     assert manifest["no_changes_count"] == 0
     assert manifest["metrics"]["schema_version"] == 1
     assert manifest["metrics"]["total_tasks"] == 1
     assert manifest["metrics"]["shipped_count"] == 1
     assert manifest["metrics"]["failed_count"] == 0
+    assert manifest["metrics"]["provider_failed_count"] == 0
     assert manifest["metrics"]["no_changes_count"] == 0
     assert manifest["metrics"]["review_blocked_count"] == 0
     assert manifest["metrics"]["pushed_not_merged_count"] == 0
@@ -430,10 +435,86 @@ def test_swarm_writes_manifest_for_failed_run(monkeypatch, tmp_path: Path) -> No
     manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
     assert manifest["ok"] is False
     assert manifest["failed_count"] == 1
+    assert manifest["provider_failed_count"] == 0
     assert manifest["tasks"][0]["status"] == "failed"
     assert manifest["tasks"][0]["failure_reason"] == "max-iterations cap reached"
     assert manifest["tasks"][0]["cleanup_status"] == "preserved"
     assert Path(manifest["tasks"][0]["worktree"]).exists()
+
+
+def test_swarm_classifies_exec_phase_provider_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md", "provider outage")
+    monkeypatch.chdir(repo)
+
+    def provider_failure(**kwargs):
+        _ = kwargs
+        raise cli._ExecPhaseError(
+            exit_code=1,
+            exit_status="error",
+            message="codex websocket disconnected during model refresh",
+        )
+
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", provider_failure)
+    monkeypatch.setattr(cli, "_ship_swarm_pr", _fake_ship)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "swarm",
+            "--provider",
+            "codex",
+            "--brief",
+            str(brief),
+            "--remove-worktrees-on-failure",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["failed_count"] == 0
+    assert payload["tasks"][0]["status"] == "provider-failed"
+    assert payload["tasks"][0]["failure_reason"] == (
+        "codex websocket disconnected during model refresh"
+    )
+    assert Path(payload["tasks"][0]["worktree"]).exists()
+    manifest = json.loads(_swarm_manifests(repo)[0].read_text(encoding="utf-8"))
+    assert manifest["failed_count"] == 0
+    assert manifest["provider_failed_count"] == 1
+    assert manifest["metrics"]["provider_failed_count"] == 1
+    assert manifest["metrics"]["per_status_counts"] == {"provider-failed": 1}
+    assert manifest["tasks"][0]["cleanup_status"] == "preserved"
+
+
+def test_swarm_classifies_runtime_provider_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md")
+    monkeypatch.chdir(repo)
+
+    def provider_failure(**kwargs):
+        _ = kwargs
+        raise RuntimeError("provider HTTP 503: request timed out")
+
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", provider_failure)
+    monkeypatch.setattr(cli, "_ship_swarm_pr", _fake_ship)
+
+    result = CliRunner().invoke(
+        main,
+        ["swarm", "--provider", "codex", "--brief", str(brief), "--json"],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["tasks"][0]["status"] == "provider-failed"
+    manifest = json.loads(_swarm_manifests(repo)[0].read_text(encoding="utf-8"))
+    assert manifest["tasks"][0]["failure_reason"] == "provider HTTP 503: request timed out"
 
 
 def test_swarm_sequential_internal_error_updates_manifest(
@@ -462,6 +543,7 @@ def test_swarm_sequential_internal_error_updates_manifest(
     assert manifest["ended_at"]
     assert manifest["ok"] is False
     assert manifest["failed_count"] == 1
+    assert manifest["provider_failed_count"] == 0
     assert manifest["tasks"][0]["status"] == "failed"
     assert manifest["tasks"][0]["failure_reason"] == "internal swarm task error: boom"
 
@@ -526,6 +608,7 @@ def test_swarm_status_latest_and_explicit_lookup(monkeypatch, tmp_path: Path) ->
         "metrics: total=1 review-blocked=0 pushed-not-merged=0 commits=1 completed/hour="
         in latest_result.output
     )
+    assert "provider-failed=0" in latest_result.output
     assert "status-counts: shipped=1" in latest_result.output
     assert "shipped:" in latest_result.output
 
@@ -536,6 +619,42 @@ def test_swarm_status_latest_and_explicit_lookup(monkeypatch, tmp_path: Path) ->
     path_result = runner.invoke(main, ["swarm", "status", str(manifest_path)])
     assert path_result.exit_code == 0, path_result.output
     assert f"swarm run {run_id} (ok)" in path_result.output
+
+
+def test_swarm_status_reports_provider_failed_counts(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md")
+    worktree = repo / ".cache" / "conductor" / "swarm" / "foo"
+    monkeypatch.chdir(repo)
+    manifest_path = _manual_swarm_manifest(
+        repo,
+        tasks=[
+            {
+                "brief": str(brief),
+                "branch": "feat/swarm/foo",
+                "worktree": str(worktree),
+                "status": "provider-failed",
+                "commits": 0,
+                "pr_url": None,
+                "merge_sha": None,
+                "duration_ms": 10,
+                "failure_reason": "rate limit: quota exceeded",
+                "cleanup_status": "preserved",
+            }
+        ],
+    )
+
+    result = CliRunner().invoke(main, ["swarm", "status", str(manifest_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "failed=0 no-changes=0 provider-failed=1" in result.output
+    assert "metrics: total=1 review-blocked=0 pushed-not-merged=0 commits=0" in result.output
+    assert "provider-failed=1" in result.output
+    assert "status-counts: provider-failed=1" in result.output
+    assert "provider-failed:" in result.output
 
 
 def test_swarm_retry_ship_updates_review_blocked_manifest(
@@ -1287,6 +1406,31 @@ def test_swarm_no_commits_is_no_changes(monkeypatch, tmp_path: Path) -> None:
     payload = json.loads(result.stdout)
     assert payload["tasks"][0]["status"] == "no-changes"
     assert payload["tasks"][0]["commits"] == 0
+
+
+def test_swarm_non_json_summary_includes_provider_failed_count(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md")
+    monkeypatch.chdir(repo)
+
+    def provider_failure(**kwargs):
+        _ = kwargs
+        raise RuntimeError("provider HTTP 503: request timed out")
+
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", provider_failure)
+    monkeypatch.setattr(cli, "_ship_swarm_pr", _fake_ship)
+
+    result = CliRunner().invoke(
+        main,
+        ["swarm", "--provider", "codex", "--brief", str(brief)],
+    )
+
+    assert result.exit_code == 1
+    assert "provider-failed:" in result.output
+    assert "ok=False shipped=0 failed=0 no-changes=0 provider-failed=1" in result.output
 
 
 def test_swarm_auto_merge_off_leaves_pushed_not_merged(monkeypatch, tmp_path: Path) -> None:

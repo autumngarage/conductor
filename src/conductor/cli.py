@@ -5536,6 +5536,7 @@ def _append_previous_phase_results(body: str, summaries: list[str]) -> str:
 
 
 SWARM_SUCCESS_STATUSES = frozenset({"shipped", "no-changes"})
+SWARM_PROVIDER_FAILED_STATUS = "provider-failed"
 SWARM_BRANCH_PREFIX = "feat/swarm"
 SWARM_WORKTREE_LOCK = threading.Lock()
 SWARM_GIT_TIMEOUT_SEC = 30.0
@@ -5561,6 +5562,58 @@ _SWARM_GENERATED_ISSUE_HEADER_RE = re.compile(
     r"(?P<number>[1-9]\d*)\)\s*$"
 )
 _SWARM_ISSUE_PATH_SEGMENT_RE = re.compile(r"(?i)^issue[-_](?P<number>[1-9]\d*)\b")
+_SWARM_PROVIDER_TRANSIENT_SIGNALS = (
+    "websocket",
+    "connection closed",
+    "connection reset",
+    "connection refused",
+    "connection aborted",
+    "connection error",
+    "disconnect",
+    "disconnected",
+    "network error",
+    "network failure",
+    "network is unreachable",
+    "network is down",
+    "no route to host",
+    "could not resolve",
+    "temporary failure in name resolution",
+    "getaddrinfo failed",
+    "model refresh",
+    "refresh models",
+    "refreshing model",
+    "rate limit",
+    "rate_limit",
+    "ratelimit",
+    "rate-limit",
+    "too many requests",
+    "quota",
+    "insufficient credits",
+    "http 429",
+    "status 429",
+    "provider http",
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+    "status 500",
+    "status 502",
+    "status 503",
+    "status 504",
+    "bad gateway",
+    "gateway timeout",
+    "service unavailable",
+    "internal server error",
+    "provider unavailable",
+    "provider timed out",
+    "provider timeout",
+    "api timed out",
+    "request timed out",
+    "read timed out",
+    "deadline exceeded",
+    "stalled",
+    "no output",
+)
 
 
 @dataclass
@@ -6063,6 +6116,7 @@ def _swarm_metrics_from_task_records(
         "total_tasks": len(tasks),
         "shipped_count": shipped_count,
         "failed_count": status_counts.get("failed", 0),
+        "provider_failed_count": status_counts.get(SWARM_PROVIDER_FAILED_STATUS, 0),
         "no_changes_count": no_changes_count,
         "review_blocked_count": status_counts.get("review-blocked", 0),
         "pushed_not_merged_count": status_counts.get("pushed-not-merged", 0),
@@ -6071,6 +6125,23 @@ def _swarm_metrics_from_task_records(
         "total_commits": total_commits,
         "completed_tasks_per_hour": throughput,
     }
+
+
+def _is_swarm_provider_failure(error: BaseException | str) -> bool:
+    if isinstance(error, ProviderStalledError | ProviderHTTPError):
+        return True
+    if isinstance(error, ProviderExecutionError):
+        return error.status.get("state") != "iteration-cap"
+    text = str(error).lower()
+    if text.startswith("`git "):
+        return False
+    return any(signal in text for signal in _SWARM_PROVIDER_TRANSIENT_SIGNALS)
+
+
+def _swarm_failure_status(error: BaseException | str) -> str:
+    if _is_swarm_provider_failure(error):
+        return SWARM_PROVIDER_FAILED_STATUS
+    return "failed"
 
 
 def _swarm_initial_task_records(
@@ -6110,6 +6181,9 @@ def _swarm_manifest_payload(
 ) -> dict[str, object]:
     shipped_count = sum(1 for task in tasks if task.get("status") == "shipped")
     failed_count = sum(1 for task in tasks if task.get("status") == "failed")
+    provider_failed_count = sum(
+        1 for task in tasks if task.get("status") == SWARM_PROVIDER_FAILED_STATUS
+    )
     no_changes_count = sum(1 for task in tasks if task.get("status") == "no-changes")
     ok = bool(tasks) and all(task.get("status") in SWARM_SUCCESS_STATUSES for task in tasks)
     metrics = _swarm_metrics_from_task_records(tasks, duration_ms=duration_ms)
@@ -6126,6 +6200,7 @@ def _swarm_manifest_payload(
         "ok": ok,
         "shipped_count": shipped_count,
         "failed_count": failed_count,
+        "provider_failed_count": provider_failed_count,
         "no_changes_count": no_changes_count,
         "metrics": metrics,
     }
@@ -6513,22 +6588,25 @@ def _format_swarm_manifest_status(payload: dict[str, object], *, path: Path) -> 
             )
         ),
         (
-            "ok={ok} shipped={shipped} failed={failed} no-changes={no_changes}".format(
+            "ok={ok} shipped={shipped} failed={failed} no-changes={no_changes} "
+            "provider-failed={provider_failed}".format(
                 ok=payload.get("ok"),
                 shipped=payload.get("shipped_count", 0),
                 failed=payload.get("failed_count", 0),
                 no_changes=payload.get("no_changes_count", 0),
+                provider_failed=payload.get("provider_failed_count", 0),
             )
         ),
         (
             "metrics: total={total} review-blocked={review_blocked} "
             "pushed-not-merged={pushed_not_merged} commits={commits} "
-            "completed/hour={throughput:.2f}".format(
+            "completed/hour={throughput:.2f} provider-failed={provider_failed}".format(
                 total=metrics.get("total_tasks", len(tasks)),
                 review_blocked=metrics.get("review_blocked_count", 0),
                 pushed_not_merged=metrics.get("pushed_not_merged_count", 0),
                 commits=metrics.get("total_commits", 0),
                 throughput=float(throughput),
+                provider_failed=metrics.get("provider_failed_count", 0),
             )
         ),
     ]
@@ -6666,7 +6744,7 @@ def _run_swarm_task(
                 elif status in {"failed", "review-blocked"}:
                     failure_reason = shipped_detail
     except _ExecPhaseError as e:
-        status = "failed"
+        status = _swarm_failure_status(f"{e.exit_status} {e.message}")
         failure_reason = e.message
         if created_worktree:
             try:
@@ -6674,7 +6752,7 @@ def _run_swarm_task(
             except RuntimeError as count_error:
                 click.echo(f"[conductor] warning: {count_error}", err=True)
     except RuntimeError as e:
-        status = "failed"
+        status = _swarm_failure_status(e)
         failure_reason = str(e)
     finally:
         duration_ms = int((time.monotonic() - started_at) * 1000)
@@ -6690,8 +6768,10 @@ def _run_swarm_task(
         duration_ms=duration_ms,
         failure_reason=failure_reason,
     )
-    if created_worktree and (
-        result.status in SWARM_SUCCESS_STATUSES or not keep_worktrees_on_failure
+    if (
+        created_worktree
+        and result.status != SWARM_PROVIDER_FAILED_STATUS
+        and (result.status in SWARM_SUCCESS_STATUSES or not keep_worktrees_on_failure)
     ):
         try:
             _remove_swarm_worktree(worktree, repo_root=repo_root)
@@ -6707,9 +6787,9 @@ def _run_swarm_task(
         except RuntimeError as e:
             result.status = "failed"
             result.failure_reason = f"{result.failure_reason or result.status}; cleanup failed: {e}"
-    if result.status == "failed":
+    if result.status in {"failed", SWARM_PROVIDER_FAILED_STATUS}:
         click.echo(
-            f"[conductor] swarm task failed: {brief_path}; inspect {worktree}; "
+            f"[conductor] swarm task {result.status}: {brief_path}; inspect {worktree}; "
             f"reason: {result.failure_reason}",
             err=True,
         )
@@ -6737,7 +6817,7 @@ def _failed_swarm_thread_result(brief_path: str, error: BaseException) -> SwarmT
         brief=brief_path,
         branch=branch,
         worktree=str(worktree),
-        status="failed",
+        status=_swarm_failure_status(error),
         commits=0,
         pr_url=None,
         merge_sha=None,
@@ -7990,9 +8070,16 @@ def swarm(
             if result.pr_url:
                 detail += f" ({result.pr_url})"
             click.echo(detail)
+        summary_display = {
+            **payload,
+            "provider_failed_count": sum(
+                1 for result in results if result.status == SWARM_PROVIDER_FAILED_STATUS
+            ),
+        }
         click.echo(
             "ok={ok} shipped={shipped_count} failed={failed_count} "
-            "no-changes={no_changes_count}".format(**payload)
+            "no-changes={no_changes_count} "
+            "provider-failed={provider_failed_count}".format(**summary_display)
         )
     if not payload["ok"]:
         sys.exit(1)
