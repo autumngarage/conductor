@@ -75,6 +75,21 @@ class ProviderHTTPError(ProviderError):
     """Raised when an HTTP-backed provider receives an upstream error
     (non-2xx, malformed JSON, timeout)."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_reason: str | None = None,
+        provider: str | None = None,
+        status_code: int | None = None,
+        upstream_body: str | None = None,
+    ) -> None:
+        self.failure_reason = failure_reason
+        self.provider = provider
+        self.status_code = status_code
+        self.upstream_body = upstream_body
+        super().__init__(message)
+
 
 class ProviderExecutionError(ProviderError):
     """Raised when a provider completes transport but fails execution policy."""

@@ -174,6 +174,29 @@ def test_is_retryable_still_handles_known_categories():
     assert _is_retryable(ValueError("some other failure")) == (False, "other")
 
 
+@pytest.mark.parametrize(
+    ("failure_reason", "expected_category"),
+    [
+        ("auth_quota", "rate-limit"),
+        ("malformed_response", "provider-error"),
+        ("provider_outage", "5xx"),
+        ("transient_network", "network"),
+        ("usage_config_error", "provider-error"),
+    ],
+)
+def test_is_retryable_prefers_provider_http_failure_reason(
+    failure_reason,
+    expected_category,
+):
+    error = ProviderHTTPError(
+        "OpenRouter failed before review output",
+        failure_reason=failure_reason,
+        provider="openrouter",
+    )
+
+    assert _is_retryable(error) == (True, expected_category)
+
+
 # --------------------------------------------------------------------------- #
 # 2. offline_mode sticky flag
 # --------------------------------------------------------------------------- #

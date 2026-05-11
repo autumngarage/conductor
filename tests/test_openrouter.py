@@ -225,6 +225,48 @@ def test_call_none_response_without_fallback_includes_response_shape(configured)
     assert "finish_reason=stop" in message
 
 
+@pytest.mark.parametrize(
+    ("status_code", "body", "expected_reason"),
+    [
+        (429, "rate limit exceeded", "auth_quota"),
+        (400, "invalid model request", "usage_config_error"),
+        (503, "service unavailable", "provider_outage"),
+    ],
+)
+def test_call_http_error_exposes_failure_taxonomy(
+    configured,
+    status_code,
+    body,
+    expected_reason,
+):
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(
+            return_value=httpx.Response(status_code, text=body)
+        )
+        with pytest.raises(ProviderHTTPError) as exc:
+            OpenRouterProvider().call("Review this.", model="model-a")
+
+    error = exc.value
+    assert error.provider == "openrouter"
+    assert error.status_code == status_code
+    assert error.upstream_body == body
+    assert error.failure_reason == expected_reason
+    assert f"upstream HTTP {status_code}" in str(error)
+
+
+def test_call_malformed_json_exposes_failure_taxonomy(configured):
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(
+            return_value=httpx.Response(200, text="not json")
+        )
+        with pytest.raises(ProviderHTTPError) as exc:
+            OpenRouterProvider().call("Review this.", model="model-a")
+
+    assert exc.value.provider == "openrouter"
+    assert exc.value.failure_reason == "malformed_response"
+    assert "not JSON" in str(exc.value)
+
+
 def test_call_raises_config_error_when_unconfigured(no_key):
     with pytest.raises(ProviderConfigError):
         OpenRouterProvider().call("hello")
