@@ -5544,7 +5544,23 @@ SWARM_GH_TIMEOUT_SEC = 30.0
 SWARM_SHIP_TIMEOUT_SEC = 1800.0
 SWARM_MANIFEST_SCHEMA_VERSION = 1
 SWARM_METRICS_SCHEMA_VERSION = 1
+SWARM_PREFLIGHT_SCHEMA_VERSION = 1
+SWARM_PREFLIGHT_SUBSYSTEMS = frozenset(
+    {
+        "swarm",
+        "provider",
+        "router",
+        "credentials",
+        "cortex",
+        "review",
+        "openrouter",
+        "cli",
+    }
+)
 _SWARM_FENCED_CODE_BLOCK_RE = re.compile(r"(?ms)^```.*?^```")
+_SWARM_PREFLIGHT_PATH_RE = re.compile(
+    r"(?<![\w./-])(?P<path>(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9_+-]+)"
+)
 _SWARM_CLOSING_LINE_RE = re.compile(
     r"(?im)^\s*(?:Closes|Fixes|Resolves)\s+"
     r"(?:https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/)?"
@@ -5807,6 +5823,140 @@ def _validate_swarm_briefs(briefs: tuple[str, ...], *, repo_root: Path) -> None:
             ) from e
         if not body:
             raise click.UsageError(f"brief is empty after stripping whitespace: {brief_path!r}")
+
+
+def _swarm_preflight_lane(
+    brief_path: str,
+    *,
+    repo_root: Path,
+    repo_slug: str | None,
+) -> dict[str, object]:
+    path = Path(brief_path)
+    resolved_path = path if path.is_absolute() else (repo_root / path).resolve()
+    body = resolved_path.read_text(encoding="utf-8")
+    searchable_body = _SWARM_FENCED_CODE_BLOCK_RE.sub("", body)
+    file_paths = sorted(
+        {
+            match.group("path").strip("`'\"),.;:")
+            for match in _SWARM_PREFLIGHT_PATH_RE.finditer(searchable_body)
+        }
+    )
+    lowered = searchable_body.lower()
+    subsystems = sorted(
+        subsystem
+        for subsystem in SWARM_PREFLIGHT_SUBSYSTEMS
+        if re.search(rf"(?<![A-Za-z0-9_-]){re.escape(subsystem)}(?![A-Za-z0-9_-])", lowered)
+    )
+    issue_refs = _swarm_issue_closing_refs(body, resolved_path, repo_slug=repo_slug)
+    return {
+        "brief": brief_path,
+        "file_paths": file_paths,
+        "subsystems": subsystems,
+        "issue_refs": issue_refs,
+    }
+
+
+def _swarm_preflight_duplicates(
+    lanes: list[dict[str, object]],
+    key: str,
+) -> list[dict[str, object]]:
+    by_value: dict[str, list[str]] = {}
+    for lane in lanes:
+        brief = lane.get("brief")
+        values = lane.get(key)
+        if not isinstance(brief, str) or not isinstance(values, list):
+            continue
+        for value in values:
+            if isinstance(value, str):
+                by_value.setdefault(value, []).append(brief)
+    return [
+        {"value": value, "briefs": sorted(briefs)}
+        for value, briefs in sorted(by_value.items())
+        if len(set(briefs)) > 1
+    ]
+
+
+def _swarm_preflight_plan(
+    briefs: tuple[str, ...],
+    *,
+    repo_root: Path,
+) -> dict[str, object]:
+    repo_slug = _swarm_github_repo_slug(repo_root)
+    lanes = [
+        _swarm_preflight_lane(brief_path, repo_root=repo_root, repo_slug=repo_slug)
+        for brief_path in briefs
+    ]
+    duplicate_file_paths = _swarm_preflight_duplicates(lanes, "file_paths")
+    shared_subsystems = _swarm_preflight_duplicates(lanes, "subsystems")
+    duplicate_issue_refs = _swarm_preflight_duplicates(lanes, "issue_refs")
+    warning_count = (
+        len(duplicate_file_paths) + len(shared_subsystems) + len(duplicate_issue_refs)
+    )
+    return {
+        "schema_version": SWARM_PREFLIGHT_SCHEMA_VERSION,
+        "lane_count": len(briefs),
+        "lanes": lanes,
+        "overlaps": {
+            "file_paths": duplicate_file_paths,
+            "subsystems": shared_subsystems,
+            "issue_refs": duplicate_issue_refs,
+        },
+        "warning_count": warning_count,
+        "has_warnings": warning_count > 0,
+    }
+
+
+def _format_swarm_preflight_warning(plan: dict[str, object]) -> str | None:
+    if not plan.get("has_warnings"):
+        return None
+    overlaps = plan.get("overlaps")
+    if not isinstance(overlaps, dict):
+        return None
+    parts: list[str] = []
+    labels = {
+        "file_paths": "file path",
+        "subsystems": "subsystem",
+        "issue_refs": "issue ref",
+    }
+    for key, label in labels.items():
+        entries = overlaps.get(key)
+        if isinstance(entries, list) and entries:
+            values = [entry.get("value") for entry in entries if isinstance(entry, dict)]
+            display = ", ".join(str(value) for value in values[:3] if isinstance(value, str))
+            if len(values) > 3:
+                display += f", +{len(values) - 3} more"
+            parts.append(f"{len(entries)} {label} overlap(s): {display}")
+    if not parts:
+        return None
+    return "[conductor] swarm preflight overlap warning: " + "; ".join(parts)
+
+
+def _format_swarm_preflight_plan(plan: dict[str, object]) -> list[str]:
+    lines = [
+        f"swarm preflight: {plan.get('lane_count', 0)} lane(s), "
+        f"{plan.get('warning_count', 0)} warning(s)"
+    ]
+    overlaps = plan.get("overlaps")
+    if not isinstance(overlaps, dict):
+        return lines
+    labels = {
+        "file_paths": "file paths",
+        "subsystems": "subsystems",
+        "issue_refs": "issue refs",
+    }
+    for key, label in labels.items():
+        entries = overlaps.get(key)
+        if not isinstance(entries, list) or not entries:
+            continue
+        lines.append(f"{label}:")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            value = entry.get("value")
+            briefs = entry.get("briefs")
+            if isinstance(value, str) and isinstance(briefs, list):
+                lines.append(f"  - {value}: {', '.join(str(brief) for brief in briefs)}")
+    return lines
 
 
 def _run_swarm_git(
@@ -6178,6 +6328,7 @@ def _swarm_manifest_payload(
     ended_at: str | None,
     duration_ms: int | None,
     tasks: list[dict[str, object]],
+    preflight: dict[str, object] | None = None,
 ) -> dict[str, object]:
     shipped_count = sum(1 for task in tasks if task.get("status") == "shipped")
     failed_count = sum(1 for task in tasks if task.get("status") == "failed")
@@ -6187,7 +6338,7 @@ def _swarm_manifest_payload(
     no_changes_count = sum(1 for task in tasks if task.get("status") == "no-changes")
     ok = bool(tasks) and all(task.get("status") in SWARM_SUCCESS_STATUSES for task in tasks)
     metrics = _swarm_metrics_from_task_records(tasks, duration_ms=duration_ms)
-    return {
+    payload: dict[str, object] = {
         "schema_version": SWARM_MANIFEST_SCHEMA_VERSION,
         "run_id": run_id,
         "repo_root": str(repo_root),
@@ -6204,6 +6355,9 @@ def _swarm_manifest_payload(
         "no_changes_count": no_changes_count,
         "metrics": metrics,
     }
+    if preflight is not None:
+        payload["preflight"] = preflight
+    return payload
 
 
 def _write_swarm_manifest(path: Path, payload: dict[str, object]) -> None:
@@ -6500,6 +6654,7 @@ def _retry_ship_swarm_task(
     if isinstance(raw_duration, int) and not isinstance(raw_duration, bool):
         run_duration_ms = max(0, raw_duration) + duration_ms
 
+    preflight = payload.get("preflight")
     return _swarm_manifest_payload(
         run_id=str(payload.get("run_id") or manifest_path.stem),
         repo_root=repo_root,
@@ -6509,6 +6664,7 @@ def _retry_ship_swarm_task(
         ended_at=_swarm_now_iso(),
         duration_ms=run_duration_ms,
         tasks=tasks,
+        preflight=preflight if isinstance(preflight, dict) else None,
     )
 
 
@@ -7943,6 +8099,12 @@ def exec_cmd(
     help="Emit structured swarm results as JSON.",
 )
 @click.option(
+    "--preflight-only",
+    is_flag=True,
+    default=False,
+    help="Inspect likely brief overlap, write the manifest, and exit before workers run.",
+)
+@click.option(
     "--keep-worktrees-on-failure/--remove-worktrees-on-failure",
     default=True,
     show_default=True,
@@ -7965,6 +8127,7 @@ def swarm(
     max_stall_sec: int | None,
     timeout_sec: int | None,
     as_json: bool,
+    preflight_only: bool,
     keep_worktrees_on_failure: bool,
     max_parallel: int,
 ) -> None:
@@ -7981,6 +8144,11 @@ def swarm(
     results: list[SwarmTaskResult] = []
     repo_root = _swarm_repo_root()
     _validate_swarm_briefs(briefs, repo_root=repo_root)
+    preflight = _swarm_preflight_plan(briefs, repo_root=repo_root)
+    if len(briefs) > 1:
+        warning = _format_swarm_preflight_warning(preflight)
+        if warning is not None:
+            click.echo(warning, err=True)
     try:
         base_ref = _run_swarm_git(
             ["rev-parse", "--verify", base_branch],
@@ -8005,8 +8173,15 @@ def swarm(
             ended_at=None,
             duration_ms=None,
             tasks=manifest_tasks,
+            preflight=preflight,
         ),
     )
+    if preflight_only:
+        for line in _format_swarm_preflight_plan(preflight):
+            click.echo(line, err=as_json)
+        if as_json:
+            click.echo(json.dumps({"ok": True, "preflight": preflight}, indent=2))
+        return
 
     def run_one(brief_path: str) -> SwarmTaskResult:
         return _run_swarm_task(
@@ -8058,6 +8233,7 @@ def swarm(
             ended_at=ended_at,
             duration_ms=duration_ms,
             tasks=manifest_tasks,
+            preflight=preflight,
         ),
     )
 
