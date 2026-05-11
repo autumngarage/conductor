@@ -15,7 +15,14 @@ _MISSING_REVIEW_CONTEXT_RE = re.compile(
     r"no files? (?:were )?provided|"
     r"no (?:code )?changes? (?:were )?provided|"
     r"no diff (?:was )?provided|"
-    r"provide (?:the )?(?:code changes?|diff|file diffs?|files? themselves)"
+    r"provide (?:the )?(?:code changes?|diff|file diffs?|files? themselves)|"
+    r"(?:cannot|can not|can't|unable to|do not|don't) "
+    r"[^.\n]{0,80}\b"
+    r"(?:code changes?|diff|patch|files?|repo(?:sitory)?|tools?)|"
+    r"no access to (?:the )?"
+    r"(?:code changes?|diff|patch|files?|repo(?:sitory)?(?: tools?)?|tools?)|"
+    r"lack(?:ing|s)? (?:the )?(?:necessary )?"
+    r"(?:code changes?|diff|patch|files?|repo(?:sitory)?|tool access|tools?)"
     r")\b",
     re.IGNORECASE,
 )
