@@ -505,6 +505,39 @@ def _bounded_attempt_budget(
     return attempt_timeout_sec, attempt_max_stall_sec
 
 
+def _bounded_review_attempt_budget(
+    *,
+    timeout_sec: int | None,
+    max_stall_sec: int | None,
+    deadline_monotonic: float | None,
+    provider_name: str,
+    is_fallback: bool,
+) -> tuple[int | None, int | None]:
+    """Return the review attempt budget under shared and per-fallback caps.
+
+    Invariant: once a review provider fails and the route is in fallback, a
+    later provider cannot receive a wall-clock timeout larger than the derived
+    review stall budget. This matters for HTTP providers that cannot emit
+    progress and do not implement the no-output watchdog separately.
+    """
+    attempt_timeout_sec, attempt_max_stall_sec = _bounded_attempt_budget(
+        timeout_sec=timeout_sec,
+        max_stall_sec=max_stall_sec,
+        deadline_monotonic=deadline_monotonic,
+        budget_label="review gate budget",
+        provider_name=provider_name,
+    )
+    if is_fallback and attempt_max_stall_sec is not None:
+        attempt_timeout_sec = (
+            attempt_max_stall_sec
+            if attempt_timeout_sec is None
+            else min(attempt_timeout_sec, attempt_max_stall_sec)
+        )
+    if attempt_timeout_sec is not None and attempt_max_stall_sec is not None:
+        attempt_max_stall_sec = min(attempt_max_stall_sec, attempt_timeout_sec)
+    return attempt_timeout_sec, attempt_max_stall_sec
+
+
 def _read_task(
     task: str | None,
     task_file: str | None,
@@ -1955,6 +1988,7 @@ def _invoke_with_fallback(
     allow_completion_stretch: bool = False,
     fallback_deadline_monotonic: float | None = None,
     fallback_budget_label: str = "fallback budget",
+    cap_fallback_attempt_timeout_to_stall: bool = False,
 ) -> tuple[CallResponse, list[str]]:
     """Try the decision's ranked providers in order; fallback on retryable errors.
 
@@ -2067,6 +2101,17 @@ def _invoke_with_fallback(
             budget_label=fallback_budget_label,
             provider_name=candidate.name,
         )
+        if (
+            cap_fallback_attempt_timeout_to_stall
+            and idx > 0
+            and attempt_max_stall_sec is not None
+        ):
+            attempt_timeout_sec = (
+                attempt_max_stall_sec
+                if attempt_timeout_sec is None
+                else min(attempt_timeout_sec, attempt_max_stall_sec)
+            )
+            attempt_max_stall_sec = min(attempt_max_stall_sec, attempt_timeout_sec)
         try:
             if mode == "exec":
                 if isinstance(provider, OpenRouterProvider):
@@ -2301,12 +2346,12 @@ def _invoke_review_with_fallback(
     for idx, candidate in enumerate(candidates):
         provider = get_provider(candidate.name)
         contract_prompt = task
-        attempt_timeout_sec, attempt_max_stall_sec = _bounded_attempt_budget(
+        attempt_timeout_sec, attempt_max_stall_sec = _bounded_review_attempt_budget(
             timeout_sec=timeout_sec,
             max_stall_sec=max_stall_sec,
             deadline_monotonic=fallback_deadline_monotonic,
-            budget_label="review gate budget",
             provider_name=candidate.name,
+            is_fallback=idx > 0,
         )
         try:
             if isinstance(provider, NativeReviewProvider):
@@ -4850,6 +4895,7 @@ def call(
                 attachments=attachments,
                 fallback_deadline_monotonic=review_deadline,
                 fallback_budget_label="review gate budget",
+                cap_fallback_attempt_timeout_to_stall=review_deadline is not None,
             )
         except ProviderConfigError as e:
             _record_failed_delegation(
@@ -7237,6 +7283,7 @@ def _run_exec_phase_dispatch(
                 strict_stall=strict_stall,
                 fallback_deadline_monotonic=review_deadline,
                 fallback_budget_label="review gate budget",
+                cap_fallback_attempt_timeout_to_stall=review_deadline is not None,
             )
         except UnsupportedCapability as e:
             if session_log is not None:

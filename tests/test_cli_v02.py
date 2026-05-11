@@ -1754,7 +1754,7 @@ def test_review_auto_generic_fallback_prompt_includes_diff(mocker, tmp_path):
     assert result.exit_code == 0, result.output
     assert openrouter_call.call_args.kwargs["models"] == OPENROUTER_CODING_HIGH
     assert openrouter_call.call_args.kwargs["task_tags"] == ["code-review"]
-    assert openrouter_call.call_args.kwargs["timeout_sec"] == 300
+    assert openrouter_call.call_args.kwargs["timeout_sec"] == 75
     assert openrouter_call.call_args.kwargs["max_stall_sec"] == 75
     prompt = openrouter_call.call_args.args[0]
     assert "Patch context for generic review fallback" in prompt
@@ -1814,7 +1814,7 @@ def test_ask_review_uses_openrouter_code_stack_instead_of_gemini(mocker, tmp_pat
     assert openrouter_call.called
     assert openrouter_call.call_args.kwargs["models"] == OPENROUTER_CODING_HIGH
     assert openrouter_call.call_args.kwargs["task_tags"] == ["code-review"]
-    assert openrouter_call.call_args.kwargs["timeout_sec"] == 300
+    assert openrouter_call.call_args.kwargs["timeout_sec"] == 75
     assert openrouter_call.call_args.kwargs["max_stall_sec"] == 75
     prompt = openrouter_call.call_args.args[0]
     assert "Patch context for generic review fallback" in prompt

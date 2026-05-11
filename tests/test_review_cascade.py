@@ -197,7 +197,7 @@ def test_review_fallback_call_uses_conductor_owned_budget(mocker) -> None:
     )
 
     assert result.exit_code == 0, result.output
-    assert 250 <= openrouter_call.call_args.kwargs["timeout_sec"] <= 300
+    assert openrouter_call.call_args.kwargs["timeout_sec"] == 75
     assert openrouter_call.call_args.kwargs["max_stall_sec"] == 75
     assert "review gate budget: timeout=300s stall=75s" in result.stderr
     assert "ignored caller timeout=7s max-stall=3s" in result.stderr
@@ -239,6 +239,56 @@ def test_review_fallback_attempts_share_one_deadline(mocker, monkeypatch) -> Non
 
     assert response.provider == "codex"
     assert seen == [("claude", 300, 180), ("codex", 75, 75)]
+
+
+def test_review_rate_limit_fallback_caps_late_provider_timeout(mocker) -> None:
+    from conductor.providers.interface import (
+        ProviderError,
+        ProviderHTTPError,
+        ProviderStalledError,
+    )
+
+    seen: list[tuple[int | None, int | None]] = []
+    mocker.patch.object(
+        GeminiProvider,
+        "review",
+        side_effect=ProviderHTTPError("Gemini returned 429 rate limit"),
+    )
+    mocker.patch.object(
+        ClaudeProvider,
+        "review",
+        side_effect=ProviderHTTPError("Anthropic returned 429 rate limit"),
+    )
+
+    def openrouter_stalls(*_args, timeout_sec=None, max_stall_sec=None, **_kwargs):
+        seen.append((timeout_sec, max_stall_sec))
+        raise ProviderStalledError("openrouter review stalled")
+
+    mocker.patch.object(OpenRouterProvider, "call", side_effect=openrouter_stalls)
+
+    with pytest.raises(ProviderError) as exc_info:
+        cli._invoke_review_with_fallback(
+            _decision("gemini", "claude", "openrouter"),
+            task="Review this merge using the project reviewer guide.",
+            effort="high",
+            cwd=None,
+            timeout_sec=300,
+            max_stall_sec=75,
+            base=None,
+            commit=None,
+            uncommitted=False,
+            title=None,
+            silent=True,
+            fallback_deadline_monotonic=cli._review_gate_deadline(300),
+        )
+
+    assert seen == [(75, 75)]
+    assert "gemini (rate-limit), claude (rate-limit), openrouter (stall)" in str(
+        exc_info.value
+    )
+    assert "Last error: ProviderStalledError: openrouter review stalled" in str(
+        exc_info.value
+    )
 
 
 def test_exec_code_review_routes_cap_default_agent_iterations(mocker) -> None:
