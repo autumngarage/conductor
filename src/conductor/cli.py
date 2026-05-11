@@ -5541,6 +5541,7 @@ SWARM_GIT_TIMEOUT_SEC = 30.0
 SWARM_GH_TIMEOUT_SEC = 30.0
 SWARM_SHIP_TIMEOUT_SEC = 1800.0
 SWARM_MANIFEST_SCHEMA_VERSION = 1
+SWARM_METRICS_SCHEMA_VERSION = 1
 _SWARM_FENCED_CODE_BLOCK_RE = re.compile(r"(?ms)^```.*?^```")
 _SWARM_CLOSING_LINE_RE = re.compile(
     r"(?im)^\s*(?:Closes|Fixes|Resolves)\s+"
@@ -6014,6 +6015,49 @@ def _swarm_summary(results: list[SwarmTaskResult]) -> dict[str, object]:
     }
 
 
+def _as_nonnegative_int(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return max(0, value)
+    return 0
+
+
+def _swarm_metrics_from_task_records(
+    tasks: list[dict[str, object]],
+    *,
+    duration_ms: int | None,
+) -> dict[str, object]:
+    status_counts: dict[str, int] = {}
+    total_commits = 0
+    for task in tasks:
+        status = task.get("status")
+        if isinstance(status, str) and status:
+            status_counts[status] = status_counts.get(status, 0) + 1
+        total_commits += _as_nonnegative_int(task.get("commits"))
+
+    shipped_count = status_counts.get("shipped", 0)
+    no_changes_count = status_counts.get("no-changes", 0)
+    completed_count = shipped_count + no_changes_count
+    throughput = 0.0
+    if duration_ms is not None and duration_ms > 0:
+        throughput = completed_count / (duration_ms / 3_600_000)
+
+    return {
+        "schema_version": SWARM_METRICS_SCHEMA_VERSION,
+        "total_tasks": len(tasks),
+        "shipped_count": shipped_count,
+        "failed_count": status_counts.get("failed", 0),
+        "no_changes_count": no_changes_count,
+        "review_blocked_count": status_counts.get("review-blocked", 0),
+        "pushed_not_merged_count": status_counts.get("pushed-not-merged", 0),
+        "duration_ms": duration_ms,
+        "per_status_counts": dict(sorted(status_counts.items())),
+        "total_commits": total_commits,
+        "completed_tasks_per_hour": throughput,
+    }
+
+
 def _swarm_initial_task_records(
     briefs: tuple[str, ...],
     *,
@@ -6053,6 +6097,7 @@ def _swarm_manifest_payload(
     failed_count = sum(1 for task in tasks if task.get("status") == "failed")
     no_changes_count = sum(1 for task in tasks if task.get("status") == "no-changes")
     ok = bool(tasks) and all(task.get("status") in SWARM_SUCCESS_STATUSES for task in tasks)
+    metrics = _swarm_metrics_from_task_records(tasks, duration_ms=duration_ms)
     return {
         "schema_version": SWARM_MANIFEST_SCHEMA_VERSION,
         "run_id": run_id,
@@ -6067,6 +6112,7 @@ def _swarm_manifest_payload(
         "shipped_count": shipped_count,
         "failed_count": failed_count,
         "no_changes_count": no_changes_count,
+        "metrics": metrics,
     }
 
 
@@ -6133,6 +6179,25 @@ def _format_swarm_manifest_status(payload: dict[str, object], *, path: Path) -> 
         status = "running"
     else:
         status = "ok" if ok is True else "failed" if ok is False else "unknown"
+    raw_tasks = payload.get("tasks", [])
+    tasks = (
+        [task for task in raw_tasks if isinstance(task, dict)]
+        if isinstance(raw_tasks, list)
+        else []
+    )
+    raw_duration = payload.get("duration_ms")
+    duration_ms = (
+        raw_duration
+        if isinstance(raw_duration, int) and not isinstance(raw_duration, bool)
+        else None
+    )
+    metrics = _swarm_metrics_from_task_records(tasks, duration_ms=duration_ms)
+    manifest_metrics = payload.get("metrics")
+    if isinstance(manifest_metrics, dict):
+        metrics = {**metrics, **manifest_metrics}
+    throughput = metrics.get("completed_tasks_per_hour", 0.0)
+    if not isinstance(throughput, int | float) or isinstance(throughput, bool):
+        throughput = 0.0
     lines = [
         f"swarm run {run_id} ({status})",
         f"manifest: {path}",
@@ -6158,12 +6223,29 @@ def _format_swarm_manifest_status(payload: dict[str, object], *, path: Path) -> 
                 no_changes=payload.get("no_changes_count", 0),
             )
         ),
+        (
+            "metrics: total={total} review-blocked={review_blocked} "
+            "pushed-not-merged={pushed_not_merged} commits={commits} "
+            "completed/hour={throughput:.2f}".format(
+                total=metrics.get("total_tasks", len(tasks)),
+                review_blocked=metrics.get("review_blocked_count", 0),
+                pushed_not_merged=metrics.get("pushed_not_merged_count", 0),
+                commits=metrics.get("total_commits", 0),
+                throughput=float(throughput),
+            )
+        ),
     ]
-    tasks = payload.get("tasks", [])
-    if isinstance(tasks, list):
+    if tasks:
+        per_status = metrics.get("per_status_counts")
+        if isinstance(per_status, dict) and per_status:
+            status_parts = [
+                f"{key}={value}"
+                for key, value in per_status.items()
+                if isinstance(key, str) and isinstance(value, int) and not isinstance(value, bool)
+            ]
+            if status_parts:
+                lines.append("status-counts: " + " ".join(status_parts))
         for raw_task in tasks:
-            if not isinstance(raw_task, dict):
-                continue
             line = (
                 "- {status}: {brief} -> {branch}".format(
                     status=raw_task.get("status", "unknown"),
