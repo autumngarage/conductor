@@ -2333,8 +2333,9 @@ def _invoke_review_with_fallback(
             "`conductor list` to check configured code-review providers"
         )
         raise ProviderError(
-            f"code review failed for all tried providers: {trail}. "
-            f"Last error: {last_detail}. Next step: {hint}."
+            f"review infrastructure failed before any provider returned a "
+            f"valid verdict; no review findings were emitted. Tried providers: "
+            f"{trail}. Last error: {last_detail}. Next step: {hint}."
         ) from last_exc
     raise last_exc
 

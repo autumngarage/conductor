@@ -97,14 +97,15 @@ def detect_missing_deliverables(
             )
         )
 
-    for command in _requested_validation_commands(brief):
-        if not _recent_bash_invoked(tool_calls, command):
-            missing.append(
-                MissingDeliverable(
-                    "validation",
-                    f"Validation calls for `{command}`; not invoked in this session.",
+    if not _review_preflight_already_passed(brief):
+        for command in _requested_validation_commands(brief):
+            if not _recent_bash_invoked(tool_calls, command):
+                missing.append(
+                    MissingDeliverable(
+                        "validation",
+                        f"Validation calls for `{command}`; not invoked in this session.",
+                    )
                 )
-            )
 
     if _brief_requests_open_pr_ship(brief) and not _recent_shipping_invoked(tool_calls):
         missing.append(
@@ -172,6 +173,39 @@ def _requested_validation_commands(brief: str) -> tuple[str, ...]:
     if re.search(r"(?i)\btypecheck\b", brief):
         commands.append("typecheck")
     return tuple(dict.fromkeys(commands))
+
+
+def _review_preflight_already_passed(brief: str) -> bool:
+    """Return True when review context says deterministic validation is done.
+
+    Invariant: this only suppresses cap-time validation-tool-call hints for
+    review gates. Implementation briefs still have to execute requested
+    validation in the current session.
+    """
+
+    if not _brief_is_review_gate(brief):
+        return False
+    return bool(
+        re.search(
+            r"(?is)\b(?:pre[- ]?flight|validation)\b.{0,120}"
+            r"\b(?:passed|succeeded|completed successfully|already passed)\b",
+            brief,
+        )
+        or re.search(
+            r"(?is)\b(?:passed|succeeded)\b.{0,120}"
+            r"\b(?:pre[- ]?flight|validation)\b",
+            brief,
+        )
+    )
+
+
+def _brief_is_review_gate(brief: str) -> bool:
+    return bool(
+        re.search(r"\bCODEX_REVIEW_(?:CLEAN|FIXED|BLOCKED)\b", brief)
+        or re.search(r"(?i)\bcode-review\b", brief)
+        or re.search(r"(?i)\breview this merge\b", brief)
+        or re.search(r"(?i)\breviewer guide\b", brief)
+    )
 
 
 def _brief_requests_open_pr_ship(brief: str) -> bool:

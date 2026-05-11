@@ -1436,7 +1436,10 @@ def test_review_auto_exhausted_fallback_names_stalled_codex_and_claude(mocker):
     )
 
     assert result.exit_code == 1
-    assert "code review failed for all tried providers" in result.stderr
+    assert (
+        "review infrastructure failed before any provider returned a valid verdict"
+        in result.stderr
+    )
     assert "codex (stall), claude (timeout)" in result.stderr
 
 
@@ -1658,7 +1661,10 @@ def test_review_auto_generic_fallback_rejects_missing_requested_sentinel(
     )
 
     assert result.exit_code == 1
-    assert "code review failed for all tried providers" in result.stderr
+    assert (
+        "review infrastructure failed before any provider returned a valid verdict"
+        in result.stderr
+    )
     assert "openrouter (output-contract)" in result.stderr
     assert "ReviewOutputContractError" in result.stderr
 
@@ -1699,7 +1705,10 @@ def test_review_auto_codex_subprocess_rejects_missing_requested_sentinel(mocker)
     )
 
     assert result.exit_code == 1
-    assert "code review failed for all tried providers" in result.stderr
+    assert (
+        "review infrastructure failed before any provider returned a valid verdict"
+        in result.stderr
+    )
     assert "codex (output-contract)" in result.stderr
 
 
