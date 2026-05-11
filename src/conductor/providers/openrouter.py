@@ -199,17 +199,35 @@ class OpenRouterProvider:
                     headers=self._headers(),
                     json=payload,
                 )
+        except httpx.TimeoutException as e:
+            raise ProviderHTTPError(
+                f"network error calling OpenRouter: {e}",
+                failure_reason="transient_network",
+                provider=self.name,
+            ) from e
         except httpx.HTTPError as e:
-            raise ProviderHTTPError(f"network error calling OpenRouter: {e}") from e
+            raise ProviderHTTPError(
+                f"network error calling OpenRouter: {e}",
+                failure_reason="transient_network",
+                provider=self.name,
+            ) from e
 
         if resp.status_code != 200:
             raise ProviderHTTPError(
-                _format_openrouter_http_error(resp.status_code, resp.text, payload)
+                _format_openrouter_http_error(resp.status_code, resp.text, payload),
+                failure_reason=_openrouter_http_failure_reason(resp.status_code, resp.text),
+                provider=self.name,
+                status_code=resp.status_code,
+                upstream_body=resp.text[:500],
             )
         try:
             return resp.json()
         except ValueError as e:
-            raise ProviderHTTPError(f"OpenRouter response was not JSON: {e}") from e
+            raise ProviderHTTPError(
+                f"OpenRouter response was not JSON: {e}",
+                failure_reason="malformed_response",
+                provider=self.name,
+            ) from e
 
     def _completion_target_payload(
         self,
@@ -342,7 +360,9 @@ class OpenRouterProvider:
             )
             if retry_payload is None:
                 raise ProviderHTTPError(
-                    _empty_call_response_message(body, fallback_model=selected_model)
+                    _empty_call_response_message(body, fallback_model=selected_model),
+                    failure_reason="malformed_response",
+                    provider=self.name,
                 )
             attempts.append(
                 {
@@ -703,7 +723,11 @@ class OpenRouterProvider:
                 status=execution_status,
             )
         if not final_text.strip():
-            raise ProviderHTTPError("OpenRouter exec produced empty final response")
+            raise ProviderHTTPError(
+                "OpenRouter exec produced empty final response",
+                failure_reason="malformed_response",
+                provider=self.name,
+            )
 
         return CallResponse(
             text=final_text,
@@ -1159,6 +1183,19 @@ def _format_openrouter_http_error(status_code: int, response_text: str, payload:
     return " ".join(parts)
 
 
+def _openrouter_http_failure_reason(status_code: int, response_text: str) -> str:
+    if status_code in {401, 403, 429}:
+        return "auth_quota"
+    if 500 <= status_code <= 599:
+        return "provider_outage"
+    if 400 <= status_code <= 499:
+        lowered = response_text.lower()
+        if any(token in lowered for token in ("quota", "rate limit", "credit", "billing")):
+            return "auth_quota"
+        return "usage_config_error"
+    return "provider_outage"
+
+
 def _openrouter_attempted_models(payload: dict) -> list[str]:
     attempted: list[str] = []
     model = payload.get("model")
@@ -1193,7 +1230,11 @@ def _remaining_timeout_sec(
         return None
     remaining = float(timeout_sec) - (time.monotonic() - start)
     if remaining <= 0:
-        raise ProviderHTTPError(f"{provider_name} timed out after {timeout_sec:g}s")
+        raise ProviderHTTPError(
+            f"{provider_name} timed out after {timeout_sec:g}s",
+            failure_reason="transient_network",
+            provider=provider_name,
+        )
     return remaining
 
 
@@ -1202,15 +1243,21 @@ def _call_response_text(body: dict) -> str:
         message = body["choices"][0]["message"]
     except (KeyError, IndexError, TypeError) as e:
         raise ProviderHTTPError(
-            f"OpenRouter response missing choices[0].message.content: {body!r:.500}"
+            f"OpenRouter response missing choices[0].message.content: {body!r:.500}",
+            failure_reason="malformed_response",
+            provider="openrouter",
         ) from e
     if not isinstance(message, dict):
         raise ProviderHTTPError(
-            f"OpenRouter response choices[0].message was not an object: {message!r:.500}"
+            f"OpenRouter response choices[0].message was not an object: {message!r:.500}",
+            failure_reason="malformed_response",
+            provider="openrouter",
         )
     if "content" not in message:
         raise ProviderHTTPError(
-            f"OpenRouter response missing choices[0].message.content: {body!r:.500}"
+            f"OpenRouter response missing choices[0].message.content: {body!r:.500}",
+            failure_reason="malformed_response",
+            provider="openrouter",
         )
     text = message["content"]
     if text is None:
@@ -1221,7 +1268,9 @@ def _call_response_text(body: dict) -> str:
             "OpenRouter response content was not text: "
             f"model={_response_model(body, fallback=None)} "
             f"content_type={type(text).__name__} "
-            f"finish_reason={finish_reason or '<unknown>'}"
+            f"finish_reason={finish_reason or '<unknown>'}",
+            failure_reason="malformed_response",
+            provider="openrouter",
         )
     return text
 
@@ -1297,11 +1346,15 @@ def _first_message(body: dict) -> dict:
         message = body["choices"][0]["message"]
     except (KeyError, IndexError, TypeError) as e:
         raise ProviderHTTPError(
-            f"OpenRouter response missing choices[0].message: {body!r:.500}"
+            f"OpenRouter response missing choices[0].message: {body!r:.500}",
+            failure_reason="malformed_response",
+            provider="openrouter",
         ) from e
     if not isinstance(message, dict):
         raise ProviderHTTPError(
-            f"OpenRouter response choices[0].message was not an object: {message!r:.500}"
+            f"OpenRouter response choices[0].message was not an object: {message!r:.500}",
+            failure_reason="malformed_response",
+            provider="openrouter",
         )
     return message
 

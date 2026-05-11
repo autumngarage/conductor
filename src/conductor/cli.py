@@ -1095,6 +1095,15 @@ def _is_retryable(err: Exception) -> tuple[bool, str]:
         return True, "timeout"
     if isinstance(err, ProviderExecutionError):
         return True, "provider-error"
+    if isinstance(err, ProviderHTTPError) and err.failure_reason:
+        reason_categories = {
+            "auth_quota": "rate-limit",
+            "malformed_response": "provider-error",
+            "provider_outage": "5xx",
+            "transient_network": "network",
+            "usage_config_error": "provider-error",
+        }
+        return True, reason_categories.get(err.failure_reason, "provider-error")
     msg = str(err).lower()
     if "429" in msg or any(sig in msg for sig in _RATE_LIMIT_ERROR_SIGNALS):
         return True, "rate-limit"
