@@ -5711,8 +5711,12 @@ class SwarmTaskResult:
     merge_sha: str | None
     duration_ms: int
     failure_reason: str | None = None
+    provider: str | None = None
+    selected_provider: str | None = None
+    fallback_provider: str | None = None
+    fallback_reason: str | None = None
 
-    def to_json(self) -> dict[str, object]:
+    def to_json(self, *, include_provider_details: bool = True) -> dict[str, object]:
         payload: dict[str, object] = {
             "brief": self.brief,
             "branch": self.branch,
@@ -5725,6 +5729,11 @@ class SwarmTaskResult:
         }
         if self.failure_reason is not None:
             payload["failure_reason"] = self.failure_reason
+        if include_provider_details:
+            payload["provider"] = self.provider
+            payload["selected_provider"] = self.selected_provider
+            payload["fallback_provider"] = self.fallback_provider
+            payload["fallback_reason"] = self.fallback_reason
         return payload
 
 
@@ -6646,7 +6655,10 @@ def _swarm_summary(results: list[SwarmTaskResult]) -> dict[str, object]:
     no_changes_count = sum(1 for result in results if result.status == "no-changes")
     ok = all(result.status in SWARM_SUCCESS_STATUSES for result in results)
     return {
-        "tasks": [result.to_json() for result in results],
+        "tasks": [
+            result.to_json(include_provider_details=False)
+            for result in results
+        ],
         "ok": ok,
         "shipped_count": shipped_count,
         "failed_count": failed_count,
@@ -6719,6 +6731,7 @@ def _swarm_initial_task_records(
     briefs: tuple[str, ...],
     *,
     repo_root: Path,
+    provider_id: str | None = None,
 ) -> list[dict[str, object]]:
     tasks: list[dict[str, object]] = []
     for brief_path in briefs:
@@ -6734,6 +6747,12 @@ def _swarm_initial_task_records(
                 "duration_ms": 0,
                 "failure_reason": None,
                 "cleanup_status": "pending",
+                "provider": None,
+                "selected_provider": (
+                    None if provider_id is None or provider_id in {"auto", "pool"} else provider_id
+                ),
+                "fallback_provider": None,
+                "fallback_reason": None,
             }
         )
     return tasks
@@ -6934,6 +6953,12 @@ def _format_swarm_resume(
     retry_command = (
         f"conductor swarm retry-ship {shlex.quote(str(path))} {shlex.quote(selector)}"
     )
+    provider_display = (
+        task.get("provider")
+        or task.get("selected_provider")
+        or payload.get("provider")
+        or "auto"
+    )
     rerun_parts = ["conductor", "swarm", "--provider", "codex"]
     base_branch = payload.get("base_branch")
     if isinstance(base_branch, str) and base_branch:
@@ -6948,7 +6973,9 @@ def _format_swarm_resume(
         f"run id: {run_id}",
         f"task index: {task_index + 1}",
         f"status: {task.get('status', 'unknown')}",
-        f"provider: {task.get('provider') or payload.get('provider') or 'codex'}",
+        f"provider: {provider_display}",
+        f"fallback provider: {task.get('fallback_provider') or ''}",
+        f"fallback reason: {task.get('fallback_reason') or ''}",
         f"brief: {brief}",
         f"branch: {branch}",
         f"worktree: {worktree_display}",
@@ -7208,6 +7235,7 @@ def _format_swarm_manifest_status(payload: dict[str, object], *, path: Path) -> 
             if status_parts:
                 lines.append("status-counts: " + " ".join(status_parts))
         for raw_task in tasks:
+            provider_detail = raw_task.get("provider") or raw_task.get("selected_provider")
             line = (
                 "- {status}: {brief} -> {branch}".format(
                     status=raw_task.get("status", "unknown"),
@@ -7215,6 +7243,12 @@ def _format_swarm_manifest_status(payload: dict[str, object], *, path: Path) -> 
                     branch=raw_task.get("branch", ""),
                 )
             )
+            if provider_detail:
+                line += f" provider={provider_detail}"
+            if raw_task.get("fallback_provider"):
+                line += f" fallback={raw_task['fallback_provider']}"
+            if raw_task.get("fallback_reason"):
+                line += f" fallback_reason={raw_task['fallback_reason']}"
             if raw_task.get("pr_url"):
                 line += f" ({raw_task['pr_url']})"
             if raw_task.get("failure_reason"):
@@ -7239,7 +7273,8 @@ def _format_swarm_manifest_status(payload: dict[str, object], *, path: Path) -> 
 def _run_swarm_task(
     *,
     brief_path: str,
-    provider_id: str,
+    provider_id: str | None,
+    tags: str | None,
     base_branch: str,
     base_ref: str,
     auto_merge: bool,
@@ -7274,7 +7309,21 @@ def _run_swarm_task(
     pr_url: str | None = None
     merge_sha: str | None = None
     failure_reason: str | None = None
+    provider_candidates: list[str] = []
+    selected_provider: str | None = None
+    provider_used: str | None = None
+    fallback_provider: str | None = None
+    fallback_reason: str | None = None
     try:
+        provider_pool = _is_swarm_provider_pool(provider_id)
+        provider_candidates, _route_decision = _swarm_provider_candidates(
+            provider_id=provider_id,
+            tags=tags,
+            body=body,
+            max_iterations=max_iterations,
+        )
+        selected_provider = provider_candidates[0]
+        dispatch_tools = _ordered_tools_csv(frozenset(VALID_TOOLS)) if provider_pool else None
         worktree.parent.mkdir(parents=True, exist_ok=True)
         with SWARM_WORKTREE_LOCK:
             _run_swarm_git(
@@ -7285,64 +7334,128 @@ def _run_swarm_task(
         if not as_json:
             click.echo(f"[conductor] swarm task started: {brief_path} -> {branch}", err=True)
 
-        _run_exec_phase_dispatch(
-            provider_id=provider_id,
-            auto=False,
-            tags=None,
-            prefer=None,
-            effort=None,
-            tools=None,
-            permission_profile=None,
-            sandbox=None,
-            exclude=None,
-            cwd=str(worktree),
-            timeout_sec=timeout_sec,
-            max_stall_sec=max_stall_sec,
-            strict_stall=False,
-            start_timeout_sec=None,
-            max_iterations=max_iterations,
-            allow_completion_stretch=False,
-            retry_on_stall=1,
-            body=body,
-            attachments=(),
-            model=None,
-            log_file=None,
-            as_json=False,
-            verbose_route=False,
-            silent_route=True,
-            resume_session_id=None,
-            offline=None,
-            preflight=True,
-            write_validation=True,
-            timeout_is_default=timeout_sec is None,
-            max_stall_is_default=max_stall_sec == DEFAULT_EXEC_MAX_STALL_SEC,
-            raise_on_error=True,
-        )
-        dirty_paths = _swarm_dirty_paths(worktree)
-        if dirty_paths:
-            status = "failed"
-            failure_reason = (
-                "task left uncommitted changes in worktree: "
-                + ", ".join(path[:200] for path in dirty_paths[:10])
-            )
-        else:
-            commits = _swarm_commit_count(worktree, base_ref)
-            if commits == 0:
-                status = "no-changes"
-            else:
-                _append_swarm_closing_refs_to_head_commit(worktree, closing_refs)
-                shipped_status, shipped_pr_url, shipped_detail = _ship_swarm_pr(
-                    worktree,
-                    base_branch=base_branch,
-                    branch=branch,
-                    auto_merge=auto_merge,
+        exec_succeeded = False
+        for index, candidate_provider in enumerate(provider_candidates):
+            provider_used = candidate_provider
+            try:
+                _run_exec_phase_dispatch(
+                    provider_id=candidate_provider,
+                    auto=False,
+                    tags=tags,
+                    prefer=None,
+                    effort=None,
+                    tools=dispatch_tools,
+                    permission_profile=None,
+                    sandbox=None,
+                    exclude=None,
+                    cwd=str(worktree),
+                    timeout_sec=timeout_sec,
+                    max_stall_sec=max_stall_sec,
+                    strict_stall=False,
+                    start_timeout_sec=None,
+                    max_iterations=max_iterations,
+                    allow_completion_stretch=False,
+                    retry_on_stall=1,
+                    body=body,
+                    attachments=(),
+                    model=None,
+                    log_file=None,
+                    as_json=False,
+                    verbose_route=False,
+                    silent_route=True,
+                    resume_session_id=None,
+                    offline=None,
+                    preflight=True,
+                    write_validation=True,
+                    timeout_is_default=timeout_sec is None,
+                    max_stall_is_default=max_stall_sec == DEFAULT_EXEC_MAX_STALL_SEC,
+                    raise_on_error=True,
                 )
-                status = shipped_status
-                pr_url = shipped_pr_url
-                if status == "shipped":
-                    merge_sha = shipped_detail
-                elif status in {"failed", "review-blocked"}:
-                    failure_reason = shipped_detail
+                exec_succeeded = True
+                break
+            except _ExecPhaseError as e:
+                candidate_status = _swarm_failure_status(f"{e.exit_status} {e.message}")
+                if (
+                    candidate_status == SWARM_PROVIDER_FAILED_STATUS
+                    and index + 1 < len(provider_candidates)
+                ):
+                    can_fallback, guard_reason = _swarm_can_fallback_after_provider_failure(
+                        worktree,
+                        base_ref=base_ref,
+                    )
+                    if can_fallback:
+                        if fallback_reason is None:
+                            fallback_reason = e.message
+                        fallback_provider = provider_candidates[index + 1]
+                        click.echo(
+                            "[conductor] swarm provider fallback: "
+                            f"{candidate_provider} -> {fallback_provider}; reason: {e.message}",
+                            err=True,
+                        )
+                        continue
+                    failure_reason = guard_reason
+                status = candidate_status
+                failure_reason = failure_reason or e.message
+                if created_worktree:
+                    try:
+                        commits = _swarm_commit_count(worktree, base_ref)
+                    except RuntimeError as count_error:
+                        click.echo(f"[conductor] warning: {count_error}", err=True)
+                break
+            except RuntimeError as e:
+                candidate_status = _swarm_failure_status(e)
+                if (
+                    candidate_status == SWARM_PROVIDER_FAILED_STATUS
+                    and index + 1 < len(provider_candidates)
+                ):
+                    can_fallback, guard_reason = _swarm_can_fallback_after_provider_failure(
+                        worktree,
+                        base_ref=base_ref,
+                    )
+                    if can_fallback:
+                        if fallback_reason is None:
+                            fallback_reason = str(e)
+                        fallback_provider = provider_candidates[index + 1]
+                        click.echo(
+                            "[conductor] swarm provider fallback: "
+                            f"{candidate_provider} -> {fallback_provider}; reason: {e}",
+                            err=True,
+                        )
+                        continue
+                    failure_reason = guard_reason
+                status = candidate_status
+                failure_reason = failure_reason or str(e)
+                break
+        if exec_succeeded:
+            if fallback_provider is not None:
+                fallback_provider = provider_used
+            dirty_paths = _swarm_dirty_paths(worktree)
+            if dirty_paths:
+                status = "failed"
+                failure_reason = (
+                    "task left uncommitted changes in worktree: "
+                    + ", ".join(path[:200] for path in dirty_paths[:10])
+                )
+            else:
+                commits = _swarm_commit_count(worktree, base_ref)
+                if commits == 0:
+                    status = "no-changes"
+                else:
+                    _append_swarm_closing_refs_to_head_commit(worktree, closing_refs)
+                    shipped_status, shipped_pr_url, shipped_detail = _ship_swarm_pr(
+                        worktree,
+                        base_branch=base_branch,
+                        branch=branch,
+                        auto_merge=auto_merge,
+                    )
+                    status = shipped_status
+                    pr_url = shipped_pr_url
+                    if status == "shipped":
+                        merge_sha = shipped_detail
+                    elif status in {"failed", "review-blocked"}:
+                        failure_reason = shipped_detail
+        elif status == "failed":
+            failure_reason = failure_reason or "provider dispatch did not complete"
     except _ExecPhaseError as e:
         status = _swarm_failure_status(f"{e.exit_status} {e.message}")
         failure_reason = e.message
@@ -7367,6 +7480,10 @@ def _run_swarm_task(
         merge_sha=merge_sha,
         duration_ms=duration_ms,
         failure_reason=failure_reason,
+        provider=provider_used,
+        selected_provider=selected_provider,
+        fallback_provider=fallback_provider,
+        fallback_reason=fallback_reason,
     )
     if (
         created_worktree
@@ -7424,6 +7541,80 @@ def _failed_swarm_thread_result(brief_path: str, error: BaseException) -> SwarmT
         duration_ms=0,
         failure_reason=message,
     )
+
+
+def _is_swarm_provider_pool(provider_id: str | None) -> bool:
+    return provider_id is None or provider_id in {"auto", "pool"}
+
+
+def _swarm_task_tags(raw_tags: str | None) -> list[str]:
+    tags = ["tool-use"]
+    for tag in _parse_csv(raw_tags):
+        if tag not in tags:
+            tags.append(tag)
+    return tags
+
+
+def _swarm_provider_candidates(
+    *,
+    provider_id: str | None,
+    tags: str | None,
+    body: str,
+    max_iterations: int | None = None,
+) -> tuple[list[str], RouteDecision | None]:
+    if not _is_swarm_provider_pool(provider_id):
+        assert provider_id is not None
+        return [provider_id], None
+
+    try:
+        _provider, decision = pick(
+            _swarm_task_tags(tags),
+            prefer="balanced",
+            effort=_parse_effort(None),
+            tools=frozenset(VALID_TOOLS),
+            sandbox="none",
+            shadow=True,
+            estimated_input_tokens=_estimate_text_tokens(body),
+        )
+    except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
+        raise click.UsageError(str(e)) from e
+    candidates = [candidate.name for candidate in decision.ranked]
+    if max_iterations is not None:
+        candidates = [
+            candidate
+            for candidate in candidates
+            if _provider_supports_exec_max_iterations(candidate)
+        ]
+        if not candidates:
+            raise click.UsageError(
+                "--max-iterations only applies to Conductor-managed tool-use "
+                "providers; no routed swarm candidate can honor it."
+            )
+    return candidates, decision
+
+
+def _swarm_can_fallback_after_provider_failure(
+    worktree: Path,
+    *,
+    base_ref: str,
+) -> tuple[bool, str | None]:
+    try:
+        dirty_paths = _swarm_dirty_paths(worktree)
+        if dirty_paths:
+            return (
+                False,
+                "provider failed after leaving uncommitted changes; "
+                "not falling back across providers",
+            )
+        commits = _swarm_commit_count(worktree, base_ref)
+        if commits > 0:
+            return (
+                False,
+                "provider failed after creating commits; not falling back across providers",
+            )
+    except RuntimeError as e:
+        return False, f"could not verify worktree before fallback: {e}"
+    return True, None
 
 
 DEFAULT_AUTO_PHASE_ANCHORS: tuple[str, ...] = (
@@ -8502,7 +8693,15 @@ def exec_cmd(
 @click.option(
     "--provider",
     "provider_id",
-    help="Provider to run for every task. v0 supports codex only.",
+    help=(
+        "Provider to run for every task. Omit, or pass auto/pool, to route "
+        "each lane across compatible providers with operational fallback."
+    ),
+)
+@click.option(
+    "--tags",
+    default=None,
+    help="Comma-separated task tags for provider-pool routing.",
 )
 @click.option(
     "--base-branch",
@@ -8566,6 +8765,7 @@ def swarm(
     ctx: click.Context,
     briefs: tuple[str, ...],
     provider_id: str | None,
+    tags: str | None,
     base_branch: str,
     auto_merge: bool,
     max_iterations: int | None,
@@ -8581,10 +8781,6 @@ def swarm(
         return
     if not briefs:
         raise click.UsageError("pass at least one --brief.")
-    if provider_id is None:
-        raise click.UsageError("pass --provider <id>.")
-    if provider_id != "codex":
-        raise click.UsageError("conductor swarm currently supports --provider codex only.")
 
     results: list[SwarmTaskResult] = []
     repo_root = _swarm_repo_root()
@@ -8606,7 +8802,11 @@ def swarm(
     started_at = started_datetime.isoformat().replace("+00:00", "Z")
     run_id = _new_swarm_run_id(started_datetime)
     manifest_path = _swarm_runs_dir(repo_root) / f"{run_id}.json"
-    manifest_tasks = _swarm_initial_task_records(briefs, repo_root=repo_root)
+    manifest_tasks = _swarm_initial_task_records(
+        briefs,
+        repo_root=repo_root,
+        provider_id=provider_id,
+    )
     _write_swarm_manifest(
         manifest_path,
         _swarm_manifest_payload(
@@ -8632,6 +8832,7 @@ def swarm(
         return _run_swarm_task(
             brief_path=brief_path,
             provider_id=provider_id,
+            tags=tags,
             base_branch=base_branch,
             base_ref=base_ref,
             auto_merge=auto_merge,

@@ -144,6 +144,40 @@ def _fake_exec_factory(*, fail_on: set[str] | None = None, no_change_on: set[str
     return fake_exec
 
 
+def _ranked_provider(name: str, score: float) -> cli.RankedCandidate:
+    return cli.RankedCandidate(
+        name=name,
+        tier="frontier",
+        tier_rank=4,
+        matched_tags=("tool-use",),
+        tag_score=1,
+        cost_score=0.0,
+        latency_ms=1,
+        health_penalty=0.0,
+        combined_score=score,
+    )
+
+
+def _route_decision(*providers: str, tags: tuple[str, ...] = ("tool-use",)) -> cli.RouteDecision:
+    ranked = tuple(
+        _ranked_provider(provider, float(len(providers) - index))
+        for index, provider in enumerate(providers)
+    )
+    return cli.RouteDecision(
+        provider=providers[0],
+        prefer="balanced",
+        effort="medium",
+        thinking_budget=0,
+        tier="frontier",
+        task_tags=tags,
+        matched_tags=("tool-use",),
+        tools_requested=tuple(cli.VALID_TOOLS),
+        sandbox="none",
+        ranked=ranked,
+        candidates_skipped=(),
+    )
+
+
 def _fake_ship(worktree: Path, *, base_branch: str, branch: str, auto_merge: bool):
     _ = (worktree, base_branch, branch)
     if auto_merge:
@@ -466,6 +500,145 @@ def test_swarm_writes_manifest_for_successful_run(monkeypatch, tmp_path: Path) -
     assert manifest["tasks"][0]["pr_url"] == "https://github.com/example/repo/pull/123"
     assert manifest["tasks"][0]["merge_sha"]
     assert manifest["tasks"][0]["cleanup_status"] == "removed"
+
+
+def test_swarm_auto_routes_lane_with_task_tags(monkeypatch, tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md")
+    monkeypatch.chdir(repo)
+    calls: list[str] = []
+
+    def fake_pick(task_tags, **kwargs):
+        assert task_tags == ["tool-use", "strong-reasoning"]
+        assert kwargs["tools"] == frozenset(cli.VALID_TOOLS)
+        decision = _route_decision("codex", tags=tuple(task_tags))
+        return object(), decision
+
+    def fake_exec(**kwargs):
+        calls.append(kwargs["provider_id"])
+        worktree = Path(kwargs["cwd"])
+        _commit_change(worktree, "auto.txt", "auto")
+        return (
+            CallResponse(text="done", provider=kwargs["provider_id"], model="test", duration_ms=1),
+            None,
+            None,
+        )
+
+    monkeypatch.setattr(cli, "pick", fake_pick)
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", fake_exec)
+    monkeypatch.setattr(cli, "_ship_swarm_pr", _fake_merged_ship(repo))
+
+    result = CliRunner().invoke(
+        main,
+        ["swarm", "--tags", "strong-reasoning", "--brief", str(brief), "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == ["codex"]
+    payload = json.loads(result.stdout)
+    assert "provider" not in payload["tasks"][0]
+    manifest = json.loads(_swarm_manifests(repo)[0].read_text(encoding="utf-8"))
+    assert manifest["tasks"][0]["selected_provider"] == "codex"
+    assert manifest["tasks"][0]["provider"] == "codex"
+    assert manifest["tasks"][0]["fallback_provider"] is None
+    assert manifest["tasks"][0]["fallback_reason"] is None
+
+
+def test_swarm_auto_falls_back_and_records_provider_details(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md", "provider fallback")
+    monkeypatch.chdir(repo)
+    calls: list[str] = []
+
+    def fake_pick(task_tags, **kwargs):
+        _ = kwargs
+        decision = _route_decision("codex", "gemini", tags=tuple(task_tags))
+        return object(), decision
+
+    def fake_exec(**kwargs):
+        provider_id = kwargs["provider_id"]
+        calls.append(provider_id)
+        if provider_id == "codex":
+            raise cli._ExecPhaseError(
+                exit_code=1,
+                exit_status="error",
+                message="codex websocket disconnected during model refresh",
+            )
+        worktree = Path(kwargs["cwd"])
+        _commit_change(worktree, "fallback.txt", "fallback")
+        return (
+            CallResponse(text="done", provider=provider_id, model="test", duration_ms=1),
+            None,
+            None,
+        )
+
+    monkeypatch.setattr(cli, "pick", fake_pick)
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", fake_exec)
+    monkeypatch.setattr(cli, "_ship_swarm_pr", _fake_merged_ship(repo))
+
+    result = CliRunner().invoke(
+        main,
+        ["swarm", "--provider", "auto", "--brief", str(brief), "--auto-merge", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == ["codex", "gemini"]
+    manifest_path = _swarm_manifests(repo)[0]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    task = manifest["tasks"][0]
+    assert task["status"] == "shipped"
+    assert task["selected_provider"] == "codex"
+    assert task["provider"] == "gemini"
+    assert task["fallback_provider"] == "gemini"
+    assert task["fallback_reason"] == "codex websocket disconnected during model refresh"
+
+    status_result = CliRunner().invoke(main, ["swarm", "status", str(manifest_path)])
+    assert status_result.exit_code == 0, status_result.output
+    assert "provider=gemini fallback=gemini" in status_result.output
+    assert "fallback_reason=codex websocket disconnected during model refresh" in (
+        status_result.output
+    )
+
+
+def test_swarm_pinned_provider_does_not_fallback(monkeypatch, tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md", "provider outage")
+    monkeypatch.chdir(repo)
+    calls: list[str] = []
+
+    def fail_pick(*args, **kwargs):
+        _ = (args, kwargs)
+        raise AssertionError("pinned swarm provider must not use router fallback")
+
+    def fake_exec(**kwargs):
+        calls.append(kwargs["provider_id"])
+        raise cli._ExecPhaseError(
+            exit_code=1,
+            exit_status="error",
+            message="codex websocket disconnected during model refresh",
+        )
+
+    monkeypatch.setattr(cli, "pick", fail_pick)
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", fake_exec)
+    monkeypatch.setattr(cli, "_ship_swarm_pr", _fake_ship)
+
+    result = CliRunner().invoke(
+        main,
+        ["swarm", "--provider", "codex", "--brief", str(brief), "--json"],
+    )
+
+    assert result.exit_code == 1
+    assert calls == ["codex"]
+    manifest = json.loads(_swarm_manifests(repo)[0].read_text(encoding="utf-8"))
+    task = manifest["tasks"][0]
+    assert task["status"] == "provider-failed"
+    assert task["selected_provider"] == "codex"
+    assert task["provider"] == "codex"
+    assert task["fallback_provider"] is None
+    assert task["fallback_reason"] is None
 
 
 def test_swarm_queues_cortex_post_merge_bookkeeping_for_configured_repo(
