@@ -166,6 +166,19 @@ run_shell_command() {
   bash -c "$command"
 }
 
+run_cortex_update_check() {
+  [ -d .cortex ] || return 0
+
+  if command -v uv >/dev/null 2>&1; then
+    run_shell_command "uv run cortex update --check --path ."
+  elif command -v cortex >/dev/null 2>&1; then
+    run_shell_command "cortex update --check --path ."
+  else
+    echo "ERROR: cortex update check requires uv or cortex on PATH." >&2
+    return 1
+  fi
+}
+
 configured_command_for_action() {
   case "$1" in
     lint) printf '%s\n' "$LINT_COMMAND" ;;
@@ -534,6 +547,7 @@ run_validate() {
     return 0
   fi
 
+  run_cortex_update_check
   run_action lint
   run_action typecheck
   # Node targets with distinct typecheck + build scripts: run the bundler too.
