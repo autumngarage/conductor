@@ -1,10 +1,10 @@
 ---
-Generated: 2026-05-11T10:37:00-04:00
+Generated: 2026-05-11T12:05:22-04:00
 Generator: cortex refresh-state v1.6.2
 Sources:
-  - HEAD sha: fd3720e5f315e52685ef9cb32e603750fe1447d4
+  - HEAD sha: 3c21713865fd55dbab3c9e51efaa999946ae78f8
   - .cortex/plans/*.md (1 files)
-  - .cortex/journal/*.md (14 entries, 2026-04-24..2026-05-11)
+  - .cortex/journal/*.md (24 entries, 2026-04-24..2026-05-11)
   - .cortex/doctrine/*.md (6 entries)
   - .cortex/templates/**/*.md (12 templates)
   - docs/case-studies/*.md (0 case studies)
@@ -31,6 +31,16 @@ Sources-hash:
   .cortex/journal/2026-05-09-release-v0.10.11.md: 3ac63a708dcd9447c9affaf0b49292d1e038c28d6c426ce0512236197092cc87
   .cortex/journal/2026-05-09-release-v0.10.9.md: 87bffa53a05daecf2fdeb0ac18b851b9f688cf9b00209939ea0b878fe848714a
   .cortex/journal/2026-05-11-cortex-update-legacy-warnings.md: aade162a022396aa9860ef42bc57579fc204e35af4182b87b7b424b2b141a63e
+  .cortex/journal/2026-05-11-pr-347-merged.md: 13277279d43f3b45101cafcea165a8588d005b1394bd76c614f10ba556dac9ad
+  .cortex/journal/2026-05-11-pr-348-merged.md: 78f40ab0705a995a9ce206753bd70adb536d39d61a1ba7b4218405e946e8e6a3
+  .cortex/journal/2026-05-11-pr-349-merged.md: 36192a4b8132e9ec70204b550810e3f245a8d9753324d631c246dd3509b930ed
+  .cortex/journal/2026-05-11-pr-350-merged.md: 81bf6c2b92766e448064b8ec561563e530e8a5b6d1f7de04207d886d3dee37d3
+  .cortex/journal/2026-05-11-pr-351-merged.md: fabaea542d7c8cab21dccfc367fe42467418ec61fa12956accb9a0df8e65e11c
+  .cortex/journal/2026-05-11-pr-352-merged.md: 2bdd3067e33d35540187d5f384e8a2ae86edb5fcce65d3ddd63dabecb00bf7b8
+  .cortex/journal/2026-05-11-pr-353-merged.md: 660ec3f634f1289d2613543e11851ffbbc2100aaa8be4a4db13285477569c530
+  .cortex/journal/2026-05-11-pr-354-merged.md: a08ee660f35f363428c19436e42fc916de10e5f763e3568e0edcf652eccbbd42
+  .cortex/journal/2026-05-11-pr-355-merged.md: 6606a755d646fb807f4a4853283b797fb8971ddc1436aab28cbc71ba98852b63
+  .cortex/journal/2026-05-11-pr-356-merged.md: f62f6f43175b771f73c1a53797b634f88d5af23c18018e87817815ee6ba3521a
   .cortex/plans/conductor-blindspots.md: 69b7cec18f5893a5edfe83e3d095eb9ae7e57d5e9e117adf73e417f31ebe11a0
   .cortex/templates/README.md: 695aa2e623bd7f4e698dae471bded0cde354da0c1d8589266660ceb1be8efad1
   .cortex/templates/digest/monthly.md: 0c13cf6781d15e0858544e3919166a7c123698066e6c93fc70a3b808a8239813
@@ -44,7 +54,7 @@ Sources-hash:
   .cortex/templates/journal/release.md: 9a6bc59219156e48b419fb170c7c50ff557767def8672ef20568df3e14eadbd0
   .cortex/templates/journal/sentinel-cycle.md: 2945e2d94af4ec9848584b4b3e9cea7060d2968dd42e78faf21fb6f859137476
   .cortex/templates/plans/template.md: d8156cfa3b86acd2a1fbb36cff07cae37d99f3adee7f72b14b7b16e645c51b44
-Corpus: 14 Journal entries, 1 Plans, 6 Doctrine entries, 12 Templates, 0 Case studies
+Corpus: 24 Journal entries, 1 Plans, 6 Doctrine entries, 12 Templates, 0 Case studies
 Omitted:
   []
 Incomplete:
@@ -69,6 +79,16 @@ Spec: 0.5.0
 - **2026-05-09** — Release v0.10.10 - review gate stabilization (`.cortex/journal/2026-05-09-release-v0.10.10.md`, Type: release)
 - **2026-05-09** — Release v0.10.11 - Conductor-owned review budgets (`.cortex/journal/2026-05-09-release-v0.10.11.md`, Type: release)
 - **2026-05-09** — Release v0.10.9 - shared update command surface (`.cortex/journal/2026-05-09-release-v0.10.9.md`, Type: release)
+- **2026-05-11** — PR #347 merged - classify exhausted review fallback infra failures (`.cortex/journal/2026-05-11-pr-347-merged.md`, Type: pr-merged)
+- **2026-05-11** — PR #348 merged - classify review provider fallback statuses (`.cortex/journal/2026-05-11-pr-348-merged.md`, Type: pr-merged)
+- **2026-05-11** — PR #349 merged - quarantine invalid review findings (`.cortex/journal/2026-05-11-pr-349-merged.md`, Type: pr-merged)
+- **2026-05-11** — PR #350 merged - refresh Cortex state and gate validation (`.cortex/journal/2026-05-11-pr-350-merged.md`, Type: pr-merged)
+- **2026-05-11** — PR #351 merged - respect read-only test recommendations (`.cortex/journal/2026-05-11-pr-351-merged.md`, Type: pr-merged)
+- **2026-05-11** — PR #352 merged - warn on unbounded code ask token estimates (`.cortex/journal/2026-05-11-pr-352-merged.md`, Type: pr-merged)
+- **2026-05-11** — PR #353 merged - allow read-only text delegations (`.cortex/journal/2026-05-11-pr-353-merged.md`, Type: pr-merged)
+- **2026-05-11** — PR #354 merged - reject no-context OpenRouter review output (`.cortex/journal/2026-05-11-pr-354-merged.md`, Type: pr-merged)
+- **2026-05-11** — PR #355 merged - classify OpenRouter pre-output failures (`.cortex/journal/2026-05-11-pr-355-merged.md`, Type: pr-merged)
+- **2026-05-11** — PR #356 merged - force terminal review answer near tool cap (`.cortex/journal/2026-05-11-pr-356-merged.md`, Type: pr-merged)
 
 ## Stale-now / handle-later
 
