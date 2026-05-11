@@ -1278,6 +1278,77 @@ def test_exec_allow_completion_stretch_runs_one_extra_turn(configured, tmp_path)
     }
 
 
+def test_exec_review_iteration_cap_gets_terminal_answer_turn(configured, tmp_path):
+    (tmp_path / "note.txt").write_text("review target\n", encoding="utf-8")
+    requests: list[dict] = []
+    responses = [
+        {
+            "model": "openai/gpt-5.5",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_read",
+                                "type": "function",
+                                "function": {
+                                    "name": "Read",
+                                    "arguments": json.dumps({"path": "note.txt"}),
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+        },
+        {
+            "model": "openai/gpt-5.5",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "No findings.\nCODEX_REVIEW_CLEAN",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 6},
+        },
+    ]
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=responses[len(requests) - 1])
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        response = OpenRouterProvider().exec(
+            (
+                "Review note.txt. The final line must be exactly "
+                "CODEX_REVIEW_CLEAN, CODEX_REVIEW_FIXED, or CODEX_REVIEW_BLOCKED."
+            ),
+            model="openai/gpt-5.5",
+            tools=frozenset({"Read"}),
+            task_tags=("code-review", "tool-use"),
+            sandbox="none",
+            cwd=str(tmp_path),
+            max_iterations=1,
+        )
+
+    assert len(requests) == 2
+    assert response.text == "No findings.\nCODEX_REVIEW_CLEAN"
+    assert response.usage["terminal_answer_stretched"] is True
+    assert response.usage["hit_iteration_cap"] is False
+    assert requests[1]["messages"][-1]["role"] == "user"
+    assert "Stop calling tools and give the final review answer now" in (
+        requests[1]["messages"][-1]["content"]
+    )
+
+
 def test_exec_allow_completion_stretch_without_missing_keeps_cap(configured, tmp_path):
     (tmp_path / "note.txt").write_text("still looping", encoding="utf-8")
     requests: list[dict] = []

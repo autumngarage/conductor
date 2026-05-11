@@ -57,6 +57,12 @@ OPENROUTER_MAX_TOOL_ITERATIONS = 10
 OPENROUTER_MODELS_ARRAY_MAX = 3
 OPENROUTER_HTTP_REFERER = "https://github.com/autumngarage/conductor"
 OPENROUTER_X_TITLE = "conductor"
+_TERMINAL_REVIEW_ANSWER_PROMPT = (
+    "You are at the review tool-iteration cap. Stop calling tools and give the "
+    "final review answer now. If the prompt requested a final sentinel such as "
+    "CODEX_REVIEW_CLEAN, CODEX_REVIEW_FIXED, or CODEX_REVIEW_BLOCKED, the "
+    "sentinel must be the final standalone line."
+)
 
 _OPENROUTER_REASONING_EFFORTS = {
     "minimal": "minimal",
@@ -470,6 +476,7 @@ class OpenRouterProvider:
         missing_deliverables: list[MissingDeliverable] = []
         empty_response_retries: list[dict[str, object]] = []
         completion_stretched = False
+        terminal_answer_stretched = False
         repo_changing_task = _is_repo_changing_tool_task(effective_task_tags, tools)
         git_status_before = _git_clean_status(workdir) if repo_changing_task else None
         iteration_cap = max_iterations or OPENROUTER_MAX_TOOL_ITERATIONS
@@ -668,6 +675,31 @@ class OpenRouterProvider:
                         )
                     iteration_cap += 1
                     completion_stretched = True
+                elif (
+                    _needs_terminal_review_answer_stretch(effective_task_tags, task)
+                    and not missing_deliverables
+                    and not terminal_answer_stretched
+                ):
+                    messages.append(
+                        {"role": "user", "content": _TERMINAL_REVIEW_ANSWER_PROMPT}
+                    )
+                    _LOG.info(
+                        "terminal review answer stretch enabled: provider=%s "
+                        "iteration_cap=%s",
+                        self.name,
+                        original_iteration_cap,
+                    )
+                    if session_log is not None:
+                        session_log.emit(
+                            "terminal_answer_stretch",
+                            {
+                                "provider": self.name,
+                                "iteration_cap": original_iteration_cap,
+                                "message": _TERMINAL_REVIEW_ANSWER_PROMPT,
+                            },
+                        )
+                    iteration_cap += 1
+                    terminal_answer_stretched = True
         else:
             hit_cap = True
 
@@ -721,6 +753,7 @@ class OpenRouterProvider:
                 "tool_names": sorted(tools),
                 "hit_iteration_cap": hit_cap,
                 "completion_stretched": completion_stretched,
+                "terminal_answer_stretched": terminal_answer_stretched,
                 "missing_deliverables": [
                     item.__dict__ for item in missing_deliverables
                 ],
@@ -747,6 +780,22 @@ def _is_repo_changing_tool_task(
 ) -> bool:
     return bool(_CODE_TASK_TAGS.intersection(task_tags)) and bool(
         _WRITE_TOOLS.intersection(tools)
+    )
+
+
+def _needs_terminal_review_answer_stretch(
+    task_tags: tuple[str, ...],
+    task: str,
+) -> bool:
+    if "code-review" in task_tags:
+        return True
+    return any(
+        sentinel in task
+        for sentinel in (
+            "CODEX_REVIEW_CLEAN",
+            "CODEX_REVIEW_FIXED",
+            "CODEX_REVIEW_BLOCKED",
+        )
     )
 
 
