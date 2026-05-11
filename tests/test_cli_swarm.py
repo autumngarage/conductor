@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -50,6 +52,19 @@ def _brief(repo: Path, name: str, body: str = "make a focused change") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
     return path
+
+
+def _swarm_manifests(repo: Path) -> list[Path]:
+    return sorted((repo / ".cache" / "conductor" / "swarm" / "runs").glob("*.json"))
+
+
+def test_new_swarm_run_id_preserves_subsecond_ordering() -> None:
+    first = cli._new_swarm_run_id(datetime(2026, 1, 1, 0, 0, 0, 1, tzinfo=UTC))
+    second = cli._new_swarm_run_id(datetime(2026, 1, 1, 0, 0, 0, 2, tzinfo=UTC))
+
+    assert first.startswith("20260101T000000000001Z-")
+    assert second.startswith("20260101T000000000002Z-")
+    assert first < second
 
 
 def _commit_change(worktree: Path, filename: str, message: str) -> None:
@@ -275,6 +290,239 @@ def test_swarm_one_brief_succeeds_as_shipped(monkeypatch, tmp_path: Path) -> Non
         _git_returncode(repo, "show-ref", "--verify", "--quiet", "refs/heads/feat/swarm/foo")
         == 1
     )
+
+
+def test_swarm_writes_manifest_for_successful_run(monkeypatch, tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md")
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", _fake_exec_factory())
+    monkeypatch.setattr(cli, "_ship_swarm_pr", _fake_merged_ship(repo))
+
+    result = CliRunner().invoke(
+        main,
+        ["swarm", "--provider", "codex", "--brief", str(brief), "--auto-merge", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    manifests = _swarm_manifests(repo)
+    assert len(manifests) == 1
+    manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert manifest["schema_version"] == 1
+    assert manifest["run_id"] == manifests[0].stem
+    assert manifest["repo_root"] == str(repo)
+    assert manifest["base_branch"] == "main"
+    assert manifest["base_ref"]
+    assert manifest["started_at"]
+    assert manifest["ended_at"]
+    assert isinstance(manifest["duration_ms"], int)
+    assert manifest["ok"] is True
+    assert manifest["shipped_count"] == 1
+    assert manifest["failed_count"] == 0
+    assert manifest["no_changes_count"] == 0
+    assert manifest["tasks"][0]["brief"] == str(brief)
+    assert manifest["tasks"][0]["branch"] == "feat/swarm/foo"
+    assert manifest["tasks"][0]["status"] == "shipped"
+    assert manifest["tasks"][0]["commits"] == 1
+    assert manifest["tasks"][0]["pr_url"] == "https://github.com/example/repo/pull/123"
+    assert manifest["tasks"][0]["merge_sha"]
+    assert manifest["tasks"][0]["cleanup_status"] == "removed"
+
+
+def test_swarm_writes_manifest_for_failed_run(monkeypatch, tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md", "fail change")
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(
+        cli,
+        "_run_exec_phase_dispatch",
+        _fake_exec_factory(fail_on={"fail change"}),
+    )
+    monkeypatch.setattr(cli, "_ship_swarm_pr", _fake_ship)
+
+    result = CliRunner().invoke(
+        main,
+        ["swarm", "--provider", "codex", "--brief", str(brief), "--auto-merge", "--json"],
+    )
+
+    assert result.exit_code == 1
+    manifests = _swarm_manifests(repo)
+    assert len(manifests) == 1
+    manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert manifest["ok"] is False
+    assert manifest["failed_count"] == 1
+    assert manifest["tasks"][0]["status"] == "failed"
+    assert manifest["tasks"][0]["failure_reason"] == "max-iterations cap reached"
+    assert manifest["tasks"][0]["cleanup_status"] == "preserved"
+    assert Path(manifest["tasks"][0]["worktree"]).exists()
+
+
+def test_swarm_sequential_internal_error_updates_manifest(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md")
+    monkeypatch.chdir(repo)
+
+    def fake_run_swarm_task(**kwargs):
+        _ = kwargs
+        raise ValueError("boom")
+
+    monkeypatch.setattr(cli, "_run_swarm_task", fake_run_swarm_task)
+
+    result = CliRunner().invoke(
+        main,
+        ["swarm", "--provider", "codex", "--brief", str(brief), "--auto-merge", "--json"],
+    )
+
+    assert result.exit_code == 1
+    manifests = _swarm_manifests(repo)
+    assert len(manifests) == 1
+    manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert manifest["ended_at"]
+    assert manifest["ok"] is False
+    assert manifest["failed_count"] == 1
+    assert manifest["tasks"][0]["status"] == "failed"
+    assert manifest["tasks"][0]["failure_reason"] == "internal swarm task error: boom"
+
+
+def test_swarm_does_not_write_manifest_for_preflight_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    missing_brief = repo / "tasks" / "missing.md"
+    monkeypatch.chdir(repo)
+
+    result = CliRunner().invoke(
+        main,
+        ["swarm", "--provider", "codex", "--brief", str(missing_brief), "--json"],
+    )
+
+    assert result.exit_code == 2
+    assert _swarm_manifests(repo) == []
+
+
+def test_swarm_rejects_reserved_manifest_worktree_slug(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "runs.md")
+    monkeypatch.chdir(repo)
+
+    result = CliRunner().invoke(
+        main,
+        ["swarm", "--provider", "codex", "--brief", str(brief), "--json"],
+    )
+
+    assert result.exit_code == 2
+    assert "reserved swarm worktree slug 'runs'" in result.output
+    assert _swarm_manifests(repo) == []
+
+
+def test_swarm_status_latest_and_explicit_lookup(monkeypatch, tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md")
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", _fake_exec_factory())
+    monkeypatch.setattr(cli, "_ship_swarm_pr", _fake_merged_ship(repo))
+    runner = CliRunner()
+
+    run_result = runner.invoke(
+        main,
+        ["swarm", "--provider", "codex", "--brief", str(brief), "--auto-merge", "--json"],
+    )
+
+    assert run_result.exit_code == 0, run_result.output
+    manifest_path = _swarm_manifests(repo)[0]
+    run_id = manifest_path.stem
+
+    latest_result = runner.invoke(main, ["swarm", "status", "--latest"])
+    assert latest_result.exit_code == 0, latest_result.output
+    assert f"swarm run {run_id} (ok)" in latest_result.output
+    assert "shipped=1 failed=0 no-changes=0" in latest_result.output
+    assert "shipped:" in latest_result.output
+
+    id_result = runner.invoke(main, ["swarm", "status", run_id])
+    assert id_result.exit_code == 0, id_result.output
+    assert f"manifest: {manifest_path}" in id_result.output
+
+    path_result = runner.invoke(main, ["swarm", "status", str(manifest_path)])
+    assert path_result.exit_code == 0, path_result.output
+    assert f"swarm run {run_id} (ok)" in path_result.output
+
+
+def test_swarm_status_latest_uses_run_id_not_mtime(monkeypatch, tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    monkeypatch.chdir(repo)
+    runs_dir = repo / ".cache" / "conductor" / "swarm" / "runs"
+    runs_dir.mkdir(parents=True)
+    older = runs_dir / "20260101T000000000001Z-older.json"
+    newer = runs_dir / "20260101T000000000002Z-newer.json"
+    base_payload = {
+        "schema_version": 1,
+        "repo_root": str(repo),
+        "base_branch": "main",
+        "base_ref": "abc123",
+        "started_at": "2026-01-01T00:00:00Z",
+        "ended_at": "2026-01-01T00:00:01Z",
+        "duration_ms": 1,
+        "tasks": [],
+        "ok": True,
+        "shipped_count": 0,
+        "failed_count": 0,
+        "no_changes_count": 0,
+    }
+    older.write_text(
+        json.dumps({**base_payload, "run_id": older.stem}),
+        encoding="utf-8",
+    )
+    newer.write_text(
+        json.dumps({**base_payload, "run_id": newer.stem}),
+        encoding="utf-8",
+    )
+    os.utime(older, (200, 200))
+    os.utime(newer, (100, 100))
+
+    result = CliRunner().invoke(main, ["swarm", "status", "--latest"])
+
+    assert result.exit_code == 0, result.output
+    assert f"swarm run {newer.stem} (ok)" in result.output
+
+
+def test_repo_ignores_generated_conductor_cache() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    gitignore = (repo_root / ".gitignore").read_text(encoding="utf-8")
+
+    assert ".cache/conductor/" in gitignore
+
+
+def test_swarm_json_stdout_contract_keeps_top_level_fields(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md")
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", _fake_exec_factory())
+    monkeypatch.setattr(cli, "_ship_swarm_pr", _fake_merged_ship(repo))
+
+    result = CliRunner().invoke(
+        main,
+        ["swarm", "--provider", "codex", "--brief", str(brief), "--auto-merge", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert set(payload) == {
+        "tasks",
+        "ok",
+        "shipped_count",
+        "failed_count",
+        "no_changes_count",
+    }
 
 
 def test_swarm_ship_appends_closing_ref_to_last_commit_body(
