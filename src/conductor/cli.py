@@ -5946,6 +5946,20 @@ def _ensure_swarm_branch_checked_out(worktree: Path, branch: str) -> None:
     _run_swarm_git(["checkout", branch], cwd=worktree)
 
 
+def _require_swarm_branch_checked_out(worktree: Path, branch: str, *, selector: str) -> None:
+    current = _run_swarm_git(
+        ["branch", "--show-current"],
+        cwd=worktree,
+    ).stdout.strip()
+    if current == branch:
+        return
+    actual = current or "detached HEAD"
+    raise click.ClickException(
+        f"swarm task {selector} worktree is on {actual!r}, expected {branch!r}; "
+        "retry-ship refuses to retarget the saved branch"
+    )
+
+
 def _ship_swarm_pr(
     worktree: Path,
     *,
@@ -6170,6 +6184,165 @@ def _resolve_swarm_manifest_path(run_id_or_path: str | None, *, latest: bool) ->
     if run_id_path.exists():
         return run_id_path
     raise click.ClickException(f"swarm manifest not found: {run_id_or_path}")
+
+
+def _swarm_manifest_tasks(payload: dict[str, object], *, path: Path) -> list[dict[str, object]]:
+    raw_tasks = payload.get("tasks")
+    if not isinstance(raw_tasks, list):
+        raise click.ClickException(f"invalid swarm manifest at {path}: tasks is not a list")
+    tasks = [task for task in raw_tasks if isinstance(task, dict)]
+    if len(tasks) != len(raw_tasks):
+        raise click.ClickException(
+            f"invalid swarm manifest at {path}: every task must be an object"
+        )
+    return tasks
+
+
+def _select_swarm_manifest_task(
+    tasks: list[dict[str, object]],
+    selector: str,
+) -> tuple[int, dict[str, object]]:
+    if selector.isdecimal():
+        index = int(selector) - 1
+        if 0 <= index < len(tasks):
+            return index, tasks[index]
+        raise click.ClickException(
+            f"swarm task selector {selector!r} is out of range; "
+            f"expected a 1-based index from 1 to {len(tasks)}"
+        )
+
+    matches = [
+        (index, task)
+        for index, task in enumerate(tasks)
+        if task.get("branch") == selector or task.get("brief") == selector
+    ]
+    if not matches:
+        raise click.ClickException(
+            f"swarm task selector {selector!r} matched no task; use a 1-based index, "
+            "exact branch, or exact brief path from the manifest"
+        )
+    if len(matches) > 1:
+        raise click.ClickException(f"swarm task selector {selector!r} matched multiple tasks")
+    return matches[0]
+
+
+def _swarm_task_string(task: dict[str, object], key: str, *, selector: str) -> str:
+    value = task.get(key)
+    if not isinstance(value, str) or not value:
+        raise click.ClickException(f"swarm task {selector!r} has no {key}")
+    return value
+
+
+def _retry_ship_swarm_task(
+    *,
+    manifest_path: Path,
+    payload: dict[str, object],
+    task_index: int,
+    auto_merge: bool,
+) -> dict[str, object]:
+    tasks = _swarm_manifest_tasks(payload, path=manifest_path)
+    task = tasks[task_index]
+    selector = str(task_index + 1)
+    repo_root_value = payload.get("repo_root")
+    repo_root = Path(repo_root_value) if isinstance(repo_root_value, str) else _swarm_repo_root()
+    base_branch = payload.get("base_branch")
+    if not isinstance(base_branch, str) or not base_branch:
+        raise click.ClickException(f"swarm manifest {manifest_path} has no base_branch")
+    base_ref = payload.get("base_ref")
+    if not isinstance(base_ref, str) or not base_ref:
+        raise click.ClickException(f"swarm manifest {manifest_path} has no base_ref")
+
+    branch = _swarm_task_string(task, "branch", selector=selector)
+    worktree = Path(_swarm_task_string(task, "worktree", selector=selector))
+    if not worktree.exists():
+        raise click.ClickException(f"swarm task {selector} worktree does not exist: {worktree}")
+
+    started_at = time.monotonic()
+    status = "failed"
+    pr_url: str | None = None
+    merge_sha: str | None = None
+    failure_reason: str | None = None
+    commits = 0
+    cleanup_warning: str | None = None
+    try:
+        _require_swarm_branch_checked_out(worktree, branch, selector=selector)
+        dirty_paths = _swarm_dirty_paths(worktree)
+        if dirty_paths:
+            raise click.ClickException(
+                "swarm task {selector} worktree has uncommitted changes: {paths}".format(
+                    selector=selector,
+                    paths=", ".join(path[:200] for path in dirty_paths[:10]),
+                )
+            )
+        commits = _swarm_commit_count(worktree, base_ref)
+        if commits == 0:
+            raise click.ClickException(
+                f"swarm task {selector} has no commits ahead of manifest base_ref {base_ref}"
+            )
+        shipped_status, shipped_pr_url, shipped_detail = _ship_swarm_pr(
+            worktree,
+            base_branch=base_branch,
+            branch=branch,
+            auto_merge=auto_merge,
+        )
+        status = shipped_status
+        pr_url = shipped_pr_url
+        if status == "shipped":
+            merge_sha = shipped_detail
+        elif status in {"failed", "review-blocked"}:
+            failure_reason = shipped_detail
+    except click.ClickException:
+        raise
+    except RuntimeError as e:
+        status = "failed"
+        failure_reason = str(e)
+    duration_ms = int((time.monotonic() - started_at) * 1000)
+
+    if status in SWARM_SUCCESS_STATUSES:
+        try:
+            _remove_swarm_worktree(worktree, repo_root=repo_root)
+            if status == "shipped":
+                cleanup_warning = _delete_shipped_swarm_branch(
+                    branch,
+                    repo_root=repo_root,
+                    merge_sha=merge_sha,
+                )
+                if cleanup_warning is not None:
+                    click.echo(f"[conductor] warning: {cleanup_warning}", err=True)
+                    failure_reason = cleanup_warning
+        except RuntimeError as e:
+            status = "failed"
+            failure_reason = f"{failure_reason or status}; cleanup failed: {e}"
+
+    updated_task = dict(task)
+    updated_task.update(
+        {
+            "status": status,
+            "commits": commits,
+            "pr_url": pr_url,
+            "merge_sha": merge_sha,
+            "duration_ms": duration_ms,
+            "failure_reason": failure_reason,
+            "cleanup_status": "removed" if not worktree.exists() else "preserved",
+        }
+    )
+    tasks[task_index] = updated_task
+
+    raw_duration = payload.get("duration_ms")
+    run_duration_ms = duration_ms
+    if isinstance(raw_duration, int) and not isinstance(raw_duration, bool):
+        run_duration_ms = max(0, raw_duration) + duration_ms
+
+    return _swarm_manifest_payload(
+        run_id=str(payload.get("run_id") or manifest_path.stem),
+        repo_root=repo_root,
+        base_branch=base_branch,
+        base_ref=base_ref,
+        started_at=str(payload.get("started_at") or _swarm_now_iso()),
+        ended_at=_swarm_now_iso(),
+        duration_ms=run_duration_ms,
+        tasks=tasks,
+    )
 
 
 def _format_swarm_manifest_status(payload: dict[str, object], *, path: Path) -> list[str]:
@@ -7715,6 +7888,47 @@ def swarm_status(run_id_or_path: str | None, latest: bool) -> None:
     payload = _read_swarm_manifest(path)
     for line in _format_swarm_manifest_status(payload, path=path):
         click.echo(line)
+
+
+@swarm.command(name="retry-ship")
+@click.argument("run_id_or_path")
+@click.argument("task_selector")
+@click.option(
+    "--auto-merge/--no-auto-merge",
+    default=True,
+    show_default=True,
+    help="Retry shipping with open-pr.sh auto-merge enabled.",
+)
+def swarm_retry_ship(run_id_or_path: str, task_selector: str, auto_merge: bool) -> None:
+    """Retry shipping one manifest task without rerunning implementation.
+
+    TASK_SELECTOR is a 1-based task index, exact branch name, or exact brief path
+    from the manifest.
+    """
+    path = _resolve_swarm_manifest_path(run_id_or_path, latest=False)
+    payload = _read_swarm_manifest(path)
+    tasks = _swarm_manifest_tasks(payload, path=path)
+    task_index, task = _select_swarm_manifest_task(tasks, task_selector)
+    branch = task.get("branch")
+    brief = task.get("brief")
+    updated = _retry_ship_swarm_task(
+        manifest_path=path,
+        payload=payload,
+        task_index=task_index,
+        auto_merge=auto_merge,
+    )
+    _write_swarm_manifest(path, updated)
+    updated_task = _swarm_manifest_tasks(updated, path=path)[task_index]
+    detail = "{status}: {brief} -> {branch}".format(
+        status=updated_task.get("status", "unknown"),
+        brief=brief or updated_task.get("brief", ""),
+        branch=branch or updated_task.get("branch", ""),
+    )
+    if updated_task.get("pr_url"):
+        detail += f" ({updated_task['pr_url']})"
+    click.echo(detail)
+    if updated_task.get("status") not in SWARM_SUCCESS_STATUSES:
+        sys.exit(1)
 
 
 # --------------------------------------------------------------------------- #

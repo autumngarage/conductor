@@ -58,6 +58,28 @@ def _swarm_manifests(repo: Path) -> list[Path]:
     return sorted((repo / ".cache" / "conductor" / "swarm" / "runs").glob("*.json"))
 
 
+def _manual_swarm_manifest(
+    repo: Path,
+    *,
+    tasks: list[dict[str, object]],
+    base_ref: str | None = None,
+    run_id: str = "20260101T000000000001Z-retry",
+) -> Path:
+    manifest_path = repo / ".cache" / "conductor" / "swarm" / "runs" / f"{run_id}.json"
+    payload = cli._swarm_manifest_payload(
+        run_id=run_id,
+        repo_root=repo,
+        base_branch="main",
+        base_ref=base_ref or _git(repo, "rev-parse", "main").stdout.strip(),
+        started_at="2026-01-01T00:00:00Z",
+        ended_at="2026-01-01T00:00:01Z",
+        duration_ms=100,
+        tasks=tasks,
+    )
+    cli._write_swarm_manifest(manifest_path, payload)
+    return manifest_path
+
+
 def test_new_swarm_run_id_preserves_subsecond_ordering() -> None:
     first = cli._new_swarm_run_id(datetime(2026, 1, 1, 0, 0, 0, 1, tzinfo=UTC))
     second = cli._new_swarm_run_id(datetime(2026, 1, 1, 0, 0, 0, 2, tzinfo=UTC))
@@ -514,6 +536,279 @@ def test_swarm_status_latest_and_explicit_lookup(monkeypatch, tmp_path: Path) ->
     path_result = runner.invoke(main, ["swarm", "status", str(manifest_path)])
     assert path_result.exit_code == 0, path_result.output
     assert f"swarm run {run_id} (ok)" in path_result.output
+
+
+def test_swarm_retry_ship_updates_review_blocked_manifest(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md")
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", _fake_exec_factory())
+
+    def review_blocked_ship(
+        worktree: Path,
+        *,
+        base_branch: str,
+        branch: str,
+        auto_merge: bool,
+    ):
+        _ = (worktree, base_branch, branch, auto_merge)
+        return "review-blocked", "https://github.com/example/repo/pull/123", "review flaked"
+
+    monkeypatch.setattr(cli, "_ship_swarm_pr", review_blocked_ship)
+    run_result = CliRunner().invoke(
+        main,
+        ["swarm", "--provider", "codex", "--brief", str(brief), "--auto-merge", "--json"],
+    )
+    assert run_result.exit_code == 1, run_result.output
+    manifest_path = _swarm_manifests(repo)[0]
+    before = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert before["tasks"][0]["status"] == "review-blocked"
+    assert before["metrics"]["review_blocked_count"] == 1
+
+    def fail_if_exec_reruns(**kwargs):
+        _ = kwargs
+        raise AssertionError("retry-ship must not rerun implementation")
+
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", fail_if_exec_reruns)
+    monkeypatch.setattr(cli, "_ship_swarm_pr", _fake_merged_ship(repo))
+
+    retry_result = CliRunner().invoke(main, ["swarm", "retry-ship", manifest_path.stem, "1"])
+
+    assert retry_result.exit_code == 0, retry_result.output
+    assert "shipped:" in retry_result.output
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    task = manifest["tasks"][0]
+    assert manifest["ok"] is True
+    assert manifest["shipped_count"] == 1
+    assert manifest["failed_count"] == 0
+    assert manifest["metrics"]["shipped_count"] == 1
+    assert manifest["metrics"]["review_blocked_count"] == 0
+    assert manifest["metrics"]["per_status_counts"] == {"shipped": 1}
+    assert manifest["metrics"]["total_commits"] == 1
+    assert task["status"] == "shipped"
+    assert task["pr_url"] == "https://github.com/example/repo/pull/123"
+    assert task["merge_sha"]
+    assert task["failure_reason"] is None
+    assert task["cleanup_status"] == "removed"
+    assert not Path(task["worktree"]).exists()
+
+
+def test_swarm_retry_ship_refuses_missing_worktree(tmp_path: Path, monkeypatch) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md")
+    monkeypatch.chdir(repo)
+    manifest_path = _manual_swarm_manifest(
+        repo,
+        tasks=[
+            {
+                "brief": str(brief),
+                "branch": "feat/swarm/foo",
+                "worktree": str(repo / ".cache" / "conductor" / "swarm" / "foo"),
+                "status": "review-blocked",
+                "commits": 1,
+                "pr_url": "https://github.com/example/repo/pull/123",
+                "merge_sha": None,
+                "duration_ms": 10,
+                "failure_reason": "review flaked",
+                "cleanup_status": "preserved",
+            }
+        ],
+    )
+
+    result = CliRunner().invoke(main, ["swarm", "retry-ship", str(manifest_path), "1"])
+
+    assert result.exit_code == 1
+    assert "worktree does not exist" in result.output
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["tasks"][0]["status"] == "review-blocked"
+
+
+def test_swarm_retry_ship_refuses_no_commits_ahead(tmp_path: Path, monkeypatch) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md")
+    base_ref = _git(repo, "rev-parse", "main").stdout.strip()
+    worktree = repo / ".cache" / "conductor" / "swarm" / "foo"
+    _git(repo, "worktree", "add", str(worktree), "-b", "feat/swarm/foo", base_ref)
+    monkeypatch.chdir(repo)
+    manifest_path = _manual_swarm_manifest(
+        repo,
+        base_ref=base_ref,
+        tasks=[
+            {
+                "brief": str(brief),
+                "branch": "feat/swarm/foo",
+                "worktree": str(worktree),
+                "status": "review-blocked",
+                "commits": 0,
+                "pr_url": None,
+                "merge_sha": None,
+                "duration_ms": 10,
+                "failure_reason": "ship failed",
+                "cleanup_status": "preserved",
+            }
+        ],
+    )
+
+    result = CliRunner().invoke(main, ["swarm", "retry-ship", str(manifest_path), "1"])
+
+    assert result.exit_code == 1
+    assert "has no commits ahead of manifest base_ref" in result.output
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["tasks"][0]["status"] == "review-blocked"
+    assert worktree.exists()
+
+
+def test_swarm_retry_ship_refuses_detached_worktree_without_moving_branch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md")
+    base_ref = _git(repo, "rev-parse", "main").stdout.strip()
+    worktree = repo / ".cache" / "conductor" / "swarm" / "foo"
+    _git(repo, "worktree", "add", str(worktree), "-b", "feat/swarm/foo", base_ref)
+    _commit_change(worktree, "feature.txt", "feature")
+    branch_head = _git(worktree, "rev-parse", "HEAD").stdout.strip()
+    _git(worktree, "checkout", "--detach", "HEAD")
+    _commit_change(worktree, "detached.txt", "detached")
+    detached_head = _git(worktree, "rev-parse", "HEAD").stdout.strip()
+    assert detached_head != branch_head
+    monkeypatch.chdir(repo)
+    manifest_path = _manual_swarm_manifest(
+        repo,
+        base_ref=base_ref,
+        tasks=[
+            {
+                "brief": str(brief),
+                "branch": "feat/swarm/foo",
+                "worktree": str(worktree),
+                "status": "review-blocked",
+                "commits": 1,
+                "pr_url": None,
+                "merge_sha": None,
+                "duration_ms": 10,
+                "failure_reason": "ship failed",
+                "cleanup_status": "preserved",
+            }
+        ],
+    )
+
+    result = CliRunner().invoke(main, ["swarm", "retry-ship", str(manifest_path), "1"])
+
+    assert result.exit_code == 1
+    assert "detached HEAD" in result.output
+    assert "refuses to retarget the saved branch" in result.output
+    assert _git(repo, "rev-parse", "feat/swarm/foo").stdout.strip() == branch_head
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["tasks"][0]["status"] == "review-blocked"
+
+
+def test_swarm_retry_ship_refuses_dirty_worktree(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md")
+    base_ref = _git(repo, "rev-parse", "main").stdout.strip()
+    worktree = repo / ".cache" / "conductor" / "swarm" / "foo"
+    _git(repo, "worktree", "add", str(worktree), "-b", "feat/swarm/foo", base_ref)
+    _commit_change(worktree, "feature.txt", "feature")
+    (worktree / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+    monkeypatch.chdir(repo)
+    manifest_path = _manual_swarm_manifest(
+        repo,
+        base_ref=base_ref,
+        tasks=[
+            {
+                "brief": str(brief),
+                "branch": "feat/swarm/foo",
+                "worktree": str(worktree),
+                "status": "review-blocked",
+                "commits": 1,
+                "pr_url": None,
+                "merge_sha": None,
+                "duration_ms": 10,
+                "failure_reason": "ship failed",
+                "cleanup_status": "preserved",
+            }
+        ],
+    )
+
+    result = CliRunner().invoke(main, ["swarm", "retry-ship", str(manifest_path), "1"])
+
+    assert result.exit_code == 1
+    assert "worktree has uncommitted changes" in result.output
+    assert "dirty.txt" in result.output
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["tasks"][0]["status"] == "review-blocked"
+
+
+@pytest.mark.parametrize("selector_kind", ["index", "branch", "brief"])
+def test_swarm_retry_ship_selects_by_index_branch_or_brief(
+    monkeypatch,
+    tmp_path: Path,
+    selector_kind: str,
+) -> None:
+    repo = _repo(tmp_path)
+    first = _brief(repo, "foo.md")
+    second = _brief(repo, "bar.md")
+    base_ref = _git(repo, "rev-parse", "main").stdout.strip()
+    foo_worktree = repo / ".cache" / "conductor" / "swarm" / "foo"
+    bar_worktree = repo / ".cache" / "conductor" / "swarm" / "bar"
+    _git(repo, "worktree", "add", str(foo_worktree), "-b", "feat/swarm/foo", base_ref)
+    _commit_change(foo_worktree, "foo.txt", "foo")
+    _git(repo, "worktree", "add", str(bar_worktree), "-b", "feat/swarm/bar", base_ref)
+    _commit_change(bar_worktree, "bar.txt", "bar")
+    monkeypatch.chdir(repo)
+    manifest_path = _manual_swarm_manifest(
+        repo,
+        base_ref=base_ref,
+        tasks=[
+            {
+                "brief": str(first),
+                "branch": "feat/swarm/foo",
+                "worktree": str(foo_worktree),
+                "status": "failed",
+                "commits": 1,
+                "pr_url": None,
+                "merge_sha": None,
+                "duration_ms": 10,
+                "failure_reason": "push failed",
+                "cleanup_status": "preserved",
+            },
+            {
+                "brief": str(second),
+                "branch": "feat/swarm/bar",
+                "worktree": str(bar_worktree),
+                "status": "review-blocked",
+                "commits": 1,
+                "pr_url": "https://github.com/example/repo/pull/124",
+                "merge_sha": None,
+                "duration_ms": 10,
+                "failure_reason": "review flaked",
+                "cleanup_status": "preserved",
+            },
+        ],
+    )
+    monkeypatch.setattr(cli, "_ship_swarm_pr", _fake_merged_ship(repo))
+    selector = {
+        "index": "2",
+        "branch": "feat/swarm/bar",
+        "brief": str(second),
+    }[selector_kind]
+
+    result = CliRunner().invoke(main, ["swarm", "retry-ship", str(manifest_path), selector])
+
+    assert result.exit_code == 0, result.output
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["tasks"][0]["status"] == "failed"
+    assert manifest["tasks"][1]["status"] == "shipped"
+    assert manifest["metrics"]["failed_count"] == 1
+    assert manifest["metrics"]["shipped_count"] == 1
+    assert manifest["metrics"]["total_commits"] == 2
 
 
 def test_swarm_status_latest_uses_run_id_not_mtime(monkeypatch, tmp_path: Path) -> None:
