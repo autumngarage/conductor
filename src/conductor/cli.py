@@ -34,6 +34,7 @@ import threading
 import time
 import tomllib
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
@@ -5586,6 +5587,7 @@ SWARM_PROVIDER_FAILED_STATUS = "provider-failed"
 SWARM_CONFLICT_STATUS = "needs-human-conflict-resolution"
 SWARM_BRANCH_PREFIX = "feat/swarm"
 SWARM_WORKTREE_LOCK = threading.Lock()
+SWARM_MANIFEST_LOCK = threading.Lock()
 SWARM_GIT_TIMEOUT_SEC = 30.0
 SWARM_GH_TIMEOUT_SEC = 30.0
 SWARM_SHIP_TIMEOUT_SEC = 1800.0
@@ -5721,6 +5723,9 @@ class SwarmTaskResult:
     selected_provider: str | None = None
     fallback_provider: str | None = None
     fallback_reason: str | None = None
+    last_phase: str | None = None
+    last_progress_at: str | None = None
+    phase_history: list[dict[str, object]] | None = None
 
     def to_json(self, *, include_provider_details: bool = True) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -5738,6 +5743,12 @@ class SwarmTaskResult:
         payload["merge_status"] = self.merge_status
         payload["inspection_warning"] = self.inspection_warning
         payload["cleanup_warning"] = self.cleanup_warning
+        if self.last_phase is not None:
+            payload["last_phase"] = self.last_phase
+        if self.last_progress_at is not None:
+            payload["last_progress_at"] = self.last_progress_at
+        if self.phase_history is not None:
+            payload["phase_history"] = self.phase_history
         if include_provider_details:
             payload["provider"] = self.provider
             payload["selected_provider"] = self.selected_provider
@@ -6892,6 +6903,9 @@ def _swarm_initial_task_records(
                 "duration_ms": 0,
                 "failure_reason": None,
                 "cleanup_status": "pending",
+                "last_phase": "starting",
+                "last_progress_at": None,
+                "phase_history": [],
                 "provider": None,
                 "selected_provider": (
                     None if provider_id is None or provider_id in {"auto", "pool"} else provider_id
@@ -7118,6 +7132,48 @@ def _write_swarm_manifest(path: Path, payload: dict[str, object]) -> None:
         temp_path.unlink(missing_ok=True)
 
 
+def _apply_swarm_task_phase(task: dict[str, object], *, phase: str, at: str) -> None:
+    task["last_phase"] = phase
+    task["last_progress_at"] = at
+    if task.get("status") == "pending":
+        task["status"] = "running"
+    history = task.get("phase_history")
+    if not isinstance(history, list):
+        history = []
+    history.append({"phase": phase, "at": at})
+    task["phase_history"] = history[-12:]
+
+
+def _record_swarm_task_phase(
+    *,
+    manifest_path: Path,
+    brief_path: str,
+    phase: str,
+) -> None:
+    now = _swarm_now_iso()
+    try:
+        with SWARM_MANIFEST_LOCK:
+            payload = _read_swarm_manifest(manifest_path)
+            tasks = _swarm_manifest_tasks(payload, path=manifest_path)
+            for task in tasks:
+                if task.get("brief") != brief_path:
+                    continue
+                _apply_swarm_task_phase(task, phase=phase, at=now)
+                _write_swarm_manifest(manifest_path, payload)
+                return
+            click.echo(
+                "[conductor] warning: could not record swarm phase "
+                f"{phase!r}; no task matched brief {brief_path!r} in {manifest_path}",
+                err=True,
+            )
+    except Exception as e:
+        click.echo(
+            "[conductor] warning: could not record swarm phase "
+            f"{phase!r} for {brief_path!r} in {manifest_path}: {e}",
+            err=True,
+        )
+
+
 def _swarm_manifest_task_records(results: list[SwarmTaskResult]) -> list[dict[str, object]]:
     tasks: list[dict[str, object]] = []
     for result in results:
@@ -7254,7 +7310,14 @@ def _orchestrate_swarm_auto_merge(
     base_branch: str,
     manifest_path: Path,
     preflight: dict[str, object] | None,
+    phase_recorder: Callable[[str, str], None] | None = None,
 ) -> dict[str, object] | None:
+    def mark_phase(task: dict[str, object], phase: str) -> None:
+        _apply_swarm_task_phase(task, phase=phase, at=_swarm_now_iso())
+        brief = task.get("brief")
+        if phase_recorder is not None and isinstance(brief, str):
+            phase_recorder(brief, phase)
+
     for task in tasks:
         if task.get("status") != "ready-to-ship":
             continue
@@ -7282,6 +7345,7 @@ def _orchestrate_swarm_auto_merge(
         if task.get("status") != "ready-to-ship":
             continue
         selector = str(index + 1)
+        mark_phase(task, "reviewing")
         current_base = _run_swarm_git(
             ["rev-parse", "--verify", base_branch],
             cwd=repo_root,
@@ -7295,6 +7359,7 @@ def _orchestrate_swarm_auto_merge(
             continue
         branch = _swarm_task_string(task, "branch", selector=selector)
         worktree = Path(_swarm_task_string(task, "worktree", selector=selector))
+        mark_phase(task, "shipping")
         ship_outcome = _coerce_swarm_ship_outcome(
             _ship_swarm_pr(
                 worktree,
@@ -7721,6 +7786,20 @@ def _run_swarm_retry_ship_command(
         sys.exit(1)
 
 
+def _swarm_task_phase_display(task: dict[str, object], *, running: bool) -> str:
+    phase = task.get("last_phase")
+    if not isinstance(phase, str) or not phase:
+        return ""
+    progress_at = task.get("last_progress_at")
+    if not isinstance(progress_at, str) or not progress_at:
+        return f" phase={phase}"
+    if not running:
+        return f" phase={phase} last_progress_at={progress_at}"
+    age_seconds = (datetime.now(UTC) - parse_timestamp(progress_at)).total_seconds()
+    activity = "stalled" if age_seconds > DEFAULT_EXEC_MAX_STALL_SEC else "active"
+    return f" {activity} phase={phase} last_progress_at={progress_at}"
+
+
 def _format_swarm_manifest_status(payload: dict[str, object], *, path: Path) -> list[str]:
     run_id = payload.get("run_id", path.stem)
     ok = payload.get("ok")
@@ -7820,6 +7899,10 @@ def _format_swarm_manifest_status(payload: dict[str, object], *, path: Path) -> 
                     branch=raw_task.get("branch", ""),
                 )
             )
+            line += _swarm_task_phase_display(
+                raw_task,
+                running=payload.get("ended_at") is None,
+            )
             if provider_detail:
                 line += f" provider={provider_detail}"
             if raw_task.get("fallback_provider"):
@@ -7875,6 +7958,7 @@ def _run_swarm_task(
     keep_worktrees_on_failure: bool,
     as_json: bool,
     defer_ship: bool = False,
+    phase_recorder: Callable[[str, str], None] | None = None,
 ) -> SwarmTaskResult:
     started_at = time.monotonic()
     repo_root = _swarm_repo_root()
@@ -7909,7 +7993,21 @@ def _run_swarm_task(
     provider_used: str | None = None
     fallback_provider: str | None = None
     fallback_reason: str | None = None
+    last_phase: str | None = None
+    last_progress_at: str | None = None
+    phase_history: list[dict[str, object]] = []
+
+    def mark_phase(phase: str) -> None:
+        nonlocal last_phase, last_progress_at
+        last_phase = phase
+        last_progress_at = _swarm_now_iso()
+        phase_history.append({"phase": phase, "at": last_progress_at})
+        del phase_history[:-12]
+        if phase_recorder is not None:
+            phase_recorder(brief_path, phase)
+
     try:
+        mark_phase("starting")
         provider_pool = _is_swarm_provider_pool(provider_id)
         provider_candidates, _route_decision = _swarm_provider_candidates(
             provider_id=provider_id,
@@ -7933,6 +8031,7 @@ def _run_swarm_task(
         for index, candidate_provider in enumerate(provider_candidates):
             provider_used = candidate_provider
             try:
+                mark_phase("editing")
                 _run_exec_phase_dispatch(
                     provider_id=candidate_provider,
                     auto=False,
@@ -8024,6 +8123,7 @@ def _run_swarm_task(
         if exec_succeeded:
             if fallback_provider is not None:
                 fallback_provider = provider_used
+            mark_phase("testing")
             dirty_paths = _swarm_dirty_paths(worktree)
             if dirty_paths:
                 status = "failed"
@@ -8036,10 +8136,13 @@ def _run_swarm_task(
                 if commits == 0:
                     status = "no-changes"
                 elif defer_ship:
+                    mark_phase("committing")
                     _append_swarm_closing_refs_to_head_commit(worktree, closing_refs)
                     status = "ready-to-ship"
                 else:
+                    mark_phase("committing")
                     _append_swarm_closing_refs_to_head_commit(worktree, closing_refs)
+                    mark_phase("shipping")
                     ship_outcome = _coerce_swarm_ship_outcome(
                         _ship_swarm_pr(
                             worktree,
@@ -8089,6 +8192,9 @@ def _run_swarm_task(
         selected_provider=selected_provider,
         fallback_provider=fallback_provider,
         fallback_reason=fallback_reason,
+        last_phase=last_phase,
+        last_progress_at=last_progress_at,
+        phase_history=phase_history,
     )
     if (
         created_worktree
@@ -8147,6 +8253,7 @@ def _failed_swarm_thread_result(brief_path: str, error: BaseException) -> SwarmT
     branch = _swarm_branch_for_brief(brief_path)
     worktree = _swarm_worktree_for_brief(brief_path, repo_root=repo_root)
     message = f"internal swarm task error: {error}"
+    now = _swarm_now_iso()
     click.echo(f"[conductor] swarm task crashed: {brief_path}; {message}", err=True)
     return SwarmTaskResult(
         brief=brief_path,
@@ -8158,6 +8265,9 @@ def _failed_swarm_thread_result(brief_path: str, error: BaseException) -> SwarmT
         merge_sha=None,
         duration_ms=0,
         failure_reason=message,
+        last_phase="starting",
+        last_progress_at=now,
+        phase_history=[{"phase": "starting", "at": now}],
     )
 
 
@@ -9446,6 +9556,13 @@ def swarm(
             click.echo(json.dumps({"ok": True, "preflight": preflight}, indent=2))
         return
 
+    def record_phase(brief_path: str, phase: str) -> None:
+        _record_swarm_task_phase(
+            manifest_path=manifest_path,
+            brief_path=brief_path,
+            phase=phase,
+        )
+
     def run_one(brief_path: str) -> SwarmTaskResult:
         return _run_swarm_task(
             brief_path=brief_path,
@@ -9460,6 +9577,7 @@ def swarm(
             keep_worktrees_on_failure=keep_worktrees_on_failure,
             as_json=as_json,
             defer_ship=auto_merge,
+            phase_recorder=record_phase,
         )
 
     if max_parallel == 1 or len(briefs) == 1:
@@ -9487,6 +9605,20 @@ def swarm(
     ended_at = _swarm_now_iso()
     duration_ms = int((time.monotonic() - run_started_monotonic) * 1000)
     manifest_tasks = _swarm_manifest_task_records(results)
+    _write_swarm_manifest(
+        manifest_path,
+        _swarm_manifest_payload(
+            run_id=run_id,
+            repo_root=repo_root,
+            base_branch=base_branch,
+            base_ref=base_ref,
+            started_at=started_at,
+            ended_at=None,
+            duration_ms=None,
+            tasks=manifest_tasks,
+            preflight=preflight,
+        ),
+    )
     merge_plan = None
     if auto_merge:
         merge_plan = _orchestrate_swarm_auto_merge(
@@ -9495,6 +9627,7 @@ def swarm(
             base_branch=base_branch,
             manifest_path=manifest_path,
             preflight=preflight,
+            phase_recorder=record_phase,
         )
     manifest_payload = _swarm_manifest_payload(
         run_id=run_id,

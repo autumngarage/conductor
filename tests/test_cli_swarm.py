@@ -4,7 +4,7 @@ import json
 import os
 import subprocess
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
@@ -1256,6 +1256,7 @@ def test_swarm_status_latest_and_explicit_lookup(monkeypatch, tmp_path: Path) ->
     assert "provider-failed=0" in latest_result.output
     assert "status-counts: shipped=1" in latest_result.output
     assert "shipped:" in latest_result.output
+    assert "phase=shipping" in latest_result.output
 
     id_result = runner.invoke(main, ["swarm", "status", run_id])
     assert id_result.exit_code == 0, id_result.output
@@ -1264,6 +1265,77 @@ def test_swarm_status_latest_and_explicit_lookup(monkeypatch, tmp_path: Path) ->
     path_result = runner.invoke(main, ["swarm", "status", str(manifest_path)])
     assert path_result.exit_code == 0, path_result.output
     assert f"swarm run {run_id} (ok)" in path_result.output
+
+
+def test_swarm_manifest_records_lane_phase_progress(monkeypatch, tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md")
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", _fake_exec_factory())
+    monkeypatch.setattr(cli, "_ship_swarm_pr", _fake_merged_ship(repo))
+
+    result = CliRunner().invoke(
+        main,
+        ["swarm", "--provider", "codex", "--brief", str(brief), "--auto-merge", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    manifest = json.loads(_swarm_manifests(repo)[0].read_text(encoding="utf-8"))
+    task = manifest["tasks"][0]
+    assert task["last_phase"] == "shipping"
+    assert isinstance(task["last_progress_at"], str)
+    phases = [event["phase"] for event in task["phase_history"]]
+    assert phases == ["starting", "editing", "testing", "committing", "reviewing", "shipping"]
+
+
+def test_swarm_status_latest_reports_active_and_stalled_phases(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    monkeypatch.chdir(repo)
+    now = cli._swarm_now_iso()
+    old = (
+        datetime.now(UTC) - timedelta(seconds=cli.DEFAULT_EXEC_MAX_STALL_SEC + 30)
+    ).isoformat().replace("+00:00", "Z")
+    run_id = "20260101T000000000001Z-progress"
+    manifest_path = repo / ".cache" / "conductor" / "swarm" / "runs" / f"{run_id}.json"
+    payload = cli._swarm_manifest_payload(
+        run_id=run_id,
+        repo_root=repo,
+        base_branch="main",
+        base_ref=_git(repo, "rev-parse", "main").stdout.strip(),
+        started_at="2026-01-01T00:00:00Z",
+        ended_at=None,
+        duration_ms=None,
+        tasks=[
+            {
+                "brief": "tasks/active.md",
+                "branch": "feat/swarm/active",
+                "worktree": str(repo / ".cache" / "conductor" / "swarm" / "active"),
+                "status": "running",
+                "commits": 0,
+                "last_phase": "editing",
+                "last_progress_at": now,
+            },
+            {
+                "brief": "tasks/stalled.md",
+                "branch": "feat/swarm/stalled",
+                "worktree": str(repo / ".cache" / "conductor" / "swarm" / "stalled"),
+                "status": "running",
+                "commits": 0,
+                "last_phase": "testing",
+                "last_progress_at": old,
+            },
+        ],
+    )
+    cli._write_swarm_manifest(manifest_path, payload)
+
+    result = CliRunner().invoke(main, ["swarm", "status", "--latest"])
+
+    assert result.exit_code == 0, result.output
+    assert "running: tasks/active.md -> feat/swarm/active active phase=editing" in result.output
+    assert "running: tasks/stalled.md -> feat/swarm/stalled stalled phase=testing" in result.output
 
 
 def test_swarm_status_reports_provider_failed_counts(
