@@ -5713,6 +5713,9 @@ class SwarmTaskResult:
     pr_url: str | None
     merge_sha: str | None
     duration_ms: int
+    merge_status: str | None = None
+    inspection_warning: str | None = None
+    cleanup_warning: str | None = None
     failure_reason: str | None = None
     provider: str | None = None
     selected_provider: str | None = None
@@ -5732,12 +5735,29 @@ class SwarmTaskResult:
         }
         if self.failure_reason is not None:
             payload["failure_reason"] = self.failure_reason
+        payload["merge_status"] = self.merge_status
+        payload["inspection_warning"] = self.inspection_warning
+        payload["cleanup_warning"] = self.cleanup_warning
         if include_provider_details:
             payload["provider"] = self.provider
             payload["selected_provider"] = self.selected_provider
             payload["fallback_provider"] = self.fallback_provider
             payload["fallback_reason"] = self.fallback_reason
         return payload
+
+
+@dataclass(frozen=True)
+class SwarmShipOutcome:
+    status: str
+    pr_url: str | None
+    detail: str | None
+    merge_status: str | None = None
+    inspection_warning: str | None = None
+
+    def __iter__(self):
+        yield self.status
+        yield self.pr_url
+        yield self.detail
 
 
 def _sanitize_swarm_stem(path: str) -> str:
@@ -6468,6 +6488,8 @@ def _swarm_unmerged_files(worktree: Path) -> list[str]:
 
 
 def _remove_swarm_worktree(worktree: Path, *, repo_root: Path) -> None:
+    if not worktree.exists():
+        return
     with SWARM_WORKTREE_LOCK:
         _run_swarm_git(["worktree", "remove", str(worktree)], cwd=repo_root)
 
@@ -6545,12 +6567,15 @@ def _extract_pr_url(output: str) -> str | None:
     return match.group(0) if match else None
 
 
-def _swarm_pr_merge_sha(worktree: Path, pr_url: str | None) -> str | None:
+def _swarm_pr_inspection(
+    cwd: Path,
+    pr_url: str | None,
+) -> tuple[str | None, str | None, str | None]:
     if pr_url is None:
-        return None
+        return None, None, None
     pr_number = pr_url.rstrip("/").rsplit("/", 1)[-1]
     if not pr_number.isdigit():
-        return None
+        return None, None, f"could not parse PR number from {pr_url}"
     try:
         result = subprocess.run(
             [
@@ -6559,37 +6584,59 @@ def _swarm_pr_merge_sha(worktree: Path, pr_url: str | None) -> str | None:
                 "view",
                 pr_number,
                 "--json",
-                "mergeCommit",
-                "--jq",
-                ".mergeCommit.oid // empty",
+                "state,mergeCommit",
             ],
-            cwd=worktree,
+            cwd=cwd,
             capture_output=True,
             text=True,
             timeout=SWARM_GH_TIMEOUT_SEC,
             check=False,
         )
     except subprocess.TimeoutExpired as e:
-        click.echo(
-            f"[conductor] warning: gh pr view timed out after {SWARM_GH_TIMEOUT_SEC:.0f}s "
-            f"for {pr_url}: {e}",
-            err=True,
+        return (
+            None,
+            None,
+            f"gh pr view timed out after {SWARM_GH_TIMEOUT_SEC:.0f}s for {pr_url}: {e}",
         )
-        return None
     except OSError as e:
-        click.echo(
-            f"[conductor] warning: could not inspect PR merge commit for {pr_url}: {e}",
-            err=True,
-        )
-        return None
+        return None, None, f"could not inspect PR state for {pr_url}: {e}"
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
-        click.echo(
-            f"[conductor] warning: gh pr view failed for {pr_url}: {detail}",
-            err=True,
+        return None, None, f"gh pr view failed for {pr_url}: {detail}"
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as e:
+        return None, None, f"gh pr view returned invalid JSON for {pr_url}: {e}"
+    if not isinstance(payload, dict):
+        return None, None, f"gh pr view returned non-object JSON for {pr_url}"
+    merge_commit = payload.get("mergeCommit")
+    merge_sha = None
+    if isinstance(merge_commit, dict):
+        oid = merge_commit.get("oid")
+        if isinstance(oid, str) and oid:
+            merge_sha = oid
+    state = payload.get("state")
+    return (state if isinstance(state, str) and state else None), merge_sha, None
+
+
+def _swarm_pr_merge_sha(worktree: Path, pr_url: str | None) -> str | None:
+    _merge_status, merge_sha, warning = _swarm_pr_inspection(worktree, pr_url)
+    if warning is not None:
+        click.echo(f"[conductor] warning: {warning}", err=True)
+    return merge_sha
+
+
+def _coerce_swarm_ship_outcome(value: object) -> SwarmShipOutcome:
+    if isinstance(value, SwarmShipOutcome):
+        return value
+    if isinstance(value, tuple) and len(value) == 3:
+        status, pr_url, detail = value
+        return SwarmShipOutcome(
+            str(status),
+            pr_url if isinstance(pr_url, str) else None,
+            detail if isinstance(detail, str) else None,
         )
-        return None
-    return result.stdout.strip() or None
+    raise TypeError(f"invalid swarm ship result: {value!r}")
 
 
 def _ensure_swarm_branch_checked_out(worktree: Path, branch: str) -> None:
@@ -6629,7 +6676,7 @@ def _ship_swarm_pr(
     base_branch: str,
     branch: str,
     auto_merge: bool,
-) -> tuple[str, str | None, str | None]:
+) -> SwarmShipOutcome:
     repo_root = _swarm_repo_root()
     script = repo_root / "scripts" / "open-pr.sh"
     _ensure_swarm_branch_checked_out(worktree, branch)
@@ -6657,17 +6704,44 @@ def _ship_swarm_pr(
             f"open-pr.sh timed out after {SWARM_SHIP_TIMEOUT_SEC:.0f}s"
             + (f": {output}" if output else "")
         )
-        return status, pr_url, reason
+        return SwarmShipOutcome(status, pr_url, reason)
     except OSError as e:
-        return "failed", None, f"open-pr.sh failed to start: {e}"
+        return SwarmShipOutcome("failed", None, f"open-pr.sh failed to start: {e}")
     output = f"{result.stdout}\n{result.stderr}".strip()
     pr_url = _extract_pr_url(output)
+    merge_status: str | None = None
+    merge_sha: str | None = None
+    inspection_warning: str | None = None
+    if auto_merge and pr_url is not None:
+        merge_status, merge_sha, inspection_warning = _swarm_pr_inspection(repo_root, pr_url)
+        if inspection_warning is not None:
+            click.echo(f"[conductor] warning: {inspection_warning}", err=True)
     if result.returncode != 0:
+        if auto_merge and pr_url is not None and merge_status == "MERGED":
+            return SwarmShipOutcome(
+                "shipped",
+                pr_url,
+                merge_sha,
+                merge_status=merge_status,
+                inspection_warning=inspection_warning,
+            )
         status = "review-blocked" if auto_merge and pr_url else "failed"
         reason = output or f"open-pr.sh exited {result.returncode}"
-        return status, pr_url, reason
-    merge_sha = _swarm_pr_merge_sha(worktree, pr_url) if auto_merge else None
-    return ("shipped" if auto_merge else "pushed-not-merged"), pr_url, merge_sha
+        return SwarmShipOutcome(
+            status,
+            pr_url,
+            reason,
+            merge_status=merge_status,
+            inspection_warning=inspection_warning,
+        )
+    status = "shipped" if auto_merge else "pushed-not-merged"
+    return SwarmShipOutcome(
+        status,
+        pr_url,
+        merge_sha,
+        merge_status=merge_status,
+        inspection_warning=inspection_warning,
+    )
 
 
 def _timeout_output_text(value: str | bytes | None) -> str:
@@ -6813,6 +6887,8 @@ def _swarm_initial_task_records(
                 "commits": 0,
                 "pr_url": None,
                 "merge_sha": None,
+                "merge_status": None,
+                "inspection_warning": None,
                 "duration_ms": 0,
                 "failure_reason": None,
                 "cleanup_status": "pending",
@@ -7046,6 +7122,9 @@ def _swarm_manifest_task_records(results: list[SwarmTaskResult]) -> list[dict[st
     tasks: list[dict[str, object]] = []
     for result in results:
         task = result.to_json()
+        task.setdefault("merge_status", None)
+        task.setdefault("inspection_warning", None)
+        task.setdefault("cleanup_warning", None)
         task["cleanup_status"] = "removed" if not Path(result.worktree).exists() else "preserved"
         tasks.append(task)
     return tasks
@@ -7216,14 +7295,21 @@ def _orchestrate_swarm_auto_merge(
             continue
         branch = _swarm_task_string(task, "branch", selector=selector)
         worktree = Path(_swarm_task_string(task, "worktree", selector=selector))
-        shipped_status, shipped_pr_url, shipped_detail = _ship_swarm_pr(
-            worktree,
-            base_branch=base_branch,
-            branch=branch,
-            auto_merge=True,
+        ship_outcome = _coerce_swarm_ship_outcome(
+            _ship_swarm_pr(
+                worktree,
+                base_branch=base_branch,
+                branch=branch,
+                auto_merge=True,
+            )
         )
+        shipped_status = ship_outcome.status
+        shipped_pr_url = ship_outcome.pr_url
+        shipped_detail = ship_outcome.detail
         task["status"] = shipped_status
         task["pr_url"] = shipped_pr_url
+        task["merge_status"] = ship_outcome.merge_status
+        task["inspection_warning"] = ship_outcome.inspection_warning
         if shipped_status == "shipped":
             task["merge_sha"] = shipped_detail
             task["failure_reason"] = None
@@ -7238,8 +7324,12 @@ def _orchestrate_swarm_auto_merge(
                     click.echo(f"[conductor] warning: {cleanup_warning}", err=True)
                     task["failure_reason"] = cleanup_warning
             except RuntimeError as e:
-                task["status"] = "failed"
-                task["failure_reason"] = f"cleanup failed after merge: {e}"
+                warning = f"cleanup failed after merge: {e}"
+                task["cleanup_warning"] = warning
+                click.echo(f"[conductor] warning: {warning}", err=True)
+                if ship_outcome.merge_status != "MERGED":
+                    task["status"] = "failed"
+                    task["failure_reason"] = warning
             updated_base = _run_swarm_git(
                 ["rev-parse", "--verify", base_branch],
                 cwd=repo_root,
@@ -7491,6 +7581,8 @@ def _retry_ship_swarm_task(
     status = "failed"
     pr_url: str | None = None
     merge_sha: str | None = None
+    merge_status: str | None = None
+    inspection_warning: str | None = None
     failure_reason: str | None = None
     commits = 0
     cleanup_warning: str | None = None
@@ -7509,18 +7601,22 @@ def _retry_ship_swarm_task(
             raise click.ClickException(
                 f"swarm task {selector} has no commits ahead of manifest base_ref {base_ref}"
             )
-        shipped_status, shipped_pr_url, shipped_detail = _ship_swarm_pr(
-            worktree,
-            base_branch=base_branch,
-            branch=branch,
-            auto_merge=auto_merge,
+        ship_outcome = _coerce_swarm_ship_outcome(
+            _ship_swarm_pr(
+                worktree,
+                base_branch=base_branch,
+                branch=branch,
+                auto_merge=auto_merge,
+            )
         )
-        status = shipped_status
-        pr_url = shipped_pr_url
+        status = ship_outcome.status
+        pr_url = ship_outcome.pr_url
+        merge_status = ship_outcome.merge_status
+        inspection_warning = ship_outcome.inspection_warning
         if status == "shipped":
-            merge_sha = shipped_detail
+            merge_sha = ship_outcome.detail
         elif status in {"failed", "review-blocked"}:
-            failure_reason = shipped_detail
+            failure_reason = ship_outcome.detail
     except click.ClickException:
         raise
     except RuntimeError as e:
@@ -7541,8 +7637,11 @@ def _retry_ship_swarm_task(
                     click.echo(f"[conductor] warning: {cleanup_warning}", err=True)
                     failure_reason = cleanup_warning
         except RuntimeError as e:
-            status = "failed"
-            failure_reason = f"{failure_reason or status}; cleanup failed: {e}"
+            cleanup_warning = f"cleanup failed: {e}"
+            click.echo(f"[conductor] warning: {cleanup_warning}", err=True)
+            if merge_status != "MERGED":
+                status = "failed"
+                failure_reason = f"{failure_reason or status}; {cleanup_warning}"
 
     updated_task = dict(task)
     updated_task.update(
@@ -7551,8 +7650,11 @@ def _retry_ship_swarm_task(
             "commits": commits,
             "pr_url": pr_url,
             "merge_sha": merge_sha,
+            "merge_status": merge_status,
+            "inspection_warning": inspection_warning,
             "duration_ms": duration_ms,
             "failure_reason": failure_reason,
+            "cleanup_warning": cleanup_warning,
             "cleanup_status": "removed" if not worktree.exists() else "preserved",
         }
     )
@@ -7798,6 +7900,9 @@ def _run_swarm_task(
     commits = 0
     pr_url: str | None = None
     merge_sha: str | None = None
+    merge_status: str | None = None
+    inspection_warning: str | None = None
+    cleanup_warning: str | None = None
     failure_reason: str | None = None
     provider_candidates: list[str] = []
     selected_provider: str | None = None
@@ -7935,18 +8040,22 @@ def _run_swarm_task(
                     status = "ready-to-ship"
                 else:
                     _append_swarm_closing_refs_to_head_commit(worktree, closing_refs)
-                    shipped_status, shipped_pr_url, shipped_detail = _ship_swarm_pr(
-                        worktree,
-                        base_branch=base_branch,
-                        branch=branch,
-                        auto_merge=auto_merge,
+                    ship_outcome = _coerce_swarm_ship_outcome(
+                        _ship_swarm_pr(
+                            worktree,
+                            base_branch=base_branch,
+                            branch=branch,
+                            auto_merge=auto_merge,
+                        )
                     )
-                    status = shipped_status
-                    pr_url = shipped_pr_url
+                    status = ship_outcome.status
+                    pr_url = ship_outcome.pr_url
+                    merge_status = ship_outcome.merge_status
+                    inspection_warning = ship_outcome.inspection_warning
                     if status == "shipped":
-                        merge_sha = shipped_detail
+                        merge_sha = ship_outcome.detail
                     elif status in {"failed", "review-blocked"}:
-                        failure_reason = shipped_detail
+                        failure_reason = ship_outcome.detail
         elif status == "failed":
             failure_reason = failure_reason or "provider dispatch did not complete"
     except _ExecPhaseError as e:
@@ -7972,6 +8081,9 @@ def _run_swarm_task(
         pr_url=pr_url,
         merge_sha=merge_sha,
         duration_ms=duration_ms,
+        merge_status=merge_status,
+        inspection_warning=inspection_warning,
+        cleanup_warning=cleanup_warning,
         failure_reason=failure_reason,
         provider=provider_used,
         selected_provider=selected_provider,
@@ -7994,10 +8106,17 @@ def _run_swarm_task(
                 )
                 if cleanup_warning is not None:
                     click.echo(f"[conductor] warning: {cleanup_warning}", err=True)
+                    result.cleanup_warning = cleanup_warning
                     result.failure_reason = cleanup_warning
         except RuntimeError as e:
-            result.status = "failed"
-            result.failure_reason = f"{result.failure_reason or result.status}; cleanup failed: {e}"
+            cleanup_warning = f"cleanup failed: {e}"
+            result.cleanup_warning = cleanup_warning
+            click.echo(f"[conductor] warning: {cleanup_warning}", err=True)
+            if result.merge_status != "MERGED":
+                result.status = "failed"
+                result.failure_reason = (
+                    f"{result.failure_reason or result.status}; {cleanup_warning}"
+                )
     if result.status in {"failed", SWARM_PROVIDER_FAILED_STATUS}:
         click.echo(
             f"[conductor] swarm task {result.status}: {brief_path}; inspect {worktree}; "
