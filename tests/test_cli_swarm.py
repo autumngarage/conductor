@@ -1222,6 +1222,72 @@ def test_swarm_validation_failed_manifest_resume_and_status(
     assert "re-enter worker: conductor exec --with codex" in resume.output
 
 
+@pytest.mark.parametrize(
+    ("mutate", "command", "expected"),
+    [
+        (
+            lambda manifest: manifest["tasks"][0].__setitem__("branch", 123),
+            "status",
+            "tasks[0].branch is not a string",
+        ),
+        (
+            lambda manifest: manifest["tasks"][0].__setitem__("commits", "1"),
+            "resume",
+            "tasks[0].commits is not an int",
+        ),
+        (
+            lambda manifest: manifest["tasks"].append("not-a-task"),
+            "status",
+            "manifest.tasks[1] is not an object",
+        ),
+        (
+            lambda manifest: manifest["tasks"][0].__setitem__(
+                "conflict_state",
+                {
+                    "conflicted_files": ["README.md", 404],
+                    "recovery_commands": ["git status"],
+                },
+            ),
+            "status",
+            "tasks[0].conflict_state.conflicted_files[1] is not a string",
+        ),
+    ],
+)
+def test_swarm_manifest_commands_reject_malformed_values(
+    tmp_path: Path,
+    mutate,
+    command: str,
+    expected: str,
+) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md")
+    manifest_path = _manual_swarm_manifest(
+        repo,
+        tasks=[
+            {
+                "brief": str(brief),
+                "branch": "feat/swarm/foo",
+                "worktree": str(repo / ".cache" / "conductor" / "swarm" / "foo"),
+                "status": "failed",
+                "commits": 1,
+                "failure_reason": "needs recovery",
+            }
+        ],
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    mutate(manifest)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    args = ["swarm", command, str(manifest_path)]
+    if command == "resume":
+        args.append("1")
+
+    result = CliRunner().invoke(main, args)
+
+    assert result.exit_code != 0
+    assert expected in result.output
+
+
 def test_swarm_classifies_exec_phase_provider_failure(
     monkeypatch,
     tmp_path: Path,

@@ -7514,8 +7514,20 @@ def _orchestrate_swarm_auto_merge(
             selector=selector,
         ):
             continue
-        branch = _swarm_task_string(task, "branch", selector=selector)
-        worktree = Path(_swarm_task_string(task, "worktree", selector=selector))
+        branch = _swarm_task_string(
+            task,
+            "branch",
+            path=manifest_path,
+            selector=selector,
+        )
+        worktree = Path(
+            _swarm_task_string(
+                task,
+                "worktree",
+                path=manifest_path,
+                selector=selector,
+            )
+        )
         mark_phase(task, "shipping")
         ship_outcome = _coerce_swarm_ship_outcome(
             _ship_swarm_pr(
@@ -7590,6 +7602,124 @@ def _read_swarm_manifest(path: Path) -> dict[str, object]:
     return payload
 
 
+def _swarm_manifest_type_error(path: Path, location: str, expected: str) -> click.ClickException:
+    return click.ClickException(
+        f"invalid swarm manifest at {path}: {location} is not {expected}"
+    )
+
+
+def _swarm_manifest_string(
+    record: dict[str, object],
+    key: str,
+    *,
+    path: Path,
+    location: str,
+    default: str = "",
+    required: bool = False,
+) -> str:
+    value = record.get(key)
+    if value is None:
+        if required:
+            raise click.ClickException(
+                f"invalid swarm manifest at {path}: {location}.{key} is missing"
+            )
+        return default
+    if not isinstance(value, str):
+        raise _swarm_manifest_type_error(path, f"{location}.{key}", "a string")
+    if required and not value:
+        raise click.ClickException(f"invalid swarm manifest at {path}: {location}.{key} is empty")
+    return value
+
+
+def _swarm_manifest_int(
+    record: dict[str, object],
+    key: str,
+    *,
+    path: Path,
+    location: str,
+    default: int | None = None,
+    required: bool = False,
+) -> int | None:
+    value = record.get(key)
+    if value is None:
+        if required:
+            raise click.ClickException(
+                f"invalid swarm manifest at {path}: {location}.{key} is missing"
+            )
+        return default
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise _swarm_manifest_type_error(path, f"{location}.{key}", "an int")
+    return value
+
+
+def _swarm_manifest_string_list(
+    record: dict[str, object],
+    key: str,
+    *,
+    path: Path,
+    location: str,
+) -> list[str]:
+    value = record.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise _swarm_manifest_type_error(path, f"{location}.{key}", "a string list")
+    strings: list[str] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, str):
+            raise _swarm_manifest_type_error(
+                path,
+                f"{location}.{key}[{index}]",
+                "a string",
+            )
+        strings.append(item)
+    return strings
+
+
+def _swarm_manifest_dict(
+    record: dict[str, object],
+    key: str,
+    *,
+    path: Path,
+    location: str,
+) -> dict[str, object] | None:
+    value = record.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise _swarm_manifest_type_error(path, f"{location}.{key}", "an object")
+    return {str(item_key): item_value for item_key, item_value in value.items()}
+
+
+def _swarm_manifest_dict_list(
+    record: dict[str, object],
+    key: str,
+    *,
+    path: Path,
+    location: str,
+    required: bool = False,
+) -> list[dict[str, object]]:
+    value = record.get(key)
+    if value is None:
+        if required:
+            raise click.ClickException(
+                f"invalid swarm manifest at {path}: {location}.{key} is missing"
+            )
+        return []
+    if not isinstance(value, list):
+        raise _swarm_manifest_type_error(path, f"{location}.{key}", "a list")
+    items: list[dict[str, object]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise _swarm_manifest_type_error(
+                path,
+                f"{location}.{key}[{index}]",
+                "an object",
+            )
+        items.append({str(item_key): item_value for item_key, item_value in item.items()})
+    return items
+
+
 def _latest_swarm_manifest_path(repo_root: Path) -> Path:
     runs_dir = _swarm_runs_dir(repo_root)
     manifests = sorted(runs_dir.glob("*.json"), key=lambda path: path.stem, reverse=True)
@@ -7614,20 +7744,20 @@ def _resolve_swarm_manifest_path(run_id_or_path: str | None, *, latest: bool) ->
 
 
 def _swarm_manifest_tasks(payload: dict[str, object], *, path: Path) -> list[dict[str, object]]:
-    raw_tasks = payload.get("tasks")
-    if not isinstance(raw_tasks, list):
-        raise click.ClickException(f"invalid swarm manifest at {path}: tasks is not a list")
-    tasks = [task for task in raw_tasks if isinstance(task, dict)]
-    if len(tasks) != len(raw_tasks):
-        raise click.ClickException(
-            f"invalid swarm manifest at {path}: every task must be an object"
-        )
-    return tasks
+    return _swarm_manifest_dict_list(
+        payload,
+        "tasks",
+        path=path,
+        location="manifest",
+        required=True,
+    )
 
 
 def _select_swarm_manifest_task(
     tasks: list[dict[str, object]],
     selector: str,
+    *,
+    path: Path,
 ) -> tuple[int, dict[str, object]]:
     if selector.isdecimal():
         index = int(selector) - 1
@@ -7641,7 +7771,20 @@ def _select_swarm_manifest_task(
     matches = [
         (index, task)
         for index, task in enumerate(tasks)
-        if task.get("branch") == selector or task.get("brief") == selector
+        if _swarm_manifest_string(
+            task,
+            "branch",
+            path=path,
+            location=f"tasks[{index}]",
+        )
+        == selector
+        or _swarm_manifest_string(
+            task,
+            "brief",
+            path=path,
+            location=f"tasks[{index}]",
+        )
+        == selector
     ]
     if not matches:
         raise click.ClickException(
@@ -7653,11 +7796,29 @@ def _select_swarm_manifest_task(
     return matches[0]
 
 
-def _swarm_task_string(task: dict[str, object], key: str, *, selector: str) -> str:
-    value = task.get(key)
-    if not isinstance(value, str) or not value:
-        raise click.ClickException(f"swarm task {selector!r} has no {key}")
-    return value
+def _swarm_task_string(
+    task: dict[str, object],
+    key: str,
+    *,
+    path: Path,
+    selector: str,
+) -> str:
+    try:
+        return _swarm_manifest_string(
+            task,
+            key,
+            path=path,
+            location=f"tasks[{int(selector) - 1}]",
+            required=True,
+        )
+    except ValueError:
+        return _swarm_manifest_string(
+            task,
+            key,
+            path=path,
+            location=f"task {selector!r}",
+            required=True,
+        )
 
 
 def _swarm_worktree_branch_state(worktree: Path) -> str:
@@ -7693,32 +7854,35 @@ def _format_swarm_resume(
     task: dict[str, object],
 ) -> list[str]:
     selector = str(task_index + 1)
-    run_id = str(payload.get("run_id") or path.stem)
-    brief = str(task.get("brief") or "")
-    branch = str(task.get("branch") or "")
-    raw_worktree = task.get("worktree")
-    worktree = Path(raw_worktree) if isinstance(raw_worktree, str) and raw_worktree else None
+    task_location = f"tasks[{task_index}]"
+    run_id = _swarm_manifest_string(
+        payload,
+        "run_id",
+        path=path,
+        location="manifest",
+        default=path.stem,
+    )
+    brief = _swarm_manifest_string(task, "brief", path=path, location=task_location)
+    branch = _swarm_manifest_string(task, "branch", path=path, location=task_location)
+    worktree_value = _swarm_manifest_string(task, "worktree", path=path, location=task_location)
+    worktree = Path(worktree_value) if worktree_value else None
     exists, dirty, branch_state = _swarm_readonly_worktree_state(worktree)
     worktree_display = str(worktree) if worktree is not None else ""
-    raw_commits = task.get("commits")
-    commits = (
-        raw_commits
-        if isinstance(raw_commits, int) and not isinstance(raw_commits, bool)
-        else 0
-    )
+    commits = _swarm_manifest_int(task, "commits", path=path, location=task_location, default=0)
+    assert commits is not None
     retry_available = exists and commits > 0
     retry_command = (
         f"conductor swarm retry-ship {shlex.quote(str(path))} {shlex.quote(selector)}"
     )
     provider_display = (
-        task.get("provider")
-        or task.get("selected_provider")
-        or payload.get("provider")
+        _swarm_manifest_string(task, "provider", path=path, location=task_location)
+        or _swarm_manifest_string(task, "selected_provider", path=path, location=task_location)
+        or _swarm_manifest_string(payload, "provider", path=path, location="manifest")
         or "auto"
     )
     rerun_parts = ["conductor", "swarm", "--provider", "codex"]
-    base_branch = payload.get("base_branch")
-    if isinstance(base_branch, str) and base_branch:
+    base_branch = _swarm_manifest_string(payload, "base_branch", path=path, location="manifest")
+    if base_branch:
         rerun_parts.extend(["--base-branch", base_branch])
     if brief:
         rerun_parts.extend(["--brief", brief])
@@ -7729,53 +7893,108 @@ def _format_swarm_resume(
         f"manifest: {path}",
         f"run id: {run_id}",
         f"task index: {task_index + 1}",
-        f"status: {task.get('status', 'unknown')}",
+        "status: "
+        + _swarm_manifest_string(
+            task,
+            "status",
+            path=path,
+            location=task_location,
+            default="unknown",
+        ),
         f"provider: {provider_display}",
-        f"fallback provider: {task.get('fallback_provider') or ''}",
-        f"fallback reason: {task.get('fallback_reason') or ''}",
+        "fallback provider: "
+        + _swarm_manifest_string(task, "fallback_provider", path=path, location=task_location),
+        "fallback reason: "
+        + _swarm_manifest_string(task, "fallback_reason", path=path, location=task_location),
         f"brief: {brief}",
         f"branch: {branch}",
         f"worktree: {worktree_display}",
         f"commits: {commits}",
-        f"pr url: {task.get('pr_url') or ''}",
-        f"failure reason: {task.get('failure_reason') or ''}",
-        f"base: {payload.get('base_branch', '')}@{payload.get('base_ref', '')}",
+        "pr url: " + _swarm_manifest_string(task, "pr_url", path=path, location=task_location),
+        "failure reason: "
+        + _swarm_manifest_string(task, "failure_reason", path=path, location=task_location),
+        "base: {branch}@{ref}".format(
+            branch=base_branch,
+            ref=_swarm_manifest_string(payload, "base_ref", path=path, location="manifest"),
+        ),
         f"worktree exists: {'yes' if exists else 'no'}",
         f"worktree dirty: {dirty}",
         f"worktree branch: {branch_state}",
         "suggested commands:",
     ]
-    validation_failure = task.get("validation_failure")
-    if isinstance(validation_failure, dict):
-        failed_check = validation_failure.get("failed_check") or validation_failure.get(
-            "failed_command"
+    validation_failure = _swarm_manifest_dict(
+        task,
+        "validation_failure",
+        path=path,
+        location=task_location,
+    )
+    if validation_failure is not None:
+        failed_check = _swarm_manifest_string(
+            validation_failure,
+            "failed_check",
+            path=path,
+            location=f"{task_location}.validation_failure",
+        ) or _swarm_manifest_string(
+            validation_failure,
+            "failed_command",
+            path=path,
+            location=f"{task_location}.validation_failure",
         )
-        if isinstance(failed_check, str) and failed_check:
+        if failed_check:
             lines.append(f"failed check: {failed_check}")
-        output_tail = validation_failure.get("output_tail")
-        if isinstance(output_tail, str) and output_tail:
+        output_tail = _swarm_manifest_string(
+            validation_failure,
+            "output_tail",
+            path=path,
+            location=f"{task_location}.validation_failure",
+        )
+        if output_tail:
             lines.append("validation output tail:")
             lines.extend(f"  {line}" for line in output_tail.splitlines())
-        validation_retry = validation_failure.get("retry_command") or validation_failure.get(
-            "suggested_next_command"
+        validation_retry = _swarm_manifest_string(
+            validation_failure,
+            "retry_command",
+            path=path,
+            location=f"{task_location}.validation_failure",
+        ) or _swarm_manifest_string(
+            validation_failure,
+            "suggested_next_command",
+            path=path,
+            location=f"{task_location}.validation_failure",
         )
-        if isinstance(validation_retry, str) and validation_retry:
+        if validation_retry:
             lines.append(f"  retry validation: {validation_retry}")
-        recovery_command = validation_failure.get("recovery_command")
-        if isinstance(recovery_command, str) and recovery_command:
+        recovery_command = _swarm_manifest_string(
+            validation_failure,
+            "recovery_command",
+            path=path,
+            location=f"{task_location}.validation_failure",
+        )
+        if recovery_command:
             lines.append(f"  re-enter worker: {recovery_command}")
-    conflict_state = task.get("conflict_state")
-    if isinstance(conflict_state, dict):
-        files = conflict_state.get("conflicted_files")
-        if isinstance(files, list):
-            lines.append(
-                "conflicted files: "
-                + (", ".join(str(path) for path in files) or "unknown")
-            )
-        commands = conflict_state.get("recovery_commands")
-        if isinstance(commands, list) and commands:
+    conflict_state = _swarm_manifest_dict(
+        task,
+        "conflict_state",
+        path=path,
+        location=task_location,
+    )
+    if conflict_state is not None:
+        files = _swarm_manifest_string_list(
+            conflict_state,
+            "conflicted_files",
+            path=path,
+            location=f"{task_location}.conflict_state",
+        )
+        lines.append("conflicted files: " + (", ".join(files) or "unknown"))
+        commands = _swarm_manifest_string_list(
+            conflict_state,
+            "recovery_commands",
+            path=path,
+            location=f"{task_location}.conflict_state",
+        )
+        if commands:
             lines.append("conflict recovery:")
-            lines.extend(f"  {command}" for command in commands if isinstance(command, str))
+            lines.extend(f"  {command}" for command in commands)
     if worktree is not None:
         lines.append(
             f"  inspect worktree: cd {shlex.quote(str(worktree))} && git status --short --branch"
@@ -7800,22 +8019,43 @@ def _retry_ship_swarm_task(
     tasks = _swarm_manifest_tasks(payload, path=manifest_path)
     task = tasks[task_index]
     selector = str(task_index + 1)
-    repo_root_value = payload.get("repo_root")
-    repo_root = Path(repo_root_value) if isinstance(repo_root_value, str) else _swarm_repo_root()
-    base_branch = payload.get("base_branch")
-    if not isinstance(base_branch, str) or not base_branch:
-        raise click.ClickException(f"swarm manifest {manifest_path} has no base_branch")
-    base_ref = payload.get("base_ref")
-    if not isinstance(base_ref, str) or not base_ref:
-        raise click.ClickException(f"swarm manifest {manifest_path} has no base_ref")
-    if task.get("status") == SWARM_CONFLICT_STATUS:
+    repo_root_text = _swarm_manifest_string(
+        payload,
+        "repo_root",
+        path=manifest_path,
+        location="manifest",
+    )
+    repo_root = Path(repo_root_text) if repo_root_text else _swarm_repo_root()
+    base_branch = _swarm_manifest_string(
+        payload,
+        "base_branch",
+        path=manifest_path,
+        location="manifest",
+        required=True,
+    )
+    base_ref = _swarm_manifest_string(
+        payload,
+        "base_ref",
+        path=manifest_path,
+        location="manifest",
+        required=True,
+    )
+    if (
+        _swarm_manifest_string(
+            task,
+            "status",
+            path=manifest_path,
+            location=f"tasks[{task_index}]",
+        )
+        == SWARM_CONFLICT_STATUS
+    ):
         base_ref = _run_swarm_git(
             ["rev-parse", "--verify", base_branch],
             cwd=repo_root,
         ).stdout.strip()
 
-    branch = _swarm_task_string(task, "branch", selector=selector)
-    worktree = Path(_swarm_task_string(task, "worktree", selector=selector))
+    branch = _swarm_task_string(task, "branch", path=manifest_path, selector=selector)
+    worktree = Path(_swarm_task_string(task, "worktree", path=manifest_path, selector=selector))
     if not worktree.exists():
         raise click.ClickException(f"swarm task {selector} worktree does not exist: {worktree}")
 
@@ -7905,22 +8145,44 @@ def _retry_ship_swarm_task(
     )
     tasks[task_index] = updated_task
 
-    raw_duration = payload.get("duration_ms")
+    raw_duration = _swarm_manifest_int(
+        payload,
+        "duration_ms",
+        path=manifest_path,
+        location="manifest",
+    )
     run_duration_ms = duration_ms
-    if isinstance(raw_duration, int) and not isinstance(raw_duration, bool):
+    if raw_duration is not None:
         run_duration_ms = max(0, raw_duration) + duration_ms
 
-    preflight = payload.get("preflight")
+    preflight = _swarm_manifest_dict(
+        payload,
+        "preflight",
+        path=manifest_path,
+        location="manifest",
+    )
     return _swarm_manifest_payload(
-        run_id=str(payload.get("run_id") or manifest_path.stem),
+        run_id=_swarm_manifest_string(
+            payload,
+            "run_id",
+            path=manifest_path,
+            location="manifest",
+            default=manifest_path.stem,
+        ),
         repo_root=repo_root,
         base_branch=base_branch,
         base_ref=base_ref,
-        started_at=str(payload.get("started_at") or _swarm_now_iso()),
+        started_at=_swarm_manifest_string(
+            payload,
+            "started_at",
+            path=manifest_path,
+            location="manifest",
+            default=_swarm_now_iso(),
+        ),
         ended_at=_swarm_now_iso(),
         duration_ms=run_duration_ms,
         tasks=tasks,
-        preflight=preflight if isinstance(preflight, dict) else None,
+        preflight=preflight,
     )
 
 
@@ -7933,18 +8195,29 @@ def _run_swarm_retry_ship_command(
     path = _resolve_swarm_manifest_path(run_id_or_path, latest=False)
     payload = _read_swarm_manifest(path)
     tasks = _swarm_manifest_tasks(payload, path=path)
-    task_index, task = _select_swarm_manifest_task(tasks, task_selector)
-    branch = task.get("branch")
-    brief = task.get("brief")
+    task_index, task = _select_swarm_manifest_task(tasks, task_selector, path=path)
+    branch = _swarm_manifest_string(task, "branch", path=path, location=f"tasks[{task_index}]")
+    brief = _swarm_manifest_string(task, "brief", path=path, location=f"tasks[{task_index}]")
     updated = _retry_ship_swarm_task(
         manifest_path=path,
         payload=payload,
         task_index=task_index,
         auto_merge=auto_merge,
     )
-    repo_root_value = updated.get("repo_root")
-    repo_root = Path(repo_root_value) if isinstance(repo_root_value, str) else _swarm_repo_root()
-    run_id = str(updated.get("run_id") or path.stem)
+    repo_root_value = _swarm_manifest_string(
+        updated,
+        "repo_root",
+        path=path,
+        location="manifest",
+    )
+    repo_root = Path(repo_root_value) if repo_root_value else _swarm_repo_root()
+    run_id = _swarm_manifest_string(
+        updated,
+        "run_id",
+        path=path,
+        location="manifest",
+        default=path.stem,
+    )
     updated, bookkeeping = _swarm_payload_with_cortex_bookkeeping(
         repo_root=repo_root,
         run_id=run_id,
@@ -7954,15 +8227,35 @@ def _run_swarm_retry_ship_command(
     _write_swarm_manifest(path, updated)
     updated_task = _swarm_manifest_tasks(updated, path=path)[task_index]
     detail = "{status}: {brief} -> {branch}".format(
-        status=updated_task.get("status", "unknown"),
-        brief=brief or updated_task.get("brief", ""),
-        branch=branch or updated_task.get("branch", ""),
+        status=_swarm_manifest_string(
+            updated_task,
+            "status",
+            path=path,
+            location=f"tasks[{task_index}]",
+            default="unknown",
+        ),
+        brief=brief,
+        branch=branch,
     )
-    if updated_task.get("pr_url"):
-        detail += f" ({updated_task['pr_url']})"
+    pr_url = _swarm_manifest_string(
+        updated_task,
+        "pr_url",
+        path=path,
+        location=f"tasks[{task_index}]",
+    )
+    if pr_url:
+        detail += f" ({pr_url})"
     click.echo(detail)
     _emit_swarm_cortex_bookkeeping_notice(bookkeeping, err=False)
-    if updated_task.get("status") not in SWARM_SUCCESS_STATUSES:
+    if (
+        _swarm_manifest_string(
+            updated_task,
+            "status",
+            path=path,
+            location=f"tasks[{task_index}]",
+        )
+        not in SWARM_SUCCESS_STATUSES
+    ):
         sys.exit(1)
 
 
@@ -7980,28 +8273,50 @@ def _swarm_task_phase_display(task: dict[str, object], *, running: bool) -> str:
     return f" {activity} phase={phase} last_progress_at={progress_at}"
 
 
+def _swarm_manifest_optional_bool(
+    record: dict[str, object],
+    key: str,
+    *,
+    path: Path,
+    location: str,
+) -> bool | None:
+    value = record.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise _swarm_manifest_type_error(path, f"{location}.{key}", "a bool")
+    return value
+
+
 def _format_swarm_manifest_status(payload: dict[str, object], *, path: Path) -> list[str]:
-    run_id = payload.get("run_id", path.stem)
-    ok = payload.get("ok")
-    if payload.get("ended_at") is None:
+    run_id = _swarm_manifest_string(
+        payload,
+        "run_id",
+        path=path,
+        location="manifest",
+        default=path.stem,
+    )
+    ok = _swarm_manifest_optional_bool(payload, "ok", path=path, location="manifest")
+    ended_at = _swarm_manifest_string(payload, "ended_at", path=path, location="manifest")
+    if ended_at == "":
         status = "running"
     else:
         status = "ok" if ok is True else "failed" if ok is False else "unknown"
-    raw_tasks = payload.get("tasks", [])
-    tasks = (
-        [task for task in raw_tasks if isinstance(task, dict)]
-        if isinstance(raw_tasks, list)
-        else []
-    )
-    raw_duration = payload.get("duration_ms")
-    duration_ms = (
-        raw_duration
-        if isinstance(raw_duration, int) and not isinstance(raw_duration, bool)
-        else None
+    tasks = _swarm_manifest_tasks(payload, path=path)
+    duration_ms = _swarm_manifest_int(
+        payload,
+        "duration_ms",
+        path=path,
+        location="manifest",
     )
     metrics = _swarm_metrics_from_task_records(tasks, duration_ms=duration_ms)
-    manifest_metrics = payload.get("metrics")
-    if isinstance(manifest_metrics, dict):
+    manifest_metrics = _swarm_manifest_dict(
+        payload,
+        "metrics",
+        path=path,
+        location="manifest",
+    )
+    if manifest_metrics is not None:
         metrics = {**metrics, **manifest_metrics}
     throughput = metrics.get("completed_tasks_per_hour", 0.0)
     if not isinstance(throughput, int | float) or isinstance(throughput, bool):
@@ -8011,26 +8326,65 @@ def _format_swarm_manifest_status(payload: dict[str, object], *, path: Path) -> 
         f"manifest: {path}",
         (
             "repo: {repo} base: {branch}@{ref}".format(
-                repo=payload.get("repo_root", ""),
-                branch=payload.get("base_branch", ""),
-                ref=payload.get("base_ref", ""),
+                repo=_swarm_manifest_string(
+                    payload,
+                    "repo_root",
+                    path=path,
+                    location="manifest",
+                ),
+                branch=_swarm_manifest_string(
+                    payload,
+                    "base_branch",
+                    path=path,
+                    location="manifest",
+                ),
+                ref=_swarm_manifest_string(payload, "base_ref", path=path, location="manifest"),
             )
         ),
         (
             "started: {started} ended: {ended} duration_ms={duration}".format(
-                started=payload.get("started_at", ""),
-                ended=payload.get("ended_at") or "running",
-                duration=payload.get("duration_ms"),
+                started=_swarm_manifest_string(
+                    payload,
+                    "started_at",
+                    path=path,
+                    location="manifest",
+                ),
+                ended=ended_at or "running",
+                duration=duration_ms,
             )
         ),
         (
             "ok={ok} shipped={shipped} failed={failed} no-changes={no_changes} "
             "provider-failed={provider_failed}".format(
-                ok=payload.get("ok"),
-                shipped=payload.get("shipped_count", 0),
-                failed=payload.get("failed_count", 0),
-                no_changes=payload.get("no_changes_count", 0),
-                provider_failed=payload.get("provider_failed_count", 0),
+                ok=ok,
+                shipped=_swarm_manifest_int(
+                    payload,
+                    "shipped_count",
+                    path=path,
+                    location="manifest",
+                    default=0,
+                ),
+                failed=_swarm_manifest_int(
+                    payload,
+                    "failed_count",
+                    path=path,
+                    location="manifest",
+                    default=0,
+                ),
+                no_changes=_swarm_manifest_int(
+                    payload,
+                    "no_changes_count",
+                    path=path,
+                    location="manifest",
+                    default=0,
+                ),
+                provider_failed=_swarm_manifest_int(
+                    payload,
+                    "provider_failed_count",
+                    path=path,
+                    location="manifest",
+                    default=0,
+                ),
             )
         ),
         (
@@ -8049,17 +8403,29 @@ def _format_swarm_manifest_status(payload: dict[str, object], *, path: Path) -> 
     conflict_count = metrics.get("needs_human_conflict_resolution_count", 0)
     if isinstance(conflict_count, int) and not isinstance(conflict_count, bool) and conflict_count:
         lines.append(f"conflicts: needs-human-conflict-resolution={conflict_count}")
-    merge_plan = payload.get("merge_plan")
-    if isinstance(merge_plan, dict):
-        lanes = merge_plan.get("lanes")
-        if isinstance(lanes, list) and lanes:
-            order = [
-                str(lane.get("task_index"))
-                for lane in lanes
-                if isinstance(lane, dict) and lane.get("task_index") is not None
-            ]
-            if order:
-                lines.append("merge-plan: " + " -> ".join(order))
+    merge_plan = _swarm_manifest_dict(payload, "merge_plan", path=path, location="manifest")
+    if merge_plan is not None:
+        lanes = _swarm_manifest_dict_list(
+            merge_plan,
+            "lanes",
+            path=path,
+            location="manifest.merge_plan",
+        )
+        order = [
+            str(task_index)
+            for lane_index, lane in enumerate(lanes)
+            if (
+                task_index := _swarm_manifest_int(
+                    lane,
+                    "task_index",
+                    path=path,
+                    location=f"manifest.merge_plan.lanes[{lane_index}]",
+                )
+            )
+            is not None
+        ]
+        if order:
+            lines.append("merge-plan: " + " -> ".join(order))
     if tasks:
         per_status = metrics.get("per_status_counts")
         if isinstance(per_status, dict) and per_status:
@@ -8070,69 +8436,183 @@ def _format_swarm_manifest_status(payload: dict[str, object], *, path: Path) -> 
             ]
             if status_parts:
                 lines.append("status-counts: " + " ".join(status_parts))
-        for raw_task in tasks:
-            provider_detail = raw_task.get("provider") or raw_task.get("selected_provider")
+        for task_index, raw_task in enumerate(tasks):
+            task_location = f"tasks[{task_index}]"
+            provider_detail = _swarm_manifest_string(
+                raw_task,
+                "provider",
+                path=path,
+                location=task_location,
+            ) or _swarm_manifest_string(
+                raw_task,
+                "selected_provider",
+                path=path,
+                location=task_location,
+            )
             line = (
                 "- {status}: {brief} -> {branch}".format(
-                    status=raw_task.get("status", "unknown"),
-                    brief=raw_task.get("brief", ""),
-                    branch=raw_task.get("branch", ""),
+                    status=_swarm_manifest_string(
+                        raw_task,
+                        "status",
+                        path=path,
+                        location=task_location,
+                        default="unknown",
+                    ),
+                    brief=_swarm_manifest_string(
+                        raw_task,
+                        "brief",
+                        path=path,
+                        location=task_location,
+                    ),
+                    branch=_swarm_manifest_string(
+                        raw_task,
+                        "branch",
+                        path=path,
+                        location=task_location,
+                    ),
                 )
             )
             line += _swarm_task_phase_display(
                 raw_task,
-                running=payload.get("ended_at") is None,
+                running=ended_at == "",
             )
             if provider_detail:
                 line += f" provider={provider_detail}"
-            if raw_task.get("fallback_provider"):
-                line += f" fallback={raw_task['fallback_provider']}"
-            if raw_task.get("fallback_reason"):
-                line += f" fallback_reason={raw_task['fallback_reason']}"
-            if raw_task.get("pr_url"):
-                line += f" ({raw_task['pr_url']})"
-            if raw_task.get("failure_reason"):
-                line += f" reason={raw_task['failure_reason']}"
+            fallback_provider = _swarm_manifest_string(
+                raw_task,
+                "fallback_provider",
+                path=path,
+                location=task_location,
+            )
+            if fallback_provider:
+                line += f" fallback={fallback_provider}"
+            fallback_reason = _swarm_manifest_string(
+                raw_task,
+                "fallback_reason",
+                path=path,
+                location=task_location,
+            )
+            if fallback_reason:
+                line += f" fallback_reason={fallback_reason}"
+            pr_url = _swarm_manifest_string(
+                raw_task,
+                "pr_url",
+                path=path,
+                location=task_location,
+            )
+            if pr_url:
+                line += f" ({pr_url})"
+            failure_reason = _swarm_manifest_string(
+                raw_task,
+                "failure_reason",
+                path=path,
+                location=task_location,
+            )
+            if failure_reason:
+                line += f" reason={failure_reason}"
             lines.append(line)
-            validation_failure = raw_task.get("validation_failure")
-            if isinstance(validation_failure, dict):
-                failed_check = validation_failure.get("failed_check") or validation_failure.get(
-                    "failed_command"
+            validation_failure = _swarm_manifest_dict(
+                raw_task,
+                "validation_failure",
+                path=path,
+                location=task_location,
+            )
+            if validation_failure is not None:
+                validation_location = f"{task_location}.validation_failure"
+                failed_check = _swarm_manifest_string(
+                    validation_failure,
+                    "failed_check",
+                    path=path,
+                    location=validation_location,
+                ) or _swarm_manifest_string(
+                    validation_failure,
+                    "failed_command",
+                    path=path,
+                    location=validation_location,
                 )
-                if isinstance(failed_check, str) and failed_check:
+                if failed_check:
                     lines.append(f"  failed check: {failed_check}")
-                retry_command = validation_failure.get("retry_command") or validation_failure.get(
-                    "suggested_next_command"
+                retry_command = _swarm_manifest_string(
+                    validation_failure,
+                    "retry_command",
+                    path=path,
+                    location=validation_location,
+                ) or _swarm_manifest_string(
+                    validation_failure,
+                    "suggested_next_command",
+                    path=path,
+                    location=validation_location,
                 )
-                if isinstance(retry_command, str) and retry_command:
+                if retry_command:
                     lines.append(f"  retry command: {retry_command}")
-            conflict_state = raw_task.get("conflict_state")
-            if isinstance(conflict_state, dict):
-                files = conflict_state.get("conflicted_files")
-                if isinstance(files, list):
-                    lines.append(
-                        "  conflicted files: "
-                        + (", ".join(str(path) for path in files) or "unknown")
-                    )
-                commands = conflict_state.get("recovery_commands")
-                if isinstance(commands, list) and commands:
+            conflict_state = _swarm_manifest_dict(
+                raw_task,
+                "conflict_state",
+                path=path,
+                location=task_location,
+            )
+            if conflict_state is not None:
+                conflict_location = f"{task_location}.conflict_state"
+                files = _swarm_manifest_string_list(
+                    conflict_state,
+                    "conflicted_files",
+                    path=path,
+                    location=conflict_location,
+                )
+                lines.append(
+                    "  conflicted files: "
+                    + (", ".join(files) or "unknown")
+                )
+                commands = _swarm_manifest_string_list(
+                    conflict_state,
+                    "recovery_commands",
+                    path=path,
+                    location=conflict_location,
+                )
+                if commands:
                     lines.append("  recovery commands:")
-                    lines.extend(
-                        f"    {command}" for command in commands if isinstance(command, str)
-                    )
-    bookkeeping = payload.get("post_merge_bookkeeping")
-    if isinstance(bookkeeping, dict):
-        required = bookkeeping.get("required")
+                    lines.extend(f"    {command}" for command in commands)
+    bookkeeping = _swarm_manifest_dict(
+        payload,
+        "post_merge_bookkeeping",
+        path=path,
+        location="manifest",
+    )
+    if bookkeeping is not None:
+        required = _swarm_manifest_optional_bool(
+            bookkeeping,
+            "required",
+            path=path,
+            location="manifest.post_merge_bookkeeping",
+        )
         if required is True:
             lines.append(
                 "cortex-post-merge: {status}".format(
-                    status=bookkeeping.get("status", "unknown"),
+                    status=_swarm_manifest_string(
+                        bookkeeping,
+                        "status",
+                        path=path,
+                        location="manifest.post_merge_bookkeeping",
+                        default="unknown",
+                    ),
                 )
             )
-            if bookkeeping.get("context_path"):
-                lines.append(f"  context: {bookkeeping['context_path']}")
-            if bookkeeping.get("follow_up_command"):
-                lines.append(f"  command: {bookkeeping['follow_up_command']}")
+            context_path = _swarm_manifest_string(
+                bookkeeping,
+                "context_path",
+                path=path,
+                location="manifest.post_merge_bookkeeping",
+            )
+            if context_path:
+                lines.append(f"  context: {context_path}")
+            follow_up_command = _swarm_manifest_string(
+                bookkeeping,
+                "follow_up_command",
+                path=path,
+                location="manifest.post_merge_bookkeeping",
+            )
+            if follow_up_command:
+                lines.append(f"  command: {follow_up_command}")
     return lines
 
 
@@ -9929,7 +10409,7 @@ def swarm_resume(
     path = _resolve_swarm_manifest_path(run_id_or_path, latest=False)
     payload = _read_swarm_manifest(path)
     tasks = _swarm_manifest_tasks(payload, path=path)
-    task_index, task = _select_swarm_manifest_task(tasks, task_selector)
+    task_index, task = _select_swarm_manifest_task(tasks, task_selector, path=path)
     for line in _format_swarm_resume(
         payload=payload,
         path=path,
