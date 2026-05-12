@@ -386,6 +386,57 @@ def test_ship_swarm_pr_timeout_preserves_detected_pr_url(monkeypatch, tmp_path: 
     assert "open-pr.sh timed out" in reason
 
 
+def test_ship_swarm_pr_classifies_pre_push_validation_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    monkeypatch.chdir(repo)
+    worktree = tmp_path / "task-worktree"
+    _git(repo, "worktree", "add", str(worktree), "-b", "feat/swarm/foo", "main")
+    _commit_change(worktree, "feature.txt", "feature")
+    (repo / "scripts").mkdir()
+    (repo / "scripts" / "open-pr.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+
+    real_run = subprocess.run
+
+    def fake_run(args, **kwargs):
+        if args[0] != "bash":
+            return real_run(args, **kwargs)
+        return subprocess.CompletedProcess(
+            args,
+            1,
+            stdout="",
+            stderr=(
+                "pre-push hook failed\n"
+                "failed command: bash scripts/touchstone-run.sh validate\n"
+                "FAILED tests/test_cli_swarm.py::test_example\n"
+            ),
+        )
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    outcome = cli._ship_swarm_pr(
+        worktree,
+        base_branch="main",
+        branch="feat/swarm/foo",
+        auto_merge=True,
+    )
+
+    assert outcome.status == "validation-failed"
+    validation_failure = outcome.validation_failure
+    assert validation_failure is not None
+    output_tail = validation_failure["output_tail"]
+    assert isinstance(output_tail, str)
+    assert validation_failure["failed_command"] == (
+        "bash scripts/touchstone-run.sh validate"
+    )
+    assert "FAILED tests/test_cli_swarm.py::test_example" in output_tail
+    assert validation_failure["retry_command"] == (
+        f"cd {worktree} && bash scripts/touchstone-run.sh validate"
+    )
+
+
 def test_ship_swarm_pr_repairs_detached_head_before_open_pr(
     monkeypatch,
     tmp_path: Path,
@@ -1085,6 +1136,90 @@ def test_swarm_writes_manifest_for_failed_run(monkeypatch, tmp_path: Path) -> No
     assert manifest["tasks"][0]["failure_reason"] == "max-iterations cap reached"
     assert manifest["tasks"][0]["cleanup_status"] == "preserved"
     assert Path(manifest["tasks"][0]["worktree"]).exists()
+
+
+def test_swarm_validation_failed_manifest_resume_and_status(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md", "validation change")
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", _fake_exec_factory())
+
+    def validation_failed_ship(
+        worktree: Path,
+        *,
+        base_branch: str,
+        branch: str,
+        auto_merge: bool,
+    ) -> cli.SwarmShipOutcome:
+        _ = (base_branch, auto_merge)
+        output = (
+            "pre-push hook failed\n"
+            "failed check: bash scripts/touchstone-run.sh validate\n"
+            "FAILED tests/test_cli_swarm.py::test_swarm_validation\n"
+        )
+        validation_failure = cli._swarm_validation_failure_from_output(
+            output=output,
+            worktree=worktree,
+            branch=branch,
+            push_command=f"git push -u origin {branch}",
+        )
+        assert validation_failure is not None
+        return cli.SwarmShipOutcome(
+            cli.SWARM_VALIDATION_FAILED_STATUS,
+            None,
+            output,
+            validation_failure=validation_failure,
+        )
+
+    monkeypatch.setattr(cli, "_ship_swarm_pr", validation_failed_ship)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        ["swarm", "--provider", "codex", "--brief", str(brief), "--auto-merge", "--json"],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["failed_count"] == 1
+    assert payload["tasks"][0]["status"] == "validation-failed"
+    manifest_path = _swarm_manifests(repo)[0]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    task = manifest["tasks"][0]
+    assert task["status"] == "validation-failed"
+    assert task["cleanup_status"] == "preserved"
+    assert task["validation_failure"]["failed_command"] == (
+        "bash scripts/touchstone-run.sh validate"
+    )
+    assert "FAILED tests/test_cli_swarm.py::test_swarm_validation" in task[
+        "validation_failure"
+    ]["output_tail"]
+    assert task["validation_failure"]["suggested_next_command"] == (
+        f"cd {task['worktree']} && bash scripts/touchstone-run.sh validate"
+    )
+    assert Path(task["worktree"]).exists()
+
+    status = runner.invoke(main, ["swarm", "status", str(manifest_path)])
+    assert status.exit_code == 0, status.output
+    assert "validation-failed:" in status.output
+    assert "failed check: bash scripts/touchstone-run.sh validate" in status.output
+    assert (
+        f"retry command: cd {task['worktree']} && bash scripts/touchstone-run.sh validate"
+        in status.output
+    )
+
+    resume = runner.invoke(main, ["swarm", "resume", str(manifest_path), "1"])
+    assert resume.exit_code == 0, resume.output
+    assert f"worktree: {task['worktree']}" in resume.output
+    assert "failed check: bash scripts/touchstone-run.sh validate" in resume.output
+    assert (
+        f"retry validation: cd {task['worktree']} && bash scripts/touchstone-run.sh validate"
+        in resume.output
+    )
+    assert "re-enter worker: conductor exec --with codex" in resume.output
 
 
 def test_swarm_classifies_exec_phase_provider_failure(
