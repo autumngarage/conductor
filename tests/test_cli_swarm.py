@@ -282,6 +282,7 @@ def test_swarm_metrics_aggregate_mixed_task_statuses() -> None:
         "provider_failed_count": 1,
         "no_changes_count": 1,
         "review_blocked_count": 1,
+        "needs_human_conflict_resolution_count": 0,
         "pushed_not_merged_count": 1,
         "duration_ms": 3_600_000,
         "per_status_counts": {
@@ -450,6 +451,27 @@ def test_swarm_one_brief_succeeds_as_shipped(monkeypatch, tmp_path: Path) -> Non
         _git_returncode(repo, "show-ref", "--verify", "--quiet", "refs/heads/feat/swarm/foo")
         == 1
     )
+
+
+def test_swarm_text_output_uses_orchestrated_manifest_status(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md")
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", _fake_exec_factory())
+    monkeypatch.setattr(cli, "_ship_swarm_pr", _fake_merged_ship(repo))
+
+    result = CliRunner().invoke(
+        main,
+        ["swarm", "--provider", "codex", "--brief", str(brief), "--auto-merge"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "shipped:" in result.output
+    assert "\nready-to-ship:" not in result.output
+    assert "ok=True shipped=1 failed=0 no-changes=0 provider-failed=0" in result.output
 
 
 def test_swarm_writes_manifest_for_successful_run(monkeypatch, tmp_path: Path) -> None:
@@ -1714,6 +1736,152 @@ def test_swarm_json_stdout_contract_keeps_top_level_fields(
         "failed_count",
         "no_changes_count",
     }
+
+
+def test_swarm_merge_plan_orders_dependencies_and_records_overlap() -> None:
+    tasks: list[dict[str, object]] = [
+        {
+            "brief": "tasks/app.md",
+            "branch": "feat/swarm/app",
+            "status": "ready-to-ship",
+            "changed_files": ["src/app.py"],
+        },
+        {
+            "brief": "tasks/core.md",
+            "branch": "feat/swarm/core",
+            "status": "ready-to-ship",
+            "changed_files": ["src/app.py", "src/core.py"],
+        },
+        {
+            "brief": "tasks/docs.md",
+            "branch": "feat/swarm/docs",
+            "status": "ready-to-ship",
+            "changed_files": ["docs/usage.md"],
+        },
+    ]
+    preflight: dict[str, object] = {
+        "lanes": [
+            {"brief": "tasks/app.md", "issue_refs": ["#1"], "depends_on": ["feat/swarm/core"]},
+            {"brief": "tasks/core.md", "issue_refs": ["#1"], "depends_on": []},
+            {"brief": "tasks/docs.md", "issue_refs": [], "depends_on": []},
+        ]
+    }
+
+    plan = cli._swarm_merge_plan(tasks, preflight=preflight)
+    lanes = cli._swarm_dict_list(plan.get("lanes"))
+
+    assert [lane["branch"] for lane in lanes] == [
+        "feat/swarm/core",
+        "feat/swarm/app",
+        "feat/swarm/docs",
+    ]
+    assert lanes[0]["overlaps_with"] == ["tasks/app.md"]
+    assert lanes[1]["issue_refs"] == ["#1"]
+
+
+def test_swarm_merge_plan_uses_lowest_shared_issue_group_deterministically() -> None:
+    tasks: list[dict[str, object]] = [
+        {
+            "brief": "tasks/a.md",
+            "branch": "feat/swarm/a",
+            "status": "ready-to-ship",
+            "changed_files": ["src/a.py"],
+        },
+        {
+            "brief": "tasks/c.md",
+            "branch": "feat/swarm/c",
+            "status": "ready-to-ship",
+            "changed_files": ["src/c.py"],
+        },
+        {
+            "brief": "tasks/b.md",
+            "branch": "feat/swarm/b",
+            "status": "ready-to-ship",
+            "changed_files": ["src/b.py"],
+        },
+    ]
+    preflight: dict[str, object] = {
+        "lanes": [
+            {"brief": "tasks/a.md", "issue_refs": ["#2", "#1"], "depends_on": []},
+            {"brief": "tasks/c.md", "issue_refs": ["#1"], "depends_on": []},
+            {"brief": "tasks/b.md", "issue_refs": ["#2"], "depends_on": []},
+        ]
+    }
+
+    plan = cli._swarm_merge_plan(tasks, preflight=preflight)
+    lanes = cli._swarm_dict_list(plan.get("lanes"))
+
+    assert lanes[0]["branch"] == "feat/swarm/a"
+
+
+def test_swarm_auto_merge_marks_rebase_conflict_for_human_recovery(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    (repo / "conflict.txt").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", "conflict.txt")
+    _git(repo, "commit", "-m", "add conflict fixture")
+    first = _brief(repo, "first.md", "first lane touches conflict.txt")
+    second = _brief(repo, "second.md", "second lane touches conflict.txt")
+    monkeypatch.chdir(repo)
+
+    def fake_exec(**kwargs):
+        worktree = Path(kwargs["cwd"])
+        body = kwargs["body"]
+        value = "first\n" if body.startswith("first lane") else "second\n"
+        (worktree / "conflict.txt").write_text(value, encoding="utf-8")
+        _git(worktree, "add", "conflict.txt")
+        _git(worktree, "commit", "-m", body.split()[0])
+        return (
+            CallResponse(
+                text="done",
+                provider="codex",
+                model="codex",
+                duration_ms=1,
+            ),
+            None,
+            None,
+        )
+
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", fake_exec)
+    monkeypatch.setattr(cli, "_ship_swarm_pr", _fake_merged_ship(repo))
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "swarm",
+            "--provider",
+            "codex",
+            "--brief",
+            str(first),
+            "--brief",
+            str(second),
+            "--auto-merge",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["tasks"][0]["status"] == "shipped"
+    assert payload["tasks"][1]["status"] == cli.SWARM_CONFLICT_STATUS
+    assert payload["failed_count"] == 1
+
+    manifest = json.loads(_swarm_manifests(repo)[0].read_text(encoding="utf-8"))
+    conflicted = manifest["tasks"][1]
+    assert conflicted["status"] == cli.SWARM_CONFLICT_STATUS
+    assert conflicted["conflict_state"]["conflicted_files"] == ["conflict.txt"]
+    assert any(
+        "git rebase --continue" in command
+        for command in conflicted["conflict_state"]["recovery_commands"]
+    )
+    assert manifest["merge_plan"]["lanes"][0]["task_index"] == 1
+
+    status = CliRunner().invoke(main, ["swarm", "status", str(_swarm_manifests(repo)[0])])
+    assert status.exit_code == 0
+    assert "conflicted files: conflict.txt" in status.output
+    assert "recovery commands:" in status.output
 
 
 def test_swarm_ship_appends_closing_ref_to_last_commit_body(
