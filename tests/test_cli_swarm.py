@@ -181,7 +181,12 @@ def _route_decision(*providers: str, tags: tuple[str, ...] = ("tool-use",)) -> c
 def _fake_ship(worktree: Path, *, base_branch: str, branch: str, auto_merge: bool):
     _ = (worktree, base_branch, branch)
     if auto_merge:
-        return "shipped", "https://github.com/example/repo/pull/123", "abc1234"
+        return cli.SwarmShipOutcome(
+            "shipped",
+            "https://github.com/example/repo/pull/123",
+            "abc1234",
+            merge_status="MERGED",
+        )
     return "pushed-not-merged", "https://github.com/example/repo/pull/123", None
 
 
@@ -199,7 +204,12 @@ def _fake_merged_ship(repo: Path):
             "squash merge",
         ).stdout.strip()
         _git(repo, "update-ref", f"refs/heads/{base_branch}", merge_sha)
-        return "shipped", "https://github.com/example/repo/pull/123", merge_sha
+        return cli.SwarmShipOutcome(
+            "shipped",
+            "https://github.com/example/repo/pull/123",
+            merge_sha,
+            merge_status="MERGED",
+        )
 
     return fake_ship
 
@@ -399,18 +409,24 @@ def test_ship_swarm_pr_repairs_detached_head_before_open_pr(
         encoding="utf-8",
     )
     open_pr.chmod(0o755)
-    monkeypatch.setattr(cli, "_swarm_pr_merge_sha", lambda *_args, **_kwargs: "merge123")
+    monkeypatch.setattr(
+        cli,
+        "_swarm_pr_inspection",
+        lambda *_args, **_kwargs: ("MERGED", "merge123", None),
+    )
 
-    status, pr_url, merge_sha = cli._ship_swarm_pr(
+    outcome = cli._ship_swarm_pr(
         worktree,
         base_branch="main",
         branch="feat/swarm/foo",
         auto_merge=True,
     )
+    status, pr_url, merge_sha = outcome
 
     assert status == "shipped"
     assert pr_url == "https://github.com/example/repo/pull/123"
     assert merge_sha == "merge123"
+    assert outcome.merge_status == "MERGED"
     assert _git(worktree, "branch", "--show-current").stdout.strip() == "feat/swarm/foo"
     assert _git(worktree, "rev-parse", "HEAD").stdout.strip() == head_sha
 
@@ -426,6 +442,45 @@ def test_ship_swarm_pr_refuses_named_branch_mismatch(tmp_path: Path) -> None:
         cli._ensure_swarm_branch_checked_out(worktree, "feat/swarm/foo")
 
     assert _git(worktree, "branch", "--show-current").stdout.strip() == "scratch"
+
+
+def test_ship_swarm_pr_treats_github_merged_as_authoritative(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    worktree = tmp_path / "task-worktree"
+    _git(repo, "worktree", "add", str(worktree), "-b", "feat/swarm/foo", "main")
+    _commit_change(worktree, "feature.txt", "feature")
+    scripts = repo / "scripts"
+    scripts.mkdir()
+    open_pr = scripts / "open-pr.sh"
+    open_pr.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "https://github.com/example/repo/pull/123\\n"\n'
+        'printf "local cleanup failed\\n" >&2\n'
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    open_pr.chmod(0o755)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(
+        cli,
+        "_swarm_pr_inspection",
+        lambda *_args, **_kwargs: ("MERGED", "merge123", None),
+    )
+
+    outcome = cli._ship_swarm_pr(
+        worktree,
+        base_branch="main",
+        branch="feat/swarm/foo",
+        auto_merge=True,
+    )
+
+    assert outcome.status == "shipped"
+    assert outcome.pr_url == "https://github.com/example/repo/pull/123"
+    assert outcome.detail == "merge123"
+    assert outcome.merge_status == "MERGED"
 
 
 def test_swarm_one_brief_succeeds_as_shipped(monkeypatch, tmp_path: Path) -> None:
@@ -522,6 +577,97 @@ def test_swarm_writes_manifest_for_successful_run(monkeypatch, tmp_path: Path) -
     assert manifest["tasks"][0]["pr_url"] == "https://github.com/example/repo/pull/123"
     assert manifest["tasks"][0]["merge_sha"]
     assert manifest["tasks"][0]["cleanup_status"] == "removed"
+
+
+def test_swarm_keeps_merged_pr_success_when_worktree_already_removed(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md")
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", _fake_exec_factory())
+
+    def ship_and_remove_worktree(
+        worktree: Path,
+        *,
+        base_branch: str,
+        branch: str,
+        auto_merge: bool,
+    ) -> cli.SwarmShipOutcome:
+        assert auto_merge is True
+        _ = branch
+        tree = _git(worktree, "rev-parse", "HEAD^{tree}").stdout.strip()
+        merge_sha = _git(
+            repo,
+            "commit-tree",
+            tree,
+            "-p",
+            base_branch,
+            "-m",
+            "squash merge",
+        ).stdout.strip()
+        _git(repo, "update-ref", f"refs/heads/{base_branch}", merge_sha)
+        _git(repo, "worktree", "remove", str(worktree))
+        return cli.SwarmShipOutcome(
+            "shipped",
+            "https://github.com/example/repo/pull/123",
+            merge_sha,
+            merge_status="MERGED",
+            inspection_warning="worktree was already removed before post-merge inspection",
+        )
+
+    monkeypatch.setattr(cli, "_ship_swarm_pr", ship_and_remove_worktree)
+
+    result = CliRunner().invoke(
+        main,
+        ["swarm", "--provider", "codex", "--brief", str(brief), "--auto-merge", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    task = payload["tasks"][0]
+    assert payload["ok"] is True
+    assert task["status"] == "shipped"
+    assert task.get("failure_reason") is None
+
+    manifest = json.loads(_swarm_manifests(repo)[0].read_text(encoding="utf-8"))
+    manifest_task = manifest["tasks"][0]
+    assert manifest_task["status"] == "shipped"
+    assert manifest_task["merge_status"] == "MERGED"
+    assert manifest_task["cleanup_status"] == "removed"
+    assert manifest_task["inspection_warning"] == (
+        "worktree was already removed before post-merge inspection"
+    )
+    assert manifest_task.get("failure_reason") is None
+    assert not Path(manifest_task["worktree"]).exists()
+
+
+def test_swarm_manifest_task_records_keep_cleanup_warning(tmp_path: Path) -> None:
+    worktree = tmp_path / "removed"
+
+    records = cli._swarm_manifest_task_records(
+        [
+            cli.SwarmTaskResult(
+                brief="tasks/foo.md",
+                branch="feat/swarm/foo",
+                worktree=str(worktree),
+                status="shipped",
+                commits=1,
+                pr_url="https://github.com/example/repo/pull/123",
+                merge_sha="abc123",
+                duration_ms=100,
+                merge_status="MERGED",
+                inspection_warning="inspect warning",
+                cleanup_warning="cleanup warning",
+            )
+        ]
+    )
+
+    assert records[0]["merge_status"] == "MERGED"
+    assert records[0]["inspection_warning"] == "inspect warning"
+    assert records[0]["cleanup_warning"] == "cleanup warning"
+    assert records[0]["cleanup_status"] == "removed"
 
 
 def test_swarm_auto_routes_lane_with_task_tags(monkeypatch, tmp_path: Path) -> None:
