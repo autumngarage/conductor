@@ -5632,6 +5632,7 @@ def _append_previous_phase_results(body: str, summaries: list[str]) -> str:
 SWARM_SUCCESS_STATUSES = frozenset({"shipped", "no-changes"})
 SWARM_PROVIDER_FAILED_STATUS = "provider-failed"
 SWARM_CONFLICT_STATUS = "needs-human-conflict-resolution"
+SWARM_VALIDATION_FAILED_STATUS = "validation-failed"
 SWARM_BRANCH_PREFIX = "feat/swarm"
 SWARM_WORKTREE_LOCK = threading.Lock()
 SWARM_MANIFEST_LOCK = threading.Lock()
@@ -5766,6 +5767,7 @@ class SwarmTaskResult:
     inspection_warning: str | None = None
     cleanup_warning: str | None = None
     failure_reason: str | None = None
+    validation_failure: dict[str, object] | None = None
     provider: str | None = None
     selected_provider: str | None = None
     fallback_provider: str | None = None
@@ -5796,6 +5798,8 @@ class SwarmTaskResult:
             payload["last_progress_at"] = self.last_progress_at
         if self.phase_history is not None:
             payload["phase_history"] = self.phase_history
+        if self.validation_failure is not None:
+            payload["validation_failure"] = self.validation_failure
         if include_provider_details:
             payload["provider"] = self.provider
             payload["selected_provider"] = self.selected_provider
@@ -5811,6 +5815,7 @@ class SwarmShipOutcome:
     detail: str | None
     merge_status: str | None = None
     inspection_warning: str | None = None
+    validation_failure: dict[str, object] | None = None
 
     def __iter__(self):
         yield self.status
@@ -6728,6 +6733,89 @@ def _require_swarm_branch_checked_out(worktree: Path, branch: str, *, selector: 
     )
 
 
+_SWARM_VALIDATION_COMMAND_RE = re.compile(
+    r"(?im)^\s*(?:failed command|failed check|validation command|command)\s*:\s*(?P<cmd>.+?)\s*$"
+)
+_SWARM_RUN_HINT_RE = re.compile(r"(?im)^\s*(?:run|retry|try)\s*:?\s*`(?P<cmd>[^`]+)`")
+_SWARM_KNOWN_CHECK_RE = re.compile(
+    r"(?im)^\s*(?:\$ )?(?P<cmd>"
+    r"bash scripts/touchstone-run\.sh validate\b[^\n]*|"
+    r"uv run (?:pytest|ruff|mypy|pyright)\b[^\n]*|"
+    r"(?:pytest|ruff|mypy|pyright)\b[^\n]*|"
+    r"(?:npm|pnpm|yarn) (?:test|run (?:test|lint|typecheck|build))\b[^\n]*|"
+    r"cargo (?:test|check|fmt -- --check|clippy)\b[^\n]*|"
+    r"go test\b[^\n]*"
+    r")\s*$"
+)
+
+
+def _swarm_output_tail(output: str, *, max_lines: int = 40, max_chars: int = 4000) -> str:
+    lines = [line.rstrip() for line in output.splitlines() if line.strip()]
+    tail = "\n".join(lines[-max_lines:]).strip()
+    if len(tail) <= max_chars:
+        return tail
+    return tail[-max_chars:].lstrip()
+
+
+def _swarm_validation_command_from_output(output: str) -> str | None:
+    for pattern in (
+        _SWARM_VALIDATION_COMMAND_RE,
+        _SWARM_RUN_HINT_RE,
+        _SWARM_KNOWN_CHECK_RE,
+    ):
+        match = pattern.search(output)
+        if match is None:
+            continue
+        command = match.group("cmd").strip()
+        if command:
+            return command
+    return None
+
+
+def _swarm_validation_failure_from_output(
+    *,
+    output: str,
+    worktree: Path,
+    branch: str,
+    push_command: str,
+) -> dict[str, object] | None:
+    lowered = output.lower()
+    validation_signal = (
+        "pre-push" in lowered
+        or "prepush" in lowered
+        or ("validation" in lowered and ("failed" in lowered or "error" in lowered))
+        or ("touchstone" in lowered and ("failed" in lowered or "error" in lowered))
+    )
+    if not validation_signal:
+        return None
+    failed_command = _swarm_validation_command_from_output(output) or push_command
+    retry_command = f"cd {shlex.quote(str(worktree))} && {failed_command}"
+    recovery_context = (
+        "Validation failed while shipping a swarm branch. Fix the check output, "
+        "commit any required changes, then rerun the retry command."
+    )
+    provider_recovery_command = (
+        "conductor exec --with codex "
+        f"--cwd {shlex.quote(str(worktree))} "
+        "--brief "
+        + shlex.quote(
+            f"{recovery_context}\n\nBranch: {branch}\n"
+            f"Failed check: {failed_command}\n\nOutput tail:\n"
+            f"{_swarm_output_tail(output)}"
+        )
+    )
+    return {
+        "schema_version": 1,
+        "failed_command": failed_command,
+        "failed_check": failed_command,
+        "output_tail": _swarm_output_tail(output),
+        "retry_command": retry_command,
+        "suggested_next_command": retry_command,
+        "recovery_command": provider_recovery_command,
+        "recovery_context": recovery_context,
+    }
+
+
 def _ship_swarm_pr(
     worktree: Path,
     *,
@@ -6739,6 +6827,7 @@ def _ship_swarm_pr(
     script = repo_root / "scripts" / "open-pr.sh"
     _ensure_swarm_branch_checked_out(worktree, branch)
     args = ["bash", str(script), "--base", base_branch]
+    push_command = f"git push -u origin {shlex.quote(branch)}"
     if auto_merge:
         args.append("--auto-merge")
     try:
@@ -6762,7 +6851,20 @@ def _ship_swarm_pr(
             f"open-pr.sh timed out after {SWARM_SHIP_TIMEOUT_SEC:.0f}s"
             + (f": {output}" if output else "")
         )
-        return SwarmShipOutcome(status, pr_url, reason)
+        validation_failure = _swarm_validation_failure_from_output(
+            output=output,
+            worktree=worktree,
+            branch=branch,
+            push_command=push_command,
+        )
+        if validation_failure is not None:
+            status = SWARM_VALIDATION_FAILED_STATUS
+        return SwarmShipOutcome(
+            status,
+            pr_url,
+            reason,
+            validation_failure=validation_failure,
+        )
     except OSError as e:
         return SwarmShipOutcome("failed", None, f"open-pr.sh failed to start: {e}")
     output = f"{result.stdout}\n{result.stderr}".strip()
@@ -6785,12 +6887,21 @@ def _ship_swarm_pr(
             )
         status = "review-blocked" if auto_merge and pr_url else "failed"
         reason = output or f"open-pr.sh exited {result.returncode}"
+        validation_failure = _swarm_validation_failure_from_output(
+            output=output,
+            worktree=worktree,
+            branch=branch,
+            push_command=push_command,
+        )
+        if validation_failure is not None:
+            status = SWARM_VALIDATION_FAILED_STATUS
         return SwarmShipOutcome(
             status,
             pr_url,
             reason,
             merge_status=merge_status,
             inspection_warning=inspection_warning,
+            validation_failure=validation_failure,
         )
     status = "shipped" if auto_merge else "pushed-not-merged"
     return SwarmShipOutcome(
@@ -6810,11 +6921,13 @@ def _timeout_output_text(value: str | bytes | None) -> str:
     return value
 
 
+def _swarm_failed_statuses() -> set[str]:
+    return {"failed", SWARM_CONFLICT_STATUS, SWARM_VALIDATION_FAILED_STATUS}
+
+
 def _swarm_summary(results: list[SwarmTaskResult]) -> dict[str, object]:
     shipped_count = sum(1 for result in results if result.status == "shipped")
-    failed_count = sum(
-        1 for result in results if result.status in {"failed", SWARM_CONFLICT_STATUS}
-    )
+    failed_count = sum(1 for result in results if result.status in _swarm_failed_statuses())
     no_changes_count = sum(1 for result in results if result.status == "no-changes")
     ok = all(result.status in SWARM_SUCCESS_STATUSES for result in results)
     return {
@@ -6831,9 +6944,7 @@ def _swarm_summary(results: list[SwarmTaskResult]) -> dict[str, object]:
 
 def _swarm_summary_from_task_records(tasks: list[dict[str, object]]) -> dict[str, object]:
     shipped_count = sum(1 for task in tasks if task.get("status") == "shipped")
-    failed_count = sum(
-        1 for task in tasks if task.get("status") in {"failed", SWARM_CONFLICT_STATUS}
-    )
+    failed_count = sum(1 for task in tasks if task.get("status") in _swarm_failed_statuses())
     no_changes_count = sum(1 for task in tasks if task.get("status") == "no-changes")
     ok = all(task.get("status") in SWARM_SUCCESS_STATUSES for task in tasks)
     public_tasks = []
@@ -6898,7 +7009,8 @@ def _swarm_metrics_from_task_records(
         "total_tasks": len(tasks),
         "shipped_count": shipped_count,
         "failed_count": status_counts.get("failed", 0)
-        + status_counts.get(SWARM_CONFLICT_STATUS, 0),
+        + status_counts.get(SWARM_CONFLICT_STATUS, 0)
+        + status_counts.get(SWARM_VALIDATION_FAILED_STATUS, 0),
         "provider_failed_count": status_counts.get(SWARM_PROVIDER_FAILED_STATUS, 0),
         "no_changes_count": no_changes_count,
         "review_blocked_count": status_counts.get("review-blocked", 0),
@@ -6977,9 +7089,7 @@ def _swarm_manifest_payload(
     preflight: dict[str, object] | None = None,
 ) -> dict[str, object]:
     shipped_count = sum(1 for task in tasks if task.get("status") == "shipped")
-    failed_count = sum(
-        1 for task in tasks if task.get("status") in {"failed", SWARM_CONFLICT_STATUS}
-    )
+    failed_count = sum(1 for task in tasks if task.get("status") in _swarm_failed_statuses())
     provider_failed_count = sum(
         1 for task in tasks if task.get("status") == SWARM_PROVIDER_FAILED_STATUS
     )
@@ -7422,6 +7532,7 @@ def _orchestrate_swarm_auto_merge(
         task["pr_url"] = shipped_pr_url
         task["merge_status"] = ship_outcome.merge_status
         task["inspection_warning"] = ship_outcome.inspection_warning
+        task["validation_failure"] = ship_outcome.validation_failure
         if shipped_status == "shipped":
             task["merge_sha"] = shipped_detail
             task["failure_reason"] = None
@@ -7458,7 +7569,7 @@ def _orchestrate_swarm_auto_merge(
                     manifest_path=manifest_path,
                     selector=str(remaining_index + 1),
                 )
-        elif shipped_status in {"failed", "review-blocked"}:
+        elif shipped_status in {"failed", "review-blocked", SWARM_VALIDATION_FAILED_STATUS}:
             task["failure_reason"] = shipped_detail
         task["cleanup_status"] = "removed" if not worktree.exists() else "preserved"
 
@@ -7634,6 +7745,25 @@ def _format_swarm_resume(
         f"worktree branch: {branch_state}",
         "suggested commands:",
     ]
+    validation_failure = task.get("validation_failure")
+    if isinstance(validation_failure, dict):
+        failed_check = validation_failure.get("failed_check") or validation_failure.get(
+            "failed_command"
+        )
+        if isinstance(failed_check, str) and failed_check:
+            lines.append(f"failed check: {failed_check}")
+        output_tail = validation_failure.get("output_tail")
+        if isinstance(output_tail, str) and output_tail:
+            lines.append("validation output tail:")
+            lines.extend(f"  {line}" for line in output_tail.splitlines())
+        validation_retry = validation_failure.get("retry_command") or validation_failure.get(
+            "suggested_next_command"
+        )
+        if isinstance(validation_retry, str) and validation_retry:
+            lines.append(f"  retry validation: {validation_retry}")
+        recovery_command = validation_failure.get("recovery_command")
+        if isinstance(recovery_command, str) and recovery_command:
+            lines.append(f"  re-enter worker: {recovery_command}")
     conflict_state = task.get("conflict_state")
     if isinstance(conflict_state, dict):
         files = conflict_state.get("conflicted_files")
@@ -7696,6 +7826,7 @@ def _retry_ship_swarm_task(
     merge_status: str | None = None
     inspection_warning: str | None = None
     failure_reason: str | None = None
+    validation_failure: dict[str, object] | None = None
     commits = 0
     cleanup_warning: str | None = None
     try:
@@ -7725,9 +7856,10 @@ def _retry_ship_swarm_task(
         pr_url = ship_outcome.pr_url
         merge_status = ship_outcome.merge_status
         inspection_warning = ship_outcome.inspection_warning
+        validation_failure = ship_outcome.validation_failure
         if status == "shipped":
             merge_sha = ship_outcome.detail
-        elif status in {"failed", "review-blocked"}:
+        elif status in {"failed", "review-blocked", SWARM_VALIDATION_FAILED_STATUS}:
             failure_reason = ship_outcome.detail
     except click.ClickException:
         raise
@@ -7766,6 +7898,7 @@ def _retry_ship_swarm_task(
             "inspection_warning": inspection_warning,
             "duration_ms": duration_ms,
             "failure_reason": failure_reason,
+            "validation_failure": validation_failure,
             "cleanup_warning": cleanup_warning,
             "cleanup_status": "removed" if not worktree.exists() else "preserved",
         }
@@ -7961,6 +8094,18 @@ def _format_swarm_manifest_status(payload: dict[str, object], *, path: Path) -> 
             if raw_task.get("failure_reason"):
                 line += f" reason={raw_task['failure_reason']}"
             lines.append(line)
+            validation_failure = raw_task.get("validation_failure")
+            if isinstance(validation_failure, dict):
+                failed_check = validation_failure.get("failed_check") or validation_failure.get(
+                    "failed_command"
+                )
+                if isinstance(failed_check, str) and failed_check:
+                    lines.append(f"  failed check: {failed_check}")
+                retry_command = validation_failure.get("retry_command") or validation_failure.get(
+                    "suggested_next_command"
+                )
+                if isinstance(retry_command, str) and retry_command:
+                    lines.append(f"  retry command: {retry_command}")
             conflict_state = raw_task.get("conflict_state")
             if isinstance(conflict_state, dict):
                 files = conflict_state.get("conflicted_files")
@@ -8043,6 +8188,7 @@ def _run_swarm_task(
     last_phase: str | None = None
     last_progress_at: str | None = None
     phase_history: list[dict[str, object]] = []
+    validation_failure: dict[str, object] | None = None
 
     def mark_phase(phase: str) -> None:
         nonlocal last_phase, last_progress_at
@@ -8202,9 +8348,10 @@ def _run_swarm_task(
                     pr_url = ship_outcome.pr_url
                     merge_status = ship_outcome.merge_status
                     inspection_warning = ship_outcome.inspection_warning
+                    validation_failure = ship_outcome.validation_failure
                     if status == "shipped":
                         merge_sha = ship_outcome.detail
-                    elif status in {"failed", "review-blocked"}:
+                    elif status in {"failed", "review-blocked", SWARM_VALIDATION_FAILED_STATUS}:
                         failure_reason = ship_outcome.detail
         elif status == "failed":
             failure_reason = failure_reason or "provider dispatch did not complete"
@@ -8242,10 +8389,12 @@ def _run_swarm_task(
         last_phase=last_phase,
         last_progress_at=last_progress_at,
         phase_history=phase_history,
+        validation_failure=validation_failure,
     )
     if (
         created_worktree
         and result.status != SWARM_PROVIDER_FAILED_STATUS
+        and result.status != SWARM_VALIDATION_FAILED_STATUS
         and result.status != "ready-to-ship"
         and (result.status in SWARM_SUCCESS_STATUSES or not keep_worktrees_on_failure)
     ):
@@ -8270,7 +8419,7 @@ def _run_swarm_task(
                 result.failure_reason = (
                     f"{result.failure_reason or result.status}; {cleanup_warning}"
                 )
-    if result.status in {"failed", SWARM_PROVIDER_FAILED_STATUS}:
+    if result.status in {"failed", SWARM_PROVIDER_FAILED_STATUS, SWARM_VALIDATION_FAILED_STATUS}:
         click.echo(
             f"[conductor] swarm task {result.status}: {brief_path}; inspect {worktree}; "
             f"reason: {result.failure_reason}",
