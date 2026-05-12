@@ -63,6 +63,12 @@ _TERMINAL_REVIEW_ANSWER_PROMPT = (
     "CODEX_REVIEW_CLEAN, CODEX_REVIEW_FIXED, or CODEX_REVIEW_BLOCKED, the "
     "sentinel must be the final standalone line."
 )
+_TOOL_CALL_LEAK_RECOVERY_PROMPT = (
+    "The previous file write was rejected because the file content included "
+    "tool-call transcript markup such as `assistant to=functions.*`. Do not "
+    "write tool-call syntax into files. Read the target file again if needed, "
+    "then re-emit only the actual file content or replacement text."
+)
 
 _OPENROUTER_REASONING_EFFORTS = {
     "minimal": "minimal",
@@ -497,6 +503,7 @@ class OpenRouterProvider:
         empty_response_retries: list[dict[str, object]] = []
         completion_stretched = False
         terminal_answer_stretched = False
+        tool_call_leak_stretched = False
         repo_changing_task = _is_repo_changing_tool_task(effective_task_tags, tools)
         git_status_before = _git_clean_status(workdir) if repo_changing_task else None
         iteration_cap = max_iterations or OPENROUTER_MAX_TOOL_ITERATIONS
@@ -598,6 +605,7 @@ class OpenRouterProvider:
                 }
             )
 
+            saw_tool_call_leak = False
             for idx, call in enumerate(tool_calls):
                 name, args, result = _parse_tool_call(call)
                 recent_tool_calls.append({"name": name, "args": args or {}})
@@ -615,6 +623,8 @@ class OpenRouterProvider:
                     tool_error = result.removeprefix("error:").strip()
 
                 if tool_error is not None:
+                    if _is_tool_call_leak_error(tool_error):
+                        saw_tool_call_leak = True
                     tool_errors.append(
                         {
                             "iteration": iteration,
@@ -657,6 +667,28 @@ class OpenRouterProvider:
                     "content": result,
                 }
                 messages.append(tool_msg)
+
+            if saw_tool_call_leak and not tool_call_leak_stretched:
+                messages.append(
+                    {"role": "user", "content": _TOOL_CALL_LEAK_RECOVERY_PROMPT}
+                )
+                _LOG.info(
+                    "tool-call leak recovery stretch enabled: provider=%s "
+                    "iteration_cap=%s",
+                    self.name,
+                    original_iteration_cap,
+                )
+                if session_log is not None:
+                    session_log.emit(
+                        "tool_call_leak_recovery",
+                        {
+                            "provider": self.name,
+                            "iteration_cap": original_iteration_cap,
+                            "message": _TOOL_CALL_LEAK_RECOVERY_PROMPT,
+                        },
+                    )
+                iteration_cap += 1
+                tool_call_leak_stretched = True
 
             if iteration >= iteration_cap:
                 missing_deliverables = _detect_and_log_missing_deliverables(
@@ -985,7 +1017,10 @@ def _execution_status(
     after_clean = (
         git_status_after.get("clean") if git_status_after is not None else None
     )
-    if hit_cap:
+    has_tool_call_leak = _has_tool_call_leak_errors(tool_errors)
+    if repo_changing_task and has_tool_call_leak and write_success_count == 0:
+        state = "tool-call-leak"
+    elif hit_cap:
         state = "iteration-cap"
     elif repo_changing_task and validation_failures:
         state = "validation-failed"
@@ -1030,6 +1065,11 @@ def _execution_failure_message(status: dict[str, object]) -> str | None:
             int(cap) if isinstance(cap, int) else 0,
             missing,
         )
+    if state == "tool-call-leak":
+        return (
+            "tool-call leak rejected generated file content before any "
+            "edit/write succeeded"
+        )
     if state == "validation-failed":
         return "validation command failed after edits"
     if state == "tool-error":
@@ -1037,6 +1077,17 @@ def _execution_failure_message(status: dict[str, object]) -> str | None:
     if state == "no-op":
         return "repo-changing code task produced no net workspace changes"
     return None
+
+
+def _is_tool_call_leak_error(error: str) -> bool:
+    return "tool-call leak detected" in error
+
+
+def _has_tool_call_leak_errors(tool_errors: list[dict[str, object]]) -> bool:
+    return any(
+        _is_tool_call_leak_error(str(item.get("error") or ""))
+        for item in tool_errors
+    )
 
 
 def select_model_for_task(
