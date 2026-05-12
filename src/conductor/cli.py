@@ -1225,6 +1225,47 @@ def _review_attempt_log_state(status: str) -> str:
     return "unavailable" if status in availability_statuses else "failed"
 
 
+def _large_review_input(decision: RouteDecision) -> bool:
+    """Return whether review input is large enough to use scaled review budgets."""
+    return (
+        _review_gate_timeout_sec(decision.estimated_input_tokens)
+        > REVIEW_GATE_MIN_TIMEOUT_SEC
+    )
+
+
+def _prioritize_openrouter_after_codex_review_failure(
+    candidates: list[RankedCandidate],
+    *,
+    failed_index: int,
+    decision: RouteDecision,
+    err: Exception,
+) -> None:
+    """Move OpenRouter to the next fallback slot after large Codex review failures.
+
+    Invariant: this only reorders candidates already admitted by routing and
+    the caller's ``--max-fallbacks`` cap; it never expands the fallback set.
+    """
+    if (
+        failed_index >= len(candidates)
+        or candidates[failed_index].name != "codex"
+        or not _large_review_input(decision)
+    ):
+        return
+
+    retryable, category = _is_retryable(err)
+    if not retryable:
+        return
+    if not isinstance(err, ReviewOutputContractError) and category != "timeout":
+        return
+
+    next_index = failed_index + 1
+    for openrouter_index in range(next_index, len(candidates)):
+        if candidates[openrouter_index].name == "openrouter":
+            if openrouter_index != next_index:
+                candidates.insert(next_index, candidates.pop(openrouter_index))
+            return
+
+
 def _validate_max_fallbacks(raw: int) -> int:
     if raw < 1:
         raise click.UsageError(f"--max-fallbacks must be >= 1, got {raw}")
@@ -2478,6 +2519,12 @@ def _invoke_review_with_fallback(
                     mode,
                     _format_fallback_error_detail(e),
                 )
+            )
+            _prioritize_openrouter_after_codex_review_failure(
+                candidates,
+                failed_index=idx,
+                decision=decision,
+                err=e,
             )
         except ReviewContextError as e:
             last_exc = e

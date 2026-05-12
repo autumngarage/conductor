@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import subprocess
 import textwrap
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -239,6 +240,143 @@ def test_review_fallback_attempts_share_one_deadline(mocker, monkeypatch) -> Non
 
     assert response.provider == "codex"
     assert seen == [("claude", 300, 180), ("codex", 75, 75)]
+
+
+def test_large_review_codex_contract_failure_falls_back_to_openrouter_next(
+    mocker, capsys
+) -> None:
+    _stub_all_configured(mocker, {"codex", "claude", "openrouter"})
+    codex_review = mocker.patch.object(
+        CodexProvider,
+        "review",
+        return_value=CallResponse(
+            text="The review completed but omitted the required sentinel.",
+            provider="codex",
+            model="codex-review",
+            duration_ms=10,
+            usage={},
+            raw={},
+        ),
+    )
+    claude_review = mocker.patch.object(
+        ClaudeProvider,
+        "review",
+        return_value=CallResponse(
+            text="No blocking issues found.\nCODEX_REVIEW_CLEAN",
+            provider="claude",
+            model="sonnet",
+            duration_ms=10,
+            usage={},
+            raw={},
+        ),
+    )
+    openrouter_call = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=CallResponse(
+            text="No blocking issues found.\nCODEX_REVIEW_CLEAN",
+            provider="openrouter",
+            model="test-model",
+            duration_ms=10,
+            usage={},
+            raw={},
+        ),
+    )
+
+    response, fallbacks = cli._invoke_review_with_fallback(
+        replace(
+            _decision("codex", "claude", "openrouter"),
+            estimated_input_tokens=8_000,
+        ),
+        task=(
+            "Review this merge. The last line must be exactly "
+            "CODEX_REVIEW_CLEAN or CODEX_REVIEW_BLOCKED."
+        ),
+        effort="high",
+        cwd=None,
+        timeout_sec=300,
+        max_stall_sec=75,
+        base=None,
+        commit=None,
+        uncommitted=False,
+        title=None,
+        silent=False,
+        fallback_deadline_monotonic=cli._review_gate_deadline(300),
+    )
+
+    captured = capsys.readouterr()
+    assert response.provider == "openrouter"
+    assert fallbacks == ["codex"]
+    assert codex_review.called
+    assert openrouter_call.called
+    assert not claude_review.called
+    assert "codex review failed (output-contract)" in captured.err
+    assert "falling back → openrouter" in captured.err
+    assert (
+        "review tried providers: codex (output-contract), openrouter (success)"
+        in captured.err
+    )
+
+
+def test_large_review_codex_timeout_falls_back_to_openrouter_next(mocker) -> None:
+    from conductor.providers.interface import ProviderStalledError
+
+    _stub_all_configured(mocker, {"codex", "claude", "openrouter"})
+    mocker.patch.object(
+        CodexProvider,
+        "review",
+        side_effect=ProviderStalledError("codex review timed out after 300s"),
+    )
+    claude_review = mocker.patch.object(
+        ClaudeProvider,
+        "review",
+        return_value=CallResponse(
+            text="No blocking issues found.\nCODEX_REVIEW_CLEAN",
+            provider="claude",
+            model="sonnet",
+            duration_ms=10,
+            usage={},
+            raw={},
+        ),
+    )
+    openrouter_call = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=CallResponse(
+            text="No blocking issues found.\nCODEX_REVIEW_CLEAN",
+            provider="openrouter",
+            model="test-model",
+            duration_ms=10,
+            usage={},
+            raw={},
+        ),
+    )
+
+    response, fallbacks = cli._invoke_review_with_fallback(
+        replace(
+            _decision("codex", "claude", "openrouter"),
+            estimated_input_tokens=8_000,
+        ),
+        task=(
+            "Review this merge. The last line must be exactly "
+            "CODEX_REVIEW_CLEAN or CODEX_REVIEW_BLOCKED."
+        ),
+        effort="high",
+        cwd=None,
+        timeout_sec=300,
+        max_stall_sec=75,
+        base=None,
+        commit=None,
+        uncommitted=False,
+        title=None,
+        silent=True,
+        fallback_deadline_monotonic=cli._review_gate_deadline(300),
+    )
+
+    assert response.provider == "openrouter"
+    assert fallbacks == ["codex"]
+    assert openrouter_call.called
+    assert not claude_review.called
 
 
 def test_review_rate_limit_fallback_caps_late_provider_timeout(mocker) -> None:
