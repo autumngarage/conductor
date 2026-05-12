@@ -1191,6 +1191,178 @@ def test_exec_code_task_iteration_cap_raises_status(configured, tmp_path):
     assert "Reached --max-iterations cap (4)" in str(exc.value)
 
 
+def test_exec_recovers_once_from_tool_call_leak_rejection(configured, tmp_path):
+    _init_clean_git_repo(tmp_path)
+    responses = [
+        {
+            "model": "openai/gpt-5.5",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_leak",
+                                "type": "function",
+                                "function": {
+                                    "name": "Edit",
+                                    "arguments": json.dumps(
+                                        {
+                                            "path": "README.md",
+                                            "old_string": "base",
+                                            "new_string": (
+                                                "assistant to=functions.Edit fixed"
+                                            ),
+                                        }
+                                    ),
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+        },
+        {
+            "model": "openai/gpt-5.5",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_clean",
+                                "type": "function",
+                                "function": {
+                                    "name": "Edit",
+                                    "arguments": json.dumps(
+                                        {
+                                            "path": "README.md",
+                                            "old_string": "base",
+                                            "new_string": "fixed",
+                                        }
+                                    ),
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 3},
+        },
+        {
+            "model": "openai/gpt-5.5",
+            "choices": [
+                {
+                    "message": {"role": "assistant", "content": "done"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 1},
+        },
+    ]
+    requests: list[dict] = []
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=responses[len(requests) - 1])
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        response = OpenRouterProvider().exec(
+            "Implement the change.",
+            model="openai/gpt-5.5",
+            tools=frozenset({"Read", "Edit"}),
+            task_tags=("code", "tool-use"),
+            sandbox="none",
+            cwd=str(tmp_path),
+            max_iterations=2,
+        )
+
+    assert response.text == "done"
+    assert (tmp_path / "README.md").read_text(encoding="utf-8") == "fixed\n"
+    assert response.usage["tool_error_count"] == 1
+    assert response.usage["write_success_count"] == 1
+    assert response.usage["hit_iteration_cap"] is False
+    assert len(requests) == 3
+    assert any(
+        "tool-call transcript markup" in message.get("content", "")
+        for message in requests[1]["messages"]
+        if message.get("role") == "user"
+    )
+
+
+def test_exec_classifies_repeated_tool_call_leak(configured, tmp_path):
+    _init_clean_git_repo(tmp_path)
+    responses = [
+        {
+            "model": "openai/gpt-5.5",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": f"call_leak_{idx}",
+                                "type": "function",
+                                "function": {
+                                    "name": "Edit",
+                                    "arguments": json.dumps(
+                                        {
+                                            "path": "README.md",
+                                            "old_string": "base",
+                                            "new_string": (
+                                                "assistant to=functions.Edit fixed"
+                                            ),
+                                        }
+                                    ),
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+        }
+        for idx in range(3)
+    ]
+    requests: list[dict] = []
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=responses[len(requests) - 1])
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        with pytest.raises(ProviderExecutionError) as exc:
+            OpenRouterProvider().exec(
+                "Implement the change.",
+                model="openai/gpt-5.5",
+                tools=frozenset({"Read", "Edit"}),
+                task_tags=("code", "tool-use"),
+                sandbox="none",
+                cwd=str(tmp_path),
+                max_iterations=2,
+            )
+
+    status = exc.value.status
+    assert status["state"] == "tool-call-leak"
+    assert status["hit_iteration_cap"] is True
+    assert status["iteration_cap"] == 2
+    assert status["successful_write_tools"] == 0
+    assert len(status["tool_errors"]) == 3
+    assert len(requests) == 3
+    assert "tool-call leak rejected" in str(exc.value)
+    assert "Reached --max-iterations cap" not in str(exc.value)
+    assert (tmp_path / "README.md").read_text(encoding="utf-8") == "base\n"
+
+
 def test_exec_iteration_cap_reports_missing_tests(configured, tmp_path):
     _init_clean_git_repo(tmp_path)
     responses = [
