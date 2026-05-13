@@ -41,7 +41,7 @@ def _run_validate(repo: Path, fake_bin: Path) -> subprocess.CompletedProcess[str
     )
 
 
-def test_validate_skips_cortex_check_when_optional_cli_is_missing(tmp_path: Path) -> None:
+def test_validate_does_not_require_optional_cortex_cli(tmp_path: Path) -> None:
     repo = _make_repo(tmp_path)
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -49,12 +49,11 @@ def test_validate_skips_cortex_check_when_optional_cli_is_missing(tmp_path: Path
     result = _run_validate(repo, fake_bin)
 
     assert result.returncode == 0
-    assert "skipping cortex update check: cortex CLI is not available" in result.stderr
-    assert "cortex refresh-index --path ." in result.stderr
+    assert "cortex" not in result.stderr
     assert "generic project has no default 'lint' command" in result.stdout
 
 
-def test_validate_rebuilds_missing_cortex_index_when_cli_exists(tmp_path: Path) -> None:
+def test_validate_does_not_refresh_cortex_index_when_cli_exists(tmp_path: Path) -> None:
     repo = _make_repo(tmp_path)
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -69,14 +68,11 @@ def test_validate_rebuilds_missing_cortex_index_when_cli_exists(tmp_path: Path) 
     result = _run_validate(repo, fake_bin)
 
     assert result.returncode == 0
-    assert ".cortex/.index.json is generated and missing" in result.stderr
-    assert log_file.read_text(encoding="utf-8").splitlines() == [
-        "refresh-index --path .",
-        "update --check --path .",
-    ]
+    assert result.stderr == ""
+    assert not log_file.exists()
 
 
-def test_validate_skips_when_uv_cannot_provide_cortex(tmp_path: Path) -> None:
+def test_validate_ignores_uv_cortex_fallback(tmp_path: Path) -> None:
     repo = _make_repo(tmp_path)
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -87,8 +83,8 @@ def test_validate_skips_when_uv_cannot_provide_cortex(tmp_path: Path) -> None:
     result = _run_validate(repo, fake_bin)
 
     assert result.returncode == 0
-    assert "skipping cortex update check: cortex CLI is not available" in result.stderr
-    assert "uv run cortex refresh-index --path ." in result.stderr
+    assert "cortex" not in result.stderr
+    assert "uv run" not in result.stderr
 
 
 def test_conductor_refresh_hook_checks_optional_cli_before_invoking() -> None:

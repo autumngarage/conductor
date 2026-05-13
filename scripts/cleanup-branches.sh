@@ -27,7 +27,7 @@ REMOTE_TOO=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --execute|-x)
+    --execute | -x)
       DRY_RUN=0
       shift
       ;;
@@ -39,7 +39,7 @@ while [ "$#" -gt 0 ]; do
       DRY_RUN=1
       shift
       ;;
-    -h|--help)
+    -h | --help)
       # Print the header comment block (skip shebang + leading `#`), stopping
       # at the first non-comment line. Derived instead of hardcoded so future
       # header edits don't silently truncate the help output.
@@ -87,7 +87,54 @@ is_worktree_branch() {
   while IFS= read -r wb; do
     [ -z "$wb" ] && continue
     [ "$b" = "$wb" ] && return 0
-  done <<< "$WORKTREE_BRANCHES"
+  done <<<"$WORKTREE_BRANCHES"
+  return 1
+}
+
+# Locate scripts/merge-pr.sh's squash-map. The map records each squash-merge
+# at the moment it happens, capturing branch tip + squash commit. Reading is
+# best-effort and offline: any I/O error or unparseable line is treated as
+# "no record" so a corrupt map never causes a false-positive deletion. The
+# tree-equivalence path (is_fully_applied) is the safety net beneath this.
+SQUASH_MAP_PATH="$(git rev-parse --git-path touchstone/squash-map.jsonl 2>/dev/null || echo "")"
+
+# Returns 0 if a record in the squash-map names $branch AND its recorded
+# branch_oid matches the branch's current tip. The OID equality is the
+# load-bearing invariant: it ensures we only treat a branch as "the same
+# code that merged" — if commits landed on the local branch after the
+# squash, the OIDs differ and we fall through to is_fully_applied (which
+# will correctly tell us those new commits are not yet on $upstream).
+#
+# Any failure to read the map returns 1 (no record); errors are surfaced
+# to stderr but never fatal — same fail-soft contract as the rest of the
+# cleanup classifier.
+is_recorded_squash() {
+  local branch="$1"
+  local branch_oid="$2"
+
+  [ -n "$SQUASH_MAP_PATH" ] || return 1
+  [ -f "$SQUASH_MAP_PATH" ] || return 1
+  [ -r "$SQUASH_MAP_PATH" ] || {
+    echo "WARNING: squash-map exists but is not readable: $SQUASH_MAP_PATH" >&2
+    return 1
+  }
+
+  # Grep for "branch":"<exact name>" — the JSONL writer in merge-pr.sh
+  # refuses to write fields containing quote/backslash, so a literal-string
+  # match is sufficient and avoids pulling in a JSON parser. Filter to
+  # records that also carry the matching branch_oid; if any match, classify
+  # as recorded squash.
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      *"\"branch\":\"$branch\""*"\"branch_oid\":\"$branch_oid\""*)
+        return 0
+        ;;
+      *"\"branch_oid\":\"$branch_oid\""*"\"branch\":\"$branch\""*)
+        return 0
+        ;;
+    esac
+  done <"$SQUASH_MAP_PATH" 2>/dev/null
   return 1
 }
 
@@ -130,14 +177,17 @@ UNMERGED_LOCAL=()
 while IFS= read -r branch; do
   [ -z "$branch" ] && continue
   is_protected "$branch" || [ "$branch" = "$CURRENT_BRANCH" ] || is_worktree_branch "$branch" && continue
+  branch_oid="$(git rev-parse --verify --quiet "refs/heads/$branch" 2>/dev/null || echo "")"
   if git merge-base --is-ancestor "$branch" "$DEFAULT_REF" 2>/dev/null; then
     MERGED_LOCAL+=("$branch")
+  elif [ -n "$branch_oid" ] && is_recorded_squash "$branch" "$branch_oid"; then
+    SQUASH_MERGED_LOCAL+=("$branch")
   elif is_fully_applied "$DEFAULT_REF" "$branch"; then
     SQUASH_MERGED_LOCAL+=("$branch")
   else
     UNMERGED_LOCAL+=("$branch")
   fi
-done <<< "$LOCAL_BRANCHES"
+done <<<"$LOCAL_BRANCHES"
 
 if [ "${#MERGED_LOCAL[@]}" -gt 0 ]; then
   echo ""
@@ -206,7 +256,7 @@ if [ "$REMOTE_TOO" -eq 1 ] && [ "$REMOTE_SKIPPED" -eq 0 ]; then
     while IFS= read -r pr_branch; do
       [ -z "$pr_branch" ] && continue
       [ "$b" = "$pr_branch" ] && return 0
-    done <<< "$OPEN_PR_BRANCHES"
+    done <<<"$OPEN_PR_BRANCHES"
     return 1
   }
 
@@ -217,14 +267,17 @@ if [ "$REMOTE_TOO" -eq 1 ] && [ "$REMOTE_SKIPPED" -eq 0 ]; then
       REMOTE_HAS_PR+=("$remote_branch")
       continue
     fi
+    remote_oid="$(git rev-parse --verify --quiet "refs/remotes/origin/$remote_branch" 2>/dev/null || echo "")"
     if git merge-base --is-ancestor "origin/$remote_branch" "$DEFAULT_REF" 2>/dev/null; then
+      REMOTE_DELETABLE+=("$remote_branch")
+    elif [ -n "$remote_oid" ] && is_recorded_squash "$remote_branch" "$remote_oid"; then
       REMOTE_DELETABLE+=("$remote_branch")
     elif is_fully_applied "$DEFAULT_REF" "origin/$remote_branch"; then
       REMOTE_DELETABLE+=("$remote_branch")
     else
       REMOTE_UNIQUE_NO_PR+=("$remote_branch")
     fi
-  done <<< "$REMOTE_BRANCHES"
+  done <<<"$REMOTE_BRANCHES"
 
   if [ "${#REMOTE_DELETABLE[@]}" -gt 0 ]; then
     echo ""

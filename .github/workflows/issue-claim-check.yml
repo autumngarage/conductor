@@ -1,0 +1,38 @@
+name: Issue claim check
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  issues: read
+  pull-requests: write
+  contents: read
+
+jobs:
+  claim-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout trusted claim-check helper
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .touchstone-claim-base
+
+      - name: Checkout PR helper fallback
+        uses: actions/checkout@v4
+        with:
+          path: .touchstone-claim-head
+
+      - name: Enforce claim-before-dispatch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          helper=".touchstone-claim-base/scripts/issue-claim-check.sh"
+          if [ ! -f "$helper" ]; then
+            echo "Trusted base helper is unavailable; using PR helper for this transition run."
+            helper=".touchstone-claim-head/scripts/issue-claim-check.sh"
+          fi
+          bash "$helper" --pr-number "$PR_NUMBER" --comment-pr
