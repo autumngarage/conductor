@@ -44,3 +44,18 @@ def test_internal_telemetry_invalid_bool_raises(monkeypatch):
 
     with pytest.raises(InternalConfigError):
         internal_telemetry_enabled(cwd=Path.cwd())
+
+
+def test_internal_telemetry_found_from_subdirectory(monkeypatch, tmp_path):
+    monkeypatch.delenv("CONDUCTOR_INTERNAL_TELEMETRY", raising=False)
+    monkeypatch.setenv("CONDUCTOR_INTERNAL_CONFIG", str(tmp_path / "missing-home.toml"))
+    repo = tmp_path / "repo"
+    (repo / ".conductor").mkdir(parents=True)
+    (repo / ".conductor" / "internal.toml").write_text(
+        "[telemetry]\ncapture_route_decisions = true\n",
+        encoding="utf-8",
+    )
+    subdir = repo / "src" / "deep" / "nested"
+    subdir.mkdir(parents=True)
+
+    assert internal_telemetry_enabled(cwd=subdir) is True

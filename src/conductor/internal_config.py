@@ -27,9 +27,19 @@ def home_internal_config_path() -> Path:
     return Path.home() / ".config" / "conductor" / "internal.toml"
 
 
-def repo_internal_config_path(cwd: Path | None = None) -> Path:
-    root = cwd or Path.cwd()
-    return root / DEFAULT_REPO_INTERNAL_PATH
+def repo_internal_config_path(cwd: Path | None = None) -> Path | None:
+    """Locate the nearest ``.conductor/internal.toml`` from ``cwd`` upward.
+
+    Walks parent directories so invoking Conductor from a subdirectory of the
+    repo still finds the project's internal-telemetry config. Returns None when
+    no ancestor contains one.
+    """
+    root = (cwd or Path.cwd()).resolve()
+    for candidate in [root, *root.parents]:
+        path = candidate / DEFAULT_REPO_INTERNAL_PATH
+        if path.exists():
+            return path
+    return None
 
 
 def internal_telemetry_enabled(*, cwd: Path | None = None) -> bool:
@@ -45,7 +55,12 @@ def internal_telemetry_enabled(*, cwd: Path | None = None) -> bool:
     if env is not None:
         return _parse_bool(env, source=INTERNAL_TELEMETRY_ENV)
 
-    for path in (repo_internal_config_path(cwd), home_internal_config_path()):
+    candidates: list[Path] = []
+    repo_path = repo_internal_config_path(cwd)
+    if repo_path is not None:
+        candidates.append(repo_path)
+    candidates.append(home_internal_config_path())
+    for path in candidates:
         if not path.exists():
             continue
         value = _load_capture_route_decisions(path)
