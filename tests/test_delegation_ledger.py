@@ -283,6 +283,52 @@ def test_delegations_report_tag_filter(monkeypatch, tmp_path):
     assert [row["provider"] for row in payload["providers"]] == ["gemini"]
 
 
+def test_delegations_report_last_applies_after_tag_filter(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    now = datetime.now(UTC)
+    record_delegation(
+        _event(
+            delegation_id="old-tagged",
+            timestamp=(now - timedelta(minutes=30)).isoformat(),
+            provider="codex",
+            tags=["tool-use"],
+            input_tokens=100,
+            output_tokens=10,
+        )
+    )
+    for idx in range(5):
+        record_delegation(
+            _event(
+                delegation_id=f"recent-{idx}",
+                timestamp=(now - timedelta(minutes=10 - idx)).isoformat(),
+                provider="codex",
+                tags=["other"],
+                input_tokens=100,
+                output_tokens=10,
+            )
+        )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "delegations",
+            "report",
+            "--since",
+            "1h",
+            "--last",
+            "2",
+            "--tag",
+            "tool-use",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["window"]["events"] == 1
+    assert payload["window"]["events_before_tag_filter"] == 6
+
+
 def test_delegations_report_preserves_multi_hop_fallback_chain(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     now = datetime.now(UTC).isoformat()

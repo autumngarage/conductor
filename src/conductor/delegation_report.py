@@ -98,12 +98,15 @@ def build_delegation_report(
     *,
     since: str | None,
     tag: str | None = None,
+    last: int | None = None,
 ) -> dict[str, Any]:
     filtered = [
         event
         for event in events
         if tag is None or tag in [candidate for candidate in event.get("tags") or []]
     ]
+    if last is not None:
+        filtered = filtered[-last:]
     providers: dict[str, _Bucket] = {}
     models: dict[tuple[str, str], _Bucket] = {}
     commands: Counter[str] = Counter()

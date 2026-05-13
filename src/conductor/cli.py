@@ -12967,7 +12967,6 @@ def delegations_report(
     try:
         events = list(
             read_delegations(
-                last=last_n,
                 since=since,
                 command=command_filter,
                 provider=provider_filter,
@@ -12977,7 +12976,7 @@ def delegations_report(
     except ValueError as e:
         raise click.UsageError(str(e)) from e
 
-    report = build_delegation_report(events, since=since, tag=tag_filter)
+    report = build_delegation_report(events, since=since, tag=tag_filter, last=last_n)
     if as_json:
         click.echo(json.dumps(report, default=str, indent=2))
         return
