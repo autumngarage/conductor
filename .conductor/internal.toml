@@ -1,0 +1,3 @@
+[telemetry]
+capture_route_decisions = true
+delegation_report = true

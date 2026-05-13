@@ -5,9 +5,9 @@ and per-exec session logs are noisy, fragmented, and may be expensive or
 impossible for operators to reconstruct later. This NDJSON stream is the
 external truth for delegation billing and time/accounting visibility.
 
-Storage is intentionally simple for schema version 1: one JSON object per line
+Storage is intentionally simple for schema version 2: one JSON object per line
 at ``~/.cache/conductor/delegations.ndjson`` under ``offline_mode._cache_dir()``.
-File rotation is future work; v1 only appends.
+File rotation is future work; v2 only appends.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 LEDGER_FILENAME = "delegations.ndjson"
 COMMANDS = ("ask", "call", "review", "exec", "council")
 STATUSES = ("ok", "error", "stalled", "timeout", "quota")
@@ -58,6 +58,8 @@ class DelegationEvent:
     council_role: CouncilRole | None = None
     members: list[dict] | None = None
     synthesis_delegation_id: str | None = None
+    route: dict | None = None
+    semantic: dict | None = None
 
     def to_dict(self) -> dict:
         payload = asdict(self)

@@ -179,3 +179,105 @@ def test_delegations_list_cli_filters(monkeypatch, tmp_path):
         "id3",
         "id4",
     ]
+
+
+def test_delegations_report_summarizes_token_efficiency(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    now = datetime.now(UTC).isoformat()
+    record_delegation(
+        _event(
+            delegation_id="gemini-1",
+            timestamp=now,
+            command="exec",
+            provider="gemini",
+            model="gemini-2.5-pro",
+            status="ok",
+            duration_ms=20_000,
+            input_tokens=10_000,
+            output_tokens=200,
+            thinking_tokens=1_000,
+            cost_usd=None,
+            tags=["tool-use", "code"],
+            route={"provider": "codex"},
+        )
+    )
+    record_delegation(
+        _event(
+            delegation_id="gemini-2",
+            timestamp=now,
+            command="exec",
+            provider="gemini",
+            model="gemini-2.5-pro",
+            status="error",
+            duration_ms=40_000,
+            input_tokens=20_000,
+            output_tokens=100,
+            thinking_tokens=2_000,
+            tags=["tool-use"],
+        )
+    )
+    record_delegation(
+        _event(
+            delegation_id="codex-1",
+            timestamp=now,
+            command="ask",
+            provider="codex",
+            model="gpt-5.4",
+            status="ok",
+            duration_ms=90_000,
+            input_tokens=30_000,
+            output_tokens=3_000,
+            thinking_tokens=0,
+            cost_usd=0.6,
+            tags=["code"],
+        )
+    )
+
+    result = CliRunner().invoke(main, ["delegations", "report", "--since", "1h", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    rows = {row["provider"]: row for row in payload["providers"]}
+    assert rows["gemini"]["calls"] == 2
+    assert rows["gemini"]["ok"] == 1
+    assert rows["gemini"]["non_ok"] == 1
+    assert rows["gemini"]["output_tokens_per_1k_input"] == 10.0
+    assert rows["gemini"]["input_tokens_per_output_token"] == 100.0
+    assert rows["gemini"]["ms_per_output_token"] == 200.0
+    assert rows["codex"]["cost_per_1k_output_tokens"] == 0.2
+    assert payload["route_fallbacks"] == {"codex->gemini": 1}
+
+
+def test_delegations_report_tag_filter(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    now = datetime.now(UTC).isoformat()
+    record_delegation(
+        _event(
+            delegation_id="a",
+            timestamp=now,
+            provider="gemini",
+            tags=["tool-use"],
+            input_tokens=100,
+            output_tokens=10,
+        )
+    )
+    record_delegation(
+        _event(
+            delegation_id="b",
+            timestamp=now,
+            provider="codex",
+            tags=["research"],
+            input_tokens=100,
+            output_tokens=10,
+        )
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["delegations", "report", "--since", "1h", "--tag", "tool-use", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["window"]["events"] == 1
+    assert [row["provider"] for row in payload["providers"]] == ["gemini"]
