@@ -463,6 +463,49 @@ def test_doctor_json_shape(mocker, monkeypatch):
         assert "source" in row
     for row in payload["providers"]:
         assert "muted" in row
+        assert "capabilities" in row
+
+
+def test_list_json_includes_capability_matrix(mocker, monkeypatch):
+    from conductor.providers import KimiProvider
+
+    _stub_all_unconfigured(mocker)
+    mocker.patch.object(KimiProvider, "configured", lambda self: (True, None))
+    monkeypatch.setattr(KimiProvider, "supported_tools", frozenset())
+
+    result = CliRunner().invoke(main, ["list", "--json"])
+
+    assert result.exit_code == 0, result.output
+    rows = {row["provider"]: row for row in json.loads(result.output)}
+    kimi = rows["kimi"]["capabilities"]
+    assert kimi["call"]["viable"] is True
+    assert kimi["exec_read_only"]["viable"] is False
+    assert kimi["exec_read_only"]["reason_code"] == "provider_lacks_tools"
+    assert kimi["exec_full"]["reason_code"] == "provider_lacks_tools"
+
+
+def test_doctor_json_reports_gemini_review_extension_readiness(mocker):
+    from conductor.providers import GeminiProvider
+
+    _stub_all_unconfigured(mocker)
+    mocker.patch.object(GeminiProvider, "configured", lambda self: (True, None))
+    mocker.patch.object(
+        GeminiProvider,
+        "review_configured",
+        lambda self: (
+            False,
+            "Gemini native review requires the Gemini CLI Code Review extension.",
+        ),
+    )
+
+    result = CliRunner().invoke(main, ["doctor", "--json"])
+
+    assert result.exit_code == 0, result.output
+    rows = {row["provider"]: row for row in json.loads(result.output)["providers"]}
+    review = rows["gemini"]["capabilities"]["review"]
+    assert review["viable"] is False
+    assert review["reason_code"] == "missing_native_review_extension"
+    assert rows["gemini"]["capabilities"]["call"]["viable"] is True
 
 
 def test_doctor_mute_unmute_shifts_counts_and_hides_fix_lines(mocker, monkeypatch):
