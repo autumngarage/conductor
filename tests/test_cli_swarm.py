@@ -114,13 +114,17 @@ def _commit_change(worktree: Path, filename: str, message: str) -> None:
     _git(worktree, "commit", "-m", message)
 
 
+def _swarm_original_body(body: str) -> str:
+    return body.split(f"\n\n{cli.SWARM_DELIVERY_CONTRACT}", 1)[0]
+
+
 def _fake_exec_factory(*, fail_on: set[str] | None = None, no_change_on: set[str] | None = None):
     fail_on = fail_on or set()
     no_change_on = no_change_on or set()
 
     def fake_exec(**kwargs):
         worktree = Path(kwargs["cwd"])
-        body = kwargs["body"]
+        body = _swarm_original_body(kwargs["body"])
         if body in fail_on:
             raise cli._ExecPhaseError(
                 exit_code=1,
@@ -538,7 +542,19 @@ def test_swarm_one_brief_succeeds_as_shipped(monkeypatch, tmp_path: Path) -> Non
     repo = _repo(tmp_path)
     brief = _brief(repo, "foo.md")
     monkeypatch.chdir(repo)
-    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", _fake_exec_factory())
+    seen: dict[str, object] = {}
+
+    def fake_exec(**kwargs):
+        seen.update(kwargs)
+        worktree = Path(kwargs["cwd"])
+        _commit_change(worktree, "foo.txt", "foo")
+        return (
+            CallResponse(text="done", provider=kwargs["provider_id"], model="test", duration_ms=1),
+            None,
+            None,
+        )
+
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", fake_exec)
     monkeypatch.setattr(cli, "_ship_swarm_pr", _fake_merged_ship(repo))
 
     result = CliRunner().invoke(
@@ -552,6 +568,9 @@ def test_swarm_one_brief_succeeds_as_shipped(monkeypatch, tmp_path: Path) -> Non
     assert payload["shipped_count"] == 1
     assert payload["tasks"][0]["status"] == "shipped"
     assert payload["tasks"][0]["commits"] == 1
+    assert seen["allow_completion_stretch"] is True
+    assert "Conductor swarm delivery contract:" in str(seen["body"])
+    assert "Commit all intended changes" in str(seen["body"])
     assert not Path(payload["tasks"][0]["worktree"]).exists()
     assert (
         _git_returncode(repo, "show-ref", "--verify", "--quiet", "refs/heads/feat/swarm/foo")
@@ -2247,7 +2266,7 @@ def test_swarm_auto_merge_marks_rebase_conflict_for_human_recovery(
 
     def fake_exec(**kwargs):
         worktree = Path(kwargs["cwd"])
-        body = kwargs["body"]
+        body = _swarm_original_body(kwargs["body"])
         value = "first\n" if body.startswith("first lane") else "second\n"
         (worktree / "conflict.txt").write_text(value, encoding="utf-8")
         _git(worktree, "add", "conflict.txt")
@@ -2584,7 +2603,7 @@ def test_swarm_max_parallel_runs_tasks_concurrently(monkeypatch, tmp_path: Path)
 
     def fake_exec(**kwargs):
         worktree = Path(kwargs["cwd"])
-        body = kwargs["body"]
+        body = _swarm_original_body(kwargs["body"])
         with started_lock:
             started.add(body)
             if len(started) == 2:

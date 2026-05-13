@@ -126,7 +126,8 @@ def detect_missing_deliverables(
 
     missing: list[MissingDeliverable] = []
     changed = tuple(changed_paths)
-    tool_calls = list(recent_tool_calls)[-RECENT_TOOL_CALL_LIMIT:]
+    all_tool_calls = list(recent_tool_calls)
+    tool_calls = all_tool_calls[-RECENT_TOOL_CALL_LIMIT:]
     if (
         _brief_requests_tests(brief)
         and not brief_declares_read_only_text_output(brief)
@@ -163,6 +164,16 @@ def detect_missing_deliverables(
                 "shipping",
                 "Brief asks to ship via `bash scripts/open-pr.sh --auto-merge`; "
                 "push/PR shipping command not invoked in this session.",
+            )
+        )
+
+    if _brief_requests_committed_work(brief) and not _recent_git_commit_invoked(
+        all_tool_calls
+    ):
+        missing.append(
+            MissingDeliverable(
+                "commit",
+                "Brief asks for committed work; `git commit` not invoked in this session.",
             )
         )
 
@@ -306,6 +317,15 @@ def _brief_requests_open_pr_ship(brief: str) -> bool:
     )
 
 
+def _brief_requests_committed_work(brief: str) -> bool:
+    patterns = (
+        r"(?i)\bcommit\s+all\s+intended\s+changes\b",
+        r"(?i)\bcommit\s+(?:your|the|all)\s+(?:changes|work)\b",
+        r"(?i)\bleave\s+the\s+worktree\s+clean\b",
+    )
+    return any(re.search(pattern, brief) for pattern in patterns)
+
+
 def _recent_bash_invoked(tool_calls: Iterable[dict[str, object]], command: str) -> bool:
     needle = _normalize_command(command)
     for call in tool_calls:
@@ -327,6 +347,16 @@ def _recent_shipping_invoked(tool_calls: Iterable[dict[str, object]]) -> bool:
         saw_push = saw_push or "git push" in command
         saw_pr = saw_pr or "gh pr" in command or "scripts/open-pr.sh --auto-merge" in command
     return saw_push and saw_pr
+
+
+def _recent_git_commit_invoked(tool_calls: Iterable[dict[str, object]]) -> bool:
+    for call in tool_calls:
+        if call.get("name") != "Bash":
+            continue
+        command = _normalize_command(_tool_call_command(call))
+        if re.search(r"\bgit\b.*\bcommit\b", command):
+            return True
+    return False
 
 
 def _tool_call_command(call: dict[str, object]) -> str:

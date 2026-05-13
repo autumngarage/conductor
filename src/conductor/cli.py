@@ -5712,6 +5712,13 @@ SWARM_SUCCESS_STATUSES = frozenset({"shipped", "no-changes"})
 SWARM_PROVIDER_FAILED_STATUS = "provider-failed"
 SWARM_CONFLICT_STATUS = "needs-human-conflict-resolution"
 SWARM_VALIDATION_FAILED_STATUS = "validation-failed"
+SWARM_DELIVERY_CONTRACT = """
+Conductor swarm delivery contract:
+- Commit all intended changes before your final answer.
+- Leave the worktree clean.
+- Do not open a pull request; conductor swarm opens and merges PRs after exec succeeds.
+- If no code changes are needed, say that explicitly in the final answer.
+""".strip()
 SWARM_BRANCH_PREFIX = "feat/swarm"
 SWARM_WORKTREE_LOCK = threading.Lock()
 SWARM_MANIFEST_LOCK = threading.Lock()
@@ -5723,6 +5730,14 @@ SWARM_METRICS_SCHEMA_VERSION = 1
 SWARM_PREFLIGHT_SCHEMA_VERSION = 1
 SWARM_MERGE_PLAN_SCHEMA_VERSION = 1
 SWARM_CORTEX_BOOKKEEPING_SCHEMA_VERSION = 1
+
+
+def _with_swarm_delivery_contract(body: str) -> str:
+    if "Conductor swarm delivery contract:" in body:
+        return body
+    return f"{body.rstrip()}\n\n{SWARM_DELIVERY_CONTRACT}"
+
+
 SWARM_PREFLIGHT_SUBSYSTEMS = frozenset(
     {
         "swarm",
@@ -8729,6 +8744,7 @@ def _run_swarm_task(
         brief_path=brief,
         repo_slug=_swarm_github_repo_slug(repo_root),
     )
+    dispatch_body = _with_swarm_delivery_contract(body)
 
     created_worktree = False
     status = "failed"
@@ -8800,9 +8816,9 @@ def _run_swarm_task(
                     strict_stall=False,
                     start_timeout_sec=None,
                     max_iterations=max_iterations,
-                    allow_completion_stretch=False,
+                    allow_completion_stretch=True,
                     retry_on_stall=1,
-                    body=body,
+                    body=dispatch_body,
                     attachments=(),
                     model=None,
                     log_file=None,

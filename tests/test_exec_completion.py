@@ -81,6 +81,35 @@ def test_cap_diagnostics_format_tool_usage_and_git_state(tmp_path: Path) -> None
     assert "untracked-files=1" in text
 
 
+def test_committed_work_request_without_git_commit_is_flagged() -> None:
+    missing = detect_missing_deliverables(
+        (
+            "Conductor swarm delivery contract:\n"
+            "- Commit all intended changes before your final answer.\n"
+            "- Leave the worktree clean."
+        ),
+        changed_paths=("src/conductor/foo.py",),
+        recent_tool_calls=[{"name": "Write", "args": {"path": "src/conductor/foo.py"}}],
+    )
+
+    assert [item.kind for item in missing] == ["commit"]
+    assert "`git commit` not invoked" in missing[0].message
+
+
+def test_committed_work_request_accepts_git_commit_from_any_prior_turn() -> None:
+    older_calls = [{"name": "Read", "args": {"path": f"file-{idx}.py"}} for idx in range(25)]
+    missing = detect_missing_deliverables(
+        "Commit all intended changes before your final answer.",
+        changed_paths=("src/conductor/foo.py",),
+        recent_tool_calls=[
+            {"name": "Bash", "args": {"command": "git add . && git commit -m fix"}},
+            *older_calls,
+        ],
+    )
+
+    assert missing == []
+
+
 def test_read_only_test_recommendations_do_not_require_test_path_change() -> None:
     missing = detect_missing_deliverables(
         (

@@ -521,6 +521,8 @@ class OpenRouterProvider:
                 "tools": tool_specs,
                 "tool_choice": "auto",
             }
+            if tools & {"Bash", "Edit", "Write"}:
+                payload["parallel_tool_calls"] = False
             body = self._post_chat(
                 payload,
                 timeout_sec=_remaining_timeout_sec(
