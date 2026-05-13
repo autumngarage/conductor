@@ -85,6 +85,14 @@ def test_pick_returns_only_configured_provider(mocker):
     assert decision.provider == "ollama"
 
 
+def test_pick_records_provider_runtime_kind(mocker):
+    _stub_configured(mocker, {"codex": True, "openrouter": True})
+    _provider, decision = pick(["tool-use"], tools={"Read"})
+    runtimes = {candidate.name: candidate.runtime_kind for candidate in decision.ranked}
+    assert runtimes["codex"] == "stateful-agent"
+    assert runtimes["openrouter"] == "stateless-tool-loop"
+
+
 def test_pick_scores_by_tag_overlap(mocker):
     _stub_configured(mocker, {"kimi": True, "claude": True, "ollama": True})
     # "local" is only on ollama; it should win even though priority says kimi first.

@@ -782,6 +782,45 @@ def test_swarm_auto_routes_lane_with_task_tags(monkeypatch, tmp_path: Path) -> N
     assert manifest["tasks"][0]["fallback_reason"] is None
 
 
+def test_swarm_auto_prefers_stateful_runtime_candidates(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md")
+    monkeypatch.chdir(repo)
+    calls: list[str] = []
+
+    def fake_pick(task_tags, **kwargs):
+        _ = (task_tags, kwargs)
+        decision = _route_decision("openrouter", "codex")
+        return object(), decision
+
+    def fake_exec(**kwargs):
+        calls.append(kwargs["provider_id"])
+        worktree = Path(kwargs["cwd"])
+        _commit_change(worktree, "auto.txt", "auto")
+        return (
+            CallResponse(text="done", provider=kwargs["provider_id"], model="test", duration_ms=1),
+            None,
+            None,
+        )
+
+    monkeypatch.setattr(cli, "pick", fake_pick)
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", fake_exec)
+    monkeypatch.setattr(cli, "_ship_swarm_pr", _fake_merged_ship(repo))
+
+    result = CliRunner().invoke(
+        main,
+        ["swarm", "--provider", "auto", "--brief", str(brief), "--auto-merge", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == ["codex"]
+    manifest = json.loads(_swarm_manifests(repo)[0].read_text(encoding="utf-8"))
+    assert manifest["tasks"][0]["selected_provider"] == "codex"
+
+
 def test_swarm_auto_falls_back_and_records_provider_details(
     monkeypatch,
     tmp_path: Path,
@@ -839,6 +878,7 @@ def test_swarm_auto_falls_back_and_records_provider_details(
     assert "fallback_reason=codex websocket disconnected during model refresh" in (
         status_result.output
     )
+    assert "codex (stateful-agent) -> gemini (stateful-agent)" in result.stderr
 
 
 def test_swarm_pinned_provider_does_not_fallback(monkeypatch, tmp_path: Path) -> None:

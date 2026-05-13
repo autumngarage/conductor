@@ -37,6 +37,7 @@ from typing import Literal
 
 from conductor.muted_providers import load_muted_provider_ids
 from conductor.providers import (
+    PROVIDER_RUNTIME_TEXT_ONLY,
     TIER_RANK,
     Provider,
     ProviderError,
@@ -164,6 +165,7 @@ class RankedCandidate:
     latency_ms: int
     health_penalty: float
     combined_score: float       # the key used by the current prefer mode (higher=better)
+    runtime_kind: str = PROVIDER_RUNTIME_TEXT_ONLY
     unconfigured_reason: str | None = None
     estimated_input_tokens: int = DEFAULT_ESTIMATED_INPUT_TOKENS
     estimated_output_tokens: int = DEFAULT_ESTIMATED_OUTPUT_TOKENS
@@ -270,6 +272,7 @@ def _score_one(
         latency_ms=provider.typical_p50_ms,
         health_penalty=penalty,
         combined_score=combined,
+        runtime_kind=getattr(provider, "runtime_kind", PROVIDER_RUNTIME_TEXT_ONLY),
         unconfigured_reason=unconfigured_reason,
         estimated_input_tokens=estimated_input_tokens,
         estimated_output_tokens=estimated_output_tokens,

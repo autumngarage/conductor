@@ -27,6 +27,7 @@ from conductor.providers.cli_auth import (
     run_subprocess_with_live_stderr,
 )
 from conductor.providers.interface import (
+    PROVIDER_RUNTIME_STATEFUL_AGENT,
     CallResponse,
     ProviderConfigError,
     ProviderError,
@@ -187,6 +188,7 @@ class ClaudeProvider:
 
     # Capability declarations (see interface.py)
     quality_tier = "frontier"
+    runtime_kind = PROVIDER_RUNTIME_STATEFUL_AGENT
     supported_tools = frozenset({"Read", "Grep", "Glob", "Edit", "Write", "Bash"})
     enforces_exec_tool_permissions = True
     supports_effort = True

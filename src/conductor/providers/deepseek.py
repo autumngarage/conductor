@@ -8,6 +8,7 @@ now share OpenRouter's credential + transport layer.
 from __future__ import annotations
 
 import conductor.providers.openrouter_catalog as openrouter_catalog
+from conductor.providers.interface import PROVIDER_RUNTIME_TEXT_ONLY
 from conductor.providers.openrouter import OpenRouterProvider
 
 DEEPSEEK_CHAT_MODEL = "deepseek/deepseek-chat"
@@ -38,6 +39,7 @@ class DeepSeekChatProvider(OpenRouterProvider):
     fix_command = "conductor init --only openrouter"
 
     quality_tier = "strong"
+    runtime_kind = PROVIDER_RUNTIME_TEXT_ONLY
     supported_tools: frozenset[str] = frozenset()
     supports_effort = False
     effort_to_thinking: dict[str, int] = {}
@@ -73,6 +75,7 @@ class DeepSeekReasonerProvider(OpenRouterProvider):
     fix_command = "conductor init --only openrouter"
 
     quality_tier = "strong"
+    runtime_kind = PROVIDER_RUNTIME_TEXT_ONLY
     supported_tools: frozenset[str] = frozenset()
     supports_effort = True
     effort_to_thinking = {

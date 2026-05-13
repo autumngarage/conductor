@@ -28,6 +28,7 @@ from conductor.providers.cli_auth import (
     run_subprocess_with_live_stderr,
 )
 from conductor.providers.interface import (
+    PROVIDER_RUNTIME_STATEFUL_AGENT,
     CallResponse,
     ProviderConfigError,
     ProviderError,
@@ -104,6 +105,7 @@ class GeminiProvider:
 
     # Capability declarations (see interface.py)
     quality_tier = "strong"
+    runtime_kind = PROVIDER_RUNTIME_STATEFUL_AGENT
     supported_tools = frozenset({"Read", "Grep", "Glob", "Edit", "Write", "Bash"})
     enforces_exec_tool_permissions = False
     supports_effort = True

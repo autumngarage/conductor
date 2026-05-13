@@ -99,6 +99,10 @@ from conductor.openrouter_stack_audit import (
 )
 from conductor.profiles import ProfileError, ProfileSpec, get_profile, load_profiles
 from conductor.providers import (
+    PROVIDER_RUNTIME_KINDS,
+    PROVIDER_RUNTIME_STATEFUL_AGENT,
+    PROVIDER_RUNTIME_STATELESS_TOOL_LOOP,
+    PROVIDER_RUNTIME_TEXT_ONLY,
     QUALITY_TIERS,
     TIER_RANK,
     TOOL_NAMES,
@@ -934,6 +938,20 @@ def _resolve_exec_tools(
 
 def _provider_enforces_exec_tool_permissions(provider_obj: object) -> bool:
     return bool(getattr(provider_obj, "enforces_exec_tool_permissions", False))
+
+
+def _provider_runtime_kind(provider_obj: object) -> str:
+    runtime_kind = getattr(provider_obj, "runtime_kind", PROVIDER_RUNTIME_TEXT_ONLY)
+    if isinstance(runtime_kind, str) and runtime_kind in PROVIDER_RUNTIME_KINDS:
+        return runtime_kind
+    return PROVIDER_RUNTIME_TEXT_ONLY
+
+
+def _provider_runtime_kind_by_name(provider_id: str) -> str:
+    try:
+        return _provider_runtime_kind(get_provider(provider_id))
+    except KeyError:
+        return PROVIDER_RUNTIME_TEXT_ONLY
 
 
 def _permission_profile_excludes(
@@ -8892,7 +8910,11 @@ def _run_swarm_task(
                         fallback_provider = provider_candidates[index + 1]
                         click.echo(
                             "[conductor] swarm provider fallback: "
-                            f"{candidate_provider} -> {fallback_provider}; reason: {e.message}",
+                            f"{candidate_provider} "
+                            f"({_provider_runtime_kind_by_name(candidate_provider)}) -> "
+                            f"{fallback_provider} "
+                            f"({_provider_runtime_kind_by_name(fallback_provider)}); "
+                            f"reason: {e.message}",
                             err=True,
                         )
                         continue
@@ -8921,7 +8943,11 @@ def _run_swarm_task(
                         fallback_provider = provider_candidates[index + 1]
                         click.echo(
                             "[conductor] swarm provider fallback: "
-                            f"{candidate_provider} -> {fallback_provider}; reason: {e}",
+                            f"{candidate_provider} "
+                            f"({_provider_runtime_kind_by_name(candidate_provider)}) -> "
+                            f"{fallback_provider} "
+                            f"({_provider_runtime_kind_by_name(fallback_provider)}); "
+                            f"reason: {e}",
                             err=True,
                         )
                         continue
@@ -9099,6 +9125,27 @@ def _swarm_task_tags(raw_tags: str | None) -> list[str]:
     return tags
 
 
+_SWARM_RUNTIME_PRIORITY = {
+    PROVIDER_RUNTIME_STATEFUL_AGENT: 0,
+    PROVIDER_RUNTIME_STATELESS_TOOL_LOOP: 1,
+    PROVIDER_RUNTIME_TEXT_ONLY: 2,
+}
+
+
+def _swarm_runtime_ordered_candidates(candidates: list[str]) -> list[str]:
+    original_index = {name: index for index, name in enumerate(candidates)}
+    return sorted(
+        candidates,
+        key=lambda name: (
+            _SWARM_RUNTIME_PRIORITY.get(
+                _provider_runtime_kind_by_name(name),
+                _SWARM_RUNTIME_PRIORITY[PROVIDER_RUNTIME_TEXT_ONLY],
+            ),
+            original_index[name],
+        ),
+    )
+
+
 def _swarm_provider_candidates(
     *,
     provider_id: str | None,
@@ -9134,7 +9181,7 @@ def _swarm_provider_candidates(
                 "--max-iterations only applies to Conductor-managed tool-use "
                 "providers; no routed swarm candidate can honor it."
             )
-    return candidates, decision
+    return _swarm_runtime_ordered_candidates(candidates), decision
 
 
 def _swarm_can_fallback_after_provider_failure(
@@ -10927,6 +10974,7 @@ def _provider_rows() -> list[dict]:
                 "default_model": _provider_default_model(provider),
                 "tags": list(provider.tags),
                 "tier": provider.quality_tier,
+                "runtime": _provider_runtime_kind(provider),
                 "muted": name in muted,
                 "tools": _tools_label(provider),
             }
@@ -10955,11 +11003,13 @@ def list_cmd(as_json: bool) -> None:
     name_w = max(len("PROVIDER"), max(len(r["provider"]) for r in rows))
     model_w = max(len("DEFAULT MODEL"), max(len(r["default_model"]) for r in rows))
     tier_w = max(len("TIER"), max(len(r["tier"]) for r in rows))
+    runtime_w = max(len("RUNTIME"), max(len(r["runtime"]) for r in rows))
     tags_w = max(len("TAGS"), max(len(",".join(r["tags"])) for r in rows))
     header = (
         f"{'PROVIDER':<{name_w}}  "
         f"{'READY':<5}  "
         f"{'TIER':<{tier_w}}  "
+        f"{'RUNTIME':<{runtime_w}}  "
         f"{'DEFAULT MODEL':<{model_w}}  "
         f"{'TAGS':<{tags_w}}  TOOLS"
     )
@@ -10972,6 +11022,7 @@ def list_cmd(as_json: bool) -> None:
             f"{r['provider']:<{name_w}}  "
             f"{ready:<5}  "
             f"{r['tier']:<{tier_w}}  "
+            f"{r['runtime']:<{runtime_w}}  "
             f"{r['default_model']:<{model_w}}  "
             f"{tags:<{tags_w}}  "
             f"{r['tools']}"
@@ -11249,6 +11300,7 @@ def _diagnostic_payload() -> dict:
                 "default_model": _provider_default_model(provider),
                 "tags": list(provider.tags),
                 "quality_tier": provider.quality_tier,
+                "runtime": _provider_runtime_kind(provider),
                 "supports_effort": provider.supports_effort,
                 "warnings": provider_warnings,
                 "muted": name in muted,
@@ -14019,6 +14071,7 @@ def providers_list(as_json: bool) -> None:
                 "accepts": s.accepts,
                 "tags": list(s.tags),
                 "tier": s.quality_tier,
+                "runtime": PROVIDER_RUNTIME_TEXT_ONLY,
                 "cost_per_1k_in": s.cost_per_1k_in,
                 "cost_per_1k_out": s.cost_per_1k_out,
                 "typical_p50_ms": s.typical_p50_ms,
@@ -14048,6 +14101,7 @@ def providers_list(as_json: bool) -> None:
         click.echo(f"    shell:    {s.shell}")
         click.echo(f"    accepts:  {s.accepts}")
         click.echo(f"    tier:     {s.quality_tier}")
+        click.echo(f"    runtime:  {PROVIDER_RUNTIME_TEXT_ONLY}")
         if s.tags:
             click.echo(f"    tags:     {', '.join(s.tags)}")
         if s.cost_per_1k_in or s.cost_per_1k_out:

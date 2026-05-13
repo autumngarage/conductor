@@ -236,12 +236,27 @@ def test_list_json_includes_tools_field(mocker):
         assert rows[name]["tools"] == "none", f"{name}: expected tools=none"
 
 
+def test_list_json_includes_runtime_field(mocker):
+    """Provider runtime kind is a contract, not a soft routing tag."""
+    _stub_all_unconfigured(mocker)
+    result = CliRunner().invoke(main, ["list", "--json"])
+    assert result.exit_code == 0
+    rows = {r["provider"]: r for r in json.loads(result.output)}
+    for name in ("claude", "codex", "gemini"):
+        assert rows[name]["runtime"] == "stateful-agent"
+    for name in ("openrouter", "ollama"):
+        assert rows[name]["runtime"] == "stateless-tool-loop"
+    for name in ("kimi", "deepseek-chat", "deepseek-reasoner"):
+        assert rows[name]["runtime"] == "text-only"
+
+
 def test_list_text_output_shows_tools_column(mocker):
     """conductor list text output includes a TOOLS column (#143)."""
     _stub_all_unconfigured(mocker)
     result = CliRunner().invoke(main, ["list"])
     assert result.exit_code == 0
     assert "TOOLS" in result.output
+    assert "RUNTIME" in result.output
     # At least one provider shows "all" and at least one shows "none".
     assert "all" in result.output
     assert "none" in result.output
