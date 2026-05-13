@@ -23,6 +23,13 @@ def _init_git(path: Path) -> None:
         "GIT_COMMITTER_EMAIL": "tester@example.com",
     }
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=path, env=env, check=True)
+    subprocess.run(["git", "config", "user.name", "Tester"], cwd=path, env=env, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "tester@example.com"],
+        cwd=path,
+        env=env,
+        check=True,
+    )
     subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=path, env=env, check=True)
     (path / "README.md").write_text("base\n", encoding="utf-8")
     subprocess.run(["git", "add", "README.md"], cwd=path, env=env, check=True)
