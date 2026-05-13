@@ -648,6 +648,34 @@ def test_ask_code_high_routes_to_codex_exec_with_default_tools(mocker):
     assert exec_mock.call_args.kwargs["sandbox"] == "none"
 
 
+def test_ask_code_high_read_only_brief_restricts_exec_tools(mocker):
+    _stub_all_configured(mocker, {"codex"})
+    exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "code",
+            "--effort",
+            "high",
+            "--allow-short-brief",
+            "--brief",
+            (
+                "Read-only advisory task. Do not modify files. "
+                "Inspect the repo and recommend the schema/stage approach."
+            ),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert exec_mock.called
+    assert exec_mock.call_args.kwargs["tools"] == frozenset({"Read", "Grep", "Glob"})
+    assert exec_mock.call_args.kwargs["sandbox"] == "read-only"
+    assert "read-only brief detected; restricting exec tools to Read,Grep,Glob" in result.stderr
+
+
 def test_ask_code_high_falls_back_immediately_to_openrouter_on_quota(mocker):
     from conductor.providers.interface import ProviderHTTPError
 

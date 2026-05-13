@@ -662,6 +662,7 @@ def test_exec_with_tools_runs_openai_tool_loop(configured, tmp_path):
     assert response.usage["iterations"][1]["cost_usd"] == pytest.approx(0.002)
     assert response.cost_usd == pytest.approx(0.003)
     assert requests[0]["tools"][0]["function"]["name"] == "Read"
+    assert "parallel_tool_calls" not in requests[0]
     assert requests[1]["messages"][1]["tool_calls"][0]["id"] == "call_read"
     assert requests[1]["messages"][2] == {
         "role": "tool",
@@ -669,6 +670,67 @@ def test_exec_with_tools_runs_openai_tool_loop(configured, tmp_path):
         "name": "Read",
         "content": "tool loop works",
     }
+
+
+def test_exec_with_write_tools_disables_parallel_tool_calls(configured, tmp_path):
+    (tmp_path / "README.md").write_text("base\n", encoding="utf-8")
+    requests: list[dict] = []
+    responses = [
+        {
+            "model": "openai/gpt-5.5",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_write",
+                                "type": "function",
+                                "function": {
+                                    "name": "Write",
+                                    "arguments": json.dumps(
+                                        {"path": "README.md", "content": "updated\n"}
+                                    ),
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+        },
+        {
+            "model": "openai/gpt-5.5",
+            "choices": [
+                {
+                    "message": {"role": "assistant", "content": "done"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 3},
+        },
+    ]
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=responses[len(requests) - 1])
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        response = OpenRouterProvider().exec(
+            "Update README.md.",
+            model="openai/gpt-5.5",
+            tools=frozenset({"Read", "Write"}),
+            sandbox="none",
+            cwd=str(tmp_path),
+            max_iterations=2,
+        )
+
+    assert response.text == "done"
+    assert requests[0]["parallel_tool_calls"] is False
+    assert requests[1]["parallel_tool_calls"] is False
 
 
 def test_exec_without_tools_passes_timeout_to_call(configured, mocker):
@@ -1417,6 +1479,64 @@ def test_exec_iteration_cap_reports_missing_tests(configured, tmp_path):
         }
     ]
     assert "Detected unfinished items" in str(exc.value)
+
+
+def test_exec_iteration_cap_reports_no_changes_and_cap_diagnostics(
+    configured, tmp_path
+):
+    _init_clean_git_repo(tmp_path)
+    response = {
+        "model": "openai/gpt-5.5",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_read",
+                            "type": "function",
+                            "function": {
+                                "name": "Read",
+                                "arguments": json.dumps({"path": "README.md"}),
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+    }
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(
+            return_value=httpx.Response(200, json=response)
+        )
+        with pytest.raises(ProviderExecutionError) as exc:
+            OpenRouterProvider().exec(
+                "Implement it.\n\n## Tests\nAdd tests.",
+                model="openai/gpt-5.5",
+                tools=frozenset({"Read"}),
+                task_tags=("code", "tool-use"),
+                sandbox="none",
+                cwd=str(tmp_path),
+                max_iterations=1,
+            )
+
+    status = exc.value.status
+    assert status["missing_deliverables"] == [
+        {
+            "kind": "changes",
+            "message": "Agent made no changes before the iteration cap.",
+        }
+    ]
+    assert status["cap_diagnostics"]["tool_usage"] == {"Read": 1}
+    assert status["cap_diagnostics"]["git_state"]["modified_files"] == 0
+    assert status["cap_diagnostics"]["git_state"]["untracked_files"] == 0
+    assert "Tool usage: Read=1" in str(exc.value)
+    assert "Agent made no changes" in str(exc.value)
+    assert "diff did not add to tests/" not in str(exc.value)
 
 
 def test_exec_iteration_cap_does_not_require_tests_for_read_only_recommendations(

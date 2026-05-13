@@ -14,13 +14,15 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import httpx
 
 from conductor import credentials
 from conductor.exec_completion import (
+    CapDiagnostics,
     MissingDeliverable,
+    cap_diagnostics_for_completion_scan,
     changed_paths_for_completion_scan,
     completion_stretch_prompt,
     detect_missing_deliverables,
@@ -500,6 +502,7 @@ class OpenRouterProvider:
         validation_failures: list[dict[str, object]] = []
         recent_tool_calls: list[dict[str, object]] = []
         missing_deliverables: list[MissingDeliverable] = []
+        cap_diagnostics: CapDiagnostics | None = None
         empty_response_retries: list[dict[str, object]] = []
         completion_stretched = False
         terminal_answer_stretched = False
@@ -518,6 +521,8 @@ class OpenRouterProvider:
                 "tools": tool_specs,
                 "tool_choice": "auto",
             }
+            if tools & {"Bash", "Edit", "Write"}:
+                payload["parallel_tool_calls"] = False
             body = self._post_chat(
                 payload,
                 timeout_sec=_remaining_timeout_sec(
@@ -756,10 +761,15 @@ class OpenRouterProvider:
             hit_cap = True
 
         if hit_cap:
+            cap_diagnostics = cap_diagnostics_for_completion_scan(
+                workdir,
+                recent_tool_calls=recent_tool_calls,
+            )
             final_text = (final_text or "(no content)") + "\n\n" + (
                 format_missing_deliverables_cap_message(
                     original_iteration_cap,
                     missing_deliverables,
+                    cap_diagnostics,
                 )
             )
 
@@ -776,6 +786,7 @@ class OpenRouterProvider:
             git_status_before=git_status_before,
             git_status_after=git_status_after,
             missing_deliverables=missing_deliverables,
+            cap_diagnostics=cap_diagnostics,
         )
         duration_ms = int((time.monotonic() - start) * 1000)
         execution_status["duration_ms"] = duration_ms
@@ -813,6 +824,9 @@ class OpenRouterProvider:
                 "missing_deliverables": [
                     item.__dict__ for item in missing_deliverables
                 ],
+                "cap_diagnostics": (
+                    cap_diagnostics.as_dict() if cap_diagnostics is not None else None
+                ),
                 "tool_call_count": tool_call_count,
                 "write_success_count": write_success_count,
                 "tool_error_count": len(tool_errors),
@@ -1012,6 +1026,7 @@ def _execution_status(
     git_status_before: dict[str, object] | None,
     git_status_after: dict[str, object] | None,
     missing_deliverables: list[MissingDeliverable],
+    cap_diagnostics: CapDiagnostics | None,
 ) -> dict[str, object]:
     state = "completed"
     after_clean = (
@@ -1042,6 +1057,9 @@ def _execution_status(
         "hit_iteration_cap": hit_cap,
         "iteration_cap": iteration_cap,
         "missing_deliverables": [item.__dict__ for item in missing_deliverables],
+        "cap_diagnostics": (
+            cap_diagnostics.as_dict() if cap_diagnostics is not None else None
+        ),
         "git_status_before": git_status_before,
         "git_status_after": git_status_after,
     }
@@ -1061,9 +1079,16 @@ def _execution_failure_message(status: dict[str, object]) -> str | None:
             for item in missing_items
             if isinstance(item, dict)
         ]
+        raw_cap_diagnostics = status.get("cap_diagnostics")
+        cap_diagnostics = (
+            cast("dict[str, object]", raw_cap_diagnostics)
+            if isinstance(raw_cap_diagnostics, dict)
+            else None
+        )
         return format_missing_deliverables_cap_message(
             int(cap) if isinstance(cap, int) else 0,
             missing,
+            cap_diagnostics,
         )
     if state == "tool-call-leak":
         return (
