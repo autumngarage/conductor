@@ -3909,6 +3909,94 @@ def test_route_json_accepts_explicit_size_estimate(mocker):
     assert payload["ranked"][0]["estimated_input_tokens"] == 123
 
 
+def test_route_review_json_reports_missing_gemini_extension(mocker):
+    _stub_all_configured(mocker, {"gemini"})
+    review_mock = mocker.patch.object(
+        GeminiProvider,
+        "review_configured",
+        return_value=(
+            False,
+            "Gemini native review requires the Gemini CLI Code Review extension.",
+        ),
+    )
+    call_mock = mocker.patch.object(GeminiProvider, "review")
+
+    result = CliRunner().invoke(
+        main,
+        ["route", "--kind", "review", "--with", "gemini", "--json"],
+    )
+
+    assert result.exit_code == 2, result.output
+    payload = json.loads(result.output)
+    assert payload["viable"] is False
+    assert payload["selected_provider"] is None
+    assert payload["excluded"][0]["provider"] == "gemini"
+    assert payload["excluded"][0]["reason_code"] == "missing_native_review_extension"
+    assert review_mock.called
+    assert not call_mock.called
+
+
+def test_route_exec_json_reports_provider_lacks_tools(mocker, monkeypatch):
+    _stub_all_configured(mocker, {"kimi"})
+    monkeypatch.setattr(KimiProvider, "supported_tools", frozenset())
+    call_mock = mocker.patch.object(KimiProvider, "exec")
+
+    result = CliRunner().invoke(
+        main,
+        ["route", "--kind", "exec", "--with", "kimi", "--tools", "Read", "--json"],
+    )
+
+    assert result.exit_code == 2, result.output
+    payload = json.loads(result.output)
+    assert payload["viable"] is False
+    assert payload["excluded"][0]["provider"] == "kimi"
+    assert payload["excluded"][0]["reason_code"] == "provider_lacks_tools"
+    assert not call_mock.called
+
+
+def test_route_review_json_selects_openrouter_fallback(mocker):
+    _stub_all_configured(mocker, {"gemini", "openrouter"})
+    mocker.patch.object(
+        GeminiProvider,
+        "review_configured",
+        return_value=(
+            False,
+            "Gemini native review requires the Gemini CLI Code Review extension.",
+        ),
+    )
+    call_mock = mocker.patch.object(OpenRouterProvider, "call")
+
+    result = CliRunner().invoke(
+        main,
+        ["route", "--kind", "review", "--prefer", "best", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["viable"] is True
+    assert payload["selected_provider"] == "openrouter"
+    assert payload["route_mode"] == "hosted_review"
+    assert payload["candidates"][0]["provider"] == "openrouter"
+    excluded = {entry["provider"]: entry for entry in payload["excluded"]}
+    assert excluded["gemini"]["reason_code"] == "missing_native_review_extension"
+    assert not call_mock.called
+
+
+def test_route_review_json_reports_all_candidates_excluded(mocker):
+    _stub_all_configured(mocker, {"openrouter"})
+
+    result = CliRunner().invoke(
+        main,
+        ["route", "--kind", "review", "--exclude", "openrouter", "--json"],
+    )
+
+    assert result.exit_code == 2, result.output
+    payload = json.loads(result.output)
+    assert payload["viable"] is False
+    excluded = {entry["provider"]: entry for entry in payload["excluded"]}
+    assert excluded["openrouter"]["reason_code"] == "excluded_by_user"
+
+
 def test_ask_call_mode_routes_with_prompt_size_estimate(mocker):
     _stub_all_configured(mocker, {"openrouter"})
     mocker.patch.object(
