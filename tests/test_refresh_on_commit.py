@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import subprocess
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -9,9 +10,6 @@ from click.testing import CliRunner
 from conductor import agent_wiring
 from conductor import cli as cli_mod
 from conductor.cli import main
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 @pytest.fixture(autouse=True)
@@ -147,6 +145,151 @@ def test_update_check_exits_one_for_stale_without_writing(tmp_path, monkeypatch)
         repo / "AGENTS.md"
     ).read_text(encoding="utf-8")
     assert _staged_paths(repo) == []
+
+
+def test_update_check_json_reports_exact_stale_repo_integrations(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    monkeypatch.setattr(cli_mod, "__version__", "0.9.0")
+    agent_wiring.wire_agents_md(cwd=repo, version="0.8.9")
+
+    result = CliRunner().invoke(main, ["update", "--check", "--json"])
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    assert payload["current"] is False
+    assert payload["stale"] is True
+    assert payload["update_command"] == "conductor update"
+    integrations = {entry["kind"]: entry for entry in payload["integrations"]}
+    assert integrations["agents-md-import"]["status"] == "stale"
+    assert integrations["agents-md-import"]["installed_version"] == "0.8.9"
+    assert integrations["agents-md-import"]["expected_version"] == "0.9.0"
+    assert integrations["agents-md-import"]["update_command"] == "conductor update"
+    assert _staged_paths(repo) == []
+
+
+def test_update_check_json_treats_repo_claude_import_mode_as_current(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    monkeypatch.setattr(cli_mod, "__version__", "0.9.0")
+    agent_wiring.wire_claude_md_repo(cwd=repo, version="0.8.9")
+
+    result = CliRunner().invoke(main, ["update", "--check", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["current"] is True
+    assert payload["stale"] is False
+    integrations = {entry["kind"]: entry for entry in payload["integrations"]}
+    assert integrations["claude-md-repo-import"]["status"] == "import-mode"
+    assert integrations["claude-md-repo-import"]["installed_version"] == "0.8.9"
+    assert integrations["claude-md-repo-import"]["stale"] is False
+    assert integrations["claude-md-repo-import"]["update_command"] is None
+    assert _staged_paths(repo) == []
+
+
+def test_update_check_json_reports_unreadable_repo_integration(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    monkeypatch.setattr(cli_mod, "__version__", "0.9.0")
+    agent_wiring.wire_agents_md(cwd=repo, version="0.8.9")
+    original_read_text = Path.read_text
+
+    def read_text(path, *args, **kwargs):
+        if path == repo / "AGENTS.md":
+            raise OSError("permission denied")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    result = CliRunner().invoke(main, ["update", "--check", "--json"])
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    assert payload["current"] is False
+    assert payload["needs_attention"] is True
+    integrations = {entry["kind"]: entry for entry in payload["integrations"]}
+    assert integrations["agents-md-import"]["stale"] is True
+    assert integrations["agents-md-import"]["requires_attention"] is True
+    assert integrations["agents-md-import"]["status"].startswith("read-error:")
+    assert (
+        integrations["agents-md-import"]["update_command"]
+        == "fix file permissions, then conductor update"
+    )
+
+
+def test_update_plain_reports_unreadable_repo_integration(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    monkeypatch.setattr(cli_mod, "__version__", "0.9.0")
+    agent_wiring.wire_agents_md(cwd=repo, version="0.8.9")
+    original_read_text = Path.read_text
+
+    def read_text(path, *args, **kwargs):
+        if path == repo / "AGENTS.md":
+            raise OSError("permission denied")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    result = CliRunner().invoke(main, ["update"])
+
+    assert result.exit_code == 1, result.output
+    assert "need manual repair" in result.output
+    assert "permission denied" in result.output
+    assert "Conductor repo integrations are current." not in result.output
+
+
+def test_update_check_json_reports_malformed_sentinel_as_manual_repair(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    monkeypatch.setattr(cli_mod, "__version__", "0.9.0")
+    (repo / "AGENTS.md").write_text(
+        "<!-- conductor:begin v0.8.9 -->\nmissing end marker\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(main, ["update", "--check", "--json"])
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    assert payload["current"] is False
+    assert payload["stale"] is False
+    assert payload["needs_attention"] is True
+    integrations = {entry["kind"]: entry for entry in payload["integrations"]}
+    assert integrations["agents-md-import"]["status"] == "malformed sentinel"
+    assert integrations["agents-md-import"]["stale"] is False
+    assert integrations["agents-md-import"]["requires_attention"] is True
+    assert (
+        integrations["agents-md-import"]["update_command"]
+        == "repair malformed sentinel, then conductor init -y"
+    )
+
+
+def test_update_json_reports_malformed_sentinel_as_json(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    monkeypatch.setattr(cli_mod, "__version__", "0.9.0")
+    (repo / "AGENTS.md").write_text(
+        "<!-- conductor:begin v0.8.9 -->\nmissing end marker\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(main, ["update", "--json"])
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    assert payload["current"] is False
+    assert payload["needs_attention"] is True
+    assert "Conductor repo integrations need manual repair" not in result.output
 
 
 def test_update_check_exits_zero_when_current(tmp_path, monkeypatch):

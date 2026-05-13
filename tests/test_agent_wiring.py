@@ -496,6 +496,13 @@ def test_agent_wiring_notice_omits_fresh_repo_wiring():
     assert aw.agent_wiring_notice(current_version="0.8.1") is None
 
 
+def test_agent_wiring_notice_omits_stale_repo_claude_import_mode():
+    aw.wire_agents_md(version="0.9.0")
+    aw.wire_claude_md_repo(version="0.8.1")
+
+    assert aw.agent_wiring_notice(current_version="0.9.0") is None
+
+
 def test_agent_wiring_notice_treats_local_build_metadata_as_current():
     aw.wire_agents_md(version="0.8.1")
     aw.wire_gemini_md(version="0.8.1")
