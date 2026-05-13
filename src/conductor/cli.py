@@ -10638,7 +10638,249 @@ def swarm_retry_ship(run_id_or_path: str, task_selector: str, auto_merge: bool) 
 # --------------------------------------------------------------------------- #
 
 
+VALID_ROUTE_KINDS = ("call", "exec", "review")
+
+
+def _route_reason_code(reason: str) -> str:
+    lowered = reason.lower()
+    if "gemini native review requires" in lowered or "code review extension" in lowered:
+        return "missing_native_review_extension"
+    if "does not support tools" in lowered:
+        return "provider_lacks_tools"
+    if "excluded" in lowered:
+        return "excluded_by_user"
+    if "muted" in lowered:
+        return "muted"
+    if "rate-limit" in lowered or "rate limited" in lowered:
+        return "rate_limited_recently"
+    if "not configured" in lowered or "not found" in lowered or "install" in lowered:
+        return "missing_credentials"
+    if "not tagged" in lowered:
+        return "provider_wrong_mode"
+    return "provider_not_viable"
+
+
+def _route_provider_mode(kind: str, provider_obj: object) -> str:
+    if kind == "review":
+        if isinstance(provider_obj, NativeReviewProvider):
+            return "native_review"
+        return "hosted_review"
+    if kind == "exec":
+        return "exec"
+    return "call"
+
+
+def _route_provider_assessment(
+    name: str,
+    *,
+    kind: str,
+    tools: frozenset[str],
+    excluded: frozenset[str],
+) -> dict[str, object]:
+    try:
+        provider_obj = get_provider(name)
+    except KeyError:
+        return {
+            "provider": name,
+            "viable": False,
+            "reason_code": "unknown_provider",
+            "reason": "unknown provider",
+        }
+    base = {
+        "provider": name,
+        "tags": sorted(getattr(provider_obj, "tags", ())),
+        "runtime_kind": getattr(provider_obj, "runtime_kind", PROVIDER_RUNTIME_TEXT_ONLY),
+        "supported_tools": sorted(getattr(provider_obj, "supported_tools", frozenset())),
+        "mode": _route_provider_mode(kind, provider_obj),
+    }
+    if name in excluded:
+        reason = "excluded by caller"
+        return {
+            **base,
+            "viable": False,
+            "reason_code": _route_reason_code(reason),
+            "reason": reason,
+        }
+    if kind == "review" and NATIVE_REVIEW_TAG not in getattr(provider_obj, "tags", ()):
+        reason = "provider is not tagged code-review"
+        return {
+            **base,
+            "viable": False,
+            "reason_code": _route_reason_code(reason),
+            "reason": reason,
+        }
+    ok, reason = (
+        provider_obj.review_configured()
+        if kind == "review" and isinstance(provider_obj, NativeReviewProvider)
+        else provider_obj.configured()
+    )
+    if not ok:
+        reason = reason or f"{name} is not configured"
+        return {
+            **base,
+            "viable": False,
+            "reason_code": _route_reason_code(reason),
+            "reason": reason,
+        }
+    if kind == "exec" and tools and not tools.issubset(
+        getattr(provider_obj, "supported_tools", frozenset())
+    ):
+        missing = sorted(tools - getattr(provider_obj, "supported_tools", frozenset()))
+        reason = f"does not support tools: {missing}"
+        return {
+            **base,
+            "viable": False,
+            "reason_code": "provider_lacks_tools",
+            "reason": reason,
+        }
+    return {
+        **base,
+        "viable": True,
+        "reason_code": None,
+        "reason": None,
+        "model": getattr(provider_obj, "default_model", None),
+    }
+
+
+def _route_validation_payload(
+    *,
+    kind: str,
+    provider_id: str | None,
+    tags: tuple[str, ...],
+    prefer: str,
+    effort: str | int,
+    tools: frozenset[str],
+    sandbox: str,
+    exclude: frozenset[str],
+    base: str | None,
+    cwd: str | None,
+    estimated_input_tokens: int | None,
+    estimated_output_tokens: int | None,
+) -> tuple[dict[str, object], int]:
+    if kind not in VALID_ROUTE_KINDS:
+        raise click.UsageError(
+            f"--kind={kind!r} is not valid. Use one of: {list(VALID_ROUTE_KINDS)}."
+        )
+    requested_tags = tuple(sorted({*tags, *(("code-review",) if kind == "review" else ())}))
+    requested = {
+        "kind": kind,
+        "provider": provider_id,
+        "tags": list(requested_tags),
+        "tools": sorted(tools),
+        "base": base,
+        "cwd": str(Path(cwd).expanduser()) if cwd else None,
+    }
+    provider_names = tuple(known_providers())
+    if provider_id is not None and provider_id not in provider_names:
+        payload = {
+            "requested": requested,
+            "viable": False,
+            "selected_provider": None,
+            "selected_model": None,
+            "route_mode": None,
+            "candidates": [],
+            "excluded": [
+                {
+                    "provider": provider_id,
+                    "viable": False,
+                    "reason_code": "unknown_provider",
+                    "reason": "unknown provider",
+                }
+            ],
+        }
+        return payload, 2
+
+    candidate_names = (provider_id,) if provider_id else provider_names
+    assessments = [
+        _route_provider_assessment(
+            name,
+            kind=kind,
+            tools=tools,
+            excluded=exclude,
+        )
+        for name in candidate_names
+    ]
+    viable_assessments = [entry for entry in assessments if entry["viable"]]
+
+    decision_payload: dict[str, object] | None = None
+    selected_provider: str | None = None
+    selected_model: str | None = None
+    route_mode: str | None = None
+    ordered_candidates = viable_assessments
+
+    if provider_id is not None:
+        if viable_assessments:
+            selected = viable_assessments[0]
+            selected_provider = str(selected["provider"])
+            selected_model = str(selected["model"])
+            route_mode = str(selected["mode"])
+    else:
+        route_exclude = set(exclude)
+        if kind == "review":
+            review_exclude, _review_reasons = _review_exclude_set(frozenset(exclude))
+            route_exclude.update(review_exclude)
+        try:
+            _provider, decision = pick(
+                list(requested_tags),
+                prefer=prefer,
+                effort=effort,
+                tools=tools if kind == "exec" else frozenset(),
+                sandbox=sandbox,
+                exclude=route_exclude,
+                shadow=True,
+                estimated_input_tokens=estimated_input_tokens,
+                estimated_output_tokens=estimated_output_tokens,
+            )
+            selected_provider = decision.provider
+            selected_assessment = next(
+                entry for entry in viable_assessments if entry["provider"] == decision.provider
+            )
+            selected_model = str(selected_assessment["model"])
+            route_mode = str(selected_assessment["mode"])
+            ranked_order = [candidate.name for candidate in decision.ranked]
+            by_name = {str(entry["provider"]): entry for entry in viable_assessments}
+            ordered_candidates = [by_name[name] for name in ranked_order if name in by_name]
+            decision_payload = asdict(decision)
+        except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError):
+            selected_provider = None
+
+    excluded_entries = [entry for entry in assessments if not entry["viable"]]
+    payload = {
+        "requested": requested,
+        "viable": selected_provider is not None,
+        "selected_provider": selected_provider,
+        "selected_model": selected_model,
+        "route_mode": route_mode,
+        "candidates": ordered_candidates,
+        "excluded": excluded_entries,
+        "decision": decision_payload,
+    }
+    return payload, 0 if selected_provider is not None else 2
+
+
+def _emit_route_validation_text(payload: dict[str, object]) -> None:
+    if payload["viable"]:
+        click.echo(
+            f"route viable: {payload['selected_provider']} "
+            f"({payload['route_mode']})"
+        )
+        return
+    click.echo("route not viable")
+    for entry in payload["excluded"]:
+        click.echo(
+            f"  - {entry['provider']}: {entry['reason_code']} — {entry['reason']}"
+        )
+
+
 @main.command()
+@click.option(
+    "--kind",
+    default=None,
+    help="Validate a route kind without provider tokens: call | exec | review.",
+)
+@click.option("--with", "provider_id", default=None, help="Validate a pinned provider.")
+@click.option("--base", default=None, help="For review validation: base ref context.")
+@click.option("--cwd", default=None, help="Working directory context for validation.")
 @click.option("--tags", default=None, help="Comma-separated task tags.")
 @click.option(
     "--prefer",
@@ -10675,6 +10917,10 @@ def swarm_retry_ship(run_id_or_path: str, task_selector: str, auto_merge: bool) 
 )
 @click.option("--json", "as_json", is_flag=True, default=False)
 def route(
+    kind: str | None,
+    provider_id: str | None,
+    base: str | None,
+    cwd: str | None,
     tags: str | None,
     prefer: str | None,
     effort: str | None,
@@ -10698,18 +10944,44 @@ def route(
     )
     sandbox_value = _validate_sandbox(sandbox, warn=sandbox is not None)
     effort_value = _parse_effort(effort)
+    tag_values = tuple(_parse_csv(tags))
+    exclude_values = _permission_profile_excludes(
+        exclude,
+        permission_profile=permission_profile_value,
+    )
 
-    try:
-        _provider, decision = pick(
-            _parse_csv(tags),
+    if kind is not None:
+        payload, exit_code = _route_validation_payload(
+            kind=kind,
+            provider_id=provider_id,
+            tags=tag_values,
             prefer=_validate_prefer(prefer),
             effort=effort_value,
             tools=tools_set,
             sandbox=sandbox_value,
-            exclude=_permission_profile_excludes(
-                exclude,
-                permission_profile=permission_profile_value,
-            ),
+            exclude=exclude_values,
+            base=base,
+            cwd=cwd,
+            estimated_input_tokens=estimated_input_tokens,
+            estimated_output_tokens=estimated_output_tokens,
+        )
+        if as_json:
+            click.echo(json.dumps(payload, default=str, indent=2))
+        else:
+            _emit_route_validation_text(payload)
+        sys.exit(exit_code)
+
+    if provider_id is not None:
+        raise click.UsageError("--with requires --kind for route validation.")
+
+    try:
+        _provider, decision = pick(
+            list(tag_values),
+            prefer=_validate_prefer(prefer),
+            effort=effort_value,
+            tools=tools_set,
+            sandbox=sandbox_value,
+            exclude=exclude_values,
             shadow=True,
             estimated_input_tokens=estimated_input_tokens,
             estimated_output_tokens=estimated_output_tokens,
