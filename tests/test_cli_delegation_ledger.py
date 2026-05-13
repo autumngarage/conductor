@@ -121,6 +121,7 @@ def test_exec_records_ledger_event(monkeypatch):
 
 def test_ask_records_ledger_event(monkeypatch):
     events = []
+    monkeypatch.setenv("CONDUCTOR_INTERNAL_TELEMETRY", "0")
     monkeypatch.setattr("conductor.cli.record_delegation", events.append)
     monkeypatch.setattr("conductor.cli.pick", lambda *args, **kwargs: ("codex", _decision()))
     monkeypatch.setattr(
@@ -145,6 +146,36 @@ def test_ask_records_ledger_event(monkeypatch):
     assert events[0].command == "ask"
     assert events[0].provider == "codex"
     assert events[0].status == "ok"
+    assert events[0].route is None
+
+
+def test_internal_telemetry_records_route_metadata(monkeypatch):
+    events = []
+    monkeypatch.setenv("CONDUCTOR_INTERNAL_TELEMETRY", "1")
+    monkeypatch.setattr("conductor.cli.record_delegation", events.append)
+    monkeypatch.setattr("conductor.cli.pick", lambda *args, **kwargs: ("codex", _decision()))
+    monkeypatch.setattr(
+        "conductor.cli._invoke_with_fallback",
+        lambda *args, **kwargs: (_response(provider="codex", model="gpt-test"), []),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "code",
+            "--task",
+            "this is long enough for semantic exec",
+            "--no-preflight",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(events) == 1
+    assert events[0].route["provider"] == "codex"
+    assert events[0].route["ranked"][0]["name"] == "codex"
+    assert events[0].semantic["kind"] == "code"
 
 
 def test_council_records_parent_and_member_events(monkeypatch):

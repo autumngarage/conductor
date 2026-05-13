@@ -64,6 +64,7 @@ from conductor.delegation_ledger import (
     read_delegations,
     record_delegation,
 )
+from conductor.delegation_report import build_delegation_report
 from conductor.exec_completion import brief_declares_read_only_text_output
 from conductor.git_state import (
     DEFAULT_BRANCH_SCAN_LIMIT,
@@ -77,6 +78,7 @@ from conductor.git_state import (
     StaleBranch,
     scan_git_state,
 )
+from conductor.internal_config import InternalConfigError, internal_telemetry_enabled
 from conductor.muted_providers import (
     MutedProvidersError,
     load_muted_provider_ids,
@@ -3361,6 +3363,7 @@ def _record_response_delegation(
     council_role: str | None = None,
     members: list[dict] | None = None,
     synthesis_delegation_id: str | None = None,
+    fallback_chain: list[str] | None = None,
 ) -> str:
     event = _delegation_event_from_response(
         command,
@@ -3374,6 +3377,7 @@ def _record_response_delegation(
         council_role=council_role,
         members=members,
         synthesis_delegation_id=synthesis_delegation_id,
+        fallback_chain=fallback_chain,
     )
     record_delegation(event)
     return event.delegation_id
@@ -3392,8 +3396,13 @@ def _delegation_event_from_response(
     council_role: str | None = None,
     members: list[dict] | None = None,
     synthesis_delegation_id: str | None = None,
+    fallback_chain: list[str] | None = None,
 ) -> DelegationEvent:
     usage = response.usage or {}
+    route_payload, semantic_payload = _internal_delegation_metadata(
+        decision=decision,
+        semantic_plan=semantic_plan,
+    )
     return DelegationEvent(
         delegation_id=delegation_id or DelegationEvent().delegation_id,
         command=command,
@@ -3414,6 +3423,9 @@ def _delegation_event_from_response(
         council_role=council_role,  # type: ignore[arg-type]
         members=members,
         synthesis_delegation_id=synthesis_delegation_id,
+        route=route_payload,
+        semantic=semantic_payload,
+        fallback_chain=fallback_chain if fallback_chain else None,
     )
 
 
@@ -3431,6 +3443,10 @@ def _record_failed_delegation(
 ) -> None:
     resolved_provider = provider_id or (decision.provider if decision is not None else None)
     resolved_model = model or _provider_default_model_by_id(resolved_provider)
+    route_payload, semantic_payload = _internal_delegation_metadata(
+        decision=decision,
+        semantic_plan=semantic_plan,
+    )
     record_delegation(
         DelegationEvent(
             command=command,
@@ -3442,8 +3458,37 @@ def _record_failed_delegation(
             error=str(error),
             tags=_delegation_tags(decision=decision, semantic_plan=semantic_plan),
             session_log_path=(str(session_log.log_path) if session_log is not None else None),
+            route=route_payload,
+            semantic=semantic_payload,
         )
     )
+
+
+_INTERNAL_CONFIG_WARNING_EMITTED = False
+
+
+def _internal_delegation_metadata(
+    *,
+    decision: RouteDecision | None,
+    semantic_plan: SemanticPlan | None,
+) -> tuple[dict | None, dict | None]:
+    if not _internal_route_capture_enabled():
+        return None, None
+    return (
+        asdict(decision) if decision is not None else None,
+        _semantic_plan_payload(semantic_plan) if semantic_plan is not None else None,
+    )
+
+
+def _internal_route_capture_enabled() -> bool:
+    global _INTERNAL_CONFIG_WARNING_EMITTED
+    try:
+        return internal_telemetry_enabled()
+    except InternalConfigError as e:
+        if not _INTERNAL_CONFIG_WARNING_EMITTED:
+            click.echo(f"[conductor] internal telemetry disabled: {e}", err=True)
+            _INTERNAL_CONFIG_WARNING_EMITTED = True
+        return False
 
 
 def _delegation_tags(
@@ -4420,7 +4465,7 @@ def ask(
         max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
         review_deadline = _review_gate_deadline(timeout_sec)
         try:
-            response, _fallbacks = _invoke_review_with_fallback(
+            response, fallbacks = _invoke_review_with_fallback(
                 decision,
                 task=body,
                 effort=effort_value,
@@ -4472,6 +4517,7 @@ def ask(
             effort=effort_value,
             decision=decision,
             semantic_plan=plan,
+            fallback_chain=fallbacks,
         )
         _emit_call(response, as_json=as_json, decision=decision, semantic_plan=plan)
         return
@@ -4554,7 +4600,7 @@ def ask(
         candidate.provider: candidate.models for candidate in plan.candidates if candidate.models
     }
     try:
-        response, _fallbacks = _invoke_with_fallback(
+        response, fallbacks = _invoke_with_fallback(
             decision,
             mode=plan.mode,
             task=body,
@@ -4645,6 +4691,7 @@ def ask(
         decision=decision,
         semantic_plan=plan,
         session_log=session_log,
+        fallback_chain=fallbacks,
     )
     _emit_call(
         response,
@@ -4889,6 +4936,7 @@ def call(
     dispatch_started_at = time.monotonic()
 
     decision: RouteDecision | None = None
+    fallbacks: list[str] = []
     if auto:
         try:
             provider, decision = pick(
@@ -4942,7 +4990,7 @@ def call(
         max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
 
         try:
-            response, _fallbacks = _invoke_with_fallback(
+            response, fallbacks = _invoke_with_fallback(
                 decision,
                 mode="call",
                 task=body,
@@ -5083,6 +5131,7 @@ def call(
         response,
         effort=effort_value,
         decision=decision,
+        fallback_chain=fallbacks,
     )
     _emit_call(response, as_json=as_json, decision=decision)
 
@@ -5325,6 +5374,7 @@ def review(
     prefer_value = _validate_prefer(prefer) if prefer is not None else None
 
     decision: RouteDecision | None = None
+    fallbacks: list[str] = []
     if auto_route:
         plan = plan_for("review", effort_value)
         user_tags = tuple(_parse_csv(tags))
@@ -5368,7 +5418,7 @@ def review(
         max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
         review_deadline = _review_gate_deadline(timeout_sec)
         try:
-            response, _fallbacks = _invoke_review_with_fallback(
+            response, fallbacks = _invoke_review_with_fallback(
                 decision,
                 task=body,
                 effort=effort_value,
@@ -5529,6 +5579,7 @@ def review(
         response,
         effort=effort_value,
         decision=decision,
+        fallback_chain=fallbacks,
     )
     _emit_call(response, as_json=as_json, decision=decision)
 
@@ -9143,6 +9194,7 @@ def _run_exec_phase_dispatch(
 
     decision: RouteDecision | None = None
     session_log: SessionLog | None = None
+    fallbacks: list[str] = []
     if auto:
         try:
             provider, decision = pick(
@@ -9268,7 +9320,7 @@ def _run_exec_phase_dispatch(
                 )
 
         try:
-            response, _fallbacks = _invoke_with_fallback(
+            response, fallbacks = _invoke_with_fallback(
                 decision,
                 mode="exec",
                 task=body,
@@ -9575,6 +9627,7 @@ def _run_exec_phase_dispatch(
         effort=effort_value,
         decision=decision,
         session_log=session_log,
+        fallback_chain=fallbacks,
     )
     return response, decision, session_log
 
@@ -12874,6 +12927,62 @@ def delegations_list(
         click.echo(_format_delegation_row(event))
 
 
+@delegations.command("report")
+@click.option(
+    "--since",
+    default="7d",
+    show_default=True,
+    help="Only include events since 1h, 24h, 7d, etc.",
+)
+@click.option(
+    "--last",
+    "last_n",
+    default=None,
+    type=click.IntRange(min=1),
+    help="Only inspect the N most recent matching events.",
+)
+@click.option(
+    "--command",
+    "command_filter",
+    default=None,
+    type=click.Choice(["ask", "call", "review", "exec", "council"]),
+)
+@click.option("--provider", "provider_filter", default=None)
+@click.option("--tag", "tag_filter", default=None, help="Only include events with this tag.")
+@click.option("--include-members", is_flag=True, default=False)
+@click.option("--json", "as_json", is_flag=True, default=False)
+def delegations_report(
+    since: str | None,
+    last_n: int | None,
+    command_filter: str | None,
+    provider_filter: str | None,
+    tag_filter: str | None,
+    include_members: bool,
+    as_json: bool,
+) -> None:
+    """Internal diagnostic report for routing and token efficiency.
+
+    Output is intentionally not part of the stable consumer contract.
+    """
+    try:
+        events = list(
+            read_delegations(
+                since=since,
+                command=command_filter,
+                provider=provider_filter,
+                include_members=include_members,
+            )
+        )
+    except ValueError as e:
+        raise click.UsageError(str(e)) from e
+
+    report = build_delegation_report(events, since=since, tag=tag_filter, last=last_n)
+    if as_json:
+        click.echo(json.dumps(report, default=str, indent=2))
+        return
+    _print_delegation_report(report)
+
+
 @delegations.command("show")
 @click.argument("delegation_id")
 @click.option("--json", "as_json", is_flag=True, default=False)
@@ -12909,6 +13018,79 @@ def _format_delegation_row(event: dict) -> str:
     )
 
 
+def _print_delegation_report(report: dict) -> None:
+    window = report.get("window") or {}
+    since = window.get("since") or "all"
+    events = window.get("events") or 0
+    tag = window.get("tag_filter")
+    heading = f"Delegation report since {since}: {events} events"
+    if tag:
+        heading += f" (tag={tag})"
+    click.echo(heading)
+    click.echo("Internal diagnostic output; not a stable consumer API.")
+    click.echo("")
+    if not events:
+        click.echo("(no matching delegations)")
+        return
+    fallbacks = report.get("route_fallbacks") or {}
+    if fallbacks:
+        formatted = ", ".join(f"{route}={count}" for route, count in sorted(fallbacks.items()))
+        click.echo(f"Fallbacks: {formatted}")
+        click.echo("")
+
+    click.echo("By provider:")
+    click.echo(
+        "PROVIDER  CALLS OK/ERR  MED_DUR  IN/OUT/THINK TOKENS  OUT/1K_IN  IN/OUT  MS/OUT  COST"
+    )
+    for row in report.get("providers") or []:
+        click.echo(_format_report_provider_row(row))
+
+    models = report.get("models") or []
+    if models:
+        click.echo("")
+        click.echo("By model:")
+        click.echo(
+            "PROVIDER  MODEL              CALLS OK/ERR  OUT/1K_IN  IN/OUT  MS/OUT  COST/1K_OUT"
+        )
+        for row in models[:20]:
+            click.echo(_format_report_model_row(row))
+
+
+def _format_report_provider_row(row: dict) -> str:
+    provider = _truncate_cell(row.get("provider") or "-", 8)
+    calls = _ledger_value(row.get("calls"))
+    ok_err = f"{_ledger_value(row.get('ok'))}/{_ledger_value(row.get('non_ok'))}"
+    duration = _format_duration_ms(row.get("median_duration_ms"))
+    tokens = (
+        f"{_ledger_value(row.get('input_tokens'))}/"
+        f"{_ledger_value(row.get('output_tokens'))}/"
+        f"{_ledger_value(row.get('thinking_tokens'))}"
+    )
+    out_per_in = _format_float(row.get("output_tokens_per_1k_input"))
+    in_per_out = _format_float(row.get("input_tokens_per_output_token"))
+    ms_per_out = _format_float(row.get("ms_per_output_token"))
+    cost = _format_cost(row.get("cost_usd"))
+    return (
+        f"{provider:<8} {calls:>5} {ok_err:>6} {duration:>8} "
+        f"{tokens:>20} {out_per_in:>10} {in_per_out:>7} {ms_per_out:>7} {cost:>8}"
+    )
+
+
+def _format_report_model_row(row: dict) -> str:
+    provider = _truncate_cell(row.get("provider") or "-", 8)
+    model = _truncate_cell(row.get("model") or "-", 18)
+    calls = _ledger_value(row.get("calls"))
+    ok_err = f"{_ledger_value(row.get('ok'))}/{_ledger_value(row.get('non_ok'))}"
+    out_per_in = _format_float(row.get("output_tokens_per_1k_input"))
+    in_per_out = _format_float(row.get("input_tokens_per_output_token"))
+    ms_per_out = _format_float(row.get("ms_per_output_token"))
+    cost_per_out = _format_cost(row.get("cost_per_1k_output_tokens"))
+    return (
+        f"{provider:<8} {model:<18} {calls:>5} {ok_err:>6} "
+        f"{out_per_in:>10} {in_per_out:>7} {ms_per_out:>7} {cost_per_out:>11}"
+    )
+
+
 def _compact_delegation_time(value: object) -> str:
     if not isinstance(value, str):
         return "-"
@@ -12938,6 +13120,12 @@ def _format_cost(value: object) -> str:
     if not isinstance(value, (int, float)):
         return "-"
     return f"${value:.4f}"
+
+
+def _format_float(value: object) -> str:
+    if not isinstance(value, (int, float)):
+        return "-"
+    return f"{value:.2f}"
 
 
 # --------------------------------------------------------------------------- #
