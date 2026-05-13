@@ -513,13 +513,15 @@ def _bounded_review_attempt_budget(
     deadline_monotonic: float | None,
     provider_name: str,
     is_fallback: bool,
+    remaining_fallback_count: int = 0,
 ) -> tuple[int | None, int | None]:
     """Return the review attempt budget under shared and per-fallback caps.
 
-    Invariant: once a review provider fails and the route is in fallback, a
-    later provider cannot receive a wall-clock timeout larger than the derived
-    review stall budget. This matters for HTTP providers that cannot emit
-    progress and do not implement the no-output watchdog separately.
+    Invariant: a review provider attempt cannot consume time reserved for
+    later fallback providers. Once the route is in fallback, a later provider
+    also cannot receive a wall-clock timeout larger than the derived review
+    stall budget. This matters for HTTP providers that cannot emit progress
+    and do not implement the no-output watchdog separately.
     """
     attempt_timeout_sec, attempt_max_stall_sec = _bounded_attempt_budget(
         timeout_sec=timeout_sec,
@@ -528,6 +530,19 @@ def _bounded_review_attempt_budget(
         budget_label="review gate budget",
         provider_name=provider_name,
     )
+    if (
+        remaining_fallback_count > 0
+        and attempt_timeout_sec is not None
+        and attempt_max_stall_sec is not None
+    ):
+        reserved_sec = remaining_fallback_count * attempt_max_stall_sec
+        if reserved_sec >= attempt_timeout_sec:
+            attempt_timeout_sec = max(
+                1,
+                attempt_timeout_sec // (remaining_fallback_count + 1),
+            )
+        else:
+            attempt_timeout_sec = max(1, attempt_timeout_sec - reserved_sec)
     if is_fallback and attempt_max_stall_sec is not None:
         attempt_timeout_sec = (
             attempt_max_stall_sec
@@ -2388,14 +2403,15 @@ def _invoke_review_with_fallback(
     for idx, candidate in enumerate(candidates):
         provider = get_provider(candidate.name)
         contract_prompt = task
-        attempt_timeout_sec, attempt_max_stall_sec = _bounded_review_attempt_budget(
-            timeout_sec=timeout_sec,
-            max_stall_sec=max_stall_sec,
-            deadline_monotonic=fallback_deadline_monotonic,
-            provider_name=candidate.name,
-            is_fallback=idx > 0,
-        )
         try:
+            attempt_timeout_sec, attempt_max_stall_sec = _bounded_review_attempt_budget(
+                timeout_sec=timeout_sec,
+                max_stall_sec=max_stall_sec,
+                deadline_monotonic=fallback_deadline_monotonic,
+                provider_name=candidate.name,
+                is_fallback=idx > 0,
+                remaining_fallback_count=max(0, len(candidates) - idx - 1),
+            )
             if isinstance(provider, NativeReviewProvider):
                 response = provider.review(
                     task,
