@@ -127,8 +127,16 @@ unsafe_paths = [
 # Touchstone onboarding choices. You can edit these later.
 [review]
 enabled = true
-reviewers = ["codex"]
+reviewer = "conductor"
 
-[review.assist]
-enabled = false
-helpers = ["codex", "gemini", "claude", "local"]
+# [review.assist] — disabled in Touchstone 2.0; returns in v2.1
+# via `conductor call --exclude <primary_provider>`.
+# enabled = false
+# helpers = ["codex", "gemini", "claude", "local"]
+
+[review.conductor]
+# Conductor routing knobs. See touchstone CHANGELOG for the 2.0 contract.
+prefer = "best"
+effort = "high"
+tags = "code-review"
+with = "codex"

@@ -5,7 +5,7 @@
 # in the environment, in which case it logs the bypass for the next PR
 # to disclose. Wired via .claude/settings.json from templates/.
 #
-# --no-verify bypasses pre-push hooks (Codex review, default-branch
+# --no-verify bypasses pre-push hooks (Conductor review, default-branch
 # checks). Routine pushes should not bypass these — the emergency path
 # is documented in principles/git-workflow.md and convention requires
 # the next PR to include an "Emergency-bypass disclosure" section.
@@ -51,7 +51,7 @@ if [ "${TOUCHSTONE_EMERGENCY:-0}" != "1" ]; then
   cat >&2 <<EOF
 ==> Blocked by Touchstone emergency-disclosure: 'git push --no-verify'
 
-  --no-verify bypasses pre-push hooks (Codex review, default-branch
+  --no-verify bypasses pre-push hooks (Conductor review, default-branch
   checks). Routine pushes should not bypass these.
 
   This is the documented emergency path. To use it:
@@ -75,7 +75,7 @@ log_file="$log_dir/emergency-bypass.log"
 mkdir -p "$log_dir" 2>/dev/null || true
 {
   printf '%s\t%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$command"
-} >> "$log_file" 2>/dev/null || true
+} >>"$log_file" 2>/dev/null || true
 
 echo "emergency-disclosure: TOUCHSTONE_EMERGENCY=1 — push allowed; logged to ${log_file#"$cwd/"} for next-PR disclosure" >&2
 exit 0

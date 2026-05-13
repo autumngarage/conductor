@@ -13,10 +13,77 @@
 set -euo pipefail
 
 ACTION="${1:-validate}"
+HOOK_PRE_COMMIT_REMOTE_BRANCH="${PRE_COMMIT_REMOTE_BRANCH:-}"
+HOOK_PRE_COMMIT_REMOTE_NAME="${PRE_COMMIT_REMOTE_NAME:-origin}"
 
+clear_git_hook_env() {
+  unset GIT_DIR
+  unset GIT_WORK_TREE
+  unset GIT_INDEX_FILE
+  unset GIT_OBJECT_DIRECTORY
+  unset GIT_COMMON_DIR
+  unset GIT_NAMESPACE
+  unset GIT_PREFIX
+  unset GIT_INTERNAL_GETTEXT_SH_SCHEME
+  unset PRE_COMMIT
+  unset PRE_COMMIT_FROM_REF
+  unset PRE_COMMIT_TO_REF
+  unset PRE_COMMIT_LOCAL_BRANCH
+  unset PRE_COMMIT_REMOTE_BRANCH
+  unset PRE_COMMIT_REMOTE_NAME
+  unset PRE_COMMIT_REMOTE_URL
+}
+
+clear_review_env() {
+  unset TOUCHSTONE_REVIEWER
+  unset TOUCHSTONE_LOCAL_REVIEWER_COMMAND
+  unset TOUCHSTONE_PREFLIGHT_ALREADY_RAN
+  unset TOUCHSTONE_CONDUCTOR_WITH
+  unset TOUCHSTONE_CONDUCTOR_PREFER
+  unset TOUCHSTONE_CONDUCTOR_EFFORT
+  unset TOUCHSTONE_CONDUCTOR_TAGS
+  unset TOUCHSTONE_CONDUCTOR_EXCLUDE
+  unset CODEX_REVIEW_ENABLED
+  unset CODEX_REVIEW_MODE
+  unset CODEX_REVIEW_BASE
+  unset CODEX_REVIEW_BRANCH_NAME
+  unset CODEX_REVIEW_FORCE
+  unset CODEX_REVIEW_NO_AUTOFIX
+  unset CODEX_REVIEW_MAX_ITERATIONS
+  unset CODEX_REVIEW_MAX_DIFF_LINES
+  unset CODEX_REVIEW_CACHE_CLEAN
+  unset CODEX_REVIEW_DISABLE_CACHE
+  unset CODEX_REVIEW_TIMEOUT
+  unset CODEX_REVIEW_ON_ERROR
+  unset CODEX_REVIEW_CONTEXT_MODE
+  unset CODEX_REVIEW_CONTEXT_SMALL_MAX_DIFF_LINES
+  unset CODEX_REVIEW_CONTEXT_SMALL_MAX_FILES
+  unset CODEX_REVIEW_LOCK_WAIT_SECONDS
+  unset CODEX_REVIEW_LOCK_STALE_SECONDS
+  unset CODEX_REVIEW_DISABLE_LOCK
+  unset CODEX_REVIEW_IN_PROGRESS
+  unset CODEX_REVIEW_ASSIST
+  unset CODEX_REVIEW_ASSIST_TIMEOUT
+  unset CODEX_REVIEW_ASSIST_MAX_ROUNDS
+  unset CODEX_REVIEW_ASSIST_WITH
+  unset CODEX_REVIEW_ASSIST_PREFER
+  unset CODEX_REVIEW_ASSIST_EFFORT
+  unset CODEX_REVIEW_ASSIST_TAGS
+  unset CODEX_REVIEW_SUMMARY_FILE
+  unset CODEX_REVIEW_FINDINGS_HISTORY_FILE
+  unset CODEX_REVIEW_SUPPRESS_LEGACY_WARNINGS
+}
+
+# tests/test-find-python-bin.sh sources this script with
+# TOUCHSTONE_RUN_SOURCE_ONLY=1 to call helpers directly without running the
+# action dispatcher at the bottom. Tests pass TOUCHSTONE_RUN_TEST_REPO_ROOT
+# to fix REPO_ROOT explicitly so they can construct fixture filesystems
+# without needing a real git repo.
 if [ "${TOUCHSTONE_RUN_SOURCE_ONLY:-0}" = "1" ]; then
   REPO_ROOT="${TOUCHSTONE_RUN_TEST_REPO_ROOT:-$(pwd)}"
 else
+  clear_git_hook_env
+  clear_review_env
   REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
   cd "$REPO_ROOT"
 fi
@@ -29,6 +96,7 @@ MONOREPO=""
 TARGETS=""
 LINT_COMMAND=""
 TYPECHECK_COMMAND=""
+TYPECHECK_COMMAND_AUTO=false
 BUILD_COMMAND=""
 TEST_COMMAND=""
 VALIDATE_COMMAND=""
@@ -48,6 +116,55 @@ trim() {
   printf '%s' "$value"
 }
 
+truthy() {
+  case "$(printf '%s' "${1:-false}" | tr '[:upper:]' '[:lower:]')" in
+    true | 1 | yes | on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+short_ref_name() {
+  local ref="$1"
+  local remote="${2:-origin}"
+
+  case "$ref" in
+    refs/heads/*) ref="${ref#refs/heads/}" ;;
+    refs/remotes/"$remote"/*) ref="${ref#refs/remotes/$remote/}" ;;
+    "$remote"/*) ref="${ref#"$remote/"}" ;;
+  esac
+  printf '%s' "$ref"
+}
+
+default_branch_for_remote() {
+  local remote="${1:-origin}"
+  local ref
+
+  ref="$(git symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null || true)"
+  if [ -n "$ref" ]; then
+    printf '%s\n' "${ref#"$remote/"}"
+    return 0
+  fi
+
+  return 1
+}
+
+should_skip_feature_push_validate() {
+  local remote_branch default_branch
+
+  truthy "${TOUCHSTONE_VALIDATE_SKIP_FEATURE_PUSH:-false}" || return 1
+  [ "$ACTION" = "validate" ] || return 1
+  [ -n "$HOOK_PRE_COMMIT_REMOTE_BRANCH" ] || return 1
+
+  remote_branch="$(short_ref_name "$HOOK_PRE_COMMIT_REMOTE_BRANCH" "$HOOK_PRE_COMMIT_REMOTE_NAME")"
+  [ -n "$remote_branch" ] || return 1
+  default_branch="$(default_branch_for_remote "$HOOK_PRE_COMMIT_REMOTE_NAME" || true)"
+  [ -n "$default_branch" ] || return 1
+
+  [ "$remote_branch" != "$default_branch" ] \
+    && [ "$remote_branch" != "main" ] \
+    && [ "$remote_branch" != "master" ]
+}
+
 load_config() {
   local line key value
 
@@ -63,17 +180,25 @@ load_config() {
     value="$(trim "${line#*=}")"
 
     case "$key" in
-      project_type|profile) PROJECT_TYPE="$value" ;;
+      project_type | profile) PROJECT_TYPE="$value" ;;
       package_manager) PACKAGE_MANAGER="$value" ;;
       monorepo) MONOREPO="$value" ;;
       targets) TARGETS="$value" ;;
       lint_command) LINT_COMMAND="$value" ;;
-      typecheck_command) TYPECHECK_COMMAND="$value" ;;
+      typecheck_command)
+        if [ "$value" = "auto" ]; then
+          TYPECHECK_COMMAND=""
+          TYPECHECK_COMMAND_AUTO=true
+        else
+          TYPECHECK_COMMAND="$value"
+          TYPECHECK_COMMAND_AUTO=false
+        fi
+        ;;
       build_command) BUILD_COMMAND="$value" ;;
       test_command) TEST_COMMAND="$value" ;;
       validate_command) VALIDATE_COMMAND="$value" ;;
     esac
-  done < "$CONFIG_FILE"
+  done <"$CONFIG_FILE"
 }
 
 detect_node_package_manager() {
@@ -163,45 +288,35 @@ has_package_script() {
 run_shell_command() {
   local command="$1"
   info "$command"
-  bash -c "$command"
-}
-
-resolve_cortex_command() {
-  if command -v cortex >/dev/null 2>&1; then
-    printf 'cortex\n'
-    return 0
-  fi
-
-  if ! command -v uv >/dev/null 2>&1; then
-    return 1
-  fi
-
-  if uv run cortex --version >/dev/null 2>&1; then
-    printf 'uv run cortex\n'
-    return 0
-  fi
-
-  return 1
-}
-
-run_cortex_update_check() {
-  local cortex_cmd
-
-  [ -d .cortex ] || return 0
-
-  if ! cortex_cmd="$(resolve_cortex_command)"; then
-    warn "skipping cortex update check: cortex CLI is not available"
-    warn "install cortex, then rebuild generated state with: cortex refresh-index --path ."
-    warn "if this repo provides cortex through uv, use: uv run cortex refresh-index --path ."
-    return 0
-  fi
-
-  if [ ! -f .cortex/.index.json ]; then
-    warn ".cortex/.index.json is generated and missing; rebuilding with: $cortex_cmd refresh-index --path ."
-    run_shell_command "$cortex_cmd refresh-index --path ."
-  fi
-
-  run_shell_command "$cortex_cmd update --check --path ."
+  env \
+    -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \
+    -u GIT_OBJECT_DIRECTORY -u GIT_COMMON_DIR -u GIT_NAMESPACE \
+    -u GIT_PREFIX -u GIT_INTERNAL_GETTEXT_SH_SCHEME \
+    -u PRE_COMMIT -u PRE_COMMIT_FROM_REF -u PRE_COMMIT_TO_REF \
+    -u PRE_COMMIT_LOCAL_BRANCH -u PRE_COMMIT_REMOTE_BRANCH \
+    -u PRE_COMMIT_REMOTE_NAME -u PRE_COMMIT_REMOTE_URL \
+    -u TOUCHSTONE_REVIEWER -u TOUCHSTONE_LOCAL_REVIEWER_COMMAND \
+    -u TOUCHSTONE_PREFLIGHT_ALREADY_RAN \
+    -u TOUCHSTONE_CONDUCTOR_WITH -u TOUCHSTONE_CONDUCTOR_PREFER \
+    -u TOUCHSTONE_CONDUCTOR_EFFORT -u TOUCHSTONE_CONDUCTOR_TAGS \
+    -u TOUCHSTONE_CONDUCTOR_EXCLUDE \
+    -u CODEX_REVIEW_ENABLED -u CODEX_REVIEW_MODE -u CODEX_REVIEW_BASE \
+    -u CODEX_REVIEW_BRANCH_NAME -u CODEX_REVIEW_FORCE \
+    -u CODEX_REVIEW_NO_AUTOFIX -u CODEX_REVIEW_MAX_ITERATIONS \
+    -u CODEX_REVIEW_MAX_DIFF_LINES -u CODEX_REVIEW_CACHE_CLEAN \
+    -u CODEX_REVIEW_DISABLE_CACHE -u CODEX_REVIEW_TIMEOUT \
+    -u CODEX_REVIEW_ON_ERROR -u CODEX_REVIEW_CONTEXT_MODE \
+    -u CODEX_REVIEW_CONTEXT_SMALL_MAX_DIFF_LINES \
+    -u CODEX_REVIEW_CONTEXT_SMALL_MAX_FILES \
+    -u CODEX_REVIEW_LOCK_WAIT_SECONDS -u CODEX_REVIEW_LOCK_STALE_SECONDS \
+    -u CODEX_REVIEW_DISABLE_LOCK -u CODEX_REVIEW_IN_PROGRESS \
+    -u CODEX_REVIEW_ASSIST -u CODEX_REVIEW_ASSIST_TIMEOUT \
+    -u CODEX_REVIEW_ASSIST_MAX_ROUNDS -u CODEX_REVIEW_ASSIST_WITH \
+    -u CODEX_REVIEW_ASSIST_PREFER -u CODEX_REVIEW_ASSIST_EFFORT \
+    -u CODEX_REVIEW_ASSIST_TAGS -u CODEX_REVIEW_SUMMARY_FILE \
+    -u CODEX_REVIEW_FINDINGS_HISTORY_FILE \
+    -u CODEX_REVIEW_SUPPRESS_LEGACY_WARNINGS \
+    bash -c "$command"
 }
 
 configured_command_for_action() {
@@ -229,7 +344,7 @@ run_node_script() {
     pnpm) command="pnpm $script" ;;
     yarn) command="yarn $script" ;;
     bun) command="bun run $script" ;;
-    npm|*) command="npm run $script" ;;
+    npm | *) command="npm run $script" ;;
   esac
 
   run_shell_command "$command"
@@ -238,12 +353,12 @@ run_node_script() {
 find_python_bin() {
   local candidate cwd parent_root parent_python
 
+  # Operator override wins over everything else.
   if [ -n "${PYTEST_PYTHON:-}" ]; then
     if command -v "$PYTEST_PYTHON" >/dev/null 2>&1; then
       command -v "$PYTEST_PYTHON"
       return 0
     fi
-
     echo "ERROR: PYTEST_PYTHON is set but not executable: $PYTEST_PYTHON" >&2
     return 1
   fi
@@ -255,6 +370,10 @@ find_python_bin() {
     fi
   done
 
+  # Worktree fallback: when the current checkout is a worktree (.git is a
+  # file, not a directory), the venv lives in the parent repo. Resolve to
+  # the parent's .venv/bin/python — pinned deps are identical across
+  # worktrees, so the parent's interpreter is the right answer.
   cwd="$(pwd)"
   if parent_root="$(find_worktree_parent_root "$cwd")"; then
     parent_python="$parent_root/.venv/bin/python"
@@ -264,6 +383,10 @@ find_python_bin() {
     fi
   fi
 
+  # No silent fallback to system python3: the project's pinned deps live
+  # in a venv. Running the test suite against a system interpreter would
+  # produce confusing ModuleNotFoundError noise that the operator can't
+  # diagnose from the failure alone (#171).
   echo "ERROR: no project virtualenv found." >&2
   echo "       Tried: $cwd/.venv/bin/python (this checkout)" >&2
   if [ -n "${parent_root:-}" ]; then
@@ -274,6 +397,10 @@ find_python_bin() {
   return 1
 }
 
+# Returns the absolute path of the parent repo's worktree root when $1 is
+# a worktree checkout (i.e. $1/.git is a regular file containing a
+# `gitdir:` pointer). Returns 1 when $1 is a normal checkout or when the
+# worktree metadata is malformed.
 find_worktree_parent_root() {
   local checkout_root="$1" git_file gitdir gitdir_path search_dir
 
@@ -286,7 +413,7 @@ find_worktree_parent_root() {
     return 1
   fi
 
-  IFS= read -r gitdir < "$git_file" || {
+  IFS= read -r gitdir <"$git_file" || {
     echo "       Worktree check failed: cannot read gitdir from $git_file" >&2
     return 1
   }
@@ -322,6 +449,8 @@ find_worktree_parent_root() {
   return 1
 }
 
+# Allow tests to source the script just for its helpers without invoking
+# the action dispatcher below.
 if [ "${TOUCHSTONE_RUN_SOURCE_ONLY:-0}" = "1" ]; then
   return 0
 fi
@@ -330,7 +459,7 @@ run_node_action() {
   local action="$1"
 
   case "$action" in
-    lint|typecheck|build|test)
+    lint | typecheck | build | test)
       if run_node_script "$action"; then
         return 0
       fi
@@ -363,7 +492,9 @@ run_python_action() {
       fi
       ;;
     typecheck)
-      if command -v pyright >/dev/null 2>&1; then
+      if [ "$TYPECHECK_COMMAND_AUTO" != true ]; then
+        ok "no Python typecheck_command configured; skipped"
+      elif command -v pyright >/dev/null 2>&1; then
         run_shell_command "pyright"
       elif command -v mypy >/dev/null 2>&1; then
         run_shell_command "mypy ."
@@ -377,8 +508,7 @@ run_python_action() {
     test)
       if python_bin="$(find_python_bin)"; then
         local pytest_rc=0
-        info "$python_bin -m pytest"
-        bash -c "$python_bin -m pytest" || pytest_rc=$?
+        run_shell_command "$python_bin -m pytest" || pytest_rc=$?
         # pytest exit 5 = no tests collected. Treat like absent linters — skip, don't fail.
         if [ "$pytest_rc" -eq 5 ]; then
           ok "pytest found no tests; skipped"
@@ -386,7 +516,7 @@ run_python_action() {
           return "$pytest_rc"
         fi
       else
-        return 1
+        ok "python not found; skipped"
       fi
       ;;
     build_if_distinct)
@@ -449,7 +579,7 @@ run_swift_action() {
         ok "swift-format not installed; skipped"
       fi
       ;;
-    typecheck|build) run_shell_command "swift build" ;;
+    typecheck | build) run_shell_command "swift build" ;;
     test) run_shell_command "swift test" ;;
     build_if_distinct)
       : # swift typecheck IS swift build — running it again would repeat
@@ -471,7 +601,7 @@ run_go_action() {
 
   case "$action" in
     lint) run_shell_command "go vet ./..." ;;
-    typecheck|build) run_shell_command "go build ./..." ;;
+    typecheck | build) run_shell_command "go build ./..." ;;
     test) run_shell_command "go test ./..." ;;
     build_if_distinct)
       : # go typecheck IS go build — running it again would repeat
@@ -487,12 +617,12 @@ run_profile_action() {
   local profile="$1" action="$2"
 
   case "$profile" in
-    node|typescript|ts) run_node_action "$action" ;;
+    node | typescript | ts) run_node_action "$action" ;;
     python) run_python_action "$action" ;;
     rust) run_rust_action "$action" ;;
     swift) run_swift_action "$action" ;;
     go) run_go_action "$action" ;;
-    generic|"")
+    generic | "")
       # build_if_distinct is a validate-time extra — silently no-op for generic
       # so "touchstone run validate" doesn't print a scary "no default command"
       # line on every non-typed project.
@@ -514,7 +644,7 @@ run_targets_action() {
 
   [ -n "$TARGETS" ] || return 1
 
-  IFS=',' read -r -a target_entries <<< "$TARGETS"
+  IFS=',' read -r -a target_entries <<<"$TARGETS"
   for entry in "${target_entries[@]}"; do
     entry="$(trim "$entry")"
     [ -z "$entry" ] && continue
@@ -566,13 +696,17 @@ run_action() {
 run_validate() {
   local configured
 
+  if should_skip_feature_push_validate; then
+    ok "feature-branch pre-push validate skipped; merge gate runs full validation"
+    return 0
+  fi
+
   configured="$(configured_command_for_action validate)"
   if [ -n "$configured" ]; then
     run_shell_command "$configured"
     return 0
   fi
 
-  run_cortex_update_check
   run_action lint
   run_action typecheck
   # Node targets with distinct typecheck + build scripts: run the bundler too.
@@ -625,9 +759,9 @@ print_detection() {
 load_config
 
 case "$ACTION" in
-  -h|--help) usage ;;
+  -h | --help) usage ;;
   detect) print_detection ;;
-  lint|typecheck|build|test) run_action "$ACTION" ;;
+  lint | typecheck | build | test) run_action "$ACTION" ;;
   validate) run_validate ;;
   *)
     echo "ERROR: unknown touchstone-run action '$ACTION'" >&2

@@ -53,9 +53,35 @@ if ! printf '%s' "$command" | grep -qE '\bgit([[:space:]]+-c[[:space:]]+[^[:spac
   exit 0
 fi
 
-# Worktree-aware: when commit targets a different repo via `-C <path>`,
-# check that branch instead.
-target_cwd="$(printf '%s' "$command" | grep -oE '\-C[[:space:]]+[^[:space:]]+' | sed -E 's/^-C[[:space:]]+//' | tail -1 || true)"
+# Worktree-aware: when commit targets a different repo via `-C <path>` OR
+# the operator wrote `cd <path> && git commit`, check that branch instead.
+# The previous version saw `main` as the current branch even when the commit
+# was being directed at a feature worktree, blocking legitimate work.
+# Lowercase `-c` (the config-override flag) does not change directory
+# and so does NOT trigger this override.
+target_cwd_from_C="$(printf '%s' "$command" | grep -oE '\-C[[:space:]]+[^[:space:]]+' | sed -E 's/^-C[[:space:]]+//' | tail -1 || true)"
+
+# `cd <path> && git commit` shape: walk shell-statement boundaries (&&, ||,
+# ;) and remember the last `cd <path>` from segments BEFORE the segment
+# that runs `git commit`. cds AFTER the commit (e.g. `git commit; cd
+# elsewhere`) don't affect the commit's cwd and must be ignored — otherwise
+# they'd silently bypass the guard on main.
+target_cwd_from_cd=""
+while IFS= read -r segment; do
+  trimmed="$(printf '%s' "$segment" | sed -E 's/^[[:space:]]+//')"
+  if printf '%s' "$trimmed" | grep -qE '^git([[:space:]]+-[cC][[:space:]]+[^[:space:]]+)*[[:space:]]+commit([[:space:]]|$)'; then
+    break
+  fi
+  cd_target="$(printf '%s' "$trimmed" | grep -oE '^cd[[:space:]]+[^[:space:]]+' | sed -E 's/^cd[[:space:]]+//' || true)"
+  if [ -n "$cd_target" ]; then
+    target_cwd_from_cd="$cd_target"
+  fi
+done < <(printf '%s' "$command" | tr '&;|' '\n')
+
+# `-C` is the more explicit form; prefer it. Fall back to the last `cd`
+# target seen before the commit.
+target_cwd="${target_cwd_from_C:-$target_cwd_from_cd}"
+
 if [ -n "$target_cwd" ]; then
   if [ -n "$cwd" ] && [ -d "$cwd/$target_cwd" ]; then
     cwd="$cwd/$target_cwd"

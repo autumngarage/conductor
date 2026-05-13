@@ -170,7 +170,7 @@ def test_codex_review_wrapper_accepts_footer_after_sentinel(tmp_path: Path) -> N
     assert not any(line.startswith("exec ") for line in conductor_invocations)
 
 
-def test_codex_review_large_diff_scales_default_review_budget(tmp_path: Path) -> None:
+def test_codex_review_large_diff_uses_large_low_risk_route(tmp_path: Path) -> None:
     repo, env = _make_review_repo(tmp_path)
     large_body = "".join(f"generated line {i}\n" for i in range(450))
     (repo / "large.txt").write_text(large_body, encoding="utf-8")
@@ -225,18 +225,16 @@ def test_codex_review_large_diff_scales_default_review_budget(tmp_path: Path) ->
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Review budget: large diff" in result.stdout
+    assert "Review routing: larger low-risk diff" in result.stdout
     conductor_invocations = conductor_args.read_text(encoding="utf-8").splitlines()
     review_invocations = [
-        line for line in conductor_invocations if line.startswith("review --auto")
+        line for line in conductor_invocations if line.startswith("review ")
     ]
-    assert any(
-        "--timeout 900" in line and "--max-stall-seconds 900" in line
-        for line in review_invocations
-    ), conductor_invocations
+    assert review_invocations, conductor_invocations
+    assert all("--timeout" not in line for line in review_invocations)
 
 
-def test_codex_review_wrapper_blocks_malformed_sentinel_even_fail_open(
+def test_codex_review_wrapper_fail_opens_malformed_sentinel_by_default(
     tmp_path: Path,
 ) -> None:
     repo, env = _make_review_repo(tmp_path)
@@ -283,13 +281,13 @@ def test_codex_review_wrapper_blocks_malformed_sentinel_even_fail_open(
         check=False,
     )
 
-    assert result.returncode == 1, result.stdout + result.stderr
+    assert result.returncode == 0, result.stdout + result.stderr
     assert "output did not match the expected sentinel contract" in result.stdout
-    assert "blocking push" in result.stderr
-    assert "regardless of on_error=fail-open" in result.stdout
+    assert "not blocking push (on_error=fail-open)" in result.stdout
+    assert "[fail-open:FAIL_OPEN_PARSE_ERROR]" in result.stderr
 
 
-def test_codex_review_wrapper_required_review_blocks_reviewer_error_fail_open(
+def test_codex_review_wrapper_blocks_reviewer_error_when_fail_closed(
     tmp_path: Path,
 ) -> None:
     repo, env = _make_review_repo(tmp_path)
@@ -323,13 +321,13 @@ def test_codex_review_wrapper_required_review_blocks_reviewer_error_fail_open(
     result = subprocess.run(
         ["bash", str(script)],
         cwd=repo,
-        env={
+            env={
             **env,
             "PATH": f"{fakes}:{os.environ.get('PATH', '')}",
             "CODEX_REVIEW_BASE": "HEAD~1",
             "CODEX_REVIEW_MODE": "review-only",
-            "CODEX_REVIEW_REQUIRED": "1",
-            "CODEX_REVIEW_DISABLE_CACHE": "1",
+                "CODEX_REVIEW_ON_ERROR": "fail-closed",
+                "CODEX_REVIEW_DISABLE_CACHE": "1",
             "CODEX_REVIEW_TIMEOUT": "5",
             "NO_COLOR": "1",
         },
@@ -340,11 +338,10 @@ def test_codex_review_wrapper_required_review_blocks_reviewer_error_fail_open(
 
     assert result.returncode == 1, result.stdout + result.stderr
     assert "review failed with exit 1" in result.stdout
-    assert "required review did not complete" in result.stderr
-    assert "on_error=fail-open ignored" in result.stderr
+    assert "blocking push (on_error=fail-closed)" in result.stderr
 
 
-def test_codex_review_wrapper_falls_back_when_conductor_lacks_review(
+def test_codex_review_wrapper_requires_conductor_review_command(
     tmp_path: Path,
 ) -> None:
     repo, env = _make_review_repo(tmp_path)
@@ -399,5 +396,6 @@ def test_codex_review_wrapper_falls_back_when_conductor_lacks_review(
 
     assert result.returncode == 0, result.stdout + result.stderr
     conductor_invocations = conductor_args.read_text(encoding="utf-8").splitlines()
-    assert any(line == "review --help" for line in conductor_invocations)
-    assert any(line.startswith("exec ") for line in conductor_invocations)
+    assert any(line.startswith("review ") for line in conductor_invocations)
+    assert not any(line.startswith("exec ") for line in conductor_invocations)
+    assert "reviewer exit 2" in result.stdout

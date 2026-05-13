@@ -32,7 +32,7 @@ Share business logic across modes (test/prod, paper/live, dev/staging). Divergen
 When a model, algorithm, or data source changes in a way that affects decisions, rankings, persisted state, metrics, or user-visible behavior, establish a boundary (cohort, epoch, version) and ensure every downstream consumer honors it. Reads that drive decisions must not blend data across the boundary; aggregating across it dilutes signal with noise from the old regime.
 
 ## Separate behavior changes from tidying
-Do not mix functional changes with broad renames, formatting sweeps, dependency churn, or unrelated refactors. If cleanup is needed, do it before or after the behavior change in a separate commit or PR. Reviewers must be able to see the semantic change without diff noise; mixed changes hide regressions and make rollback unsafe.
+Do not mix functional changes with broad renames, formatting sweeps, dependency churn, or unrelated refactors. If cleanup is needed, do it before or after the behavior change in a separate commit or PR. Mixed changes hide regressions and make rollback unsafe: a behavior change bundled with a rename is hard to bisect, hard to revert without losing the rename, and hard to find via `git blame` later.
 
 ## Make irreversible actions recoverable
 Any destructive or one-way operation must have a recovery path before it runs. Deletes, migrations, format rewrites, external side effects, and history rewrites need a dry run, backup, idempotency key, rollback plan, or forward-fix plan. A change is not safe because it passed once; it is safe when failure leaves the system in a known recoverable state.
@@ -40,5 +40,5 @@ Any destructive or one-way operation must have a recovery path before it runs. D
 ## Preserve compatibility at boundaries
 Changes to public APIs, config files, schemas, CLIs, hooks, templates, and generated artifacts must include a compatibility or migration plan. Accept old and new formats during rollout when downstream consumers may lag. Boundary breaks multiply: one local assumption becomes N downstream failures.
 
-## Audit one weak-point class at a time
-When you find a structural bug, audit the whole class — not just the one you noticed. See [audit-weak-points.md](audit-weak-points.md) for the methodology. This discipline prevents re-auditing the same code twice and catches bugs before they compound.
+## Audit weak-point classes
+When you find a structural bug, audit the whole class — not just the one you noticed. Use the `touchstone-audit-weak-points` skill. This discipline prevents re-auditing the same code twice and catches bugs before they compound.
