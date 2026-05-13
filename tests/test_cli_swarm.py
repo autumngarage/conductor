@@ -2400,6 +2400,57 @@ def test_swarm_ship_does_not_add_closing_ref_without_explicit_issue(
     assert result.exit_code == 0, result.output
 
 
+def test_swarm_commits_dirty_worktree_before_shipping(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "foo.md", "make a focused change")
+    monkeypatch.chdir(repo)
+    merged_ship = _fake_merged_ship(repo)
+
+    def fake_exec(**kwargs):
+        worktree = Path(kwargs["cwd"])
+        (worktree / "feature.txt").write_text("feature\n", encoding="utf-8")
+        return (
+            CallResponse(
+                text="done",
+                provider="codex",
+                model="codex",
+                duration_ms=1,
+            ),
+            None,
+            None,
+        )
+
+    def fake_ship(worktree: Path, *, base_branch: str, branch: str, auto_merge: bool):
+        assert _git(worktree, "status", "--porcelain").stdout == ""
+        assert _git(worktree, "log", "-1", "--format=%s").stdout.strip() == "swarm: foo"
+        body = _git(worktree, "log", "-1", "--format=%b").stdout
+        assert "Conductor swarm task:" in body
+        assert "make a focused change" in body
+        assert _git(worktree, "rev-list", "--count", f"{base_branch}..HEAD").stdout.strip() == "1"
+        return merged_ship(
+            worktree,
+            base_branch=base_branch,
+            branch=branch,
+            auto_merge=auto_merge,
+        )
+
+    monkeypatch.setattr(cli, "_run_exec_phase_dispatch", fake_exec)
+    monkeypatch.setattr(cli, "_ship_swarm_pr", fake_ship)
+
+    result = CliRunner().invoke(
+        main,
+        ["swarm", "--provider", "codex", "--brief", str(brief), "--auto-merge", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["tasks"][0]["status"] == "shipped"
+    assert payload["tasks"][0]["commits"] == 1
+
+
 def test_swarm_two_briefs_both_succeed(monkeypatch, tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     first = _brief(repo, "foo.md", "first change")
