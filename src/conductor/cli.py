@@ -4524,6 +4524,18 @@ def ask(
 
     tools_set = plan.tools
     sandbox_value = plan.sandbox
+    if plan.mode == "exec" and brief_declares_read_only_text_output(body):
+        read_only_tools = EXEC_PERMISSION_PROFILES["read-only"]
+        narrowed = tools_set & read_only_tools
+        if narrowed:
+            tools_set = narrowed
+            sandbox_value = "read-only"
+            if not (silent_route or as_json):
+                click.echo(
+                    "[conductor] read-only brief detected; restricting exec "
+                    f"tools to {_ordered_tools_csv(tools_set)}",
+                    err=True,
+                )
     exclude_set = _semantic_candidate_exclude_set(plan, frozenset())
     try:
         provider, decision = pick(

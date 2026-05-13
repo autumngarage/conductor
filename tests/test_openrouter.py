@@ -1419,6 +1419,64 @@ def test_exec_iteration_cap_reports_missing_tests(configured, tmp_path):
     assert "Detected unfinished items" in str(exc.value)
 
 
+def test_exec_iteration_cap_reports_no_changes_and_cap_diagnostics(
+    configured, tmp_path
+):
+    _init_clean_git_repo(tmp_path)
+    response = {
+        "model": "openai/gpt-5.5",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_read",
+                            "type": "function",
+                            "function": {
+                                "name": "Read",
+                                "arguments": json.dumps({"path": "README.md"}),
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+    }
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(
+            return_value=httpx.Response(200, json=response)
+        )
+        with pytest.raises(ProviderExecutionError) as exc:
+            OpenRouterProvider().exec(
+                "Implement it.\n\n## Tests\nAdd tests.",
+                model="openai/gpt-5.5",
+                tools=frozenset({"Read"}),
+                task_tags=("code", "tool-use"),
+                sandbox="none",
+                cwd=str(tmp_path),
+                max_iterations=1,
+            )
+
+    status = exc.value.status
+    assert status["missing_deliverables"] == [
+        {
+            "kind": "changes",
+            "message": "Agent made no changes before the iteration cap.",
+        }
+    ]
+    assert status["cap_diagnostics"]["tool_usage"] == {"Read": 1}
+    assert status["cap_diagnostics"]["git_state"]["modified_files"] == 0
+    assert status["cap_diagnostics"]["git_state"]["untracked_files"] == 0
+    assert "Tool usage: Read=1" in str(exc.value)
+    assert "Agent made no changes" in str(exc.value)
+    assert "diff did not add to tests/" not in str(exc.value)
+
+
 def test_exec_iteration_cap_does_not_require_tests_for_read_only_recommendations(
     configured, tmp_path
 ):

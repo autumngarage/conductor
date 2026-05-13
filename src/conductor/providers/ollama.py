@@ -23,7 +23,9 @@ from typing import TYPE_CHECKING
 import httpx
 
 from conductor.exec_completion import (
+    CapDiagnostics,
     MissingDeliverable,
+    cap_diagnostics_for_completion_scan,
     changed_paths_for_completion_scan,
     completion_stretch_prompt,
     detect_missing_deliverables,
@@ -550,6 +552,7 @@ class OllamaProvider:
         hit_context_budget = False
         recent_tool_calls: list[dict[str, object]] = []
         missing_deliverables: list[MissingDeliverable] = []
+        cap_diagnostics: CapDiagnostics | None = None
         completion_stretched = False
         prompt_tokens = 0
         context_ceiling = int(
@@ -741,10 +744,15 @@ class OllamaProvider:
             hit_cap = True
 
         if hit_cap:
+            cap_diagnostics = cap_diagnostics_for_completion_scan(
+                workdir,
+                recent_tool_calls=recent_tool_calls,
+            )
             final_text = (final_text or "(no content)") + "\n\n" + (
                 format_missing_deliverables_cap_message(
                     original_iteration_cap,
                     missing_deliverables,
+                    cap_diagnostics,
                 )
             )
         if hit_context_budget:
@@ -776,6 +784,9 @@ class OllamaProvider:
                 "missing_deliverables": [
                     item.__dict__ for item in missing_deliverables
                 ],
+                "cap_diagnostics": (
+                    cap_diagnostics.as_dict() if cap_diagnostics is not None else None
+                ),
                 "hit_context_budget": hit_context_budget,
                 "iterations": iterations_log,
             },
