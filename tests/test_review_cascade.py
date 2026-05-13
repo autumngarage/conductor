@@ -33,6 +33,7 @@ from conductor.providers import (
     KimiProvider,
     OllamaProvider,
     OpenRouterProvider,
+    ProviderError,
     review_contract,
 )
 from conductor.router import RankedCandidate, RouteDecision, reset_health
@@ -239,7 +240,89 @@ def test_review_fallback_attempts_share_one_deadline(mocker, monkeypatch) -> Non
     )
 
     assert response.provider == "codex"
-    assert seen == [("claude", 300, 180), ("codex", 75, 75)]
+    assert seen == [("claude", 120, 120), ("codex", 75, 75)]
+
+
+def test_review_fallback_reserves_budget_for_ready_final_provider(
+    mocker, monkeypatch
+) -> None:
+    from conductor.providers.interface import ProviderStalledError
+
+    now = [1_000.0]
+    seen: list[tuple[str, int | None, int | None]] = []
+    monkeypatch.setattr(cli.time, "monotonic", lambda: now[0])
+
+    def stalled(name: str):
+        def fail(*_args, timeout_sec=None, max_stall_sec=None, **_kwargs):
+            seen.append((name, timeout_sec, max_stall_sec))
+            now[0] += timeout_sec or 0
+            raise ProviderStalledError(f"{name} review stalled")
+
+        return fail
+
+    def gemini_succeeds(*_args, timeout_sec=None, max_stall_sec=None, **_kwargs):
+        seen.append(("gemini", timeout_sec, max_stall_sec))
+        return _fake_response("gemini")
+
+    mocker.patch.object(ClaudeProvider, "review", side_effect=stalled("claude"))
+    mocker.patch.object(CodexProvider, "review", side_effect=stalled("codex"))
+    mocker.patch.object(OpenRouterProvider, "call", side_effect=stalled("openrouter"))
+    mocker.patch.object(GeminiProvider, "review", side_effect=gemini_succeeds)
+
+    response, _fallbacks = cli._invoke_review_with_fallback(
+        _decision("claude", "codex", "openrouter", "gemini"),
+        task="Review this merge using the project reviewer guide.",
+        effort="high",
+        cwd=None,
+        timeout_sec=300,
+        max_stall_sec=60,
+        base=None,
+        commit=None,
+        uncommitted=False,
+        title=None,
+        silent=True,
+        max_fallbacks=4,
+        fallback_deadline_monotonic=cli._review_gate_deadline(300),
+    )
+
+    assert response.provider == "gemini"
+    assert seen == [
+        ("claude", 120, 60),
+        ("codex", 60, 60),
+        ("openrouter", 60, 60),
+        ("gemini", 60, 60),
+    ]
+
+
+def test_review_budget_exhaustion_before_provider_is_reported(
+    mocker, monkeypatch
+) -> None:
+    now = [1_000.0]
+    monkeypatch.setattr(cli.time, "monotonic", lambda: now[0])
+    mocker.patch.object(GeminiProvider, "review", return_value=_fake_response("gemini"))
+    deadline = cli._review_gate_deadline(10)
+    now[0] += 11
+
+    with pytest.raises(ProviderError) as exc_info:
+        cli._invoke_review_with_fallback(
+            _decision("gemini"),
+            task="Review this merge using the project reviewer guide.",
+            effort="high",
+            cwd=None,
+            timeout_sec=10,
+            max_stall_sec=5,
+            base=None,
+            commit=None,
+            uncommitted=False,
+            title=None,
+            silent=True,
+            max_fallbacks=1,
+            fallback_deadline_monotonic=deadline,
+        )
+
+    message = str(exc_info.value)
+    assert "gemini (stall)" in message
+    assert "review gate budget exhausted before trying gemini" in message
 
 
 def test_large_review_codex_contract_failure_falls_back_to_openrouter_next(
