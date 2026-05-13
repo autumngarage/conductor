@@ -10872,6 +10872,35 @@ def _emit_route_validation_text(payload: dict[str, object]) -> None:
         )
 
 
+def _provider_capability_matrix(name: str) -> dict[str, object]:
+    return {
+        "call": _route_provider_assessment(
+            name,
+            kind="call",
+            tools=frozenset(),
+            excluded=frozenset(),
+        ),
+        "review": _route_provider_assessment(
+            name,
+            kind="review",
+            tools=frozenset(),
+            excluded=frozenset(),
+        ),
+        "exec_read_only": _route_provider_assessment(
+            name,
+            kind="exec",
+            tools=EXEC_PERMISSION_PROFILES["read-only"],
+            excluded=frozenset(),
+        ),
+        "exec_full": _route_provider_assessment(
+            name,
+            kind="exec",
+            tools=EXEC_PERMISSION_PROFILES["full"],
+            excluded=frozenset(),
+        ),
+    }
+
+
 @main.command()
 @click.option(
     "--kind",
@@ -11252,6 +11281,7 @@ def _provider_rows() -> list[dict]:
                 "runtime": _provider_runtime_kind(provider),
                 "muted": name in muted,
                 "tools": _tools_label(provider),
+                "capabilities": _provider_capability_matrix(name),
             }
         )
     return rows
@@ -11577,6 +11607,8 @@ def _diagnostic_payload() -> dict:
                 "quality_tier": provider.quality_tier,
                 "runtime": _provider_runtime_kind(provider),
                 "supports_effort": provider.supports_effort,
+                "supported_tools": sorted(getattr(provider, "supported_tools", frozenset())),
+                "capabilities": _provider_capability_matrix(name),
                 "warnings": provider_warnings,
                 "muted": name in muted,
             }
