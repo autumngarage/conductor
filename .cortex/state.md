@@ -1,15 +1,15 @@
 ---
-Generated: 2026-05-11T12:05:22-04:00
-Generator: cortex refresh-state v1.6.2
+Generated: 2026-05-13T09:13:16-04:00
+Generator: cortex refresh-state v1.6.3
 Sources:
-  - HEAD sha: 3c21713865fd55dbab3c9e51efaa999946ae78f8
+  - HEAD sha: 029862ccc1821cd399dd1c292448987aec15cc7b
   - .cortex/plans/*.md (1 files)
   - .cortex/journal/*.md (24 entries, 2026-04-24..2026-05-11)
   - .cortex/doctrine/*.md (6 entries)
   - .cortex/templates/**/*.md (12 templates)
   - docs/case-studies/*.md (0 case studies)
   - SPEC version: 0.5.0
-  - pyproject.toml: conductor + cortex package version: 1.6.2
+  - pyproject.toml: conductor + cortex package version: 1.6.3
 Sources-hash:
   .cortex/doctrine/0001-readme.md: 6ba51021185ac81b252780f755f85f6afe388518f9c90009a0b14c1e60b54153
   .cortex/doctrine/0002-audit-weak-points.md: 9d0dbf91fd4af7b42c1e16ecefae6ab228f369bf83d70ca2019de59c60947d55
