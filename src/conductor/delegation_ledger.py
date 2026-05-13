@@ -60,6 +60,7 @@ class DelegationEvent:
     synthesis_delegation_id: str | None = None
     route: dict | None = None
     semantic: dict | None = None
+    fallback_chain: list[str] | None = None
 
     def to_dict(self) -> dict:
         payload = asdict(self)

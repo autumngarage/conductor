@@ -281,3 +281,43 @@ def test_delegations_report_tag_filter(monkeypatch, tmp_path):
     payload = json.loads(result.output)
     assert payload["window"]["events"] == 1
     assert [row["provider"] for row in payload["providers"]] == ["gemini"]
+
+
+def test_delegations_report_preserves_multi_hop_fallback_chain(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    now = datetime.now(UTC).isoformat()
+    record_delegation(
+        _event(
+            delegation_id="multi-1",
+            timestamp=now,
+            command="review",
+            provider="gemini",
+            model="gemini-2.5-pro",
+            status="ok",
+            tags=["code-review"],
+            route={"provider": "codex"},
+            fallback_chain=["codex", "claude", "openrouter"],
+        )
+    )
+    record_delegation(
+        _event(
+            delegation_id="single-1",
+            timestamp=now,
+            command="review",
+            provider="gemini",
+            model="gemini-2.5-pro",
+            status="ok",
+            tags=["code-review"],
+            route={"provider": "codex"},
+            fallback_chain=["codex"],
+        )
+    )
+
+    result = CliRunner().invoke(main, ["delegations", "report", "--since", "1h", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["route_fallbacks"] == {
+        "codex->claude->openrouter->gemini": 1,
+        "codex->gemini": 1,
+    }

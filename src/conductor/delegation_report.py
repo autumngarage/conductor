@@ -129,8 +129,9 @@ def build_delegation_report(
             selected = route.get("provider")
             if isinstance(selected, str) and selected:
                 route_selected[selected] += 1
-                if selected != provider:
-                    route_fallbacks[f"{selected}->{provider}"] += 1
+        chain_key = _fallback_chain_key(event, provider=provider)
+        if chain_key is not None:
+            route_fallbacks[chain_key] += 1
 
     provider_rows = sorted(
         (bucket.payload() for bucket in providers.values()),
@@ -155,6 +156,27 @@ def build_delegation_report(
         "providers": provider_rows,
         "models": model_rows,
     }
+
+
+def _fallback_chain_key(event: dict[str, Any], *, provider: str) -> str | None:
+    """Return the full attempted-provider chain as a "a->b->c" key, or None.
+
+    Prefers the structured ``fallback_chain`` list (providers that failed
+    before the completed one) so multi-hop fallback paths are not collapsed
+    to primary→final. Falls back to the legacy ``route.provider`` heuristic
+    when that field is absent (older v1/early-v2 events).
+    """
+    chain = event.get("fallback_chain")
+    if isinstance(chain, list) and chain:
+        attempted = [item for item in chain if isinstance(item, str) and item]
+        if attempted:
+            return "->".join([*attempted, provider])
+    route = event.get("route")
+    if isinstance(route, dict):
+        selected = route.get("provider")
+        if isinstance(selected, str) and selected and selected != provider:
+            return f"{selected}->{provider}"
+    return None
 
 
 def _int_or_none(value: object) -> int | None:

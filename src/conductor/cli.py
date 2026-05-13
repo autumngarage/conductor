@@ -3363,6 +3363,7 @@ def _record_response_delegation(
     council_role: str | None = None,
     members: list[dict] | None = None,
     synthesis_delegation_id: str | None = None,
+    fallback_chain: list[str] | None = None,
 ) -> str:
     event = _delegation_event_from_response(
         command,
@@ -3376,6 +3377,7 @@ def _record_response_delegation(
         council_role=council_role,
         members=members,
         synthesis_delegation_id=synthesis_delegation_id,
+        fallback_chain=fallback_chain,
     )
     record_delegation(event)
     return event.delegation_id
@@ -3394,6 +3396,7 @@ def _delegation_event_from_response(
     council_role: str | None = None,
     members: list[dict] | None = None,
     synthesis_delegation_id: str | None = None,
+    fallback_chain: list[str] | None = None,
 ) -> DelegationEvent:
     usage = response.usage or {}
     route_payload, semantic_payload = _internal_delegation_metadata(
@@ -3422,6 +3425,7 @@ def _delegation_event_from_response(
         synthesis_delegation_id=synthesis_delegation_id,
         route=route_payload,
         semantic=semantic_payload,
+        fallback_chain=fallback_chain if fallback_chain else None,
     )
 
 
@@ -4461,7 +4465,7 @@ def ask(
         max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
         review_deadline = _review_gate_deadline(timeout_sec)
         try:
-            response, _fallbacks = _invoke_review_with_fallback(
+            response, fallbacks = _invoke_review_with_fallback(
                 decision,
                 task=body,
                 effort=effort_value,
@@ -4513,6 +4517,7 @@ def ask(
             effort=effort_value,
             decision=decision,
             semantic_plan=plan,
+            fallback_chain=fallbacks,
         )
         _emit_call(response, as_json=as_json, decision=decision, semantic_plan=plan)
         return
@@ -4595,7 +4600,7 @@ def ask(
         candidate.provider: candidate.models for candidate in plan.candidates if candidate.models
     }
     try:
-        response, _fallbacks = _invoke_with_fallback(
+        response, fallbacks = _invoke_with_fallback(
             decision,
             mode=plan.mode,
             task=body,
@@ -4686,6 +4691,7 @@ def ask(
         decision=decision,
         semantic_plan=plan,
         session_log=session_log,
+        fallback_chain=fallbacks,
     )
     _emit_call(
         response,
@@ -4930,6 +4936,7 @@ def call(
     dispatch_started_at = time.monotonic()
 
     decision: RouteDecision | None = None
+    fallbacks: list[str] = []
     if auto:
         try:
             provider, decision = pick(
@@ -4983,7 +4990,7 @@ def call(
         max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
 
         try:
-            response, _fallbacks = _invoke_with_fallback(
+            response, fallbacks = _invoke_with_fallback(
                 decision,
                 mode="call",
                 task=body,
@@ -5124,6 +5131,7 @@ def call(
         response,
         effort=effort_value,
         decision=decision,
+        fallback_chain=fallbacks,
     )
     _emit_call(response, as_json=as_json, decision=decision)
 
@@ -5366,6 +5374,7 @@ def review(
     prefer_value = _validate_prefer(prefer) if prefer is not None else None
 
     decision: RouteDecision | None = None
+    fallbacks: list[str] = []
     if auto_route:
         plan = plan_for("review", effort_value)
         user_tags = tuple(_parse_csv(tags))
@@ -5409,7 +5418,7 @@ def review(
         max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
         review_deadline = _review_gate_deadline(timeout_sec)
         try:
-            response, _fallbacks = _invoke_review_with_fallback(
+            response, fallbacks = _invoke_review_with_fallback(
                 decision,
                 task=body,
                 effort=effort_value,
@@ -5570,6 +5579,7 @@ def review(
         response,
         effort=effort_value,
         decision=decision,
+        fallback_chain=fallbacks,
     )
     _emit_call(response, as_json=as_json, decision=decision)
 
@@ -9184,6 +9194,7 @@ def _run_exec_phase_dispatch(
 
     decision: RouteDecision | None = None
     session_log: SessionLog | None = None
+    fallbacks: list[str] = []
     if auto:
         try:
             provider, decision = pick(
@@ -9309,7 +9320,7 @@ def _run_exec_phase_dispatch(
                 )
 
         try:
-            response, _fallbacks = _invoke_with_fallback(
+            response, fallbacks = _invoke_with_fallback(
                 decision,
                 mode="exec",
                 task=body,
@@ -9616,6 +9627,7 @@ def _run_exec_phase_dispatch(
         effort=effort_value,
         decision=decision,
         session_log=session_log,
+        fallback_chain=fallbacks,
     )
     return response, decision, session_log
 
