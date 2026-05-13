@@ -7,6 +7,7 @@ transport now flow through the shared OpenRouter adapter.
 from __future__ import annotations
 
 import conductor.providers.openrouter_catalog as openrouter_catalog
+from conductor.providers.interface import PROVIDER_RUNTIME_TEXT_ONLY
 from conductor.providers.openrouter import OpenRouterProvider
 
 KIMI_DEFAULT_MODEL = "moonshotai/kimi-k2.6"
@@ -25,6 +26,7 @@ class KimiProvider(OpenRouterProvider):
     fix_command = "conductor init --only openrouter"
 
     quality_tier = "strong"
+    runtime_kind = PROVIDER_RUNTIME_TEXT_ONLY
     supported_tools: frozenset[str] = frozenset()
     supports_effort = True
     effort_to_thinking = {

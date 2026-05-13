@@ -35,6 +35,7 @@ from conductor.providers._startup_lock import codex_startup_lock, release_startu
 from conductor.providers._tool_weights import ToolBudgetCounter
 from conductor.providers.cli_auth import STARTUP_LOCK_MAX_HOLD_SEC, AuthPromptTracker
 from conductor.providers.interface import (
+    PROVIDER_RUNTIME_STATEFUL_AGENT,
     CallResponse,
     ProviderConfigError,
     ProviderError,
@@ -348,6 +349,7 @@ class CodexProvider:
 
     # Capability declarations (see interface.py)
     quality_tier = "frontier"
+    runtime_kind = PROVIDER_RUNTIME_STATEFUL_AGENT
     supported_tools = frozenset({"Read", "Grep", "Glob", "Edit", "Write", "Bash"})
     enforces_exec_tool_permissions = False
     supports_effort = True

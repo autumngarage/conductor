@@ -4,6 +4,10 @@ from conductor.providers.deepseek import DeepSeekChatProvider, DeepSeekReasonerP
 from conductor.providers.gemini import GeminiProvider
 from conductor.providers.interface import (
     EFFORT_LEVELS,
+    PROVIDER_RUNTIME_KINDS,
+    PROVIDER_RUNTIME_STATEFUL_AGENT,
+    PROVIDER_RUNTIME_STATELESS_TOOL_LOOP,
+    PROVIDER_RUNTIME_TEXT_ONLY,
     QUALITY_TIERS,
     TIER_RANK,
     TOOL_NAMES,
@@ -25,6 +29,10 @@ from conductor.providers.shell import ShellProvider, ShellProviderSpec
 
 __all__ = [
     "EFFORT_LEVELS",
+    "PROVIDER_RUNTIME_KINDS",
+    "PROVIDER_RUNTIME_STATEFUL_AGENT",
+    "PROVIDER_RUNTIME_STATELESS_TOOL_LOOP",
+    "PROVIDER_RUNTIME_TEXT_ONLY",
     "QUALITY_TIERS",
     "TIER_RANK",
     "TOOL_NAMES",

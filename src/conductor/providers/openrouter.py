@@ -30,6 +30,7 @@ from conductor.exec_completion import (
 )
 from conductor.openrouter_model_stacks import openrouter_coding_stack
 from conductor.providers.interface import (
+    PROVIDER_RUNTIME_STATELESS_TOOL_LOOP,
     CallResponse,
     ProviderConfigError,
     ProviderError,
@@ -96,6 +97,7 @@ class OpenRouterProvider:
     fix_command = "conductor init --only openrouter"
 
     quality_tier = "frontier"
+    runtime_kind = PROVIDER_RUNTIME_STATELESS_TOOL_LOOP
     supported_tools: frozenset[str] = frozenset(
         {"Read", "Grep", "Glob", "Edit", "Write", "Bash"}
     )

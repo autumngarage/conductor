@@ -15,6 +15,7 @@ and the error hierarchy below.
 
 Capability declarations (v0.2):
   - quality_tier            — "frontier" | "strong" | "standard" | "local"
+  - runtime_kind            — "stateful-agent" | "stateless-tool-loop" | "text-only"
   - supported_tools         — frozenset of tool names ({Read, Grep, Glob, Edit, Write, Bash})
   - enforces_exec_tool_permissions — whether exec() honors Conductor's requested tool whitelist
   - supports_effort         — whether the provider has a thinking/reasoning dial
@@ -57,6 +58,16 @@ TIER_RANK = {name: len(QUALITY_TIERS) - i for i, name in enumerate(QUALITY_TIERS
 # which of these they can drive; the router filters unsupported combinations.
 # --------------------------------------------------------------------------- #
 TOOL_NAMES = frozenset({"Read", "Grep", "Glob", "Edit", "Write", "Bash"})
+PROVIDER_RUNTIME_STATEFUL_AGENT = "stateful-agent"
+PROVIDER_RUNTIME_STATELESS_TOOL_LOOP = "stateless-tool-loop"
+PROVIDER_RUNTIME_TEXT_ONLY = "text-only"
+PROVIDER_RUNTIME_KINDS = frozenset(
+    {
+        PROVIDER_RUNTIME_STATEFUL_AGENT,
+        PROVIDER_RUNTIME_STATELESS_TOOL_LOOP,
+        PROVIDER_RUNTIME_TEXT_ONLY,
+    }
+)
 
 
 class ProviderError(Exception):
@@ -212,6 +223,7 @@ class Provider(Protocol):
 
     # --- capability declarations (hard filters + scoring dimensions) ------- #
     quality_tier: ClassVar[str]
+    runtime_kind: ClassVar[str]
     supported_tools: ClassVar[frozenset[str]]
     enforces_exec_tool_permissions: ClassVar[bool]
     supports_effort: ClassVar[bool]

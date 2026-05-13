@@ -32,6 +32,7 @@ from conductor.exec_completion import (
     format_missing_deliverables_cap_message,
 )
 from conductor.providers.interface import (
+    PROVIDER_RUNTIME_STATELESS_TOOL_LOOP,
     CallResponse,
     ProviderConfigError,
     ProviderHTTPError,
@@ -212,6 +213,7 @@ class OllamaProvider:
 
     # Capability declarations (see interface.py)
     quality_tier = "local"
+    runtime_kind = PROVIDER_RUNTIME_STATELESS_TOOL_LOOP
     # Tool-use runs through Conductor's HTTP tool-use loop.
     supported_tools: frozenset[str] = frozenset(
         {"Read", "Grep", "Glob", "Edit", "Write", "Bash"}

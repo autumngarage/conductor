@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from conductor.providers.interface import (
+    PROVIDER_RUNTIME_TEXT_ONLY,
     CallResponse,
     ProviderConfigError,
     ProviderError,
@@ -86,6 +87,7 @@ class ShellProvider:
     """
 
     # Capability declarations that are the same for every shell provider.
+    runtime_kind: str = PROVIDER_RUNTIME_TEXT_ONLY
     supported_tools: frozenset[str] = frozenset()
     enforces_exec_tool_permissions: bool = False
     supports_effort: bool = False

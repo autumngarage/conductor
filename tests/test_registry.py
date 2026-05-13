@@ -5,6 +5,10 @@ from __future__ import annotations
 import pytest
 
 from conductor.providers import (
+    PROVIDER_RUNTIME_KINDS,
+    PROVIDER_RUNTIME_STATEFUL_AGENT,
+    PROVIDER_RUNTIME_STATELESS_TOOL_LOOP,
+    PROVIDER_RUNTIME_TEXT_ONLY,
     ClaudeProvider,
     CodexProvider,
     DeepSeekChatProvider,
@@ -58,9 +62,25 @@ def test_every_provider_implements_protocol_surface():
             isinstance(t, str) for t in provider.tags
         )
         assert isinstance(provider.default_model, str)
+        assert provider.runtime_kind in PROVIDER_RUNTIME_KINDS
         assert callable(provider.configured)
         assert callable(provider.smoke)
         assert callable(provider.call)
+
+
+def test_builtin_provider_runtime_kinds_are_explicit():
+    assert {
+        name: get_provider(name).runtime_kind for name in known_providers()
+    } == {
+        "claude": PROVIDER_RUNTIME_STATEFUL_AGENT,
+        "codex": PROVIDER_RUNTIME_STATEFUL_AGENT,
+        "deepseek-chat": PROVIDER_RUNTIME_TEXT_ONLY,
+        "deepseek-reasoner": PROVIDER_RUNTIME_TEXT_ONLY,
+        "gemini": PROVIDER_RUNTIME_STATEFUL_AGENT,
+        "kimi": PROVIDER_RUNTIME_TEXT_ONLY,
+        "ollama": PROVIDER_RUNTIME_STATELESS_TOOL_LOOP,
+        "openrouter": PROVIDER_RUNTIME_STATELESS_TOOL_LOOP,
+    }
 
 
 def test_provider_identifiers_match_class_name():
