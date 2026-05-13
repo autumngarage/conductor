@@ -14,7 +14,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import httpx
 
@@ -1079,10 +1079,16 @@ def _execution_failure_message(status: dict[str, object]) -> str | None:
             for item in missing_items
             if isinstance(item, dict)
         ]
+        raw_cap_diagnostics = status.get("cap_diagnostics")
+        cap_diagnostics = (
+            cast("dict[str, object]", raw_cap_diagnostics)
+            if isinstance(raw_cap_diagnostics, dict)
+            else None
+        )
         return format_missing_deliverables_cap_message(
             int(cap) if isinstance(cap, int) else 0,
             missing,
-            status.get("cap_diagnostics"),
+            cap_diagnostics,
         )
     if state == "tool-call-leak":
         return (

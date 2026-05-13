@@ -97,7 +97,9 @@ def test_committed_work_request_without_git_commit_is_flagged() -> None:
 
 
 def test_committed_work_request_accepts_git_commit_from_any_prior_turn() -> None:
-    older_calls = [{"name": "Read", "args": {"path": f"file-{idx}.py"}} for idx in range(25)]
+    older_calls: list[dict[str, object]] = [
+        {"name": "Read", "args": {"path": f"file-{idx}.py"}} for idx in range(25)
+    ]
     missing = detect_missing_deliverables(
         "Commit all intended changes before your final answer.",
         changed_paths=("src/conductor/foo.py",),
