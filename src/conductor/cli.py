@@ -6627,6 +6627,47 @@ def _swarm_dirty_paths(worktree: Path) -> list[str]:
     return [line for line in output.splitlines() if line.strip()]
 
 
+def _swarm_commit_dirty_worktree(
+    worktree: Path,
+    *,
+    brief_path: str,
+    body: str,
+) -> bool:
+    _run_swarm_git(["add", "-A"], cwd=worktree)
+    staged = _run_swarm_git(["diff", "--cached", "--quiet"], cwd=worktree, check=False)
+    if staged.returncode == 0:
+        return False
+    if staged.returncode != 1:
+        detail = (staged.stderr or staged.stdout or "").strip()
+        suffix = f": {detail}" if detail else ""
+        raise RuntimeError(f"`git diff --cached --quiet` failed in {worktree}{suffix}")
+    _run_swarm_git(
+        [
+            "commit",
+            "-m",
+            _swarm_owned_commit_subject(brief_path),
+            "-m",
+            _swarm_owned_commit_body(brief_path, body),
+        ],
+        cwd=worktree,
+    )
+    return True
+
+
+def _swarm_owned_commit_subject(brief_path: str) -> str:
+    stem = Path(brief_path).stem or "task"
+    cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "-", stem).strip(" ._-") or "task"
+    return f"swarm: {cleaned}"[:72]
+
+
+def _swarm_owned_commit_body(brief_path: str, body: str) -> str:
+    brief = body.strip()
+    max_body_chars = 2_000
+    if len(brief) > max_body_chars:
+        brief = f"{brief[:max_body_chars].rstrip()}\n\n[brief truncated]"
+    return f"Conductor swarm task: {brief_path}\n\n{brief}"
+
+
 def _swarm_changed_files(worktree: Path, base_ref: str) -> list[str]:
     output = _run_swarm_git(
         ["diff", "--name-only", f"{base_ref}...HEAD"],
@@ -8893,41 +8934,45 @@ def _run_swarm_task(
                 fallback_provider = provider_used
             mark_phase("testing")
             dirty_paths = _swarm_dirty_paths(worktree)
+            committing_marked = False
             if dirty_paths:
-                status = "failed"
-                failure_reason = (
-                    "task left uncommitted changes in worktree: "
-                    + ", ".join(path[:200] for path in dirty_paths[:10])
+                mark_phase("committing")
+                committing_marked = True
+                _swarm_commit_dirty_worktree(
+                    worktree,
+                    brief_path=brief_path,
+                    body=body,
                 )
+            commits = _swarm_commit_count(worktree, base_ref)
+            if commits == 0:
+                status = "no-changes"
+            elif defer_ship:
+                if not committing_marked:
+                    mark_phase("committing")
+                _append_swarm_closing_refs_to_head_commit(worktree, closing_refs)
+                status = "ready-to-ship"
             else:
-                commits = _swarm_commit_count(worktree, base_ref)
-                if commits == 0:
-                    status = "no-changes"
-                elif defer_ship:
+                if not committing_marked:
                     mark_phase("committing")
-                    _append_swarm_closing_refs_to_head_commit(worktree, closing_refs)
-                    status = "ready-to-ship"
-                else:
-                    mark_phase("committing")
-                    _append_swarm_closing_refs_to_head_commit(worktree, closing_refs)
-                    mark_phase("shipping")
-                    ship_outcome = _coerce_swarm_ship_outcome(
-                        _ship_swarm_pr(
-                            worktree,
-                            base_branch=base_branch,
-                            branch=branch,
-                            auto_merge=auto_merge,
-                        )
+                _append_swarm_closing_refs_to_head_commit(worktree, closing_refs)
+                mark_phase("shipping")
+                ship_outcome = _coerce_swarm_ship_outcome(
+                    _ship_swarm_pr(
+                        worktree,
+                        base_branch=base_branch,
+                        branch=branch,
+                        auto_merge=auto_merge,
                     )
-                    status = ship_outcome.status
-                    pr_url = ship_outcome.pr_url
-                    merge_status = ship_outcome.merge_status
-                    inspection_warning = ship_outcome.inspection_warning
-                    validation_failure = ship_outcome.validation_failure
-                    if status == "shipped":
-                        merge_sha = ship_outcome.detail
-                    elif status in {"failed", "review-blocked", SWARM_VALIDATION_FAILED_STATUS}:
-                        failure_reason = ship_outcome.detail
+                )
+                status = ship_outcome.status
+                pr_url = ship_outcome.pr_url
+                merge_status = ship_outcome.merge_status
+                inspection_warning = ship_outcome.inspection_warning
+                validation_failure = ship_outcome.validation_failure
+                if status == "shipped":
+                    merge_sha = ship_outcome.detail
+                elif status in {"failed", "review-blocked", SWARM_VALIDATION_FAILED_STATUS}:
+                    failure_reason = ship_outcome.detail
         elif status == "failed":
             failure_reason = failure_reason or "provider dispatch did not complete"
     except _ExecPhaseError as e:
