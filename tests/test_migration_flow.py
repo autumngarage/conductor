@@ -182,6 +182,10 @@ def test_brew_upgrade_then_consumer_commit_refresh(tmp_path, monkeypatch):
     doctor = _invoke(["doctor", "--json"])
     agent_integration = json.loads(doctor.output)["agent_integration"]
     assert agent_integration["user_version_skew_files"] == []
-    assert set(agent_integration["repo_version_skew_files"]) == {
-        str(consumer / "CLAUDE.md")
+    assert agent_integration["repo_version_skew_files"] == []
+    status = {
+        entry["kind"]: entry
+        for entry in agent_integration["repo_integration_status"]
     }
+    assert status["claude-md-repo-import"]["status"] == "import-mode"
+    assert status["claude-md-repo-import"]["installed_version"] == "0.10.0"

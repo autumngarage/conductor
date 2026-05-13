@@ -865,6 +865,38 @@ def test_doctor_json_includes_agent_integration_version_skew(
     assert ai["version_skew"] is True
     assert ai["version_skew_files"] == [str(tmp_path / "repo" / "AGENTS.md")]
     assert ai["repo_version_skew_files"] == [str(tmp_path / "repo" / "AGENTS.md")]
+    status = {
+        entry["kind"]: entry
+        for entry in ai["repo_integration_status"]
+    }
+    assert status["agents-md-import"]["stale"] is True
+    assert status["agents-md-import"]["installed_version"] == "0.8.10"
+    assert status["agents-md-import"]["expected_version"] == "0.9.0"
+    assert status["agents-md-import"]["update_command"] == "conductor update"
+
+
+def test_doctor_json_treats_repo_claude_import_mode_as_current(
+    mocker, monkeypatch, tmp_path
+):
+    _stub_all_unconfigured(mocker)
+    monkeypatch.setattr(cli_mod, "__version__", "0.9.0")
+
+    from conductor import agent_wiring
+
+    agent_wiring.wire_claude_md_repo(version="0.8.10")
+
+    result = CliRunner().invoke(main, ["doctor", "--json"])
+    assert result.exit_code == 0, result.output
+    ai = json.loads(result.output)["agent_integration"]
+    assert ai["repo_version_skew_files"] == []
+    status = {
+        entry["kind"]: entry
+        for entry in ai["repo_integration_status"]
+    }
+    assert status["claude-md-repo-import"]["status"] == "import-mode"
+    assert status["claude-md-repo-import"]["installed_version"] == "0.8.10"
+    assert status["claude-md-repo-import"]["stale"] is False
+    assert status["claude-md-repo-import"]["update_command"] is None
 
 
 def test_doctor_reports_agents_md_when_present(mocker, monkeypatch, tmp_path):

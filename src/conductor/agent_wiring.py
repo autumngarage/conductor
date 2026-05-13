@@ -431,13 +431,12 @@ def repo_scope_version_decisions(
 ) -> tuple[RepoScopeVersionDecision, ...]:
     """Scan repo-scope managed files for stale conductor version stamps.
 
-    Startup auto-refresh calls this on eligible CLI commands, so the scan is
-    intentionally bounded to the conventional repo-scope files in ``cwd`` and
-    reads only a small prefix from each existing candidate.
+    The scan is intentionally bounded to the conventional repo-scope files in
+    ``cwd``. Sentinel blocks may live deep in AGENTS.md or CLAUDE.md after
+    project-owned content, so sentinel files are read fully; first-line managed
+    files still use bounded reads.
     """
     root = cwd.resolve()
-    if not _is_inside_git_repo(root):
-        return ()
 
     decisions: list[RepoScopeVersionDecision] = []
     for path, kind in _repo_scope_candidate_sentinel_paths(root).items():
@@ -511,7 +510,8 @@ def _repo_scope_decision(
     reason: str | None,
 ) -> RepoScopeVersionDecision:
     if reason is not None:
-        return RepoScopeVersionDecision(path, kind, version, False, reason)
+        stale = reason.startswith("read-error:")
+        return RepoScopeVersionDecision(path, kind, version, stale, reason)
     if version is None:
         detail = "missing" if not exists else "not conductor-managed"
         return RepoScopeVersionDecision(path, kind, None, False, detail)
@@ -574,7 +574,7 @@ def _read_managed_version_prefix(path: Path) -> str | None:
 
 
 def _read_sentinel_version_prefix(path: Path) -> str | None:
-    text = _read_prefix(path)
+    text = _read_text(path)
     if not text:
         return None
     idx = text.find(SENTINEL_BEGIN_PREFIX)
@@ -588,7 +588,10 @@ def _read_sentinel_version_prefix(path: Path) -> str | None:
 
 
 def _read_repo_sentinel_version_prefix(path: Path) -> tuple[str | None, str | None]:
-    text = _read_prefix(path)
+    try:
+        text = _read_text(path)
+    except OSError as e:
+        return None, f"read-error: {e}"
     if not text:
         return None, None
     idx = text.find(SENTINEL_BEGIN_PREFIX)
@@ -597,11 +600,20 @@ def _read_repo_sentinel_version_prefix(path: Path) -> tuple[str | None, str | No
     marker_end = text.find("-->", idx)
     if marker_end == -1:
         return None, "malformed sentinel"
+    block_end = text.find(SENTINEL_END, marker_end)
+    if block_end == -1:
+        return None, "malformed sentinel"
+    version = text[idx + len(SENTINEL_BEGIN_PREFIX) : marker_end].strip() or None
     body_prefix = text[marker_end + len("-->") :].lstrip()
     if body_prefix.startswith("@"):
-        return None, "import-mode"
-    version = text[idx + len(SENTINEL_BEGIN_PREFIX) : marker_end].strip()
-    return version or None, None
+        return version, "import-mode"
+    return version, None
+
+
+def _read_text(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    return path.read_text(encoding="utf-8")
 
 
 def _is_inside_git_repo(cwd: Path) -> bool:
@@ -638,26 +650,22 @@ def agent_wiring_notice(
     if root is None:
         return None
 
-    detection = detect(cwd=root)
     current_version_key = _canonical_wiring_version(current_version)
     stale: list[str] = []
-    for artifact in detection.managed:
-        if artifact.kind not in _REPO_SCOPED_KINDS:
+    decisions = repo_scope_version_decisions(root, binary_version=current_version)
+    for decision in decisions:
+        if not decision.stale:
             continue
-        if artifact.version and not _wiring_versions_match(
-            artifact.version, current_version
-        ):
-            try:
-                display = artifact.path.relative_to(root)
-            except ValueError:
-                display = artifact.path
-            stale.append(f"{display} has conductor v{artifact.version}")
+        try:
+            display = decision.path.relative_to(root)
+        except ValueError:
+            display = decision.path
+        version = decision.version or "unknown"
+        stale.append(f"{display} has conductor v{version}")
 
     agents_current = any(
-        artifact.kind == "agents-md-import"
-        and artifact.version
-        and _wiring_versions_match(artifact.version, current_version)
-        for artifact in detection.managed
+        decision.kind == "agents-md-import" and decision.reason == "current"
+        for decision in decisions
     )
     agents_missing = not agents_current
 

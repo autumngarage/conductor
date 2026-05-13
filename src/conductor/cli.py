@@ -10,7 +10,7 @@ v0.1 surface (unchanged):
   conductor smoke [<id>] [--all] [--json]
   conductor doctor [--json]
   conductor init [--yes]
-  conductor update [--dry-run] [--check]
+  conductor update [--dry-run] [--check] [--json]
   conductor update-all [--paths PATHS] [--config-file FILE]
 
 v0.2 additions:
@@ -4080,6 +4080,9 @@ def _maybe_auto_refresh(ctx: click.Context) -> None:
         from conductor import agent_wiring
 
         cwd = Path.cwd()
+        repo_check = _run_repo_command(cwd, ["git", "rev-parse", "--is-inside-work-tree"])
+        if repo_check.returncode != 0:
+            return
         repo_decisions = agent_wiring.repo_scope_version_decisions(
             cwd,
             binary_version=__version__,
@@ -11385,25 +11388,25 @@ def _diagnostic_payload() -> dict:
 
 def _agent_integration_payload() -> dict:
     """Summarize the state of agent-integration wiring (see agent_wiring.py)."""
-    from conductor.agent_wiring import detect
+    from conductor import agent_wiring
 
-    detection = detect()
+    detection = agent_wiring.detect()
     kinds = {a.kind for a in detection.managed}
     managed_files = [
         {"path": str(a.path), "kind": a.kind, "version": a.version} for a in detection.managed
     ]
-    version_skew_files = _integration_version_skew_files(
-        managed_files,
-        binary_version=__version__,
-    )
     user_version_skew_files = _integration_version_skew_files(
         [f for f in managed_files if f["kind"] not in REPO_INTEGRATION_KINDS],
         binary_version=__version__,
     )
-    repo_version_skew_files = _integration_version_skew_files(
-        [f for f in managed_files if f["kind"] in REPO_INTEGRATION_KINDS],
+    repo_integration_status = _repo_integration_status_payloads(
+        cwd=Path.cwd(),
         binary_version=__version__,
     )
+    repo_version_skew_files = [
+        str(entry["path"]) for entry in repo_integration_status if entry["stale"]
+    ]
+    version_skew_files = [*user_version_skew_files, *repo_version_skew_files]
     return {
         "claude_detected": detection.claude_detected,
         "claude_cli_on_path": detection.claude_cli_on_path,
@@ -11427,6 +11430,65 @@ def _agent_integration_payload() -> dict:
         "version_skew_files": version_skew_files,
         "user_version_skew_files": user_version_skew_files,
         "repo_version_skew_files": repo_version_skew_files,
+        "repo_integration_status": repo_integration_status,
+    }
+
+
+def _repo_integration_status_payloads(
+    *,
+    cwd: Path,
+    binary_version: str,
+) -> list[dict[str, object]]:
+    """Return exact repo integration status for machine consumers.
+
+    Invariant: the same repo-scope decision engine powers human doctor
+    warnings and JSON status, so an import-only CLAUDE.md block cannot be
+    reported stale while `conductor update` says there is nothing to do.
+    """
+    from conductor import agent_wiring
+
+    return [
+        _repo_integration_decision_payload(decision, cwd=cwd, binary_version=binary_version)
+        for decision in agent_wiring.repo_scope_version_decisions(
+            cwd,
+            binary_version=binary_version,
+        )
+    ]
+
+
+def _repo_integration_decision_payload(
+    decision: RepoScopeVersionDecision,
+    *,
+    cwd: Path,
+    binary_version: str,
+) -> dict[str, object]:
+    expected = str(binary_version).split("+", 1)[0]
+    status = decision.reason
+    managed = status not in {"missing", "not conductor-managed"}
+    requires_attention = status == "malformed sentinel" or status.startswith("read-error:")
+    if status.startswith("read-error:"):
+        update_command = "fix file permissions, then conductor update"
+    elif status == "malformed sentinel":
+        update_command = "repair malformed sentinel, then conductor init -y"
+    elif decision.stale:
+        update_command = "conductor update"
+    elif status in {"missing", "not conductor-managed", "malformed sentinel"}:
+        update_command = "conductor init -y"
+    else:
+        update_command = None
+    return {
+        "path": str(decision.path),
+        "display_path": _repo_relative_path(decision.path, cwd=cwd),
+        "kind": decision.kind,
+        "scope": "repo",
+        "exists": decision.path.is_file(),
+        "managed": managed,
+        "status": status,
+        "stale": decision.stale,
+        "requires_attention": requires_attention,
+        "installed_version": decision.version,
+        "expected_version": expected,
+        "update_command": update_command,
     }
 
 
@@ -11925,10 +11987,9 @@ def doctor(as_json: bool) -> None:
         click.echo(f"⚠ Integration files behind binary (v{payload['version']}). Refresh with:")
         click.echo("    conductor init -y --remaining")
     if ai["repo_version_skew_files"]:
-        repo_skew_entries = _integration_version_skew_entries(
-            [f for f in ai["managed_files"] if f["kind"] in REPO_INTEGRATION_KINDS],
-            binary_version=payload["version"],
-        )
+        repo_skew_entries = [
+            entry for entry in ai["repo_integration_status"] if entry["stale"]
+        ]
         click.echo("")
         click.echo(f"⚠ Repo integration files behind binary (v{payload['version']}):")
         for entry in repo_skew_entries:
@@ -11937,7 +11998,11 @@ def doctor(as_json: bool) -> None:
                 display = path.relative_to(Path.cwd())
             except ValueError:
                 display = path
-            version_note = f" (v{entry['version']})" if entry["version"] else ""
+            version_note = (
+                f" (v{entry['installed_version']})"
+                if entry["installed_version"]
+                else ""
+            )
             click.echo(f"    {display}{version_note}")
         click.echo("  Auto refresh paths:")
         click.echo("    brew upgrade conductor       # CLAUDE.md @-import self-heals on upgrade")
@@ -12268,12 +12333,19 @@ def refresh_on_commit() -> None:
     default=False,
     help="Exit 1 if repo integrations are stale; do not write files.",
 )
-def update(dry_run: bool, check: bool) -> None:
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Emit machine-readable repo integration status as JSON.",
+)
+def update(dry_run: bool, check: bool, as_json: bool) -> None:
     """Refresh stale embedded Conductor repo integrations in this repo."""
-    sys.exit(_run_update_current_repo(dry_run=dry_run, check=check))
+    sys.exit(_run_update_current_repo(dry_run=dry_run, check=check, as_json=as_json))
 
 
-def _run_update_current_repo(*, dry_run: bool, check: bool) -> int:
+def _run_update_current_repo(*, dry_run: bool, check: bool, as_json: bool = False) -> int:
     cwd = Path.cwd()
     repo_check = _run_repo_command(cwd, ["git", "rev-parse", "--is-inside-work-tree"])
     if repo_check.returncode != 0:
@@ -12282,6 +12354,25 @@ def _run_update_current_repo(*, dry_run: bool, check: bool) -> int:
         raise click.ClickException(f"not a git repository{suffix}")
 
     stale = _stale_repo_integration_decisions(cwd)
+    attention = _repo_attention_integration_decisions(cwd)
+    if as_json:
+        status = _repo_update_status_payload(cwd, refreshed=())
+        if attention:
+            click.echo(json.dumps(status, indent=2))
+            return 0 if dry_run else 1
+        if not stale and not attention:
+            click.echo(json.dumps(status, indent=2))
+            return 0
+        if dry_run or check:
+            click.echo(json.dumps(status, indent=2))
+            return 1 if check else 0
+
+    if attention:
+        click.echo("Conductor repo integrations need manual repair:")
+        _echo_repo_attention_plan(attention, cwd=cwd)
+        click.echo("Repair the files above, then run `conductor init -y`.")
+        return 0 if dry_run else 1
+
     if not stale:
         click.echo("Conductor repo integrations are current.")
         return 0
@@ -12307,6 +12398,9 @@ def _run_update_current_repo(*, dry_run: bool, check: bool) -> int:
         raise click.ClickException(f"internal refresh error: {e}") from e
 
     if not touched:
+        if as_json:
+            click.echo(json.dumps(_repo_update_status_payload(cwd, refreshed=()), indent=2))
+            return 0
         click.echo("Conductor repo integrations are current.")
         return 0
 
@@ -12316,6 +12410,10 @@ def _run_update_current_repo(*, dry_run: bool, check: bool) -> int:
     )
     if add.returncode != 0:
         raise click.ClickException(_command_failure_detail(add, "git add"))
+
+    if as_json:
+        click.echo(json.dumps(_repo_update_status_payload(cwd, refreshed=touched), indent=2))
+        return 0
 
     click.echo("Refreshed Conductor repo integrations:")
     for path in touched:
@@ -12337,6 +12435,40 @@ def _stale_repo_integration_decisions(cwd: Path) -> tuple[RepoScopeVersionDecisi
     )
 
 
+def _repo_attention_integration_decisions(cwd: Path) -> tuple[RepoScopeVersionDecision, ...]:
+    from conductor import agent_wiring
+
+    return tuple(
+        decision
+        for decision in agent_wiring.repo_scope_version_decisions(
+            cwd,
+            binary_version=__version__,
+        )
+        if decision.reason == "malformed sentinel"
+        or decision.reason.startswith("read-error:")
+    )
+
+
+def _repo_update_status_payload(
+    cwd: Path,
+    *,
+    refreshed: tuple[Path, ...],
+) -> dict[str, object]:
+    integrations = _repo_integration_status_payloads(cwd=cwd, binary_version=__version__)
+    stale = [entry for entry in integrations if entry["stale"]]
+    needs_attention = [entry for entry in integrations if entry["requires_attention"]]
+    return {
+        "version": __version__.split("+", 1)[0],
+        "repo": str(cwd.resolve()),
+        "current": not stale and not needs_attention,
+        "stale": bool(stale),
+        "needs_attention": bool(needs_attention),
+        "update_command": "conductor update" if stale else None,
+        "refreshed": [_repo_relative_path(path, cwd=cwd) for path in refreshed],
+        "integrations": integrations,
+    }
+
+
 def _echo_repo_update_plan(
     decisions: tuple[RepoScopeVersionDecision, ...],
     *,
@@ -12348,6 +12480,18 @@ def _echo_repo_update_plan(
         click.echo(
             f"  {_repo_relative_path(decision.path, cwd=cwd)} "
             f"(v{version} -> v{target_version})"
+        )
+
+
+def _echo_repo_attention_plan(
+    decisions: tuple[RepoScopeVersionDecision, ...],
+    *,
+    cwd: Path,
+) -> None:
+    for decision in decisions:
+        click.echo(
+            f"  {_repo_relative_path(decision.path, cwd=cwd)} "
+            f"({decision.reason})"
         )
 
 
