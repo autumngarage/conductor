@@ -20,11 +20,21 @@ fi
 
 TOUCHSTONE_PREFLIGHT_SCOPE_MODE="${TOUCHSTONE_PREFLIGHT_SCOPE_MODE:-all}"
 TOUCHSTONE_PREFLIGHT_DIFF_BASE="${TOUCHSTONE_PREFLIGHT_DIFF_BASE:-}"
+TOUCHSTONE_PREFLIGHT_CACHE_KEY=""
+TOUCHSTONE_PREFLIGHT_CACHE_FILE=""
+TOUCHSTONE_PREFLIGHT_CACHE_INPUTS=""
 
 touchstone_preflight_info() { printf '==> %s\n' "$*"; }
 touchstone_preflight_ok() { printf '  OK %s\n' "$*"; }
 touchstone_preflight_skip() { printf '  SKIP %s\n' "$*"; }
 touchstone_preflight_fail() { printf '  FAIL %s\n' "$*" >&2; }
+
+touchstone_preflight_truthy() {
+  case "$(printf '%s' "${1:-false}" | tr '[:upper:]' '[:lower:]')" in
+    true | 1 | yes | on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 touchstone_preflight_unset_review_env() {
   unset TOUCHSTONE_CONDUCTOR_WITH
@@ -44,6 +54,7 @@ touchstone_preflight_unset_review_env() {
   unset CODEX_REVIEW_CONTEXT_SMALL_MAX_FILES
   unset CODEX_REVIEW_DISABLE_CACHE
   unset CODEX_REVIEW_ENABLED
+  unset CODEX_REVIEW_DIAGNOSTICS_FILE
   unset CODEX_REVIEW_FINDINGS_HISTORY_FILE
   unset CODEX_REVIEW_FORCE
   unset CODEX_REVIEW_MAX_DIFF_LINES
@@ -69,6 +80,195 @@ touchstone_preflight_repo_root() {
     return
   fi
   git rev-parse --show-toplevel 2>/dev/null || pwd
+}
+
+touchstone_preflight_hash_stream() {
+  shasum -a 256 | awk '{ print $1 }'
+}
+
+touchstone_preflight_hash_file() {
+  local path="$1"
+
+  if [ -f "$path" ]; then
+    shasum -a 256 "$path" | awk '{ print $1 }'
+  else
+    printf 'missing'
+  fi
+}
+
+touchstone_preflight_hash_paths() {
+  local repo_root="$1"
+  shift
+  local rel path
+
+  for rel in "$@"; do
+    path="$repo_root/$rel"
+    printf '%s\t%s\n' "$rel" "$(touchstone_preflight_hash_file "$path")"
+  done | touchstone_preflight_hash_stream
+}
+
+touchstone_preflight_hash_file_list() {
+  local label path
+
+  while [ "$#" -gt 0 ]; do
+    label="$1"
+    path="$2"
+    shift 2
+    printf '%s\t%s\n' "$label" "$(touchstone_preflight_hash_file "$path")"
+  done | touchstone_preflight_hash_stream
+}
+
+touchstone_preflight_worktree_hash() {
+  local repo_root="$1"
+
+  (
+    cd "$repo_root" || exit 1
+    git status --porcelain --untracked-files=all
+    printf '\n-- worktree diff --\n'
+    git diff --binary
+    printf '\n-- index diff --\n'
+    git diff --cached --binary
+    printf '\n-- untracked files --\n'
+    while IFS= read -r -d '' rel; do
+      printf 'path\t%s\n' "$rel"
+      if [ -f "$rel" ]; then
+        printf 'sha256\t%s\n' "$(touchstone_preflight_hash_file "$rel")"
+      else
+        printf 'sha256\tmissing\n'
+      fi
+    done < <(git ls-files --others --exclude-standard -z)
+  ) 2>/dev/null | touchstone_preflight_hash_stream
+}
+
+touchstone_preflight_changed_paths_hash() {
+  local repo_root="$1"
+  local base_ref="$2"
+
+  (cd "$repo_root" && git diff --name-only "$base_ref"...HEAD) 2>/dev/null \
+    | sort -u \
+    | touchstone_preflight_hash_stream
+}
+
+touchstone_preflight_tool_fingerprint() {
+  local tool path version_hash
+
+  for tool in shellcheck shfmt markdownlint-cli2 markdownlint actionlint; do
+    path="$(command -v "$tool" 2>/dev/null || true)"
+    if [ -n "$path" ]; then
+      version_hash="$({ "$tool" --version 2>&1 || true; } | touchstone_preflight_hash_stream)"
+      printf '%s\t%s\t%s\n' "$tool" "$path" "$version_hash"
+    else
+      printf '%s\tmissing\tmissing\n' "$tool"
+    fi
+  done | touchstone_preflight_hash_stream
+}
+
+touchstone_preflight_env_fingerprint() {
+  {
+    printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_SCRIPT=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_SCRIPT:-}"
+    printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_COMMAND=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_COMMAND:-}"
+  } | touchstone_preflight_hash_stream
+}
+
+touchstone_preflight_cache_inputs() {
+  local base_ref="$1"
+  local repo_root head_sha base_sha merge_base changed_paths_hash
+  local checker_hash config_hash worktree_hash tool_hash env_hash
+
+  repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+  repo_root="$(cd "$repo_root" && pwd)" || return 1
+  head_sha="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null)" || return 1
+  base_sha="$(git -C "$repo_root" rev-parse --verify "$base_ref^{commit}" 2>/dev/null)" || return 1
+  merge_base="$(git -C "$repo_root" merge-base "$base_ref" "$head_sha" 2>/dev/null)" || return 1
+  changed_paths_hash="$(touchstone_preflight_changed_paths_hash "$repo_root" "$base_ref")" || return 1
+  checker_hash="$(touchstone_preflight_hash_file_list \
+    "lib/preflight.sh" "$PREFLIGHT_LIB_DIR/preflight.sh" \
+    "lib/preflight-scope.sh" "$PREFLIGHT_LIB_DIR/preflight-scope.sh" \
+    "scripts/touchstone-run.sh" "$PREFLIGHT_LIB_DIR/../scripts/touchstone-run.sh")"
+  config_hash="$(touchstone_preflight_hash_paths "$repo_root" \
+    ".touchstone-review.toml" \
+    ".codex-review.toml" \
+    ".touchstone-config" \
+    ".touchstone-version" \
+    ".pre-commit-config.yaml" \
+    ".markdownlint.json")"
+  worktree_hash="$(touchstone_preflight_worktree_hash "$repo_root")" || return 1
+  tool_hash="$(touchstone_preflight_tool_fingerprint)"
+  env_hash="$(touchstone_preflight_env_fingerprint)"
+
+  printf 'version=2\n'
+  printf 'repo_root=%s\n' "$repo_root"
+  printf 'scope=diff\n'
+  printf 'base_ref=%s\n' "$base_ref"
+  printf 'base_sha=%s\n' "$base_sha"
+  printf 'head_sha=%s\n' "$head_sha"
+  printf 'merge_base=%s\n' "$merge_base"
+  printf 'changed_paths_hash=%s\n' "$changed_paths_hash"
+  printf 'checker_hash=%s\n' "$checker_hash"
+  printf 'config_hash=%s\n' "$config_hash"
+  printf 'worktree_hash=%s\n' "$worktree_hash"
+  printf 'tool_hash=%s\n' "$tool_hash"
+  printf 'env_hash=%s\n' "$env_hash"
+}
+
+touchstone_preflight_cache_prepare() {
+  local base_ref="$1"
+  local cache_dir
+
+  TOUCHSTONE_PREFLIGHT_CACHE_KEY=""
+  TOUCHSTONE_PREFLIGHT_CACHE_FILE=""
+  TOUCHSTONE_PREFLIGHT_CACHE_INPUTS=""
+
+  if [ -z "$base_ref" ]; then
+    return 1
+  fi
+  if touchstone_preflight_truthy "${TOUCHSTONE_PREFLIGHT_DISABLE_CACHE:-false}"; then
+    return 1
+  fi
+
+  TOUCHSTONE_PREFLIGHT_CACHE_INPUTS="$(touchstone_preflight_cache_inputs "$base_ref")" || return 1
+  TOUCHSTONE_PREFLIGHT_CACHE_KEY="$(printf '%s\n' "$TOUCHSTONE_PREFLIGHT_CACHE_INPUTS" | touchstone_preflight_hash_stream)"
+  cache_dir="$(git rev-parse --git-path touchstone/preflight-clean 2>/dev/null)" || return 1
+  TOUCHSTONE_PREFLIGHT_CACHE_FILE="$cache_dir/$TOUCHSTONE_PREFLIGHT_CACHE_KEY.clean"
+}
+
+touchstone_preflight_cache_short_key() {
+  printf '%s' "${TOUCHSTONE_PREFLIGHT_CACHE_KEY:0:12}"
+}
+
+touchstone_preflight_cache_hit() {
+  local marker_inputs
+
+  [ -n "$TOUCHSTONE_PREFLIGHT_CACHE_FILE" ] || return 1
+  [ -f "$TOUCHSTONE_PREFLIGHT_CACHE_FILE" ] || return 1
+  grep -q '^result=preflight_clean$' "$TOUCHSTONE_PREFLIGHT_CACHE_FILE" || return 1
+  marker_inputs="$(sed '1,2d' "$TOUCHSTONE_PREFLIGHT_CACHE_FILE")"
+  [ "$marker_inputs" = "$TOUCHSTONE_PREFLIGHT_CACHE_INPUTS" ]
+}
+
+touchstone_preflight_write_clean_cache() {
+  local cache_dir tmp
+
+  [ -n "$TOUCHSTONE_PREFLIGHT_CACHE_FILE" ] || return 0
+  [ -n "$TOUCHSTONE_PREFLIGHT_CACHE_INPUTS" ] || return 0
+  cache_dir="$(dirname "$TOUCHSTONE_PREFLIGHT_CACHE_FILE")"
+  if ! mkdir -p "$cache_dir" 2>/dev/null; then
+    echo "WARNING: could not create preflight cache directory $cache_dir; continuing without cache." >&2
+    return 0
+  fi
+
+  tmp="$TOUCHSTONE_PREFLIGHT_CACHE_FILE.$$"
+  if {
+    printf 'result=preflight_clean\n'
+    printf 'created_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")"
+    printf '%s\n' "$TOUCHSTONE_PREFLIGHT_CACHE_INPUTS"
+  } >"$tmp" 2>/dev/null && mv "$tmp" "$TOUCHSTONE_PREFLIGHT_CACHE_FILE" 2>/dev/null; then
+    return 0
+  fi
+
+  rm -f "$tmp" 2>/dev/null || true
+  echo "WARNING: could not write preflight cache marker $TOUCHSTONE_PREFLIGHT_CACHE_FILE; continuing without cache." >&2
+  return 0
 }
 
 touchstone_preflight_all_files() {

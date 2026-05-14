@@ -79,6 +79,7 @@
 #   CODEX_REVIEW_CONTEXT_SMALL_MAX_DIFF_LINES — bounded-context diff line cap (default: 400)
 #   CODEX_REVIEW_CONTEXT_SMALL_MAX_FILES — bounded-context changed-file cap (default: 4)
 #   CODEX_REVIEW_DISABLE_CACHE        — set to true/1 to force a fresh review
+#   CODEX_REVIEW_DIAGNOSTICS_FILE     — optional JSONL path for review infra/fallback diagnostics
 #   CODEX_REVIEW_FORCE                — set to true/1 to run even on non-default-branch pushes
 #   CODEX_REVIEW_NO_AUTOFIX           — set to true/1 for review-only mode (backward compat)
 #   CODEX_REVIEW_IN_PROGRESS          — internal guard to skip nested review runs
@@ -415,6 +416,8 @@ CONDUCTOR_EFFORT=""
 CONDUCTOR_TAGS=""
 CONDUCTOR_EXCLUDE=""
 CONDUCTOR_EXCLUDE_CONFIGURED=false
+CONDUCTOR_PREFLIGHT_REVIEW_PROVIDER=""
+CONDUCTOR_PREFLIGHT_FIX_PROVIDER=""
 ROUTING_ENABLED=true
 ROUTING_SMALL_MAX_DIFF_LINES=400
 ROUTING_SMALL_REVIEWERS=() # legacy 1.x shape; retained for back-compat parsing
@@ -1703,18 +1706,20 @@ reviewer_conductor_exec() {
   local -a args=()
   local subcommand
   local tools
+  local effective_with
 
   # REVIEW_MODE + REVIEW_PHASE → Conductor job shape. The default phase uses
   # Conductor's semantic review command and lets Conductor own routing policy.
   # Edit-capable work is a separate phase after a BLOCKED read-only review.
   subcommand="$(conductor_subcommand_for_mode "$phase")"
   tools="$(conductor_tools_for_mode "$phase")"
+  effective_with="$(conductor_effective_with_for_phase "$phase")"
 
   if [ "$subcommand" = "review" ]; then
     local review_tags
     review_tags="$(normalize_conductor_review_tags "${CONDUCTOR_TAGS:-}")"
-    [ -n "${CONDUCTOR_WITH:-}" ] && args+=(--with "$CONDUCTOR_WITH")
-    if [ -z "${CONDUCTOR_WITH:-}" ]; then
+    [ -n "$effective_with" ] && args+=(--with "$effective_with")
+    if [ -z "$effective_with" ]; then
       args+=(--prefer "${CONDUCTOR_PREFER:-best}")
       [ -n "$review_tags" ] && args+=(--tags "$review_tags")
     fi
@@ -1733,8 +1738,8 @@ reviewer_conductor_exec() {
 
   # Provider selection for exec/call paths: --with <id> pins a provider;
   # otherwise --auto lets the router pick based on prefer + effort + tags.
-  if [ -n "${CONDUCTOR_WITH:-}" ]; then
-    args+=(--with "$CONDUCTOR_WITH")
+  if [ -n "$effective_with" ]; then
+    args+=(--with "$effective_with")
   else
     args+=(--auto)
     args+=(--prefer "${CONDUCTOR_PREFER:-best}")
@@ -1777,6 +1782,20 @@ conductor_csv_empty_or_only_ollama() {
 conductor_should_use_semantic_review() {
   [ "${CONDUCTOR_WITH:-}" != "ollama" ] || return 1
   return 0
+}
+
+conductor_effective_with_for_phase() {
+  local phase="${1:-review}"
+
+  if [ -n "${CONDUCTOR_WITH:-}" ]; then
+    printf '%s' "$CONDUCTOR_WITH"
+    return 0
+  fi
+
+  case "$phase" in
+    review) printf '%s' "${CONDUCTOR_PREFLIGHT_REVIEW_PROVIDER:-}" ;;
+    fix) printf '%s' "${CONDUCTOR_PREFLIGHT_FIX_PROVIDER:-}" ;;
+  esac
 }
 
 conductor_native_review_provider() {
@@ -1949,6 +1968,11 @@ conductor_route_preflight_for_phase() {
     return 1
   fi
 
+  case "$phase" in
+    review) CONDUCTOR_PREFLIGHT_REVIEW_PROVIDER="$provider" ;;
+    fix) CONDUCTOR_PREFLIGHT_FIX_PROVIDER="$provider" ;;
+  esac
+
   echo "==> Review route preflight: $phase route viable via $provider (subcommand=$subcommand, tools=${tools:-none})"
   return 0
 }
@@ -1969,6 +1993,9 @@ run_conductor_route_preflight() {
     echo "WARNING: conductor route preflight is unavailable; continuing without route viability validation." >&2
     return 0
   fi
+
+  CONDUCTOR_PREFLIGHT_REVIEW_PROVIDER=""
+  CONDUCTOR_PREFLIGHT_FIX_PROVIDER=""
 
   echo "==> Review route preflight: mode=$REVIEW_MODE with=${CONDUCTOR_WITH:-auto} prefer=${CONDUCTOR_PREFER:-best} effort=${CONDUCTOR_EFFORT:-high} exclude=${CONDUCTOR_EXCLUDE:-none}"
 
@@ -2554,7 +2581,7 @@ if ! resolve_reviewer; then
   echo "    Fix above, then re-run \`git push\` to trigger review again."
   echo "==> Review status: provider/infrastructure unavailable; findings=0; exit_reason=$unavailable_reason"
   if [ -n "${CODEX_REVIEW_SUMMARY_FILE:-}" ]; then
-    printf '{"reviewer":"Conductor","provider":"unknown","model":"unknown","peer_provider":"none","route":"%s","mode":"%s","context":"%s","prefer":"%s","effort":"%s","files":%d,"diff_lines":%d,"iterations":0,"fix_commits":0,"peer_assists":0,"high_scrutiny_triggered":%s,"high_scrutiny_mode":"%s","high_scrutiny_reason":"","findings":0,"fallback_attempted":false,"fallback_primary_provider":"","fallback_retry_provider":"","fallback_excluded_providers":"","fallback_reason":"","exit_reason":"%s","elapsed_seconds":0}\n' \
+    printf '{"reviewer":"Conductor","provider":"unknown","model":"unknown","peer_provider":"none","route":"%s","mode":"%s","context":"%s","prefer":"%s","effort":"%s","files":%d,"diff_lines":%d,"iterations":0,"fix_commits":0,"peer_assists":0,"high_scrutiny_triggered":%s,"high_scrutiny_mode":"%s","high_scrutiny_reason":"","findings":0,"fallback_attempted":false,"fallback_primary_provider":"","fallback_retry_provider":"","fallback_excluded_providers":"","fallback_reason":"","diagnostics_file":"","diagnostics_events":0,"exit_reason":"%s","elapsed_seconds":0}\n' \
       "$ROUTING_DECISION" "$REVIEW_MODE" "$PROMPT_CONTEXT_DECISION" "${CONDUCTOR_PREFER:-auto}" "${CONDUCTOR_EFFORT:-default}" \
       "$(git diff --name-only "$MERGE_BASE"..HEAD 2>/dev/null | wc -l | tr -d ' ')" "$ROUTING_DIFF_LINE_COUNT" \
       "${HIGH_SCRUTINY_TRIGGERED:-false}" "${HIGH_SCRUTINY_MODE:-peer}" "$unavailable_reason" \
@@ -2728,6 +2755,8 @@ review_cache_key() {
     # silently satisfy a later push expecting prefer=best/effort=high
     # because the diff hash matches.
     printf 'conductor_with=%s\n' "${CONDUCTOR_WITH:-}"
+    printf 'conductor_preflight_review_provider=%s\n' "${CONDUCTOR_PREFLIGHT_REVIEW_PROVIDER:-}"
+    printf 'conductor_preflight_fix_provider=%s\n' "${CONDUCTOR_PREFLIGHT_FIX_PROVIDER:-}"
     printf 'conductor_prefer=%s\n' "${CONDUCTOR_PREFER:-}"
     printf 'conductor_effort=%s\n' "${CONDUCTOR_EFFORT:-}"
     printf 'conductor_tags=%s\n' "${CONDUCTOR_TAGS:-}"
@@ -2905,15 +2934,131 @@ clear_review_findings() {
 
 json_escape() {
   awk '
+    BEGIN {
+      tab = sprintf("%c", 9)
+      cr = sprintf("%c", 13)
+    }
     {
       gsub(/\\/, "\\\\")
       gsub(/"/, "\\\"")
+      gsub(tab, "\\t")
+      gsub(cr, "\\r")
+      gsub(/[[:cntrl:]]/, "?")
       if (NR > 1) {
         printf "\\n"
       }
       printf "%s", $0
     }
   '
+}
+
+review_diagnostics_dir() {
+  git rev-parse --git-path touchstone/reviewer-diagnostics
+}
+
+review_diagnostics_path() {
+  local key stamp diagnostics_dir branch
+  if [ -n "${REVIEW_DIAGNOSTICS_FILE:-}" ]; then
+    printf '%s' "$REVIEW_DIAGNOSTICS_FILE"
+    return 0
+  fi
+  if [ -n "${CODEX_REVIEW_DIAGNOSTICS_FILE:-}" ]; then
+    REVIEW_DIAGNOSTICS_FILE="$CODEX_REVIEW_DIAGNOSTICS_FILE"
+    printf '%s' "$REVIEW_DIAGNOSTICS_FILE"
+    return 0
+  fi
+
+  if [ -n "${CODEX_REVIEW_PR_NUMBER:-}" ]; then
+    key="pr-${CODEX_REVIEW_PR_NUMBER}"
+  else
+    branch="$(review_clean_marker_branch)"
+    if [ -n "$branch" ]; then
+      key="branch-$(review_clean_marker_key "$branch")"
+    else
+      key="manual"
+    fi
+  fi
+  key="$(review_clean_marker_key "$key")"
+  stamp="$(date -u '+%Y%m%dT%H%M%SZ')"
+  diagnostics_dir="$(review_diagnostics_dir)"
+  REVIEW_DIAGNOSTICS_FILE="$diagnostics_dir/${key}-${stamp}-$$.jsonl"
+  printf '%s' "$REVIEW_DIAGNOSTICS_FILE"
+}
+
+review_diagnostics_tail_json() {
+  local file="$1"
+  local lines="${2:-80}"
+  [ -f "$file" ] || return 0
+  tail -n "$lines" "$file" 2>/dev/null | json_escape
+}
+
+review_diagnostics_event_count() {
+  local path="$1"
+  [ -f "$path" ] || {
+    printf '0'
+    return 0
+  }
+  wc -l <"$path" 2>/dev/null | tr -d ' '
+}
+
+append_review_diagnostic_event() {
+  local event="$1"
+  local reason="$2"
+  local output_file="${3:-$REVIEW_OUTPUT_FILE}"
+  local path path_dir timestamp branch head provider model iteration
+  local stdout_tail stderr_tail conductor_log_tail
+
+  path="$(review_diagnostics_path 2>/dev/null || true)"
+  [ -n "$path" ] || return 0
+  [ "$path" != "/dev/null" ] || return 0
+  REVIEW_DIAGNOSTICS_FILE="$path"
+  path_dir="$(dirname "$path")"
+  mkdir -p "$path_dir" 2>/dev/null || return 0
+
+  timestamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  branch="$(review_clean_marker_branch)"
+  [ -n "$branch" ] || branch="unknown"
+  head="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+  provider="$(parse_primary_provider)"
+  [ -n "$provider" ] || provider="$(conductor_effective_with_for_phase review)"
+  [ -n "$provider" ] || provider="unknown"
+  model="$(parse_primary_model)"
+  [ -n "$model" ] || model="unknown"
+  iteration="${iter:-0}"
+  case "$iteration" in
+    '' | *[!0-9]*) iteration=0 ;;
+  esac
+
+  stdout_tail="$(review_diagnostics_tail_json "$output_file" 120)"
+  stderr_tail="$(review_diagnostics_tail_json "$REVIEW_STDERR_FILE" 120)"
+  conductor_log_tail="$(review_diagnostics_tail_json "$REVIEW_CONDUCTOR_LOG_FILE" 120)"
+
+  if printf '{"schema":"touchstone.review.diagnostics.v1","timestamp":"%s","event":"%s","reason":"%s","reviewer":"%s","provider":"%s","model":"%s","branch":"%s","base":"%s","merge_base":"%s","head":"%s","pr_number":"%s","iteration":%d,"mode":"%s","route":"%s","prefer":"%s","effort":"%s","stdout_tail":"%s","stderr_tail":"%s","conductor_log_tail":"%s"}\n' \
+    "$timestamp" \
+    "$(printf '%s' "$event" | json_escape)" \
+    "$(printf '%s' "$reason" | json_escape)" \
+    "$(printf '%s' "${REVIEWER_LABEL:-unknown}" | json_escape)" \
+    "$(printf '%s' "$provider" | json_escape)" \
+    "$(printf '%s' "$model" | json_escape)" \
+    "$(printf '%s' "$branch" | json_escape)" \
+    "$(printf '%s' "${BASE:-}" | json_escape)" \
+    "$(printf '%s' "${MERGE_BASE:-}" | json_escape)" \
+    "$(printf '%s' "$head" | json_escape)" \
+    "$(printf '%s' "${CODEX_REVIEW_PR_NUMBER:-}" | json_escape)" \
+    "$iteration" \
+    "$(printf '%s' "${REVIEW_MODE:-}" | json_escape)" \
+    "$(printf '%s' "${ROUTING_DECISION:-}" | json_escape)" \
+    "$(printf '%s' "${CONDUCTOR_PREFER:-auto}" | json_escape)" \
+    "$(printf '%s' "${CONDUCTOR_EFFORT:-default}" | json_escape)" \
+    "$stdout_tail" "$stderr_tail" "$conductor_log_tail" \
+    >>"$path" 2>/dev/null; then
+    if [ "${REVIEW_DIAGNOSTICS_NOTICE_PRINTED:-false}" = false ]; then
+      echo "==> Review diagnostics: $path"
+      REVIEW_DIAGNOSTICS_NOTICE_PRINTED=true
+    fi
+  else
+    echo "WARNING: unable to persist review diagnostics at $path" >&2
+  fi
 }
 
 review_history_path() {
@@ -3271,6 +3416,8 @@ REVIEW_FALLBACK_RETRY_PROVIDER=""
 REVIEW_FALLBACK_EXCLUDED_PROVIDERS=""
 REVIEW_FALLBACK_REASON=""
 FALLBACK_REVIEW_EXIT=0
+REVIEW_DIAGNOSTICS_FILE=""
+REVIEW_DIAGNOSTICS_NOTICE_PRINTED=false
 
 # --------------------------------------------------------------------------
 # Phase labels
@@ -3336,7 +3483,7 @@ conductor_log_string_field() {
 }
 
 conductor_stderr_success_provider() {
-  local stderr_file="${1:-$REVIEW_STDERR_FILE}"
+  local stderr_file="$REVIEW_STDERR_FILE"
   [ -f "$stderr_file" ] || return 0
   awk '
     /review tried providers:/ { line = $0 }
@@ -3360,7 +3507,7 @@ conductor_stderr_success_provider() {
 }
 
 conductor_stderr_first_tried_provider() {
-  local stderr_file="${1:-$REVIEW_STDERR_FILE}"
+  local stderr_file="$REVIEW_STDERR_FILE"
   [ -f "$stderr_file" ] || return 0
   awk '
     /review tried providers:/ { line = $0 }
@@ -3395,7 +3542,7 @@ parse_primary_provider() {
     printf '%s' "$provider"
     return
   fi
-  provider="$(conductor_stderr_success_provider "$REVIEW_STDERR_FILE")"
+  provider="$(conductor_stderr_success_provider)"
   if [ -n "$provider" ]; then
     printf '%s' "$provider"
     return
@@ -3410,7 +3557,7 @@ parse_primary_provider() {
     printf '%s' "$provider"
     return
   fi
-  provider="$(conductor_stderr_first_tried_provider "$REVIEW_STDERR_FILE")"
+  provider="$(conductor_stderr_first_tried_provider)"
   if [ -n "$provider" ]; then
     printf '%s' "$provider"
     return
@@ -3486,9 +3633,7 @@ print_malformed_sentinel_diagnostics() {
 
   local selected_provider
   selected_provider="$(parse_primary_provider)"
-  if [ -z "$selected_provider" ] && [ -n "${CONDUCTOR_WITH:-}" ]; then
-    selected_provider="$CONDUCTOR_WITH"
-  fi
+  [ -n "$selected_provider" ] || selected_provider="$(conductor_effective_with_for_phase review)"
   [ -n "$selected_provider" ] || selected_provider="unknown"
 
   echo "    Conductor selected provider: $selected_provider"
@@ -3607,7 +3752,8 @@ try_review_fallback_retry() {
   local status_before="$3"
   local prompt="${4:-$REVIEW_PROMPT}"
   local output_file="${5:-$REVIEW_OUTPUT_FILE}"
-  local failed_provider failed_providers previous_with previous_exclude fallback_exclude
+  local failed_provider failed_providers previous_with previous_exclude
+  local previous_preflight_review_provider previous_preflight_fix_provider fallback_exclude
 
   [ "${ACTIVE_REVIEWER:-}" = "conductor" ] || return 1
   is_truthy "$CONDUCTOR_FALLBACK_RETRY" || return 1
@@ -3619,7 +3765,7 @@ try_review_fallback_retry() {
   fi
 
   failed_provider="$(parse_primary_provider)"
-  [ -n "$failed_provider" ] || failed_provider="${CONDUCTOR_WITH:-}"
+  [ -n "$failed_provider" ] || failed_provider="$(conductor_effective_with_for_phase review)"
   failed_providers="$(conductor_failed_provider_csv)"
   if [ -n "$failed_provider" ] && [ "$failed_provider" != "unknown" ]; then
     failed_providers="$(exclude_provider_once "$failed_providers" "$failed_provider")"
@@ -3634,9 +3780,12 @@ try_review_fallback_retry() {
   REVIEW_FALLBACK_PRIMARY_PROVIDER="$failed_provider"
   REVIEW_FALLBACK_EXCLUDED_PROVIDERS="$failed_providers"
   REVIEW_FALLBACK_REASON="$reason"
+  append_review_diagnostic_event "fallback-trigger" "$reason" "$output_file"
 
   previous_with="$CONDUCTOR_WITH"
   previous_exclude="$CONDUCTOR_EXCLUDE"
+  previous_preflight_review_provider="$CONDUCTOR_PREFLIGHT_REVIEW_PROVIDER"
+  previous_preflight_fix_provider="$CONDUCTOR_PREFLIGHT_FIX_PROVIDER"
   fallback_exclude="$(exclude_provider_csv "$CONDUCTOR_EXCLUDE" "$failed_providers")"
 
   phase "retrying with Conductor fallback (excluding $failed_providers)"
@@ -3645,6 +3794,8 @@ try_review_fallback_retry() {
 
   CONDUCTOR_WITH=""
   CONDUCTOR_EXCLUDE="$fallback_exclude"
+  CONDUCTOR_PREFLIGHT_REVIEW_PROVIDER=""
+  CONDUCTOR_PREFLIGHT_FIX_PROVIDER=""
   set +e
   run_reviewer_with_timeout "$REVIEW_TIMEOUT" "$prompt" "$output_file"
   FALLBACK_REVIEW_EXIT=$?
@@ -3654,6 +3805,8 @@ try_review_fallback_retry() {
 
   CONDUCTOR_WITH="$previous_with"
   CONDUCTOR_EXCLUDE="$previous_exclude"
+  CONDUCTOR_PREFLIGHT_REVIEW_PROVIDER="$previous_preflight_review_provider"
+  CONDUCTOR_PREFLIGHT_FIX_PROVIDER="$previous_preflight_fix_provider"
 
   # The clean-review cache key was computed for the primary route. A fallback
   # clean result is valid for this run, but should not satisfy a later exact
@@ -3873,17 +4026,26 @@ ${fix_output}"
 # --------------------------------------------------------------------------
 
 print_summary() {
-  local elapsed mins secs findings provider model peer_provider
+  local elapsed mins secs findings provider model peer_provider diagnostics_file diagnostics_events
   elapsed=$(($(date +%s) - REVIEW_START_TIME))
   mins=$((elapsed / 60))
   secs=$((elapsed % 60))
   findings="${REVIEW_FINDINGS_COUNT:-0}"
   provider="$(parse_primary_provider)"
-  [ -n "$provider" ] || provider="${CONDUCTOR_WITH:-unknown}"
+  [ -n "$provider" ] || provider="$(conductor_effective_with_for_phase review)"
+  [ -n "$provider" ] || provider="unknown"
   model="$(parse_primary_model)"
   [ -n "$model" ] || model="unknown"
   peer_provider="$(parse_peer_provider)"
   [ -n "$peer_provider" ] || peer_provider="none"
+  diagnostics_file="${REVIEW_DIAGNOSTICS_FILE:-}"
+  diagnostics_events=0
+  if [ -n "$diagnostics_file" ] && [ -f "$diagnostics_file" ]; then
+    diagnostics_events="$(review_diagnostics_event_count "$diagnostics_file")"
+    [ -n "$diagnostics_events" ] || diagnostics_events=0
+  else
+    diagnostics_file=""
+  fi
 
   printf "\n  ${C_DIM}─── review summary ────────────────────────${C_RESET}\n"
   printf "  ${C_DIM}reviewer:       %s${C_RESET}\n" "$REVIEWER_LABEL"
@@ -3911,12 +4073,15 @@ print_summary() {
       printf "  ${C_DIM}fallback skip:  %s${C_RESET}\n" "${REVIEW_FALLBACK_EXCLUDED_PROVIDERS:-unknown}"
     fi
   fi
+  if [ -n "$diagnostics_file" ]; then
+    printf "  ${C_DIM}diagnostics:    %s (%s event(s))${C_RESET}\n" "$diagnostics_file" "$diagnostics_events"
+  fi
   printf "  ${C_DIM}exit reason:    %s${C_RESET}\n" "$REVIEW_EXIT_REASON"
   printf "  ${C_DIM}elapsed:        %dm%ds${C_RESET}\n" "$mins" "$secs"
   printf "  ${C_DIM}──────────────────────────────────────────${C_RESET}\n"
 
   if [ -n "${CODEX_REVIEW_SUMMARY_FILE:-}" ]; then
-    printf '{"reviewer":"%s","provider":"%s","model":"%s","peer_provider":"%s","route":"%s","mode":"%s","context":"%s","prefer":"%s","effort":"%s","files":%d,"diff_lines":%d,"iterations":%d,"fix_commits":%d,"peer_assists":%d,"high_scrutiny_triggered":%s,"high_scrutiny_mode":"%s","high_scrutiny_reason":"%s","findings":%d,"fallback_attempted":%s,"fallback_primary_provider":"%s","fallback_retry_provider":"%s","fallback_excluded_providers":"%s","fallback_reason":"%s","exit_reason":"%s","elapsed_seconds":%d}\n' \
+    printf '{"reviewer":"%s","provider":"%s","model":"%s","peer_provider":"%s","route":"%s","mode":"%s","context":"%s","prefer":"%s","effort":"%s","files":%d,"diff_lines":%d,"iterations":%d,"fix_commits":%d,"peer_assists":%d,"high_scrutiny_triggered":%s,"high_scrutiny_mode":"%s","high_scrutiny_reason":"%s","findings":%d,"fallback_attempted":%s,"fallback_primary_provider":"%s","fallback_retry_provider":"%s","fallback_excluded_providers":"%s","fallback_reason":"%s","diagnostics_file":"%s","diagnostics_events":%d,"exit_reason":"%s","elapsed_seconds":%d}\n' \
       "$REVIEWER_LABEL" "$provider" "$model" "$peer_provider" "$ROUTING_DECISION" "$REVIEW_MODE" "$PROMPT_CONTEXT_DECISION" "${CONDUCTOR_PREFER:-auto}" "${CONDUCTOR_EFFORT:-default}" "$REVIEW_FILES_INSPECTED" "$DIFF_LINE_COUNT" \
       "${iter:-0}" "$FIX_COMMITS" "$ASSIST_ROUNDS" "${HIGH_SCRUTINY_TRIGGERED:-false}" \
       "$(printf '%s' "${HIGH_SCRUTINY_MODE:-peer}" | json_escape)" \
@@ -3926,6 +4091,7 @@ print_summary() {
       "$(printf '%s' "${REVIEW_FALLBACK_RETRY_PROVIDER:-}" | json_escape)" \
       "$(printf '%s' "${REVIEW_FALLBACK_EXCLUDED_PROVIDERS:-}" | json_escape)" \
       "$(printf '%s' "${REVIEW_FALLBACK_REASON:-}" | json_escape)" \
+      "$(printf '%s' "$diagnostics_file" | json_escape)" "$diagnostics_events" \
       "$REVIEW_EXIT_REASON" "$elapsed" \
       >"$CODEX_REVIEW_SUMMARY_FILE" 2>/dev/null || true
   fi
@@ -4151,6 +4317,7 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
     phase "timed out"
     echo "==> $REVIEWER_LABEL timed out after ${REVIEW_TIMEOUT}s."
     REVIEW_EXIT_REASON="timeout"
+    append_review_diagnostic_event "review-timeout" "timeout after ${REVIEW_TIMEOUT}s"
     print_summary
     handle_error "timeout after ${REVIEW_TIMEOUT}s"
   fi
@@ -4167,6 +4334,7 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
   if [ $EXIT -ne 0 ]; then
     echo "==> $REVIEWER_LABEL review failed with exit $EXIT."
     REVIEW_EXIT_REASON="error"
+    append_review_diagnostic_event "review-error" "reviewer exit $EXIT"
     print_summary
     handle_error "reviewer exit $EXIT"
   fi
@@ -4191,6 +4359,7 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
           phase "timed out"
           echo "==> $REVIEWER_LABEL timed out after ${REVIEW_TIMEOUT}s after peer assistance."
           REVIEW_EXIT_REASON="timeout"
+          append_review_diagnostic_event "assist-timeout" "timeout after ${REVIEW_TIMEOUT}s after peer assistance"
           print_summary
           handle_error "timeout after ${REVIEW_TIMEOUT}s after peer assistance"
         fi
@@ -4198,6 +4367,7 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
         if [ "$EXIT" -ne 0 ]; then
           echo "==> $REVIEWER_LABEL review failed with exit $EXIT after peer assistance."
           REVIEW_EXIT_REASON="error"
+          append_review_diagnostic_event "assist-error" "reviewer exit $EXIT after peer assistance"
           print_summary
           handle_error "reviewer exit $EXIT after peer assistance"
         fi
@@ -4224,6 +4394,7 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
         phase "timed out"
         echo "==> $REVIEWER_LABEL timed out after ${REVIEW_TIMEOUT}s during fallback retry."
         REVIEW_EXIT_REASON="timeout"
+        append_review_diagnostic_event "fallback-timeout" "timeout after ${REVIEW_TIMEOUT}s during fallback retry"
         print_summary
         handle_error "timeout after ${REVIEW_TIMEOUT}s during fallback retry"
       fi
@@ -4231,6 +4402,7 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
       if [ "$EXIT" -ne 0 ]; then
         echo "==> $REVIEWER_LABEL fallback review failed with exit $EXIT."
         REVIEW_EXIT_REASON="error"
+        append_review_diagnostic_event "fallback-error" "reviewer exit $EXIT during fallback retry"
         print_summary
         handle_error "reviewer exit $EXIT during fallback retry"
       fi
@@ -4351,6 +4523,7 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
       echo "    Raw output (first 20 lines):"
       printf '%s\n' "$OUTPUT" | head -20 | sed 's/^/    /'
       REVIEW_EXIT_REASON="malformed-sentinel"
+      append_review_diagnostic_event "malformed-sentinel" "malformed sentinel"
       print_summary
       handle_error "malformed sentinel"
       ;;

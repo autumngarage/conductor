@@ -188,6 +188,38 @@ run_pr_body_protocol_preflight() {
   fi
 }
 
+run_deterministic_preflight_for_advisory() {
+  local base_ref="$1"
+  local repo_root cache_key_short
+
+  repo_root="$(git rev-parse --show-toplevel)"
+
+  if declare -F touchstone_preflight_cache_prepare >/dev/null 2>&1 \
+    && touchstone_preflight_cache_prepare "$base_ref" \
+    && touchstone_preflight_cache_hit; then
+    cache_key_short="$(touchstone_preflight_cache_short_key)"
+    echo "==> Deterministic preflight clean (cached=true, key=$cache_key_short; before advisory review, diff vs $base_ref)."
+    return 0
+  fi
+
+  echo "==> Running deterministic preflight before advisory review ..."
+  if touchstone_preflight_main_sanitized --diff "$base_ref" "$repo_root"; then
+    if declare -F touchstone_preflight_write_clean_cache >/dev/null 2>&1; then
+      touchstone_preflight_write_clean_cache
+    fi
+    if [ -n "${TOUCHSTONE_PREFLIGHT_CACHE_KEY:-}" ] \
+      && declare -F touchstone_preflight_cache_short_key >/dev/null 2>&1; then
+      cache_key_short="$(touchstone_preflight_cache_short_key)"
+      echo "==> Deterministic preflight clean (cached=false, key=$cache_key_short)."
+    else
+      echo "==> Deterministic preflight clean (cached=false)."
+    fi
+    return 0
+  fi
+
+  return 1
+}
+
 truthy() {
   case "$(printf '%s' "${1:-false}" | tr '[:upper:]' '[:lower:]')" in
     true | 1 | yes | on) return 0 ;;
@@ -254,8 +286,7 @@ run_advisory_review_at_pr_open() {
 
   if truthy "$PREFLIGHT_REQUIRED" && ! truthy "${TOUCHSTONE_NO_PREFLIGHT:-false}"; then
     if declare -F touchstone_preflight_main >/dev/null 2>&1; then
-      echo "==> Running deterministic preflight before advisory review ..."
-      if ! touchstone_preflight_main_sanitized --diff "origin/$base_branch" "$(git rev-parse --show-toplevel)"; then
+      if ! run_deterministic_preflight_for_advisory "origin/$base_branch"; then
         echo "WARNING: preflight failed; skipping non-blocking advisory review to avoid spending provider tokens." >&2
         return 0
       fi

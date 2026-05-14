@@ -40,6 +40,7 @@ review_comment_findings_from_output() {
 format_clean_review_comment() {
   local json="$1"
   local reviewer provider model peer iterations mode findings
+  local fallback_primary fallback_retry fallback_reason fallback_excluded diagnostics_file diagnostics_events
 
   reviewer="$(review_comment_clean_value "$(review_comment_json_field "$json" reviewer)")"
   provider="$(review_comment_clean_value "$(review_comment_json_field "$json" provider)")"
@@ -48,9 +49,26 @@ format_clean_review_comment() {
   iterations="$(review_comment_clean_value "$(review_comment_json_number "$json" iterations)")"
   mode="$(review_comment_clean_value "$(review_comment_json_field "$json" mode)")"
   findings="$(review_comment_clean_value "$(review_comment_json_number "$json" findings)")"
+  fallback_primary="$(review_comment_clean_value "$(review_comment_json_field "$json" fallback_primary_provider)")"
+  fallback_retry="$(review_comment_clean_value "$(review_comment_json_field "$json" fallback_retry_provider)")"
+  fallback_reason="$(review_comment_clean_value "$(review_comment_json_field "$json" fallback_reason)")"
+  fallback_excluded="$(review_comment_clean_value "$(review_comment_json_field "$json" fallback_excluded_providers)")"
+  diagnostics_file="$(review_comment_clean_value "$(review_comment_json_field "$json" diagnostics_file)")"
+  diagnostics_events="$(review_comment_clean_value "$(review_comment_json_number "$json" diagnostics_events)")"
 
-  printf '%s review clean - provider: %s, model: %s, peer: %s, iterations: %s, mode: %s, findings: %s' \
-    "$reviewer" "$provider" "$model" "$peer" "$iterations" "$mode" "$findings"
+  {
+    printf '%s review clean - provider: %s, model: %s, peer: %s, iterations: %s, mode: %s, findings: %s' \
+      "$reviewer" "$provider" "$model" "$peer" "$iterations" "$mode" "$findings"
+    if [ "$fallback_primary" != "unknown" ] || [ "$fallback_retry" != "unknown" ] || [ "$fallback_reason" != "unknown" ]; then
+      printf '\n- Fallback: `%s` -> `%s` (%s)' "$fallback_primary" "$fallback_retry" "$fallback_reason"
+    fi
+    if [ "$fallback_excluded" != "unknown" ]; then
+      printf '\n- Fallback excluded: `%s`' "$fallback_excluded"
+    fi
+    if [ "$diagnostics_file" != "unknown" ]; then
+      printf '\n- Diagnostics: `%s` (%s event(s))' "$diagnostics_file" "$diagnostics_events"
+    fi
+  }
 }
 
 format_review_failure_comment() {
@@ -59,7 +77,7 @@ format_review_failure_comment() {
   local retry_command="${3:-}"
   local failed_providers="${4:-}"
   local reviewer provider model peer iterations mode findings exit_reason fallback_primary fallback_retry fallback_reason fallback_excluded
-  local findings_block output_excerpt
+  local diagnostics_file diagnostics_events findings_block output_excerpt
 
   reviewer="$(review_comment_clean_value "$(review_comment_json_field "$json" reviewer)")"
   provider="$(review_comment_clean_value "$(review_comment_json_field "$json" provider)")"
@@ -73,6 +91,8 @@ format_review_failure_comment() {
   fallback_retry="$(review_comment_clean_value "$(review_comment_json_field "$json" fallback_retry_provider)")"
   fallback_reason="$(review_comment_clean_value "$(review_comment_json_field "$json" fallback_reason)")"
   fallback_excluded="$(review_comment_clean_value "$(review_comment_json_field "$json" fallback_excluded_providers)")"
+  diagnostics_file="$(review_comment_clean_value "$(review_comment_json_field "$json" diagnostics_file)")"
+  diagnostics_events="$(review_comment_clean_value "$(review_comment_json_number "$json" diagnostics_events)")"
   findings_block="$(review_comment_findings_from_output "$output")"
   output_excerpt="$(printf '%s\n' "$output" | sed -n '1,80p')"
 
@@ -93,6 +113,9 @@ format_review_failure_comment() {
     fi
     if [ "$fallback_excluded" != "unknown" ]; then
       printf -- '- Fallback excluded: `%s`\n' "$fallback_excluded"
+    fi
+    if [ "$diagnostics_file" != "unknown" ]; then
+      printf -- '- Diagnostics: `%s` (%s event(s))\n' "$diagnostics_file" "$diagnostics_events"
     fi
     if [ -n "$retry_command" ]; then
       printf -- '- Retry: `%s`\n' "$retry_command"
