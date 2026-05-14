@@ -3483,7 +3483,7 @@ conductor_log_string_field() {
 }
 
 conductor_stderr_success_provider() {
-  local stderr_file="${1:-$REVIEW_STDERR_FILE}"
+  local stderr_file="$REVIEW_STDERR_FILE"
   [ -f "$stderr_file" ] || return 0
   awk '
     /review tried providers:/ { line = $0 }
@@ -3507,7 +3507,7 @@ conductor_stderr_success_provider() {
 }
 
 conductor_stderr_first_tried_provider() {
-  local stderr_file="${1:-$REVIEW_STDERR_FILE}"
+  local stderr_file="$REVIEW_STDERR_FILE"
   [ -f "$stderr_file" ] || return 0
   awk '
     /review tried providers:/ { line = $0 }
