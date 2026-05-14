@@ -28,6 +28,8 @@ from conductor import offline_mode
 from conductor.cli import (
     SANDBOX_DEPRECATION_WARNING,
     _resolve_exec_max_iterations,
+    _review_exit_class_for_verdict,
+    _review_verdict_from_text,
     main,
 )
 from conductor.network_profile import NetworkProfile
@@ -1658,6 +1660,22 @@ def test_review_auto_next_provider_success_json_reports_winner_and_status(mocker
         ("openrouter", "success", None),
     ]
     assert payload["review"]["attempts"] == payload["attempts"]
+
+
+@pytest.mark.parametrize(
+    ("text", "verdict", "exit_class"),
+    [
+        ("No blocking issues.\nCODEX_REVIEW_CLEAN", "clean", "clean"),
+        ("Applied safe fix.\nCODEX_REVIEW_FIXED", "fixed", "clean"),
+        ("Blocking issue found.\nCODEX_REVIEW_BLOCKED", "blocked", "findings"),
+        ("Review output without a final verdict marker.", "unknown", "malformed_output"),
+    ],
+)
+def test_review_verdict_exit_class_coupling(text, verdict, exit_class):
+    parsed = _review_verdict_from_text(text)
+
+    assert parsed == verdict
+    assert _review_exit_class_for_verdict(parsed) == exit_class
 
 
 def test_review_auto_exhausted_fallback_json_reports_structured_infra_error(

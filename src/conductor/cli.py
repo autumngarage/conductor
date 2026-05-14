@@ -1351,7 +1351,9 @@ def _review_verdict_from_text(text: str) -> str:
 def _review_exit_class_for_verdict(verdict: str) -> str:
     if verdict == "blocked":
         return "findings"
-    return "clean"
+    if verdict in {"clean", "fixed"}:
+        return "clean"
+    return "malformed_output"
 
 
 def _review_candidate_model(
