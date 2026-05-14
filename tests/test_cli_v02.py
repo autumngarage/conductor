@@ -27,6 +27,8 @@ from click.testing import CliRunner
 from conductor import offline_mode
 from conductor.cli import (
     SANDBOX_DEPRECATION_WARNING,
+    _estimate_review_input_tokens,
+    _estimate_text_tokens,
     _resolve_exec_max_iterations,
     _review_exit_class_for_verdict,
     _review_verdict_from_text,
@@ -48,6 +50,7 @@ from conductor.providers import (
     ProviderError,
     ProviderExecutionError,
 )
+from conductor.providers.review_contract import build_review_task_prompt
 from conductor.router import RouteDecision, reset_health
 from conductor.session_log import SessionLog
 
@@ -4564,8 +4567,53 @@ def test_review_auto_route_includes_patch_size_estimate(mocker, tmp_path):
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert payload["route"]["estimated_input_tokens"] > 2
+    expected_prompt = build_review_task_prompt(
+        "review",
+        base="HEAD~1",
+        commit=None,
+        uncommitted=False,
+        title=None,
+        cwd=str(repo),
+        include_patch=True,
+    )
+    assert payload["route"]["estimated_input_tokens"] == _estimate_text_tokens(
+        expected_prompt
+    )
     assert payload["route"]["estimated_output_tokens"] == 500
+
+
+def test_review_auto_without_target_warns_estimate_is_prompt_only(mocker, tmp_path):
+    _stub_all_configured(mocker, {"claude"})
+    mocker.patch.object(ClaudeProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(ClaudeProvider, "review", return_value=_fake_response("claude"))
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--cwd",
+            str(tmp_path),
+            "--brief",
+            "Review this merge using the project reviewer guide.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "token estimate is prompt-only" in result.stderr
+    assert "native review providers may load repository or diff context" in result.stderr
+    assert "Pass --base, --commit, or --uncommitted" in result.stderr
+
+
+def test_review_input_estimate_is_prompt_only_without_explicit_target() -> None:
+    assert _estimate_review_input_tokens(
+        "review me",
+        base=None,
+        commit=None,
+        uncommitted=False,
+        title=None,
+        cwd=None,
+    ) == _estimate_text_tokens("review me")
 
 
 def test_route_no_configured_provider_exits_nonzero(mocker):
