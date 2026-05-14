@@ -90,7 +90,6 @@ CODEX_STALL_KNOWN_NON_PROGRESS_EVENTS = frozenset(
 )
 CODEX_STREAM_POLL_INTERVAL_SEC = 0.05
 CODEX_STREAM_EXIT_READER_JOIN_SEC = 0.2
-CODEX_REVIEW_CONTRACT_RETRY_PREVIEW_CHARS = 4000
 
 # Sentinel distinguishing "caller didn't specify a timeout" from "caller
 # explicitly asked for no timeout (None)". The constructor default applies
@@ -140,13 +139,6 @@ _CODEX_EXEC_RESUME_DROPPED_OPTION_ARITY = {
 }
 
 
-def _remaining_review_timeout(timeout: float | None, start: float) -> float | None:
-    if timeout is None:
-        return None
-    remaining = timeout - (time.monotonic() - start)
-    return max(0.001, remaining)
-
-
 def _extract_review_stdout(result: subprocess.CompletedProcess[str]) -> str:
     if result.returncode != 0:
         raise ProviderHTTPError(
@@ -159,46 +151,6 @@ def _extract_review_stdout(result: subprocess.CompletedProcess[str]) -> str:
             f"codex review produced empty stdout: {result.stderr[:500]!r}"
         )
     return content
-
-
-def _build_review_contract_retry_prompt(
-    task: str,
-    *,
-    reason: str,
-    previous_output: str,
-) -> str:
-    previous = previous_output.strip()
-    if len(previous) > CODEX_REVIEW_CONTRACT_RETRY_PREVIEW_CHARS:
-        previous = previous[-CODEX_REVIEW_CONTRACT_RETRY_PREVIEW_CHARS:]
-
-    return f"""{task.rstrip()}
-
-## Conductor review output contract retry
-
-Your previous Codex review output did not satisfy Conductor's required
-review output contract.
-
-Contract failure: {reason}
-
-Re-run the review for the same target. Return the full review result again.
-The final line must be exactly one standalone sentinel:
-
-- CODEX_REVIEW_CLEAN
-- CODEX_REVIEW_FIXED
-- CODEX_REVIEW_BLOCKED
-
-Rules:
-
-- Emit exactly one standalone CODEX_REVIEW_* line.
-- Do not include any text after the sentinel.
-- If you are not certain the change is clean, use CODEX_REVIEW_BLOCKED.
-
-Previous non-compliant output:
-
-```text
-{previous}
-```
-"""
 
 
 def _codex_output_path(resume_session_id: str | None) -> Path:
@@ -638,22 +590,15 @@ class CodexProvider:
         _ = max_stall_sec
         timeout = self._timeout_sec if timeout_sec is None else timeout_sec
         start = time.monotonic()
-        contract_retry_reason: str | None = None
-        first_stderr: str | None = None
 
-        def run_review_once(
-            prompt: str, *, is_retry: bool = False
-        ) -> subprocess.CompletedProcess[str]:
-            review_timeout = (
-                _remaining_review_timeout(timeout, start) if is_retry else timeout
-            )
+        def run_review_once(prompt: str) -> subprocess.CompletedProcess[str]:
             try:
                 return subprocess.run(
                     args,
                     input=prompt,
                     capture_output=True,
                     text=True,
-                    timeout=review_timeout,
+                    timeout=timeout,
                     cwd=cwd,
                 )
             except subprocess.TimeoutExpired as e:
@@ -670,26 +615,14 @@ class CodexProvider:
                 prompt=review_prompt,
                 text=content,
             )
-        except ReviewOutputContractError as first_error:
-            contract_retry_reason = first_error.reason
-            first_stderr = result.stderr
+        except ReviewOutputContractError as e:
             print(
                 "[conductor] codex review output-contract failure "
-                f"({first_error.reason}); retrying once with stricter "
-                "sentinel instructions",
+                f"({e.reason}); failing this attempt so review fallback can "
+                "try the next provider",
                 file=sys.stderr,
             )
-            retry_prompt = _build_review_contract_retry_prompt(
-                review_prompt,
-                reason=first_error.reason,
-                previous_output=content,
-            )
-            result = run_review_once(retry_prompt, is_retry=True)
-            content = validate_requested_review_sentinel(
-                provider_name=self.name,
-                prompt=retry_prompt,
-                text=_extract_review_stdout(result),
-            )
+            raise
         duration_ms = int((time.monotonic() - start) * 1000)
 
         raw: dict[str, object] = {
@@ -702,11 +635,6 @@ class CodexProvider:
                 "title": title,
             },
         }
-        if contract_retry_reason is not None:
-            raw["contract_retry"] = {
-                "reason": contract_retry_reason,
-                "first_stderr": first_stderr,
-            }
 
         return CallResponse(
             text=content,
