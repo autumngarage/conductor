@@ -22,6 +22,7 @@ from conductor import credentials
 from conductor.exec_completion import (
     CapDiagnostics,
     MissingDeliverable,
+    brief_declares_read_only_text_output,
     cap_diagnostics_for_completion_scan,
     changed_paths_for_completion_scan,
     completion_stretch_prompt,
@@ -804,6 +805,7 @@ class OpenRouterProvider:
             git_status_after=git_status_after,
             missing_deliverables=missing_deliverables,
             cap_diagnostics=cap_diagnostics,
+            read_only_text_task=brief_declares_read_only_text_output(task),
         )
         duration_ms = int((time.monotonic() - start) * 1000)
         execution_status["duration_ms"] = duration_ms
@@ -1048,6 +1050,7 @@ def _detect_and_log_missing_deliverables(
 def _execution_status(
     *,
     repo_changing_task: bool,
+    read_only_text_task: bool,
     tool_call_count: int,
     write_success_count: int,
     tool_errors: list[dict[str, object]],
@@ -1067,7 +1070,7 @@ def _execution_status(
     has_tool_call_leak = _has_tool_call_leak_errors(tool_errors)
     if repo_changing_task and has_tool_call_leak and write_success_count == 0:
         state = "tool-call-leak"
-    elif hit_cap:
+    elif hit_cap and not read_only_text_task:
         state = "iteration-cap"
     elif repo_changing_task and validation_failures:
         state = "validation-failed"
@@ -1081,6 +1084,7 @@ def _execution_status(
     return {
         "state": state,
         "repo_changing": repo_changing_task,
+        "read_only_text_task": read_only_text_task,
         "tool_calls": tool_call_count,
         "successful_write_tools": write_success_count,
         "tool_errors": tool_errors,
