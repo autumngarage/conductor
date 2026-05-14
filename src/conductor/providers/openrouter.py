@@ -478,6 +478,11 @@ class OpenRouterProvider:
             exclude=exclude,
             log_selection=log_selection,
         )
+        empty_response_retry_base = (
+            dict(target_payload)
+            if isinstance(target_payload.get("models"), list)
+            else None
+        )
 
         workdir = Path(cwd) if cwd else Path.cwd()
         executor = ToolExecutor(cwd=workdir, write_validation=write_validation)
@@ -575,6 +580,12 @@ class OpenRouterProvider:
                     body,
                     attempts=empty_response_retries,
                 )
+                if retry_payload is None and empty_response_retry_base is not None:
+                    retry_payload = _retry_payload_after_empty_response(
+                        empty_response_retry_base,
+                        body,
+                        attempts=empty_response_retries,
+                    )
                 if retry_payload is not None:
                     failed_model = _response_model(body, fallback=selected_model)
                     empty_response_retries.append(
@@ -590,6 +601,8 @@ class OpenRouterProvider:
                             retry_payload=retry_payload,
                         )
                     target_payload = retry_payload
+                    if isinstance(retry_payload.get("models"), list):
+                        empty_response_retry_base = dict(retry_payload)
                     continue
             if (
                 isinstance(actual_model, str)
@@ -597,6 +610,8 @@ class OpenRouterProvider:
                 and actual_model != OPENROUTER_DEFAULT_MODEL
             ):
                 selected_model = actual_model
+                if isinstance(target_payload.get("models"), list):
+                    empty_response_retry_base = dict(target_payload)
                 target_payload = {"model": actual_model}
                 reasoning = self._reasoning_payload(effort)
                 if reasoning is not None:
@@ -800,8 +815,23 @@ class OpenRouterProvider:
                 status=execution_status,
             )
         if not final_text.strip():
+            empty_git_status_after = (
+                git_status_after
+                if git_status_after is not None
+                else _git_clean_status(workdir)
+            )
             raise ProviderHTTPError(
-                "OpenRouter exec produced empty final response",
+                _empty_exec_response_message(
+                    final_body,
+                    fallback_model=selected_model,
+                    workdir=workdir,
+                    git_status_before=git_status_before,
+                    git_status_after=empty_git_status_after,
+                    recent_tool_calls=recent_tool_calls,
+                    tool_call_count=tool_call_count,
+                    write_success_count=write_success_count,
+                    empty_response_retries=empty_response_retries,
+                ),
                 failure_reason="malformed_response",
                 provider=self.name,
             )
@@ -1412,6 +1442,116 @@ def _empty_call_response_message(body: dict, *, fallback_model: str | None) -> s
         f"content_type={type(content).__name__} "
         f"finish_reason={finish_reason or '<unknown>'}"
     )
+
+
+def _empty_exec_response_message(
+    body: dict,
+    *,
+    fallback_model: str | None,
+    workdir: Path,
+    git_status_before: dict[str, object] | None,
+    git_status_after: dict[str, object] | None,
+    recent_tool_calls: list[dict[str, object]],
+    tool_call_count: int,
+    write_success_count: int,
+    empty_response_retries: list[dict[str, object]],
+) -> str:
+    message = _first_message(body)
+    content = message.get("content")
+    finish_reason = _first_finish_reason(body)
+    return (
+        "OpenRouter exec produced empty final response after tool loop: "
+        f"model={_response_model(body, fallback=fallback_model)} "
+        f"content_type={type(content).__name__} "
+        f"finish_reason={finish_reason or '<unknown>'}; "
+        f"tool_calls={tool_call_count}; "
+        f"successful_write_tools={write_success_count}; "
+        f"empty_response_retries={len(empty_response_retries)}; "
+        f"git_before={_format_git_recovery_state(workdir, git_status_before)}; "
+        f"git_after={_format_git_recovery_state(workdir, git_status_after)}; "
+        f"recent_tool_calls={_format_recent_tool_calls(recent_tool_calls)}"
+    )
+
+
+def _format_git_recovery_state(
+    workdir: Path,
+    status: dict[str, object] | None,
+) -> str:
+    if status is None:
+        return "not captured"
+    if status.get("available") is not True:
+        return f"unavailable(error={_single_line(str(status.get('error') or 'unknown'))})"
+
+    porcelain = status.get("porcelain")
+    lines = [
+        line
+        for line in str(porcelain or "").splitlines()
+        if line.strip()
+    ]
+    tracked_dirty = sum(1 for line in lines if not line.startswith("??"))
+    untracked = sum(1 for line in lines if line.startswith("??"))
+    ahead = _git_commits_ahead_summary(workdir)
+    return (
+        f"clean={bool(status.get('clean'))} "
+        f"modified_files={tracked_dirty} "
+        f"untracked_files={untracked} "
+        f"dirty_files={len(lines)} "
+        f"{ahead}"
+    )
+
+
+def _git_commits_ahead_summary(workdir: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(workdir), "rev-list", "--count", "@{u}..HEAD"],
+            capture_output=True,
+            env=_scrub_git_env(),
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except FileNotFoundError as err:
+        return f"commits_ahead=unknown(error={_single_line(f'git unavailable: {err}')})"
+    except subprocess.TimeoutExpired as err:
+        return (
+            "commits_ahead=unknown("
+            f"error={_single_line(f'git rev-list timed out after {err.timeout}s')})"
+        )
+
+    if result.returncode != 0:
+        error = (result.stderr or result.stdout or "").strip()
+        return (
+            "commits_ahead=unknown("
+            f"error={_single_line(error or f'git rev-list exited {result.returncode}')})"
+        )
+
+    return f"commits_ahead={_single_line(result.stdout.strip() or '0')}"
+
+
+def _format_recent_tool_calls(calls: list[dict[str, object]]) -> str:
+    if not calls:
+        return "none"
+    entries: list[str] = []
+    for call in calls[-5:]:
+        name = str(call.get("name") or "<unknown>")
+        args = call.get("args")
+        if isinstance(args, dict):
+            args_preview = json.dumps(args, sort_keys=True, default=str)
+        else:
+            args_preview = str(args or "")
+        entries.append(f"{name}({_truncate_for_diagnostic(args_preview, 180)})")
+    return "; ".join(entries)
+
+
+def _truncate_for_diagnostic(value: str, limit: int) -> str:
+    value = _single_line(value)
+    if len(value) <= limit:
+        return value
+    return f"{value[: max(0, limit - 3)]}..."
+
+
+def _single_line(value: str) -> str:
+    return " ".join(value.split())
 
 
 def _first_finish_reason(body: dict) -> str | None:
