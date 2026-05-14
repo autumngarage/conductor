@@ -1627,6 +1627,49 @@ def _review_excluded_payload(reasons: dict[str, str]) -> list[dict[str, object]]
     ]
 
 
+class _ReviewRouteSelectionError(RuntimeError):
+    def __init__(
+        self,
+        cause: NoConfiguredProvider | InvalidRouterRequest | MutedProvidersError,
+        review_reasons: dict[str, str],
+    ) -> None:
+        self.cause = cause
+        self.review_reasons = review_reasons
+        super().__init__(str(cause))
+
+
+def _build_review_route_decision(
+    *,
+    effort: str | int,
+    tags: tuple[str, ...],
+    prefer: str | None,
+    exclude: frozenset[str],
+    estimated_input_tokens: int | None,
+) -> tuple[RouteDecision, dict[str, str], SemanticPlan]:
+    """Resolve the semantic review route used by review preflight and dispatch.
+
+    Invariant: review route validation and real semantic review dispatch use
+    one provider ordering path, so a no-token preflight cannot report a
+    different selected provider than the gate will try first.
+    """
+    plan = _with_review_semantic_tags(plan_for("review", effort), tags)
+    review_exclude, review_reasons = _review_exclude_set(exclude)
+    exclude_set = _semantic_candidate_exclude_set(plan, review_exclude)
+    try:
+        _provider, decision = pick(
+            list(plan.tags),
+            prefer=prefer or plan.prefer,
+            effort=effort,
+            exclude=exclude_set,
+            priority=_semantic_priority(plan),
+            shadow=True,
+            estimated_input_tokens=estimated_input_tokens,
+        )
+    except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
+        raise _ReviewRouteSelectionError(e, review_reasons) from e
+    return _apply_semantic_priority_to_decision(decision, plan), review_reasons, plan
+
+
 def _review_no_viable_provider_error(
     review_reasons: dict[str, str],
     cause: Exception,
@@ -4774,8 +4817,6 @@ def ask(
 
     dispatch_started_at = time.monotonic()
     if plan.mode == "review":
-        review_exclude, review_reasons = _review_exclude_set(frozenset())
-        exclude_set = _semantic_candidate_exclude_set(plan, review_exclude)
         review_estimated_input_tokens = _estimate_review_input_tokens(
             body,
             base=base,
@@ -4784,18 +4825,15 @@ def ask(
             cwd=cwd,
         )
         try:
-            _provider, decision = pick(
-                list(plan.tags),
-                prefer=plan.prefer,
+            decision, review_reasons, plan = _build_review_route_decision(
                 effort=effort_value,
-                exclude=exclude_set,
-                priority=_semantic_priority(plan),
-                shadow=True,
+                tags=user_tags,
+                prefer=None,
+                exclude=frozenset(),
                 estimated_input_tokens=review_estimated_input_tokens,
             )
-            decision = _apply_semantic_priority_to_decision(decision, plan)
-        except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
-            _emit_review_route_failure(review_reasons, e, as_json=as_json)
+        except _ReviewRouteSelectionError as e:
+            _emit_review_route_failure(e.review_reasons, e.cause, as_json=as_json)
             sys.exit(2)
         print_caller_banner(decision.provider, silent=silent_route or as_json)
         _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
@@ -5743,25 +5781,18 @@ def review(
     decision: RouteDecision | None = None
     fallbacks: list[str] = []
     if auto_route:
-        plan = plan_for("review", effort_value)
         user_tags = tuple(_parse_csv(tags))
-        plan = _with_review_semantic_tags(plan, user_tags)
         user_exclude = frozenset(_parse_csv(exclude))
-        review_exclude, review_reasons = _review_exclude_set(user_exclude)
-        exclude_set = _semantic_candidate_exclude_set(plan, review_exclude)
         try:
-            _provider, decision = pick(
-                list(plan.tags),
-                prefer=prefer_value or plan.prefer,
+            decision, review_reasons, plan = _build_review_route_decision(
                 effort=effort_value,
-                exclude=exclude_set,
-                priority=_semantic_priority(plan),
-                shadow=True,
+                tags=user_tags,
+                prefer=prefer_value,
+                exclude=user_exclude,
                 estimated_input_tokens=estimated_input_tokens,
             )
-            decision = _apply_semantic_priority_to_decision(decision, plan)
-        except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
-            _emit_review_route_failure(review_reasons, e, as_json=as_json)
+        except _ReviewRouteSelectionError as e:
+            _emit_review_route_failure(e.review_reasons, e.cause, as_json=as_json)
             sys.exit(2)
         print_caller_banner(decision.provider, silent=silent_route or as_json)
         _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
@@ -11098,7 +11129,7 @@ def _route_validation_payload(
     kind: str,
     provider_id: str | None,
     tags: tuple[str, ...],
-    prefer: str,
+    prefer: str | None,
     effort: str | int,
     tools: frozenset[str],
     sandbox: str,
@@ -11166,19 +11197,36 @@ def _route_validation_payload(
             selected_provider = str(selected["provider"])
             selected_model = str(selected["model"])
             route_mode = str(selected["mode"])
+    elif kind == "review":
+        try:
+            decision, _review_reasons, _plan = _build_review_route_decision(
+                effort=effort,
+                tags=tuple(tags),
+                prefer=prefer,
+                exclude=exclude,
+                estimated_input_tokens=estimated_input_tokens,
+            )
+            selected_provider = decision.provider
+            selected_assessment = next(
+                entry for entry in viable_assessments if entry["provider"] == decision.provider
+            )
+            selected_model = str(selected_assessment["model"])
+            route_mode = str(selected_assessment["mode"])
+            ranked_order = [candidate.name for candidate in decision.ranked]
+            by_name = {str(entry["provider"]): entry for entry in viable_assessments}
+            ordered_candidates = [by_name[name] for name in ranked_order if name in by_name]
+            decision_payload = asdict(decision)
+        except _ReviewRouteSelectionError:
+            selected_provider = None
     else:
-        route_exclude = set(exclude)
-        if kind == "review":
-            review_exclude, _review_reasons = _review_exclude_set(frozenset(exclude))
-            route_exclude.update(review_exclude)
         try:
             _provider, decision = pick(
                 list(requested_tags),
-                prefer=prefer,
+                prefer=prefer or "balanced",
                 effort=effort,
                 tools=tools if kind == "exec" else frozenset(),
                 sandbox=sandbox,
-                exclude=route_exclude,
+                exclude=exclude,
                 shadow=True,
                 estimated_input_tokens=estimated_input_tokens,
                 estimated_output_tokens=estimated_output_tokens,
@@ -11341,7 +11389,7 @@ def route(
             kind=kind,
             provider_id=provider_id,
             tags=tag_values,
-            prefer=_validate_prefer(prefer),
+            prefer=_validate_prefer(prefer) if prefer is not None else None,
             effort=effort_value,
             tools=tools_set,
             sandbox=sandbox_value,

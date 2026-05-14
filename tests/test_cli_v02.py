@@ -4141,6 +4141,28 @@ def test_route_prints_chosen_provider_without_calling(mocker):
     assert not call_mock.called  # router dry-run makes no calls
 
 
+def test_route_kind_review_matches_semantic_review_dispatch(mocker):
+    _stub_all_configured(mocker, {"claude", "codex"})
+    codex_review = mocker.patch.object(CodexProvider, "review")
+    claude_review = mocker.patch.object(ClaudeProvider, "review")
+
+    result = CliRunner().invoke(
+        main,
+        ["route", "--kind", "review", "--effort", "high", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["selected_provider"] == "codex"
+    assert [candidate["provider"] for candidate in payload["candidates"][:2]] == [
+        "codex",
+        "claude",
+    ]
+    assert payload["decision"]["provider"] == "codex"
+    assert not codex_review.called
+    assert not claude_review.called
+
+
 def test_route_json_mode(mocker):
     _stub_all_configured(mocker, {"claude"})
     result = CliRunner().invoke(main, ["route", "--prefer", "best", "--json"])
