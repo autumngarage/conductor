@@ -314,6 +314,55 @@ class ReviewProviderStatus:
     detail: str
 
 
+@dataclass(frozen=True)
+class ReviewProviderAttempt:
+    provider: str
+    model: str | None
+    status: str
+    failure_code: str | None
+    elapsed_ms: int
+    detail: str | None = None
+    route_mode: str | None = None
+
+
+class ReviewInfrastructureError(ProviderError):
+    """Raised when review routing cannot produce a valid review verdict."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        exit_class: str,
+        failure_code: str | None,
+        attempts: list[dict[str, object]],
+        selected_provider: str | None = None,
+        selected_model: str | None = None,
+        review_verdict: str = "unknown",
+        excluded: list[dict[str, object]] | None = None,
+    ) -> None:
+        review_payload: dict[str, object] = {
+            "exit_class": exit_class,
+            "failure_code": failure_code,
+            "attempts": attempts,
+            "selected_provider": selected_provider,
+            "selected_model": selected_model,
+            "review_verdict": review_verdict,
+        }
+        if excluded is not None:
+            review_payload["excluded"] = excluded
+        self.error_response = {
+            "error": (
+                "review_no_viable_provider"
+                if exit_class == "no_viable_provider"
+                else "review_infrastructure_failed"
+            ),
+            "message": message,
+            **review_payload,
+            "review": review_payload,
+        }
+        super().__init__(message)
+
+
 # --------------------------------------------------------------------------- #
 # Shared helpers
 # --------------------------------------------------------------------------- #
@@ -1247,6 +1296,102 @@ def _format_review_status_summary(statuses: list[ReviewProviderStatus]) -> str:
     )
 
 
+def _review_attempt_payloads(
+    attempts: list[ReviewProviderAttempt],
+) -> list[dict[str, object]]:
+    return [asdict(attempt) for attempt in attempts]
+
+
+def _review_failure_code(err: Exception, status: str) -> str:
+    """Map provider/review failures to the stable JSON error taxonomy."""
+    if isinstance(err, ReviewOutputContractError):
+        return "malformed_output"
+    if isinstance(err, ProviderHTTPError) and err.failure_reason == "malformed_response":
+        return "malformed_output"
+    if status in {"output-contract", "output-contract/quarantined-findings", "empty-response"}:
+        return "malformed_output"
+    if isinstance(err, UnsupportedCapability) or status == "unsupported":
+        return "provider_lacks_tools"
+    if isinstance(err, ProviderConfigError) or status == "config":
+        reason_code = _route_reason_code(str(err))
+        if reason_code in {"missing_native_review_extension", "provider_lacks_tools"}:
+            return reason_code
+        return "auth_missing"
+    if isinstance(err, ProviderStalledError) or status == "stall":
+        return "provider_stall"
+    if status == "timeout":
+        return "provider_timeout"
+    if status == "rate-limit":
+        return "rate_limited"
+    if status in {"network", "transport", "5xx"}:
+        return "provider_unreachable"
+    if status == "review-context":
+        return "review_context_error"
+    return "unknown_provider_error"
+
+
+def _review_exit_class_for_failure(failure_code: str | None) -> str:
+    if failure_code == "malformed_output":
+        return "malformed_output"
+    return "infra_error"
+
+
+def _review_verdict_from_text(text: str) -> str:
+    for line in reversed(text.splitlines()):
+        marker = line.strip()
+        if marker == "CODEX_REVIEW_CLEAN":
+            return "clean"
+        if marker == "CODEX_REVIEW_FIXED":
+            return "fixed"
+        if marker == "CODEX_REVIEW_BLOCKED":
+            return "blocked"
+    return "unknown"
+
+
+def _review_exit_class_for_verdict(verdict: str) -> str:
+    if verdict == "blocked":
+        return "findings"
+    if verdict in {"clean", "fixed"}:
+        return "clean"
+    return "malformed_output"
+
+
+def _review_candidate_model(
+    provider_name: str,
+    provider: object,
+    models_by_provider: dict[str, tuple[str, ...]] | None,
+) -> str | None:
+    models = (models_by_provider or {}).get(provider_name)
+    if models:
+        return models[0]
+    return _provider_default_model(provider)
+
+
+def _review_response_with_metadata(
+    response: CallResponse,
+    *,
+    statuses: list[ReviewProviderStatus],
+    attempts: list[ReviewProviderAttempt],
+) -> CallResponse:
+    verdict = _review_verdict_from_text(response.text)
+    review_payload: dict[str, object] = {
+        "exit_class": _review_exit_class_for_verdict(verdict),
+        "failure_code": None,
+        "attempts": _review_attempt_payloads(attempts),
+        "selected_provider": response.provider,
+        "selected_model": response.model,
+        "review_verdict": verdict,
+    }
+    raw: dict[str, object] = {
+        **response.raw,
+        "review_attempts": review_payload["attempts"],
+        "conductor_review": review_payload,
+    }
+    if statuses:
+        raw["review_provider_statuses"] = [asdict(status) for status in statuses]
+    return replace(response, raw=raw)
+
+
 def _review_attempt_log_state(status: str) -> str:
     availability_statuses = {
         "5xx",
@@ -1401,6 +1546,48 @@ def _native_review_unavailable_message(reasons: dict[str, str]) -> str:
     for name in sorted(reasons):
         lines.append(f"  - {name}: {reasons[name]}")
     return "\n".join(lines)
+
+
+def _review_excluded_payload(reasons: dict[str, str]) -> list[dict[str, object]]:
+    return [
+        {
+            "provider": name,
+            "reason_code": _route_reason_code(reason),
+            "reason": reason,
+        }
+        for name, reason in sorted(reasons.items())
+    ]
+
+
+def _review_no_viable_provider_error(
+    review_reasons: dict[str, str],
+    cause: Exception,
+) -> ReviewInfrastructureError:
+    message = f"{_native_review_unavailable_message(review_reasons)} {cause}"
+    return ReviewInfrastructureError(
+        message,
+        exit_class="no_viable_provider",
+        failure_code="no_viable_provider",
+        attempts=[],
+        review_verdict="unknown",
+        excluded=_review_excluded_payload(review_reasons),
+    )
+
+
+def _emit_review_route_failure(
+    review_reasons: dict[str, str],
+    cause: Exception,
+    *,
+    as_json: bool,
+) -> None:
+    if as_json:
+        _emit_provider_error(
+            _review_no_viable_provider_error(review_reasons, cause),
+            as_json=True,
+        )
+        return
+    click.echo(f"conductor: {_native_review_unavailable_message(review_reasons)}", err=True)
+    click.echo(f"conductor: {cause}", err=True)
 
 
 def _semantic_candidate_exclude_set(
@@ -2417,11 +2604,19 @@ def _invoke_review_with_fallback(
     fallbacks: list[str] = []
     tried: list[tuple[str, str]] = []
     statuses: list[ReviewProviderStatus] = []
+    attempts: list[ReviewProviderAttempt] = []
     quarantined_contract_errors: list[ReviewOutputContractError] = []
     candidates = list(decision.ranked[:max_fallbacks])
 
     for idx, candidate in enumerate(candidates):
         provider = get_provider(candidate.name)
+        attempt_model = _review_candidate_model(
+            candidate.name,
+            provider,
+            models_by_provider,
+        )
+        attempt_route_mode = _route_provider_mode("review", provider)
+        attempt_started_at = time.monotonic()
         contract_prompt = task
         try:
             attempt_timeout_sec, attempt_max_stall_sec = _bounded_review_attempt_budget(
@@ -2497,16 +2692,21 @@ def _invoke_review_with_fallback(
                 )
             mark_outcome(candidate.name, "success")
             tried.append((candidate.name, "success"))
-            if statuses:
-                response = replace(
-                    response,
-                    raw={
-                        **response.raw,
-                        "review_provider_statuses": [
-                            asdict(status) for status in statuses
-                        ],
-                    },
+            attempts.append(
+                ReviewProviderAttempt(
+                    provider=candidate.name,
+                    model=response.model or attempt_model,
+                    status="success",
+                    failure_code=None,
+                    elapsed_ms=response.duration_ms,
+                    route_mode=attempt_route_mode,
                 )
+            )
+            response = _review_response_with_metadata(
+                response,
+                statuses=statuses,
+                attempts=attempts,
+            )
             if not silent and len(tried) > 1:
                 click.echo(
                     f"[conductor] review tried providers: {_format_tried_providers(tried)}",
@@ -2518,22 +2718,46 @@ def _invoke_review_with_fallback(
             mark_outcome(candidate.name, "config")
             fallbacks.append(candidate.name)
             tried.append((candidate.name, "config"))
+            detail = _format_fallback_error_detail(e)
             statuses.append(
                 ReviewProviderStatus(
                     candidate.name,
                     "config",
-                    _format_fallback_error_detail(e),
+                    detail,
+                )
+            )
+            attempts.append(
+                ReviewProviderAttempt(
+                    provider=candidate.name,
+                    model=attempt_model,
+                    status="config",
+                    failure_code=_review_failure_code(e, "config"),
+                    elapsed_ms=_council_elapsed_ms(attempt_started_at),
+                    detail=detail,
+                    route_mode=attempt_route_mode,
                 )
             )
         except UnsupportedCapability as e:
             last_exc = e
             fallbacks.append(candidate.name)
             tried.append((candidate.name, "unsupported"))
+            detail = _format_fallback_error_detail(e)
             statuses.append(
                 ReviewProviderStatus(
                     candidate.name,
                     "unsupported",
-                    _format_fallback_error_detail(e),
+                    detail,
+                )
+            )
+            attempts.append(
+                ReviewProviderAttempt(
+                    provider=candidate.name,
+                    model=attempt_model,
+                    status="unsupported",
+                    failure_code=_review_failure_code(e, "unsupported"),
+                    elapsed_ms=_council_elapsed_ms(attempt_started_at),
+                    detail=detail,
+                    route_mode=attempt_route_mode,
                 )
             )
         except ProviderError as e:
@@ -2549,11 +2773,23 @@ def _invoke_review_with_fallback(
             fallbacks.append(candidate.name)
             mode = _review_failure_mode(e)
             tried.append((candidate.name, mode))
+            detail = _format_fallback_error_detail(e)
             statuses.append(
                 ReviewProviderStatus(
                     candidate.name,
                     mode,
-                    _format_fallback_error_detail(e),
+                    detail,
+                )
+            )
+            attempts.append(
+                ReviewProviderAttempt(
+                    provider=candidate.name,
+                    model=attempt_model,
+                    status=mode,
+                    failure_code=_review_failure_code(e, mode),
+                    elapsed_ms=_council_elapsed_ms(attempt_started_at),
+                    detail=detail,
+                    route_mode=attempt_route_mode,
                 )
             )
             _prioritize_openrouter_after_codex_review_failure(
@@ -2567,11 +2803,23 @@ def _invoke_review_with_fallback(
             mark_outcome(candidate.name, "review-context")
             fallbacks.append(candidate.name)
             tried.append((candidate.name, "review-context"))
+            detail = _format_fallback_error_detail(e)
             statuses.append(
                 ReviewProviderStatus(
                     candidate.name,
                     "review-context",
-                    _format_fallback_error_detail(e),
+                    detail,
+                )
+            )
+            attempts.append(
+                ReviewProviderAttempt(
+                    provider=candidate.name,
+                    model=attempt_model,
+                    status="review-context",
+                    failure_code=_review_failure_code(e, "review-context"),
+                    elapsed_ms=_council_elapsed_ms(attempt_started_at),
+                    detail=detail,
+                    route_mode=attempt_route_mode,
                 )
             )
 
@@ -2610,12 +2858,21 @@ def _invoke_review_with_fallback(
             "failing providers, or run `conductor list` to check configured "
             "code-review providers"
         )
-        raise ProviderError(
-            f"review infrastructure failed before any provider returned a "
-            f"valid verdict; no review findings were emitted. Tried providers: "
-            f"{trail}. Provider status: {status_summary}. "
-            f"Last error: {last_detail}.{quarantine} Next step: {direct_work}. "
-            f"Operator follow-up: {operator_hint}."
+        failure_payloads = _review_attempt_payloads(attempts)
+        failure_code = (
+            str(failure_payloads[-1]["failure_code"]) if failure_payloads else None
+        )
+        raise ReviewInfrastructureError(
+            (
+                f"review infrastructure failed before any provider returned a "
+                f"valid verdict; no review findings were emitted. Tried providers: "
+                f"{trail}. Provider status: {status_summary}. "
+                f"Last error: {last_detail}.{quarantine} Next step: {direct_work}. "
+                f"Operator follow-up: {operator_hint}."
+            ),
+            exit_class=_review_exit_class_for_failure(failure_code),
+            failure_code=failure_code,
+            attempts=failure_payloads,
         ) from last_exc
     raise last_exc
 
@@ -3359,6 +3616,18 @@ def _emit_call(
             payload["auth_prompts"] = effective_auth_prompts
         else:
             payload.pop("auth_prompts", None)
+        review_payload = (response.raw or {}).get("conductor_review")
+        if isinstance(review_payload, dict):
+            payload["review"] = review_payload
+            for key in (
+                "exit_class",
+                "failure_code",
+                "attempts",
+                "selected_provider",
+                "selected_model",
+                "review_verdict",
+            ):
+                payload[key] = review_payload.get(key)
         if decision is not None:
             payload["route"] = asdict(decision)
         if semantic_plan is not None:
@@ -4462,8 +4731,7 @@ def ask(
             )
             decision = _apply_semantic_priority_to_decision(decision, plan)
         except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
-            click.echo(f"conductor: {_native_review_unavailable_message(review_reasons)}", err=True)
-            click.echo(f"conductor: {e}", err=True)
+            _emit_review_route_failure(review_reasons, e, as_json=as_json)
             sys.exit(2)
         print_caller_banner(decision.provider, silent=silent_route or as_json)
         _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
@@ -4516,7 +4784,7 @@ def ask(
                 decision=decision,
                 semantic_plan=plan,
             )
-            click.echo(f"conductor: {e}", err=True)
+            _emit_provider_error(e, as_json=as_json)
             sys.exit(2)
         except ProviderError as e:
             _record_failed_delegation(
@@ -4529,7 +4797,7 @@ def ask(
                 decision=decision,
                 semantic_plan=plan,
             )
-            click.echo(f"conductor: {e}", err=True)
+            _emit_provider_error(e, as_json=as_json)
             sys.exit(1)
         _emit_usage_log(response, silent=silent_route or as_json)
         _record_response_delegation(
@@ -5427,8 +5695,7 @@ def review(
             )
             decision = _apply_semantic_priority_to_decision(decision, plan)
         except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
-            click.echo(f"conductor: {_native_review_unavailable_message(review_reasons)}", err=True)
-            click.echo(f"conductor: {e}", err=True)
+            _emit_review_route_failure(review_reasons, e, as_json=as_json)
             sys.exit(2)
         print_caller_banner(decision.provider, silent=silent_route or as_json)
         _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
@@ -5481,7 +5748,7 @@ def review(
                 error=e,
                 decision=decision,
             )
-            click.echo(f"conductor: {e}", err=True)
+            _emit_provider_error(e, as_json=as_json)
             sys.exit(2)
         except ProviderError as e:
             _record_failed_delegation(
@@ -5493,7 +5760,7 @@ def review(
                 error=e,
                 decision=decision,
             )
-            click.echo(f"conductor: {e}", err=True)
+            _emit_provider_error(e, as_json=as_json)
             sys.exit(1)
     else:
         assert provider_id is not None
@@ -5580,7 +5847,7 @@ def review(
                 started_at=dispatch_started_at,
                 error=e,
             )
-            click.echo(f"conductor: {e}", err=True)
+            _emit_provider_error(e, as_json=as_json)
             sys.exit(2)
         except ProviderError as e:
             _record_failed_delegation(
@@ -5591,7 +5858,7 @@ def review(
                 started_at=dispatch_started_at,
                 error=e,
             )
-            click.echo(f"conductor: {e}", err=True)
+            _emit_provider_error(e, as_json=as_json)
             sys.exit(1)
         except ReviewContextError as e:
             _record_failed_delegation(
