@@ -5,6 +5,7 @@
 # Usage:
 #   bash scripts/merge-pr.sh <pr-number>
 #   bash scripts/merge-pr.sh <pr-number> --bypass-with-disclosure="<reason>"
+#   bash scripts/merge-pr.sh <pr-number> --bypass-with-disclosure="<reason>" --allow-fail-open-marker
 #
 # What this does:
 #   1. Verifies the PR is open and mergeable.
@@ -23,6 +24,8 @@ set -euo pipefail
 
 PR_NUMBER=""
 BYPASS_REASON=""
+BYPASS_MARKER_SOURCE=""
+BYPASS_MARKER_EVIDENCE=""
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT_SYNC_GUARD="$SCRIPT_DIR/../lib/script-sync-guard.sh"
 if [ -f "$SCRIPT_SYNC_GUARD" ]; then
@@ -53,6 +56,7 @@ fi
 REVIEWED_HEAD_OID=""
 PR_HEAD_BRANCH=""
 BYPASS_REVIEW=false
+ALLOW_FAIL_OPEN_MARKER=false
 TOUCHSTONE_MERGE_FAILURE_REASON="nonzero-exit"
 PREFLIGHT_REQUIRED=true
 COMMENT_ON_CLEAN=true
@@ -62,6 +66,9 @@ PREFLIGHT_CACHE_KEY=""
 PREFLIGHT_CACHE_FILE=""
 PREFLIGHT_CACHE_INPUTS=""
 PR_WORKTREE_PATH=""
+TOUCHSTONE_REVIEW_LOG="${TOUCHSTONE_REVIEW_LOG-${HOME:-}/.touchstone-review-log}"
+TOUCHSTONE_REVIEW_LOG_MAX_LINES="${TOUCHSTONE_REVIEW_LOG_MAX_LINES:-1000}"
+TOUCHSTONE_FAIL_OPEN_BYPASS_WINDOW_HOURS="${TOUCHSTONE_FAIL_OPEN_BYPASS_WINDOW_HOURS:-24}"
 
 on_merge_exit() {
   local rc="$?"
@@ -83,6 +90,10 @@ while [ "$#" -gt 0 ]; do
     --bypass-with-disclosure)
       echo "ERROR: --bypass-with-disclosure requires a non-empty reason." >&2
       exit 2
+      ;;
+    --allow-fail-open-marker)
+      ALLOW_FAIL_OPEN_MARKER=true
+      shift
       ;;
     --*)
       echo "ERROR: Unknown option: $1" >&2
@@ -257,11 +268,15 @@ print_review_infra_retry_guidance() {
 BYPASS_REASON="$(trim "$(printf '%s' "$BYPASS_REASON" | tr '\r\n\t' '   ')")"
 
 if [ -z "$PR_NUMBER" ] || ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
-  echo "Usage: bash scripts/merge-pr.sh <pr-number> [--bypass-with-disclosure=\"<reason>\"]" >&2
+  echo "Usage: bash scripts/merge-pr.sh <pr-number> [--bypass-with-disclosure=\"<reason>\" [--allow-fail-open-marker]]" >&2
   exit 2
 fi
 if [ "$BYPASS_REVIEW" = true ] && [ -z "$BYPASS_REASON" ]; then
   echo "ERROR: --bypass-with-disclosure requires a non-empty reason." >&2
+  exit 2
+fi
+if [ "$ALLOW_FAIL_OPEN_MARKER" = true ] && [ "$BYPASS_REVIEW" != true ]; then
+  echo "ERROR: --allow-fail-open-marker requires --bypass-with-disclosure=\"<reason>\"." >&2
   exit 2
 fi
 
@@ -371,6 +386,22 @@ preflight_hash_paths() {
   done | preflight_hash_stream
 }
 
+preflight_hash_changed_paths() {
+  local repo_root="$1"
+  shift
+  local rel path
+
+  for rel in "$@"; do
+    [ -n "$rel" ] || continue
+    path="$repo_root/$rel"
+    if [ -f "$path" ]; then
+      printf '%s\t%s\n' "$rel" "$(preflight_hash_file "$path")"
+    else
+      printf '%s\tmissing\n' "$rel"
+    fi
+  done | preflight_hash_stream
+}
+
 preflight_hash_file_list() {
   local label path
 
@@ -407,10 +438,15 @@ preflight_worktree_hash() {
 preflight_changed_paths_hash() {
   local repo_root="$1"
   local base_ref="$2"
+  local -a paths=()
+  local path
 
-  (cd "$repo_root" && git diff --name-only "$base_ref"...HEAD) 2>/dev/null \
-    | sort -u \
-    | preflight_hash_stream
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    paths+=("$path")
+  done < <((cd "$repo_root" && git diff --name-only "$base_ref"...HEAD) 2>/dev/null | sort -u)
+
+  preflight_hash_changed_paths "$repo_root" "${paths[@]}"
 }
 
 preflight_tool_fingerprint() {
@@ -431,6 +467,10 @@ preflight_env_fingerprint() {
   {
     printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_SCRIPT=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_SCRIPT:-}"
     printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_COMMAND=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_COMMAND:-}"
+    printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_LANE=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_LANE:-}"
+    printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_AFFECTED_COMMAND=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_AFFECTED_COMMAND:-}"
+    printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_SMOKE_COMMAND=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_SMOKE_COMMAND:-}"
+    printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_FULL_COMMAND=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_FULL_COMMAND:-}"
   } | preflight_hash_stream
 }
 
@@ -460,14 +500,14 @@ preflight_cache_inputs() {
   tool_hash="$(preflight_tool_fingerprint)"
   env_hash="$(preflight_env_fingerprint)"
 
-  printf 'version=2\n'
+  printf 'version=3\n'
   printf 'repo_root=%s\n' "$repo_root"
   printf 'scope=diff\n'
   printf 'base_ref=%s\n' "$base_ref"
   printf 'base_sha=%s\n' "$base_sha"
   printf 'head_sha=%s\n' "$head_sha"
   printf 'merge_base=%s\n' "$merge_base"
-  printf 'changed_paths_hash=%s\n' "$changed_paths_hash"
+  printf 'changed_files_hash=%s\n' "$changed_paths_hash"
   printf 'checker_hash=%s\n' "$checker_hash"
   printf 'config_hash=%s\n' "$config_hash"
   printf 'worktree_hash=%s\n' "$worktree_hash"
@@ -585,6 +625,161 @@ branch_has_clean_review_marker() {
     && [ "$live_branch_head" = "$head_oid" ] \
     && [ "$marker_head" = "$live_branch_head" ] \
     && [ "$marker_merge_base" = "$merge_base" ]
+}
+
+is_positive_integer() {
+  case "${1:-}" in
+    "" | *[!0-9]*) return 1 ;;
+    *) [ "$1" -gt 0 ] ;;
+  esac
+}
+
+timestamp_to_epoch() {
+  local timestamp="$1"
+
+  date -j -f "%Y-%m-%dT%H:%M:%S%z" "$timestamp" "+%s" 2>/dev/null \
+    || date -d "$timestamp" "+%s" 2>/dev/null
+}
+
+head_oid_matches_logged_sha() {
+  local head_oid="$1"
+  local logged_sha="$2"
+
+  [ -n "$head_oid" ] || return 1
+  [ -n "$logged_sha" ] || return 1
+
+  case "$head_oid" in
+    "$logged_sha"*) return 0 ;;
+  esac
+  case "$logged_sha" in
+    "$head_oid"*) return 0 ;;
+  esac
+  return 1
+}
+
+bypass_reason_mentions_fail_open() {
+  local reason_lower
+  reason_lower="$(printf '%s' "$BYPASS_REASON" | tr '[:upper:]' '[:lower:]')"
+
+  case "$reason_lower" in
+    *fail-open* | *"fail open"* | *provider* | *infra* | *outage* | *timeout* | *"timed out"* | *"reviewer unavailable"* | *"reviewer error"*)
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+branch_has_recent_fail_open_marker() {
+  local branch="$1"
+  local head_oid="$2"
+  local log_file="$TOUCHSTONE_REVIEW_LOG"
+  local window_hours="$TOUCHSTONE_FAIL_OPEN_BYPASS_WINDOW_HOURS"
+  local window_seconds now_epoch tab
+  local timestamp repo_path log_branch logged_sha reason detail
+  local event_epoch age
+
+  [ -n "$log_file" ] || return 1
+  [ "$log_file" != "/dev/null" ] || return 1
+  [ -f "$log_file" ] || return 1
+  is_positive_integer "$window_hours" || return 1
+
+  window_seconds=$((window_hours * 3600))
+  now_epoch="$(date "+%s" 2>/dev/null)" || return 1
+  tab="$(printf '\t')"
+
+  while IFS="$tab" read -r timestamp repo_path log_branch logged_sha reason detail || [ -n "$timestamp" ]; do
+    [ "$log_branch" = "$branch" ] || continue
+    head_oid_matches_logged_sha "$head_oid" "$logged_sha" || continue
+    case "$reason" in
+      FAIL_OPEN_*) ;;
+      *) continue ;;
+    esac
+    case "$detail" in
+      fail-open:*) ;;
+      *) continue ;;
+    esac
+    event_epoch="$(timestamp_to_epoch "$timestamp" 2>/dev/null || true)"
+    [ -n "$event_epoch" ] || continue
+    age=$((now_epoch - event_epoch))
+    # Allow a small future skew between the review hook and merge machine clocks.
+    [ "$age" -ge -300 ] || continue
+    [ "$age" -le "$window_seconds" ] || continue
+
+    BYPASS_MARKER_EVIDENCE="timestamp=$timestamp; repo=$repo_path; branch=$log_branch; sha=$logged_sha; reason=$reason; detail=$detail"
+    return 0
+  done <"$log_file"
+
+  return 1
+}
+
+sanitize_review_log_field() {
+  printf '%s' "$1" | tr '\t\n' '  '
+}
+
+append_review_log_event() {
+  local reason="$1"
+  local detail="$2"
+  local log_file="$TOUCHSTONE_REVIEW_LOG"
+  local timestamp repo_root branch sha tmp_dir tmp_file line_count keep_lines
+
+  [ -n "$log_file" ] || return 0
+  [ "$log_file" != "/dev/null" ] || return 0
+
+  timestamp="$(date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null || echo unknown)"
+  repo_root="$(git rev-parse --show-toplevel 2>/dev/null || echo unknown)"
+  branch="${PR_HEAD_BRANCH:-$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)}"
+  sha="${REVIEWED_HEAD_OID:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}"
+  if [ "$sha" != "unknown" ] && [ "${#sha}" -gt 12 ]; then
+    sha="${sha:0:12}"
+  fi
+
+  reason="$(sanitize_review_log_field "$reason")"
+  detail="$(sanitize_review_log_field "$detail")"
+  branch="$(sanitize_review_log_field "$branch")"
+
+  tmp_dir="${TMPDIR:-/tmp}"
+  tmp_dir="${tmp_dir%/}"
+  tmp_file="$tmp_dir/touchstone-merge-review-log.$$.tmp"
+
+  if ! mkdir -p "$(dirname "$log_file")" 2>/dev/null; then
+    echo "WARNING: Could not create review audit log directory for $log_file." >&2
+    return 0
+  fi
+
+  if [ -f "$log_file" ]; then
+    line_count="$(wc -l <"$log_file" 2>/dev/null | tr -d ' ')" || line_count=0
+    line_count="${line_count:-0}"
+    if is_positive_integer "$TOUCHSTONE_REVIEW_LOG_MAX_LINES" && [ "$line_count" -ge "$TOUCHSTONE_REVIEW_LOG_MAX_LINES" ]; then
+      keep_lines=$((TOUCHSTONE_REVIEW_LOG_MAX_LINES - 1))
+      tail -n "$keep_lines" "$log_file" >"$tmp_file" 2>/dev/null || : >"$tmp_file"
+    else
+      cat "$log_file" >"$tmp_file" 2>/dev/null || : >"$tmp_file"
+    fi
+  else
+    : >"$tmp_file"
+  fi
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$timestamp" "$repo_root" "$branch" "$sha" "$reason" "$detail" \
+    >>"$tmp_file" 2>/dev/null || {
+    rm -f "$tmp_file" 2>/dev/null
+    echo "WARNING: Could not append review audit log entry for $log_file." >&2
+    return 0
+  }
+
+  if ! mv "$tmp_file" "$log_file" 2>/dev/null; then
+    rm -f "$tmp_file" 2>/dev/null
+    echo "WARNING: Could not update review audit log $log_file." >&2
+  fi
+}
+
+record_bypass_audit_log() {
+  local detail
+  detail="reason=$BYPASS_REASON; marker=$BYPASS_MARKER_SOURCE"
+  if [ -n "$BYPASS_MARKER_EVIDENCE" ]; then
+    detail="$detail; evidence=[$BYPASS_MARKER_EVIDENCE]"
+  fi
+  append_review_log_event review-bypass "$detail"
 }
 
 sync_default_branch_after_merge() {
@@ -756,6 +951,7 @@ print_bypass_banner() {
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 !! BYPASSING REVIEWER GATE
+!! marker: $BYPASS_MARKER_SOURCE
 !! reason: $BYPASS_REASON
 !! This bypass is recorded on the PR and squash commit.
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -831,7 +1027,14 @@ record_squash_merge() {
 }
 
 record_bypass_comment() {
-  gh pr comment "$PR_NUMBER" --body "Reviewer bypassed via \`--bypass-with-disclosure\`. Reason: $BYPASS_REASON"
+  local body
+  body="Reviewer bypassed via \`--bypass-with-disclosure\`. Marker: $BYPASS_MARKER_SOURCE. Reason: $BYPASS_REASON"
+  if [ -n "$BYPASS_MARKER_EVIDENCE" ]; then
+    body="$body
+
+Fail-open evidence: $BYPASS_MARKER_EVIDENCE"
+  fi
+  gh pr comment "$PR_NUMBER" --body "$body"
 }
 
 post_clean_review_comment() {
@@ -1165,15 +1368,38 @@ run_merge_review() {
       echo "ERROR: Could not compute merge base for PR #$PR_NUMBER head against $default_base_ref." >&2
       exit 1
     fi
-    if ! branch_has_clean_review_marker "$pr_head_branch" "$pr_head_oid" "$current_merge_base"; then
+    BYPASS_MARKER_SOURCE=""
+    BYPASS_MARKER_EVIDENCE=""
+    if branch_has_clean_review_marker "$pr_head_branch" "$pr_head_oid" "$current_merge_base"; then
+      BYPASS_MARKER_SOURCE="clean-review"
+    elif [ "$ALLOW_FAIL_OPEN_MARKER" = true ]; then
+      if ! bypass_reason_mentions_fail_open; then
+        echo "ERROR: Refusing reviewer bypass for PR #$PR_NUMBER." >&2
+        echo "       --allow-fail-open-marker requires a disclosure reason that cites the fail-open reviewer/provider outage." >&2
+        exit 1
+      fi
+      if ! is_positive_integer "$TOUCHSTONE_FAIL_OPEN_BYPASS_WINDOW_HOURS"; then
+        echo "ERROR: TOUCHSTONE_FAIL_OPEN_BYPASS_WINDOW_HOURS must be a positive integer." >&2
+        exit 2
+      fi
+      if ! branch_has_recent_fail_open_marker "$pr_head_branch" "$pr_head_oid"; then
+        echo "ERROR: Refusing reviewer bypass for PR #$PR_NUMBER." >&2
+        echo "       No recent fail-open review-log marker matches branch '$pr_head_branch' at head '$pr_head_oid'." >&2
+        echo "       Looked in: ${TOUCHSTONE_REVIEW_LOG:-<disabled>} (window: ${TOUCHSTONE_FAIL_OPEN_BYPASS_WINDOW_HOURS}h)." >&2
+        echo "       Expected a FAIL_OPEN_* entry with detail 'fail-open:*' for the current branch head." >&2
+        exit 1
+      fi
+      BYPASS_MARKER_SOURCE="fail-open"
+    else
       echo "ERROR: Refusing reviewer bypass for PR #$PR_NUMBER." >&2
       echo "       No prior clean review marker matches branch '$pr_head_branch' at head '$pr_head_oid' and merge base '$current_merge_base'." >&2
-      echo "       Run the reviewer cleanly once before using --bypass-with-disclosure." >&2
+      echo "       Run the reviewer cleanly once before using --bypass-with-disclosure, or pass --allow-fail-open-marker after a recent fail-open review-log event for this branch head." >&2
       exit 1
     fi
-    touchstone_emit_event review_bypass pr_number="$PR_NUMBER" head_sha="$pr_head_oid" reason="$BYPASS_REASON"
+    touchstone_emit_event review_bypass pr_number="$PR_NUMBER" head_sha="$pr_head_oid" reason="$BYPASS_REASON" marker="$BYPASS_MARKER_SOURCE" evidence="$BYPASS_MARKER_EVIDENCE"
     print_bypass_banner
     record_bypass_comment
+    record_bypass_audit_log
     return 0
   fi
 
@@ -1319,7 +1545,7 @@ run_merge_review() {
   else
     echo "       Concrete review findings were reported; fix the findings, then rerun the merge gate." >&2
   fi
-  echo "       Emergency bypass requires an explicit --bypass-with-disclosure reason and a matching prior clean review marker." >&2
+  echo "       Emergency bypass requires an explicit --bypass-with-disclosure reason and either a matching prior clean review marker or --allow-fail-open-marker with recent fail-open evidence." >&2
   post_review_failure_comment "$review_output_file" "$review_infra_failure"
 
   rm -f "$review_output_file"

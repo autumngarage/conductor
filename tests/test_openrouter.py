@@ -825,6 +825,80 @@ def test_exec_with_tools_empty_final_response_raises(configured, tmp_path):
             )
 
 
+def test_exec_empty_final_response_includes_recovery_diagnostics(
+    configured,
+    tmp_path,
+):
+    _init_clean_git_repo(tmp_path)
+    responses = [
+        {
+            "model": "openai/gpt-5.5",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_write",
+                                "type": "function",
+                                "function": {
+                                    "name": "Write",
+                                    "arguments": json.dumps(
+                                        {
+                                            "path": "README.md",
+                                            "content": "base\nupdated\n",
+                                        }
+                                    ),
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+        },
+        {
+            "model": "openai/gpt-5.5",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 0},
+        },
+    ]
+    requests: list[dict] = []
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=responses[len(requests) - 1])
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        with pytest.raises(ProviderHTTPError) as exc_info:
+            OpenRouterProvider().exec(
+                "Update README.md.",
+                model="openai/gpt-5.5",
+                tools=frozenset({"Write"}),
+                cwd=str(tmp_path),
+                write_validation=False,
+            )
+
+    message = str(exc_info.value)
+    assert "empty final response after tool loop" in message
+    assert "successful_write_tools=1" in message
+    assert "modified_files=1" in message
+    assert "untracked_files=0" in message
+    assert "recent_tool_calls=Write(" in message
+    assert "README.md" in message
+
+
 def test_exec_with_tools_empty_final_response_retries_remaining_models(
     configured, tmp_path
 ):
@@ -877,6 +951,87 @@ def test_exec_with_tools_empty_final_response_retries_remaining_models(
     assert requests[1]["models"] == ["model-b"]
     assert response.usage["empty_response_retries"] == [
         {"iteration": 1, "reason": "empty-response", "model": "model-a"}
+    ]
+
+
+def test_exec_empty_final_after_tool_calls_retries_remaining_models(
+    configured,
+    tmp_path,
+):
+    (tmp_path / "note.txt").write_text("tool loop works", encoding="utf-8")
+    requests: list[dict] = []
+    responses = [
+        {
+            "model": "model-a",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_read",
+                                "type": "function",
+                                "function": {
+                                    "name": "Read",
+                                    "arguments": json.dumps({"path": "note.txt"}),
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+        },
+        {
+            "model": "model-a",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 0},
+        },
+        {
+            "model": "model-b",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "final verdict",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 3},
+        },
+    ]
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=responses[len(requests) - 1])
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        response = OpenRouterProvider().exec(
+            "Read note.txt and summarize it.",
+            models=("model-a", "model-b"),
+            tools=frozenset({"Read"}),
+            cwd=str(tmp_path),
+            log_selection=False,
+        )
+
+    assert response.text == "final verdict"
+    assert requests[0]["models"] == ["model-a", "model-b"]
+    assert requests[1]["model"] == "model-a"
+    assert requests[2]["models"] == ["model-b"]
+    assert response.usage["empty_response_retries"] == [
+        {"iteration": 2, "reason": "empty-response", "model": "model-a"}
     ]
 
 
