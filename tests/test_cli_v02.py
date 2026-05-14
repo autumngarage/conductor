@@ -1645,6 +1645,107 @@ def test_review_auto_next_provider_success_json_reports_winner_and_status(mocker
             "detail": "ProviderHTTPError: Anthropic returned 429 rate limit",
         }
     ]
+    assert payload["exit_class"] == "clean"
+    assert payload["failure_code"] is None
+    assert payload["selected_provider"] == "openrouter"
+    assert payload["selected_model"] == OPENROUTER_CODING_HIGH[0]
+    assert payload["review_verdict"] == "clean"
+    assert [
+        (attempt["provider"], attempt["status"], attempt["failure_code"])
+        for attempt in payload["attempts"]
+    ] == [
+        ("claude", "rate-limit", "rate_limited"),
+        ("openrouter", "success", None),
+    ]
+    assert payload["review"]["attempts"] == payload["attempts"]
+
+
+def test_review_auto_exhausted_fallback_json_reports_structured_infra_error(
+    mocker,
+):
+    from conductor.providers.interface import (
+        ProviderError,
+        ProviderHTTPError,
+        ProviderStalledError,
+    )
+
+    _stub_all_configured(mocker, {"codex", "claude", "openrouter"})
+    mocker.patch.object(CodexProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(ClaudeProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(
+        CodexProvider,
+        "review",
+        side_effect=ProviderStalledError("codex review stalled after 0.05s"),
+    )
+    mocker.patch.object(
+        ClaudeProvider,
+        "review",
+        side_effect=ProviderError("claude review timed out after 1s"),
+    )
+    mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        side_effect=ProviderHTTPError("OpenRouter returned HTTP 503"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--max-fallbacks",
+            "3",
+            "--json",
+            "--brief",
+            "Review this merge. End with CODEX_REVIEW_CLEAN or BLOCKED.",
+        ],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["error"] == "review_infrastructure_failed"
+    assert payload["exit_class"] == "infra_error"
+    assert payload["failure_code"] == "provider_unreachable"
+    assert payload["selected_provider"] is None
+    assert payload["selected_model"] is None
+    assert payload["review_verdict"] == "unknown"
+    assert [
+        (attempt["provider"], attempt["status"], attempt["failure_code"])
+        for attempt in payload["attempts"]
+    ] == [
+        ("codex", "stall", "provider_stall"),
+        ("claude", "timeout", "provider_timeout"),
+        ("openrouter", "5xx", "provider_unreachable"),
+    ]
+    assert payload["review"]["attempts"] == payload["attempts"]
+
+
+def test_review_auto_no_viable_json_reports_excluded_reasons(mocker):
+    _stub_all_configured(mocker, set())
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--json",
+            "--brief",
+            "Review this merge. End with CODEX_REVIEW_CLEAN or BLOCKED.",
+        ],
+    )
+
+    assert result.exit_code == 2
+    payload = json.loads(result.stdout)
+    assert payload["error"] == "review_no_viable_provider"
+    assert payload["exit_class"] == "no_viable_provider"
+    assert payload["failure_code"] == "no_viable_provider"
+    assert payload["attempts"] == []
+    assert payload["selected_provider"] is None
+    assert payload["review_verdict"] == "unknown"
+    excluded = {entry["provider"]: entry for entry in payload["review"]["excluded"]}
+    assert excluded["codex"]["reason_code"] == "missing_credentials"
+    assert excluded["claude"]["reason_code"] == "missing_credentials"
+    assert excluded["openrouter"]["reason_code"] == "missing_credentials"
 
 
 def test_review_auto_output_contract_failure_falls_through_to_next_provider(mocker):
