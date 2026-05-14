@@ -261,6 +261,11 @@ if [ -f "$PREFLIGHT_SCRIPT" ]; then
   # shellcheck source=../lib/preflight.sh
   source "$PREFLIGHT_SCRIPT"
 fi
+REVIEW_COMMENT_SCRIPT="$TOUCHSTONE_ROOT/lib/review-comment.sh"
+if [ -f "$REVIEW_COMMENT_SCRIPT" ]; then
+  # shellcheck source=../lib/review-comment.sh
+  source "$REVIEW_COMMENT_SCRIPT"
+fi
 
 # --------------------------------------------------------------------------
 # Skip-event audit log
@@ -2882,12 +2887,17 @@ review_findings_history_file() {
   printf '%s/%s.jsonl' "$(review_findings_history_dir)" "$(review_clean_marker_key "$branch")"
 }
 
-# Strip trailing whitespace from each line and drop empty trailing lines.
-# Findings text comes from the reviewer's stdout, which can include shell
-# color codes or stray indentation; the gate only persists lines that start
-# with `- ` (the BLOCKED contract).
+# Extract and normalize actionable findings from reviewer stdout. The prompt
+# asks for `- path:line` bullets, but hosted reviewers sometimes return
+# numbered lists, Markdown finding headings, or `Issue:` prefixes. Normalize
+# those shapes back to `- ...` so operators see the findings instead of a
+# parser failure.
 extract_findings_block() {
-  printf '%s\n' "$1" | awk '/^- / { print } /^$/ { if (have_finding) exit }'
+  if declare -F review_comment_findings_from_output >/dev/null 2>&1; then
+    review_comment_findings_from_output "$1"
+    return 0
+  fi
+  printf '%s\n' "$1" | awk '/^- / { print; found = 1 } /^$/ { if (found) exit }'
 }
 
 write_review_findings() {
@@ -3619,6 +3629,24 @@ parse_peer_provider() {
   fi
 }
 
+primary_provider_for_peer_review() {
+  local provider
+  provider="$(parse_primary_provider)"
+  if [ -n "$provider" ]; then
+    printf '%s' "$provider"
+    return 0
+  fi
+
+  # If Conductor did not emit parseable provider telemetry, a pinned provider
+  # (or merge-gate route preflight provider) is still a trustworthy exclusion.
+  # Leave truly unknown auto-routed cases empty so peer review skips rather than
+  # risk asking the same provider for a second opinion.
+  provider="$(conductor_effective_with_for_phase review)"
+  if [ -n "$provider" ]; then
+    printf '%s' "$provider"
+  fi
+}
+
 conductor_invocation_label() {
   local conductor_path subcommand
   conductor_path="$(command -v conductor 2>/dev/null || printf 'conductor')"
@@ -3823,7 +3851,7 @@ try_review_fallback_retry() {
 run_peer_review() {
   local primary_output="$1"
   local primary_provider mode
-  primary_provider="$(parse_primary_provider)"
+  primary_provider="$(primary_provider_for_peer_review)"
   mode="peer"
   if [ "${HIGH_SCRUTINY_TRIGGERED:-false}" = true ]; then
     mode="${HIGH_SCRUTINY_MODE:-peer}"
@@ -3887,21 +3915,56 @@ run_peer_review() {
 }
 
 build_peer_review_prompt() {
-  local primary_output="$1"
+  local primary_output="$1" changed_paths
+  changed_paths="${PROMPT_CONTEXT_CHANGED_PATHS:-$(git diff --name-only "$MERGE_BASE"..HEAD 2>/dev/null || true)}"
   cat <<EOF
 You are a peer code reviewer giving a second opinion on another AI reviewer's output.
-You are asked to be a QUICK second opinion, NOT to redo the review from scratch.
+You are asked to be a QUICK second opinion, NOT a full independent review.
 
-The primary reviewer examined a code change and produced the output below. Your job:
+Use the branch context and diff below to verify whether the primary reviewer's verdict is credible.
+Do not complain that you cannot see the diff; it is embedded in this prompt.
+
+Your job:
   1. Do you AGREE or DISAGREE with the primary's overall verdict (CLEAN / FIXED / BLOCKED)?
   2. Anything the primary MISSED that you'd flag?
   3. Anything the primary FLAGGED that you think is a false positive?
 
 Keep your response under 300 words. Lead with AGREE or DISAGREE on a line by itself.
 
---- Primary reviewer output: ---
+## Branch context
+
+Base: $BASE
+Merge base: $MERGE_BASE
+High scrutiny: ${HIGH_SCRUTINY_REASON:-none}
+
+Changed files:
+$(if [ -n "$changed_paths" ]; then
+    printf '%s\n' "$changed_paths" | sed '/^$/d; s/^/- /'
+  else
+    printf '(none)\n'
+  fi)
+
+Commit messages:
+
+$(git log --reverse --format='### %s%n%n%b' "$MERGE_BASE"..HEAD 2>/dev/null | sed '/^$/N;/^\n$/d')
+$(if [ -n "$REVIEW_CONTEXT_FILE" ]; then
+    printf '\n## Project review context\n\n'
+    cat "$REVIEW_CONTEXT_FILE"
+  fi)
+
+## Diff
+
+\`\`\`diff
+$(if is_truthy "${SCOPED_LARGE_DIFF_REVIEW:-false}" && [ -n "${SCOPED_LARGE_DIFF_FILE:-}" ]; then
+    cat "$SCOPED_LARGE_DIFF_FILE"
+  else
+    git diff "$MERGE_BASE"..HEAD 2>/dev/null
+  fi)
+\`\`\`
+
+## Primary reviewer output
+
 $primary_output
---- End primary output ---
 EOF
 }
 
@@ -4487,7 +4550,7 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
 
     CODEX_REVIEW_BLOCKED)
       phase "done — blocked"
-      REVIEW_FINDINGS_COUNT="$(printf '%s\n' "$OUTPUT" | grep -c '^- ' || true)"
+      REVIEW_FINDINGS_COUNT="$(extract_findings_block "$OUTPUT" | grep -c '^- ' || true)"
       blocked_subtitle="${REVIEWER_LABEL} flagged issues to address · push refused"
       tk_verdict fail "PUSH BLOCKED" "$blocked_subtitle"
       printf '%s\n' "$OUTPUT" | sed 's/^/    /'

@@ -107,6 +107,22 @@ touchstone_preflight_hash_paths() {
   done | touchstone_preflight_hash_stream
 }
 
+touchstone_preflight_hash_changed_paths() {
+  local repo_root="$1"
+  shift
+  local rel path
+
+  for rel in "$@"; do
+    [ -n "$rel" ] || continue
+    path="$repo_root/$rel"
+    if [ -f "$path" ]; then
+      printf '%s\t%s\n' "$rel" "$(touchstone_preflight_hash_file "$path")"
+    else
+      printf '%s\tmissing\n' "$rel"
+    fi
+  done | touchstone_preflight_hash_stream
+}
+
 touchstone_preflight_hash_file_list() {
   local label path
 
@@ -143,10 +159,15 @@ touchstone_preflight_worktree_hash() {
 touchstone_preflight_changed_paths_hash() {
   local repo_root="$1"
   local base_ref="$2"
+  local -a paths=()
+  local path
 
-  (cd "$repo_root" && git diff --name-only "$base_ref"...HEAD) 2>/dev/null \
-    | sort -u \
-    | touchstone_preflight_hash_stream
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    paths+=("$path")
+  done < <((cd "$repo_root" && git diff --name-only "$base_ref"...HEAD) 2>/dev/null | sort -u)
+
+  touchstone_preflight_hash_changed_paths "$repo_root" "${paths[@]}"
 }
 
 touchstone_preflight_tool_fingerprint() {
@@ -167,6 +188,10 @@ touchstone_preflight_env_fingerprint() {
   {
     printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_SCRIPT=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_SCRIPT:-}"
     printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_COMMAND=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_COMMAND:-}"
+    printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_LANE=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_LANE:-}"
+    printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_AFFECTED_COMMAND=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_AFFECTED_COMMAND:-}"
+    printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_SMOKE_COMMAND=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_SMOKE_COMMAND:-}"
+    printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_FULL_COMMAND=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_FULL_COMMAND:-}"
   } | touchstone_preflight_hash_stream
 }
 
@@ -196,14 +221,14 @@ touchstone_preflight_cache_inputs() {
   tool_hash="$(touchstone_preflight_tool_fingerprint)"
   env_hash="$(touchstone_preflight_env_fingerprint)"
 
-  printf 'version=2\n'
+  printf 'version=3\n'
   printf 'repo_root=%s\n' "$repo_root"
   printf 'scope=diff\n'
   printf 'base_ref=%s\n' "$base_ref"
   printf 'base_sha=%s\n' "$base_sha"
   printf 'head_sha=%s\n' "$head_sha"
   printf 'merge_base=%s\n' "$merge_base"
-  printf 'changed_paths_hash=%s\n' "$changed_paths_hash"
+  printf 'changed_files_hash=%s\n' "$changed_paths_hash"
   printf 'checker_hash=%s\n' "$checker_hash"
   printf 'config_hash=%s\n' "$config_hash"
   printf 'worktree_hash=%s\n' "$worktree_hash"
@@ -347,6 +372,351 @@ touchstone_preflight_test_files() {
     done
 }
 
+touchstone_preflight_delivery_only_path() {
+  local path="$1"
+
+  case "$path" in
+    .touchstone-version | .touchstone-manifest | TOUCHSTONE.md | AGENTS.md | GEMINI.md)
+      return 0
+      ;;
+    .touchstone-review.toml | .codex-review.toml)
+      return 0
+      ;;
+    .github/workflows/issue-claim-check.yml)
+      return 0
+      ;;
+    .claude/settings.json | .claude/skills/touchstone-*/*)
+      return 0
+      ;;
+    principles/*)
+      return 0
+      ;;
+    scripts/conductor-review.sh | scripts/codex-review.sh | scripts/branch-guard.sh)
+      return 0
+      ;;
+    scripts/emergency-disclosure.sh | scripts/cortex-pr-merged-hook.sh)
+      return 0
+      ;;
+    scripts/touchstone-run.sh | scripts/open-pr.sh | scripts/merge-pr.sh)
+      return 0
+      ;;
+    scripts/claim-issue.sh | scripts/issue-claim-check.sh)
+      return 0
+      ;;
+    scripts/cleanup-branches.sh | scripts/spawn-worktree.sh)
+      return 0
+      ;;
+    scripts/cleanup-worktrees.sh | scripts/worker.sh | scripts/run-pytest-in-venv.sh)
+      return 0
+      ;;
+    lib/toml.sh | lib/events.sh | lib/worker-state.sh | lib/script-sync-guard.sh)
+      return 0
+      ;;
+    lib/preflight.sh | lib/preflight-scope.sh | lib/review-comment.sh)
+      return 0
+      ;;
+    hooks/conductor-review.sh | hooks/codex-review.sh)
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
+touchstone_preflight_delivery_only_diff() {
+  local path saw_path=false
+
+  [ "$TOUCHSTONE_PREFLIGHT_SCOPE_MODE" = "diff" ] || return 1
+
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    saw_path=true
+    if ! touchstone_preflight_delivery_only_path "$path"; then
+      return 1
+    fi
+  done < <(touchstone_preflight_changed_files)
+
+  [ "$saw_path" = true ]
+}
+
+touchstone_preflight_strip_outer_quotes() {
+  local value="$1"
+
+  case "$value" in
+    \"*\")
+      value="${value#\"}"
+      value="${value%\"}"
+      ;;
+    \'*\')
+      value="${value#\'}"
+      value="${value%\'}"
+      ;;
+  esac
+  printf '%s' "$value"
+}
+
+touchstone_preflight_config_value() {
+  local repo_root="$1"
+  local wanted_key="$2"
+  local config_file="$repo_root/.touchstone-config"
+  local line key value found=""
+
+  [ -f "$config_file" ] || return 1
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [ -z "$line" ] && continue
+    case "$line" in \#*) continue ;; esac
+    case "$line" in *=*) ;; *) continue ;; esac
+    key="${line%%=*}"
+    value="${line#*=}"
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    if [ "$key" = "$wanted_key" ]; then
+      found="$(touchstone_preflight_strip_outer_quotes "$value")"
+    fi
+  done <"$config_file"
+
+  [ -n "$found" ] || return 1
+  printf '%s\n' "$found"
+}
+
+touchstone_preflight_validate_command_from_config() {
+  local repo_root="$1"
+  shift
+  local key value
+
+  for key in "$@"; do
+    value="$(touchstone_preflight_config_value "$repo_root" "$key" || true)"
+    if [ -n "$value" ]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+touchstone_preflight_changed_path_full_reason() {
+  local path="$1"
+
+  case "$path" in
+    package.json | */package.json | package-lock.json | */package-lock.json)
+      printf 'dependency manifest or lockfile changed: %s\n' "$path"
+      return 0
+      ;;
+    pnpm-lock.yaml | */pnpm-lock.yaml | pnpm-workspace.yaml | */pnpm-workspace.yaml)
+      printf 'dependency manifest or lockfile changed: %s\n' "$path"
+      return 0
+      ;;
+    yarn.lock | */yarn.lock | bun.lock | */bun.lock | bun.lockb | */bun.lockb)
+      printf 'dependency lockfile changed: %s\n' "$path"
+      return 0
+      ;;
+    pyproject.toml | */pyproject.toml | requirements*.txt | */requirements*.txt)
+      printf 'dependency manifest changed: %s\n' "$path"
+      return 0
+      ;;
+    uv.lock | */uv.lock | poetry.lock | */poetry.lock | setup.py | */setup.py | setup.cfg | */setup.cfg)
+      printf 'Python dependency or build config changed: %s\n' "$path"
+      return 0
+      ;;
+    Cargo.toml | */Cargo.toml | Cargo.lock | */Cargo.lock | go.mod | */go.mod | go.sum | */go.sum)
+      printf 'compiler dependency manifest changed: %s\n' "$path"
+      return 0
+      ;;
+    Package.swift | */Package.swift | Package.resolved | */Package.resolved)
+      printf 'Swift dependency manifest changed: %s\n' "$path"
+      return 0
+      ;;
+    Gemfile | */Gemfile | Gemfile.lock | */Gemfile.lock | composer.json | */composer.json | composer.lock | */composer.lock)
+      printf 'dependency manifest or lockfile changed: %s\n' "$path"
+      return 0
+      ;;
+    .github/workflows/* | .touchstone-config | .pre-commit-config.yaml | .markdownlint.json)
+      printf 'CI or repository tooling config changed: %s\n' "$path"
+      return 0
+      ;;
+    Dockerfile | */Dockerfile | Dockerfile.* | */Dockerfile.*)
+      printf 'deployment container config changed: %s\n' "$path"
+      return 0
+      ;;
+    docker-compose.yml | */docker-compose.yml | docker-compose.yaml | */docker-compose.yaml)
+      printf 'deployment container config changed: %s\n' "$path"
+      return 0
+      ;;
+    docker-compose.*.yml | */docker-compose.*.yml | docker-compose.*.yaml | */docker-compose.*.yaml)
+      printf 'deployment container config changed: %s\n' "$path"
+      return 0
+      ;;
+    deploy/* | */deploy/* | deployment/* | */deployment/* | deployments/* | */deployments/*)
+      printf 'deployment or infrastructure path changed: %s\n' "$path"
+      return 0
+      ;;
+    infra/* | */infra/* | infrastructure/* | */infrastructure/* | k8s/* | */k8s/*)
+      printf 'deployment or infrastructure path changed: %s\n' "$path"
+      return 0
+      ;;
+    kubernetes/* | */kubernetes/* | helm/* | */helm/* | terraform/* | */terraform/* | .github/actions/*)
+      printf 'deployment or infrastructure path changed: %s\n' "$path"
+      return 0
+      ;;
+    migrations/* | */migrations/*)
+      printf 'migration path changed: %s\n' "$path"
+      return 0
+      ;;
+    db/migrate/*)
+      printf 'migration path changed: %s\n' "$path"
+      return 0
+      ;;
+    src/* | lib/* | app/* | server/* | cmd/* | internal/* | pkg/*)
+      printf 'shared runtime path changed: %s\n' "$path"
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
+touchstone_preflight_full_validation_reason() {
+  local path reason saw_path=false
+
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    saw_path=true
+    reason="$(touchstone_preflight_changed_path_full_reason "$path" || true)"
+    if [ -n "$reason" ]; then
+      printf '%s\n' "$reason"
+      return 0
+    fi
+  done < <(touchstone_preflight_changed_files)
+
+  if [ "$saw_path" != true ]; then
+    printf 'no changed paths found; using full validation\n'
+    return 0
+  fi
+
+  return 1
+}
+
+touchstone_preflight_affected_path() {
+  case "$1" in
+    apps/*/* | packages/*/* | services/*/*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+touchstone_preflight_smoke_path() {
+  case "$1" in
+    README.md | CHANGELOG.md | docs/* | *.md)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+touchstone_preflight_all_changed_paths_match() {
+  local matcher="$1"
+  local path saw_path=false
+
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    saw_path=true
+    if ! "$matcher" "$path"; then
+      return 1
+    fi
+  done < <(touchstone_preflight_changed_files)
+
+  [ "$saw_path" = true ]
+}
+
+touchstone_preflight_validation_lane() {
+  local repo_root="$1"
+  local affected_command="$2"
+  local smoke_command="$3"
+  local requested reason
+
+  requested="${TOUCHSTONE_PREFLIGHT_VALIDATE_LANE:-}"
+  if [ -z "$requested" ]; then
+    requested="$(touchstone_preflight_config_value "$repo_root" validate_lane || true)"
+  fi
+  [ -n "$requested" ] || requested="auto"
+  requested="$(printf '%s' "$requested" | tr '[:upper:]' '[:lower:]')"
+
+  reason="$(touchstone_preflight_full_validation_reason || true)"
+  if [ -n "$reason" ]; then
+    printf 'full\t%s\n' "$reason"
+    return 0
+  fi
+
+  case "$requested" in
+    full)
+      printf 'full\tconfigured validate_lane=full\n'
+      return 0
+      ;;
+    smoke)
+      if [ -n "$smoke_command" ]; then
+        printf 'smoke\tconfigured validate_lane=smoke\n'
+      else
+        printf 'full\tconfigured validate_lane=smoke but validate_smoke_command is empty\n'
+      fi
+      return 0
+      ;;
+    affected)
+      if [ -n "$affected_command" ] && touchstone_preflight_all_changed_paths_match touchstone_preflight_affected_path; then
+        printf 'affected\tconfigured validate_lane=affected and all changed paths are target-scoped\n'
+      else
+        printf 'full\tconfigured validate_lane=affected but diff is not safely target-scoped or command is empty\n'
+      fi
+      return 0
+      ;;
+    auto | "")
+      if [ -n "$smoke_command" ] && touchstone_preflight_all_changed_paths_match touchstone_preflight_smoke_path; then
+        printf 'smoke\tdocs-only diff with validate_smoke_command configured\n'
+      elif [ -n "$affected_command" ] && touchstone_preflight_all_changed_paths_match touchstone_preflight_affected_path; then
+        printf 'affected\tall changed paths are target-scoped and validate_affected_command is configured\n'
+      else
+        printf 'full\tunknown or unconfigured validation scope; full validation is the safe fallback\n'
+      fi
+      return 0
+      ;;
+    *)
+      printf 'full\tunknown validate_lane=%s; full validation is the safe fallback\n' "$requested"
+      return 0
+      ;;
+  esac
+}
+
+touchstone_preflight_run_validate_command() {
+  local command="$1"
+  local lane="$2"
+  local reason="$3"
+  local changed_paths_file="" rc=0
+
+  if [ "$TOUCHSTONE_PREFLIGHT_SCOPE_MODE" = "diff" ]; then
+    changed_paths_file="$(mktemp -t touchstone-preflight-paths.XXXXXX)"
+    touchstone_preflight_changed_files >"$changed_paths_file"
+  fi
+
+  TOUCHSTONE_PREFLIGHT_IN_PROGRESS=1 \
+    TOUCHSTONE_PREFLIGHT_VALIDATE_LANE="$lane" \
+    TOUCHSTONE_PREFLIGHT_VALIDATE_REASON="$reason" \
+    TOUCHSTONE_PREFLIGHT_CHANGED_PATHS_FILE="$changed_paths_file" \
+    TOUCHSTONE_PREFLIGHT_DIFF_BASE="$TOUCHSTONE_PREFLIGHT_DIFF_BASE" \
+    bash -c "$command" || rc=$?
+
+  if [ -n "$changed_paths_file" ]; then
+    rm -f "$changed_paths_file" 2>/dev/null || true
+  fi
+
+  return "$rc"
+}
+
 touchstone_preflight_is_touchstone_repo() {
   [ -f VERSION ] \
     && [ -f bootstrap/new-project.sh ] \
@@ -432,10 +802,12 @@ touchstone_preflight_markdownlint() {
 touchstone_preflight_validate() {
   local validate_script="${TOUCHSTONE_PREFLIGHT_VALIDATE_SCRIPT:-scripts/touchstone-run.sh}"
   local validate_command="${TOUCHSTONE_PREFLIGHT_VALIDATE_COMMAND:-}"
+  local repo_root lane_info lane reason affected_command smoke_command full_command
 
   if [ -n "$validate_command" ]; then
+    touchstone_preflight_info "tests lane: explicit (TOUCHSTONE_PREFLIGHT_VALIDATE_COMMAND)"
     touchstone_preflight_info "tests ($validate_command)"
-    if TOUCHSTONE_PREFLIGHT_IN_PROGRESS=1 bash -c "$validate_command"; then
+    if touchstone_preflight_run_validate_command "$validate_command" explicit "TOUCHSTONE_PREFLIGHT_VALIDATE_COMMAND"; then
       touchstone_preflight_ok "tests"
       return 0
     fi
@@ -458,6 +830,51 @@ touchstone_preflight_validate() {
         fi
       done
       if [ "$failures" -eq 0 ]; then
+        touchstone_preflight_ok "tests"
+        return 0
+      fi
+      touchstone_preflight_fail "tests"
+      return 1
+    fi
+
+    if touchstone_preflight_delivery_only_diff; then
+      touchstone_preflight_skip "tests (delivery-only Touchstone-managed diff; project validate not required)"
+      return 0
+    fi
+
+    repo_root="$(pwd)"
+    affected_command="${TOUCHSTONE_PREFLIGHT_VALIDATE_AFFECTED_COMMAND:-$(touchstone_preflight_validate_command_from_config "$repo_root" validate_affected_command affected_validate_command validate_command_affected || true)}"
+    smoke_command="${TOUCHSTONE_PREFLIGHT_VALIDATE_SMOKE_COMMAND:-$(touchstone_preflight_validate_command_from_config "$repo_root" validate_smoke_command smoke_validate_command validate_command_smoke || true)}"
+    full_command="${TOUCHSTONE_PREFLIGHT_VALIDATE_FULL_COMMAND:-$(touchstone_preflight_validate_command_from_config "$repo_root" validate_full_command full_validate_command validate_command_full || true)}"
+    lane_info="$(touchstone_preflight_validation_lane "$repo_root" "$affected_command" "$smoke_command")"
+    lane="${lane_info%%	*}"
+    reason="${lane_info#*	}"
+    touchstone_preflight_info "tests lane: $lane ($reason)"
+
+    case "$lane" in
+      smoke)
+        touchstone_preflight_info "tests (smoke validate command)"
+        if touchstone_preflight_run_validate_command "$smoke_command" "$lane" "$reason"; then
+          touchstone_preflight_ok "tests"
+          return 0
+        fi
+        touchstone_preflight_fail "tests"
+        return 1
+        ;;
+      affected)
+        touchstone_preflight_info "tests (affected validate command)"
+        if touchstone_preflight_run_validate_command "$affected_command" "$lane" "$reason"; then
+          touchstone_preflight_ok "tests"
+          return 0
+        fi
+        touchstone_preflight_fail "tests"
+        return 1
+        ;;
+    esac
+
+    if [ -n "$full_command" ]; then
+      touchstone_preflight_info "tests (full validate command)"
+      if touchstone_preflight_run_validate_command "$full_command" full "$reason"; then
         touchstone_preflight_ok "tests"
         return 0
       fi
@@ -582,7 +999,10 @@ the changed file set versus the base ref, not the whole project, unless
 --all-files is explicitly passed.
 
 Scoped checks: shellcheck, shfmt, markdownlint, actionlint.
-Full-project check: the project validate command remains full-project.
+Validation lane: explicit commands win; delivery-only Touchstone-managed sync
+diffs skip app validation; high-risk or unknown paths run full validation;
+target-scoped diffs can use validate_affected_command; docs-only diffs can use
+validate_smoke_command. Full validation is the fallback.
 EOF
         return 0
         ;;
