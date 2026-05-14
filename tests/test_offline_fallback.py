@@ -49,6 +49,7 @@ def _isolate_offline_cache(tmp_path, monkeypatch):
     """
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     monkeypatch.delenv(OLLAMA_BASE_URL_ENV, raising=False)
+    monkeypatch.delenv("CONDUCTOR_ALLOW_LOCAL_ONLINE", raising=False)
     yield
 
 
@@ -550,7 +551,7 @@ def test_explicit_with_ollama_network_error_does_not_hint(mocker):
             side_effect=httpx.ConnectError("Connection refused")
         )
         result = CliRunner().invoke(
-            main, ["call", "--with", "ollama", "--task", "hi"]
+            main, ["call", "--offline", "--with", "ollama", "--task", "hi"]
         )
 
     assert result.exit_code != 0

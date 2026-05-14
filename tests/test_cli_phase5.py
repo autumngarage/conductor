@@ -39,6 +39,7 @@ def _isolated_agent_homes(tmp_path, monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("CONDUCTOR_OLLAMA_MODEL", raising=False)
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    monkeypatch.delenv("CONDUCTOR_ALLOW_LOCAL_ONLINE", raising=False)
     monkeypatch.delenv("CLOUDFLARE_API_TOKEN", raising=False)
     monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
@@ -248,6 +249,28 @@ def test_list_json_includes_runtime_field(mocker):
         assert rows[name]["runtime"] == "stateless-tool-loop"
     for name in ("kimi", "deepseek-chat", "deepseek-reasoner"):
         assert rows[name]["runtime"] == "text-only"
+
+
+def test_list_marks_configured_ollama_as_local_offline_only(mocker):
+    from conductor.providers import OllamaProvider
+
+    _stub_all_unconfigured(mocker)
+    mocker.patch.object(OllamaProvider, "configured", lambda self: (True, None))
+
+    text_result = CliRunner().invoke(main, ["list"])
+    assert text_result.exit_code == 0, text_result.output
+    assert "ollama" in text_result.output
+    assert "local/offline-only" in text_result.output
+
+    json_result = CliRunner().invoke(main, ["list", "--json"])
+    assert json_result.exit_code == 0, json_result.output
+    rows = {row["provider"]: row for row in json.loads(json_result.output)}
+    assert rows["ollama"]["configured"] is True
+    assert rows["ollama"]["readiness"] == "local/offline-only"
+    assert rows["ollama"]["local_policy"] == {
+        "scope": "local/offline-only",
+        "online_opt_in_env": "CONDUCTOR_ALLOW_LOCAL_ONLINE",
+    }
 
 
 def test_list_text_output_shows_tools_column(mocker):
@@ -506,6 +529,21 @@ def test_doctor_json_reports_gemini_review_extension_readiness(mocker):
     assert review["viable"] is False
     assert review["reason_code"] == "missing_native_review_extension"
     assert rows["gemini"]["capabilities"]["call"]["viable"] is True
+
+
+def test_doctor_json_marks_ollama_local_policy(mocker):
+    from conductor.providers import OllamaProvider
+
+    _stub_all_unconfigured(mocker)
+    mocker.patch.object(OllamaProvider, "configured", lambda self: (True, None))
+
+    result = CliRunner().invoke(main, ["doctor", "--json"])
+
+    assert result.exit_code == 0, result.output
+    rows = {row["provider"]: row for row in json.loads(result.output)["providers"]}
+    assert rows["ollama"]["configured"] is True
+    assert rows["ollama"]["readiness"] == "local/offline-only"
+    assert rows["ollama"]["local_policy"]["online_opt_in_env"] == "CONDUCTOR_ALLOW_LOCAL_ONLINE"
 
 
 def test_doctor_mute_unmute_shifts_counts_and_hides_fix_lines(mocker, monkeypatch):

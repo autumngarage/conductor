@@ -293,7 +293,7 @@ Consumers pin a major version in their own dependency declarations (brew formula
 ## Provider-specific gotchas
 
 - **`--resume <session_id>`** works only for claude / codex / gemini. Other providers ignore it or return error.
-- **`ollama`** requires a local daemon (`ollama serve`); `conductor list` shows readiness. `CONDUCTOR_OLLAMA_MODEL` sets the host-local default. If no explicit `--model` is passed and the requested local model is missing, Conductor queries `/api/tags` and retries once with a non-embedding installed chat model. Explicit `--model` requests are strict and fail rather than being silently replaced.
+- **`ollama`** requires a local daemon (`ollama serve`); `conductor list` shows readiness as `local/offline-only` when configured. While the machine is online, direct `--with ollama` usage requires `--offline` or `CONDUCTOR_ALLOW_LOCAL_ONLINE=1`, so hosted-provider degradation does not silently become a local-model review. `CONDUCTOR_OLLAMA_MODEL` sets the host-local default. If no explicit `--model` is passed and the requested local model is missing, Conductor queries `/api/tags` and retries once with a non-embedding installed chat model. Explicit `--model` requests are strict and fail rather than being silently replaced.
 - **`openrouter`** routes to whatever model `openrouter/auto` picks unless `--model` is set; cost estimates may be approximate.
 - **`--effort max`** maps to provider-specific extended thinking where supported; for providers without thinking, it's treated as a hint.
 

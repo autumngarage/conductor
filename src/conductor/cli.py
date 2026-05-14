@@ -202,6 +202,8 @@ GIT_RECOVERY_COMMAND_TIMEOUT_SEC = 2.0
 GIT_RECOVERY_MAX_COMMITS = 5
 GIT_RECOVERY_MAX_STATUS_PATHS = 8
 NATIVE_REVIEW_TAG = "code-review"
+LOCAL_PROVIDER_IDS = frozenset({"ollama"})
+LOCAL_ONLINE_OPT_IN_ENV = "CONDUCTOR_ALLOW_LOCAL_ONLINE"
 REVIEW_IGNORED_TASK_TAGS = frozenset({"tool-use"})
 DEFAULT_SESSION_PRUNE_OLDER_THAN = "30d"
 DEFAULT_SESSION_PRUNE_PROTECT_LAST = 50
@@ -1129,6 +1131,72 @@ def _apply_offline_flag(
     return "ollama", False
 
 
+def _truthy_env(value: str | None) -> bool:
+    return value is not None and value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _local_provider_opt_in_active(*, offline_requested: bool) -> bool:
+    return (
+        offline_requested
+        or offline_mode.is_active()
+        or _truthy_env(os.environ.get(LOCAL_ONLINE_OPT_IN_ENV))
+    )
+
+
+def _local_provider_online_policy_reason(
+    provider_id: str | None,
+    *,
+    offline_requested: bool,
+) -> str | None:
+    if provider_id not in LOCAL_PROVIDER_IDS:
+        return None
+    if _local_provider_opt_in_active(offline_requested=offline_requested):
+        return None
+
+    profile = get_network_profile(
+        NETWORK_PROFILE_FALLBACK_TARGET,
+        warn=_network_profile_warning,
+    )
+    if profile.rtt_ms is None:
+        return None
+
+    return (
+        f"provider '{provider_id}' is local/offline-only while network is available; "
+        "pass --offline for intentional local/offline routing or set "
+        f"{LOCAL_ONLINE_OPT_IN_ENV}=1 to allow local models while online."
+    )
+
+
+def _enforce_local_provider_opt_in(
+    provider_id: str | None,
+    *,
+    offline_requested: bool,
+) -> None:
+    reason = _local_provider_online_policy_reason(
+        provider_id,
+        offline_requested=offline_requested,
+    )
+    if reason is not None:
+        raise click.UsageError(reason)
+
+
+def _local_provider_policy(provider_id: str) -> dict[str, object] | None:
+    if provider_id not in LOCAL_PROVIDER_IDS:
+        return None
+    return {
+        "scope": "local/offline-only",
+        "online_opt_in_env": LOCAL_ONLINE_OPT_IN_ENV,
+    }
+
+
+def _provider_readiness_label(provider_id: str, configured: bool) -> str:
+    if not configured:
+        return "no"
+    if provider_id in LOCAL_PROVIDER_IDS:
+        return "local/offline-only"
+    return "yes"
+
+
 def _closest(query: str, options: tuple[str, ...]) -> str:
     from difflib import get_close_matches
 
@@ -1660,7 +1728,7 @@ class ExclusionRule:
 
 OLLAMA_ONLINE_EXCLUSION_MESSAGE = (
     "[conductor] excluding ollama from fallback chain "
-    "(online; ollama is offline-only — pass --offline to override)"
+    f"(online; ollama is offline-only — pass --offline or set {LOCAL_ONLINE_OPT_IN_ENV}=1)"
 )
 OLLAMA_PROBE_OFFLINE_INCLUSION_MESSAGE = (
     "[conductor] including ollama as local fallback "
@@ -1699,9 +1767,7 @@ def _ollama_online_only_predicate(
 ) -> bool:
     if not _is_ollama_candidate(candidate):
         return False
-    if context.offline_requested or offline_mode.is_active():
-        return False
-    if "ollama" in context.user_tags:
+    if _local_provider_opt_in_active(offline_requested=context.offline_requested):
         return False
     return context.online_probe_reachable is True
 
@@ -1867,7 +1933,7 @@ def _apply_ollama_offline_only_policy(
     """
     if not _semantic_plan_contains_ollama(plan):
         return plan, None
-    if offline_requested or offline_mode.is_active():
+    if _local_provider_opt_in_active(offline_requested=offline_requested):
         return _apply_planning_exclusion_rules(
             plan,
             PlanContext(
@@ -1878,24 +1944,21 @@ def _apply_ollama_offline_only_policy(
             ),
         )
 
-    online_probe_reachable: bool | None = None
-    if "ollama" not in user_tags:
-        profile = get_network_profile(
-            _network_target_for_provider(_first_online_candidate_provider(plan)),
-            warn=None,
+    profile = get_network_profile(
+        _network_target_for_provider(_first_online_candidate_provider(plan)),
+        warn=None,
+    )
+    if profile.rtt_ms is None:
+        plan, message = _apply_planning_exclusion_rules(
+            plan,
+            PlanContext(
+                semantic_plan=plan,
+                user_tags=user_tags,
+                offline_requested=offline_requested,
+                online_probe_reachable=False,
+            ),
         )
-        if profile.rtt_ms is None:
-            plan, message = _apply_planning_exclusion_rules(
-                plan,
-                PlanContext(
-                    semantic_plan=plan,
-                    user_tags=user_tags,
-                    offline_requested=offline_requested,
-                    online_probe_reachable=False,
-                ),
-            )
-            return plan, message or OLLAMA_PROBE_OFFLINE_INCLUSION_MESSAGE
-        online_probe_reachable = True
+        return plan, message or OLLAMA_PROBE_OFFLINE_INCLUSION_MESSAGE
 
     return _apply_planning_exclusion_rules(
         plan,
@@ -1903,7 +1966,7 @@ def _apply_ollama_offline_only_policy(
             semantic_plan=plan,
             user_tags=user_tags,
             offline_requested=offline_requested,
-            online_probe_reachable=online_probe_reachable,
+            online_probe_reachable=True,
         ),
     )
 
@@ -1923,7 +1986,7 @@ def _auto_route_plan_context(
             ),
             None,
         )
-    if offline_requested or offline_mode.is_active() or "ollama" in user_tags:
+    if _local_provider_opt_in_active(offline_requested=offline_requested):
         return (
             PlanContext(
                 user_tags=user_tags,
@@ -1987,9 +2050,10 @@ def _apply_auto_route_exclusion_rules(
     if len(retained) == len(decision.ranked):
         return decision, inclusion_message
     if not retained:
+        detail = f"{'; '.join(messages)}. " if messages else ""
         raise NoConfiguredProvider(
             "no provider satisfies the routing request after planning exclusions. "
-            f"Skipped: {skipped}"
+            f"{detail}Skipped: {skipped}"
         )
 
     winner = retained[0]
@@ -5220,6 +5284,8 @@ def call(
         raise click.UsageError(
             f"--with {provider_id} and --exclude {exclude} contradict each other."
         )
+    if provider_id and not auto:
+        _enforce_local_provider_opt_in(provider_id, offline_requested=offline is True)
 
     brief_input = _read_task(
         task,
@@ -9795,6 +9861,7 @@ def _run_exec_phase_dispatch(
         # Same narrowing as in `call()` — the early guard rejects the case
         # where neither --auto nor --with was passed.
         assert provider_id is not None
+        _enforce_local_provider_opt_in(provider_id, offline_requested=offline is True)
         try:
             provider = get_provider(provider_id)
         except KeyError as e:
@@ -10364,6 +10431,8 @@ def exec_cmd(
         raise click.UsageError(
             "--resume requires --with <provider> (sessions are provider-specific)."
         )
+    if provider_id and not auto:
+        _enforce_local_provider_opt_in(provider_id, offline_requested=offline is True)
 
     brief_files = tuple(brief_file)
     if auto_phase and len(brief_files) > 1:
@@ -10910,6 +10979,8 @@ VALID_ROUTE_KINDS = ("call", "exec", "review")
 
 def _route_reason_code(reason: str) -> str:
     lowered = reason.lower()
+    if "local/offline-only" in lowered or LOCAL_ONLINE_OPT_IN_ENV.lower() in lowered:
+        return "local_provider_requires_opt_in"
     if "gemini native review requires" in lowered or "code review extension" in lowered:
         return "missing_native_review_extension"
     if "does not support tools" in lowered:
@@ -10943,6 +11014,7 @@ def _route_provider_assessment(
     kind: str,
     tools: frozenset[str],
     excluded: frozenset[str],
+    enforce_local_online_policy: bool = False,
 ) -> dict[str, object]:
     try:
         provider_obj = get_provider(name)
@@ -10989,6 +11061,18 @@ def _route_provider_assessment(
             "reason_code": _route_reason_code(reason),
             "reason": reason,
         }
+    if enforce_local_online_policy:
+        reason = _local_provider_online_policy_reason(
+            name,
+            offline_requested=False,
+        )
+        if reason is not None:
+            return {
+                **base,
+                "viable": False,
+                "reason_code": _route_reason_code(reason),
+                "reason": reason,
+            }
     if kind == "exec" and tools and not tools.issubset(
         getattr(provider_obj, "supported_tools", frozenset())
     ):
@@ -11064,6 +11148,7 @@ def _route_validation_payload(
             kind=kind,
             tools=tools,
             excluded=exclude,
+            enforce_local_online_policy=True,
         )
         for name in candidate_names
     ]
@@ -11097,6 +11182,11 @@ def _route_validation_payload(
                 shadow=True,
                 estimated_input_tokens=estimated_input_tokens,
                 estimated_output_tokens=estimated_output_tokens,
+            )
+            decision, _exclusion_message = _apply_auto_route_exclusion_rules(
+                decision,
+                user_tags=tuple(tags),
+                offline_requested=False,
             )
             selected_provider = decision.provider
             selected_assessment = next(
@@ -11532,10 +11622,13 @@ def _provider_rows() -> list[dict]:
     for name in known_providers():
         provider = get_provider(name)
         ok, reason = provider.configured()
+        local_policy = _local_provider_policy(name)
         rows.append(
             {
                 "provider": name,
                 "configured": ok,
+                "readiness": _provider_readiness_label(name, ok),
+                "local_policy": local_policy,
                 "reason": None if ok else reason,
                 # Copy-pasteable shell one-liner that takes the user from
                 # "not configured" to "configured". None for providers
@@ -11574,12 +11667,13 @@ def list_cmd(as_json: bool) -> None:
 
     name_w = max(len("PROVIDER"), max(len(r["provider"]) for r in rows))
     model_w = max(len("DEFAULT MODEL"), max(len(r["default_model"]) for r in rows))
+    ready_w = max(len("READY"), max(len(r["readiness"]) for r in rows))
     tier_w = max(len("TIER"), max(len(r["tier"]) for r in rows))
     runtime_w = max(len("RUNTIME"), max(len(r["runtime"]) for r in rows))
     tags_w = max(len("TAGS"), max(len(",".join(r["tags"])) for r in rows))
     header = (
         f"{'PROVIDER':<{name_w}}  "
-        f"{'READY':<5}  "
+        f"{'READY':<{ready_w}}  "
         f"{'TIER':<{tier_w}}  "
         f"{'RUNTIME':<{runtime_w}}  "
         f"{'DEFAULT MODEL':<{model_w}}  "
@@ -11588,11 +11682,10 @@ def list_cmd(as_json: bool) -> None:
     click.echo(header)
     click.echo("-" * len(header))
     for r in rows:
-        ready = "yes" if r["configured"] else "no"
         tags = ",".join(r["tags"])
         click.echo(
             f"{r['provider']:<{name_w}}  "
-            f"{ready:<5}  "
+            f"{r['readiness']:<{ready_w}}  "
             f"{r['tier']:<{tier_w}}  "
             f"{r['runtime']:<{runtime_w}}  "
             f"{r['default_model']:<{model_w}}  "
@@ -11600,9 +11693,9 @@ def list_cmd(as_json: bool) -> None:
             f"{r['tools']}"
         )
         if not r["configured"] and r["reason"]:
-            click.echo(f"{'':<{name_w}}  {'':<5}  └─ {r['reason']}")
+            click.echo(f"{'':<{name_w}}  {'':<{ready_w}}  └─ {r['reason']}")
         if not r["configured"] and r["fix_command"]:
-            click.echo(f"{'':<{name_w}}  {'':<5}  → fix: {r['fix_command']}")
+            click.echo(f"{'':<{name_w}}  {'':<{ready_w}}  → fix: {r['fix_command']}")
 
 
 # --------------------------------------------------------------------------- #
@@ -11852,6 +11945,7 @@ def _diagnostic_payload() -> dict:
     for name in known_providers():
         provider = get_provider(name)
         ok, reason = provider.configured()
+        local_policy = _local_provider_policy(name)
         provider_warnings: list[str] = []
 
         # Provider-specific health probes: daemon up but default model missing,
@@ -11867,6 +11961,8 @@ def _diagnostic_payload() -> dict:
             {
                 "provider": name,
                 "configured": ok,
+                "readiness": _provider_readiness_label(name, ok),
+                "local_policy": local_policy,
                 "reason": None if ok else reason,
                 "fix_command": (None if ok else _provider_fix_command(provider, reason)),
                 "default_model": _provider_default_model(provider),

@@ -56,6 +56,7 @@ from conductor.session_log import SessionLog
 def _clean_health(monkeypatch, tmp_path):
     reset_health()
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.delenv("CONDUCTOR_ALLOW_LOCAL_ONLINE", raising=False)
     yield
     reset_health()
 
@@ -841,7 +842,8 @@ def test_ask_code_medium_online_excludes_ollama_from_fallback(mocker):
     assert not ollama_call.called
     assert result.stderr == (
         "[conductor] excluding ollama from fallback chain "
-        "(online; ollama is offline-only — pass --offline to override)\n"
+        "(online; ollama is offline-only — pass --offline or set "
+        "CONDUCTOR_ALLOW_LOCAL_ONLINE=1)\n"
     )
     assert "excluding ollama from fallback chain" in result.stderr
     assert "online; ollama is offline-only" in result.stderr
@@ -960,8 +962,54 @@ def test_ask_network_probe_offline_keeps_ollama_fallback(mocker):
     assert "→ ollama" in result.stderr
 
 
-def test_ask_explicit_ollama_tag_keeps_ollama_fallback(mocker):
+def test_ask_explicit_ollama_tag_online_still_requires_local_opt_in(mocker):
     _stub_all_configured(mocker, {"openrouter", "ollama"})
+    mocker.patch(
+        "conductor.cli.get_network_profile",
+        return_value=NetworkProfile(50, "https://1.1.1.1", 1_000),
+    )
+    openrouter_call = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response("openrouter", "openrouter/auto"),
+    )
+    ollama_call = mocker.patch.object(
+        OllamaProvider,
+        "call",
+        return_value=_fake_response("ollama", "llama3.2"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "research",
+            "--effort",
+            "low",
+            "--tags",
+            "ollama,cheap",
+            "--brief",
+            "Keep local fallback available.",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert openrouter_call.called
+    assert not ollama_call.called
+    assert "excluding ollama from fallback chain" in result.stderr
+    assert "CONDUCTOR_ALLOW_LOCAL_ONLINE=1" in result.stderr
+    payload = json.loads(result.stdout)
+    assert [candidate["provider"] for candidate in payload["semantic"]["candidates"]] == [
+        "openrouter",
+    ]
+    assert "ollama" in payload["semantic"]["tags"]
+
+
+def test_ask_explicit_ollama_tag_env_opt_in_keeps_ollama_fallback(mocker, monkeypatch):
+    _stub_all_configured(mocker, {"openrouter", "ollama"})
+    monkeypatch.setenv("CONDUCTOR_ALLOW_LOCAL_ONLINE", "1")
     openrouter_call = mocker.patch.object(
         OpenRouterProvider,
         "call",
@@ -998,14 +1046,39 @@ def test_ask_explicit_ollama_tag_keeps_ollama_fallback(mocker):
         "openrouter",
         "ollama",
     ]
-    assert "ollama" in payload["semantic"]["tags"]
 
 
-def test_call_with_ollama_bypasses_semantic_ollama_policy(mocker):
+def test_call_with_ollama_online_requires_local_opt_in(mocker):
     _stub_all_configured(mocker, {"ollama"})
     profile_mock = mocker.patch(
         "conductor.cli.get_network_profile",
-        return_value=NetworkProfile(50, "http://localhost:11434", 1_000),
+        return_value=NetworkProfile(50, "https://1.1.1.1", 1_000),
+    )
+    ollama_call = mocker.patch.object(
+        OllamaProvider,
+        "call",
+        return_value=_fake_response("ollama", "llama3.2"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["call", "--with", "ollama", "--brief", "Use the local provider."],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert not ollama_call.called
+    assert profile_mock.called
+    assert "local/offline-only" in result.output
+    assert "--offline" in result.output
+    assert "CONDUCTOR_ALLOW_LOCAL_ONLINE=1" in result.output
+
+
+def test_call_with_ollama_online_env_opt_in_allows(mocker, monkeypatch):
+    _stub_all_configured(mocker, {"ollama"})
+    monkeypatch.setenv("CONDUCTOR_ALLOW_LOCAL_ONLINE", "1")
+    profile_mock = mocker.patch(
+        "conductor.cli.get_network_profile",
+        return_value=NetworkProfile(50, "https://1.1.1.1", 1_000),
     )
     ollama_call = mocker.patch.object(
         OllamaProvider,
@@ -1021,7 +1094,6 @@ def test_call_with_ollama_bypasses_semantic_ollama_policy(mocker):
     assert result.exit_code == 0, result.output
     assert ollama_call.called
     assert profile_mock.called
-    assert "excluding ollama from fallback chain" not in result.stderr
 
 
 def test_ask_review_uses_native_review_route(mocker):
@@ -2508,8 +2580,49 @@ def test_exec_auto_cheapest_network_probe_offline_keeps_ollama_primary(mocker):
     assert "→ ollama" in result.stderr
 
 
-def test_exec_auto_explicit_ollama_tag_keeps_ollama_primary(mocker):
+def test_exec_auto_explicit_ollama_tag_online_requires_local_opt_in(mocker):
     _stub_all_configured(mocker, {"openrouter", "ollama"})
+    mocker.patch(
+        "conductor.cli.get_network_profile",
+        return_value=NetworkProfile(50, "https://1.1.1.1", 1_000),
+    )
+    openrouter_exec = mocker.patch.object(
+        OpenRouterProvider,
+        "exec",
+        return_value=_fake_response("openrouter", "openrouter/auto"),
+    )
+    ollama_exec = mocker.patch.object(
+        OllamaProvider,
+        "exec",
+        return_value=_fake_response("ollama", "llama3.2"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--auto",
+            "--prefer",
+            "cheapest",
+            "--tags",
+            "ollama",
+            "--tools",
+            "Read,Grep,Glob,Bash",
+            "--no-preflight",
+            "--task",
+            "review the diff",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert not ollama_exec.called
+    assert openrouter_exec.called
+    assert "→ openrouter" in result.stderr
+
+
+def test_exec_auto_explicit_ollama_tag_env_opt_in_allows(mocker, monkeypatch):
+    _stub_all_configured(mocker, {"openrouter", "ollama"})
+    monkeypatch.setenv("CONDUCTOR_ALLOW_LOCAL_ONLINE", "1")
     mocker.patch(
         "conductor.cli.get_network_profile",
         return_value=NetworkProfile(50, "https://1.1.1.1", 1_000),
@@ -2543,8 +2656,42 @@ def test_exec_auto_explicit_ollama_tag_keeps_ollama_primary(mocker):
     assert "→ ollama" in result.stderr
 
 
-def test_exec_with_ollama_bypasses_auto_route_exclusions(mocker):
+def test_exec_with_ollama_online_requires_local_opt_in(mocker):
     _stub_all_configured(mocker, {"ollama"})
+    mocker.patch(
+        "conductor.cli.get_network_profile",
+        return_value=NetworkProfile(50, "https://1.1.1.1", 1_000),
+    )
+    ollama_exec = mocker.patch.object(
+        OllamaProvider,
+        "exec",
+        return_value=_fake_response("ollama", "llama3.2"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--with",
+            "ollama",
+            "--tools",
+            "Read,Grep,Glob,Bash",
+            "--no-preflight",
+            "--task",
+            "review the diff",
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert not ollama_exec.called
+    assert "local/offline-only" in result.output
+    assert "--offline" in result.output
+    assert "CONDUCTOR_ALLOW_LOCAL_ONLINE=1" in result.output
+
+
+def test_exec_with_ollama_online_env_opt_in_allows(mocker, monkeypatch):
+    _stub_all_configured(mocker, {"ollama"})
+    monkeypatch.setenv("CONDUCTOR_ALLOW_LOCAL_ONLINE", "1")
     mocker.patch(
         "conductor.cli.get_network_profile",
         return_value=NetworkProfile(50, "https://1.1.1.1", 1_000),
@@ -4114,6 +4261,48 @@ def test_route_review_json_reports_all_candidates_excluded(mocker):
     assert payload["viable"] is False
     excluded = {entry["provider"]: entry for entry in payload["excluded"]}
     assert excluded["openrouter"]["reason_code"] == "excluded_by_user"
+
+
+def test_route_exec_with_ollama_online_requires_local_opt_in(mocker):
+    _stub_all_configured(mocker, {"ollama"})
+    mocker.patch(
+        "conductor.cli.get_network_profile",
+        return_value=NetworkProfile(50, "https://1.1.1.1", 1_000),
+    )
+    exec_mock = mocker.patch.object(OllamaProvider, "exec")
+
+    result = CliRunner().invoke(
+        main,
+        ["route", "--kind", "exec", "--with", "ollama", "--tools", "Read", "--json"],
+    )
+
+    assert result.exit_code == 2, result.output
+    payload = json.loads(result.output)
+    assert payload["viable"] is False
+    assert payload["selected_provider"] is None
+    assert payload["excluded"][0]["provider"] == "ollama"
+    assert payload["excluded"][0]["reason_code"] == "local_provider_requires_opt_in"
+    assert "CONDUCTOR_ALLOW_LOCAL_ONLINE=1" in payload["excluded"][0]["reason"]
+    assert not exec_mock.called
+
+
+def test_route_exec_with_ollama_env_opt_in_is_viable(mocker, monkeypatch):
+    _stub_all_configured(mocker, {"ollama"})
+    monkeypatch.setenv("CONDUCTOR_ALLOW_LOCAL_ONLINE", "1")
+    mocker.patch(
+        "conductor.cli.get_network_profile",
+        return_value=NetworkProfile(50, "https://1.1.1.1", 1_000),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["route", "--kind", "exec", "--with", "ollama", "--tools", "Read", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["viable"] is True
+    assert payload["selected_provider"] == "ollama"
 
 
 def test_ask_call_mode_routes_with_prompt_size_estimate(mocker):
