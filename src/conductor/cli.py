@@ -125,7 +125,6 @@ from conductor.providers import (
 from conductor.providers.review_contract import (
     ReviewContextError,
     ReviewOutputContractError,
-    build_review_patch_context,
     build_review_task_prompt,
     validate_requested_review_sentinel,
 )
@@ -341,6 +340,7 @@ class ReviewInfrastructureError(ProviderError):
         selected_model: str | None = None,
         review_verdict: str = "unknown",
         excluded: list[dict[str, object]] | None = None,
+        skipped_by_max_fallbacks: list[str] | None = None,
     ) -> None:
         review_payload: dict[str, object] = {
             "exit_class": exit_class,
@@ -352,6 +352,8 @@ class ReviewInfrastructureError(ProviderError):
         }
         if excluded is not None:
             review_payload["excluded"] = excluded
+        if skipped_by_max_fallbacks:
+            review_payload["skipped_by_max_fallbacks"] = skipped_by_max_fallbacks
         self.error_response = {
             "error": (
                 "review_no_viable_provider"
@@ -908,22 +910,44 @@ def _estimate_review_input_tokens(
     base: str | None,
     commit: str | None,
     uncommitted: bool,
+    title: str | None = None,
     cwd: str | None,
 ) -> int:
     estimated = _estimate_text_tokens(task)
     if not (base or commit or uncommitted):
         return estimated
     try:
-        patch_context = build_review_patch_context(
+        review_prompt = build_review_task_prompt(
+            task,
             base=base,
             commit=commit,
             uncommitted=uncommitted,
+            title=title,
             cwd=cwd,
+            include_patch=True,
         )
     except ReviewContextError as e:
         click.echo(f"[conductor] could not estimate review patch size: {e}", err=True)
         return estimated
-    return estimated + _estimate_text_tokens(patch_context)
+    return _estimate_text_tokens(review_prompt)
+
+
+def _review_input_context_warning(
+    *,
+    estimated_input_tokens: int,
+    base: str | None,
+    commit: str | None,
+    uncommitted: bool,
+) -> str | None:
+    if base or commit or uncommitted:
+        return None
+    return (
+        "[conductor] token estimate is prompt-only "
+        f"({estimated_input_tokens:,} input tokens from the brief). "
+        "No explicit review target was provided; native review providers may "
+        "load repository or diff context outside this estimate. Pass --base, "
+        "--commit, or --uncommitted for a review-target estimate."
+    )
 
 
 def _semantic_tool_context_warning(
@@ -1361,6 +1385,19 @@ def _format_review_status_summary(statuses: list[ReviewProviderStatus]) -> str:
     return "; ".join(
         f"{status.provider}: {status.status} - {status.detail}"
         for status in statuses
+    )
+
+
+def _format_max_fallbacks_skipped(
+    skipped: list[str],
+    *,
+    max_fallbacks: int,
+) -> str:
+    if not skipped:
+        return ""
+    return (
+        f"Skipped by --max-fallbacks={max_fallbacks}: "
+        f"{', '.join(skipped)}."
     )
 
 
@@ -2713,7 +2750,11 @@ def _invoke_review_with_fallback(
     statuses: list[ReviewProviderStatus] = []
     attempts: list[ReviewProviderAttempt] = []
     quarantined_contract_errors: list[ReviewOutputContractError] = []
-    candidates = list(decision.ranked[:max_fallbacks])
+    ranked_candidates = list(decision.ranked)
+    candidates = ranked_candidates[:max_fallbacks]
+    skipped_by_max_fallbacks = [
+        candidate.name for candidate in ranked_candidates[max_fallbacks:]
+    ]
 
     for idx, candidate in enumerate(candidates):
         provider = get_provider(candidate.name)
@@ -2955,6 +2996,11 @@ def _invoke_review_with_fallback(
             if quarantined_contract_errors
             else ""
         )
+        skipped_note = _format_max_fallbacks_skipped(
+            skipped_by_max_fallbacks,
+            max_fallbacks=max_fallbacks,
+        )
+        skipped_sentence = f" {skipped_note}" if skipped_note else ""
         direct_work = (
             "Conductor did not complete a review; continue the coding/review "
             "task directly in the driving agent, and do not treat this "
@@ -2974,12 +3020,14 @@ def _invoke_review_with_fallback(
                 f"review infrastructure failed before any provider returned a "
                 f"valid verdict; no review findings were emitted. Tried providers: "
                 f"{trail}. Provider status: {status_summary}. "
-                f"Last error: {last_detail}.{quarantine} Next step: {direct_work}. "
+                f"Last error: {last_detail}.{quarantine}{skipped_sentence} "
+                f"Next step: {direct_work}. "
                 f"Operator follow-up: {operator_hint}."
             ),
             exit_class=_review_exit_class_for_failure(failure_code),
             failure_code=failure_code,
             attempts=failure_payloads,
+            skipped_by_max_fallbacks=skipped_by_max_fallbacks,
         ) from last_exc
     raise last_exc
 
@@ -4822,8 +4870,17 @@ def ask(
             base=base,
             commit=commit,
             uncommitted=uncommitted,
+            title=title,
             cwd=cwd,
         )
+        review_estimate_warning = _review_input_context_warning(
+            estimated_input_tokens=review_estimated_input_tokens,
+            base=base,
+            commit=commit,
+            uncommitted=uncommitted,
+        )
+        if review_estimate_warning and not (silent_route or as_json):
+            click.echo(review_estimate_warning, err=True)
         try:
             decision, review_reasons, plan = _build_review_route_decision(
                 effort=effort_value,
@@ -5772,8 +5829,17 @@ def review(
         base=base,
         commit=commit,
         uncommitted=uncommitted,
+        title=title,
         cwd=cwd,
     )
+    review_estimate_warning = _review_input_context_warning(
+        estimated_input_tokens=estimated_input_tokens,
+        base=base,
+        commit=commit,
+        uncommitted=uncommitted,
+    )
+    if review_estimate_warning and not (silent_route or as_json):
+        click.echo(review_estimate_warning, err=True)
     dispatch_started_at = time.monotonic()
     max_fallbacks = _validate_max_fallbacks(max_fallbacks)
     prefer_value = _validate_prefer(prefer) if prefer is not None else None

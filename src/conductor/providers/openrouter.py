@@ -1104,40 +1104,58 @@ def _execution_status(
 def _execution_failure_message(status: dict[str, object]) -> str | None:
     state = status.get("state")
     if state == "iteration-cap":
-        cap = status.get("iteration_cap")
-        raw_missing = status.get("missing_deliverables")
-        missing_items = raw_missing if isinstance(raw_missing, list) else []
-        missing = [
-            MissingDeliverable(
-                kind=str(item.get("kind") or ""),
-                message=str(item.get("message") or ""),
-            )
-            for item in missing_items
-            if isinstance(item, dict)
-        ]
-        raw_cap_diagnostics = status.get("cap_diagnostics")
-        cap_diagnostics = (
-            cast("dict[str, object]", raw_cap_diagnostics)
-            if isinstance(raw_cap_diagnostics, dict)
-            else None
-        )
-        return format_missing_deliverables_cap_message(
-            int(cap) if isinstance(cap, int) else 0,
-            missing,
-            cap_diagnostics,
-        )
+        return _cap_failure_message(status)
     if state == "tool-call-leak":
-        return (
+        return _with_cap_failure_detail(
+            status,
             "tool-call leak rejected generated file content before any "
-            "edit/write succeeded"
+            "edit/write succeeded",
         )
     if state == "validation-failed":
-        return "validation command failed after edits"
+        return _with_cap_failure_detail(status, "validation command failed after edits")
     if state == "tool-error":
-        return "tool schema/execution errors occurred before any edit/write succeeded"
+        return _with_cap_failure_detail(
+            status,
+            "tool schema/execution errors occurred before any edit/write succeeded",
+        )
     if state == "no-op":
-        return "repo-changing code task produced no net workspace changes"
+        return _with_cap_failure_detail(
+            status,
+            "repo-changing code task produced no net workspace changes",
+        )
     return None
+
+
+def _with_cap_failure_detail(status: dict[str, object], message: str) -> str:
+    if status.get("hit_iteration_cap") is not True:
+        return message
+    cap_message = _cap_failure_message(status)
+    return f"{message}\n{cap_message}" if cap_message else message
+
+
+def _cap_failure_message(status: dict[str, object]) -> str:
+    cap = status.get("iteration_cap")
+    raw_missing = status.get("missing_deliverables")
+    missing_items = raw_missing if isinstance(raw_missing, list) else []
+    missing = [
+        MissingDeliverable(
+            kind=str(item.get("kind") or ""),
+            message=str(item.get("message") or ""),
+        )
+        for item in missing_items
+        if isinstance(item, dict)
+    ]
+    raw_cap_diagnostics = status.get("cap_diagnostics")
+    cap_diagnostics = (
+        cast("dict[str, object]", raw_cap_diagnostics)
+        if isinstance(raw_cap_diagnostics, dict)
+        else None
+    )
+    return format_missing_deliverables_cap_message(
+        int(cap) if isinstance(cap, int) else 0,
+        missing,
+        cap_diagnostics,
+    )
 
 
 def _is_tool_call_leak_error(error: str) -> bool:

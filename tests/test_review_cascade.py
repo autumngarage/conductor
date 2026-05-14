@@ -621,7 +621,59 @@ def test_review_max_fallbacks_caps_total_attempts(mocker) -> None:
     assert result.exit_code == 1
     assert not openrouter_call.called
     assert "codex (stall), claude (stall)" in result.stderr
-    assert "openrouter" not in result.stderr
+    assert "Skipped by --max-fallbacks=2: openrouter." in result.stderr
+
+
+def test_review_exhaustion_reports_providers_skipped_by_max_fallbacks(
+    mocker,
+) -> None:
+    from conductor.providers.interface import ProviderStalledError
+
+    mocker.patch.object(
+        ClaudeProvider,
+        "review",
+        side_effect=ProviderStalledError("claude review stalled"),
+    )
+    mocker.patch.object(
+        CodexProvider,
+        "review",
+        side_effect=ProviderStalledError("codex review stalled"),
+    )
+    mocker.patch.object(
+        GeminiProvider,
+        "review",
+        side_effect=ProviderStalledError("gemini review stalled"),
+    )
+    openrouter_call = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response("openrouter"),
+    )
+
+    with pytest.raises(cli.ReviewInfrastructureError) as exc_info:
+        cli._invoke_review_with_fallback(
+            _decision("claude", "codex", "gemini", "openrouter"),
+            task="Review this merge using the project reviewer guide.",
+            effort="high",
+            cwd=None,
+            timeout_sec=300,
+            max_stall_sec=75,
+            base=None,
+            commit=None,
+            uncommitted=False,
+            title=None,
+            silent=True,
+            max_fallbacks=3,
+            fallback_deadline_monotonic=cli._review_gate_deadline(300),
+        )
+
+    assert not openrouter_call.called
+    message = str(exc_info.value)
+    assert "claude (stall), codex (stall), gemini (stall)" in message
+    assert "Skipped by --max-fallbacks=3: openrouter." in message
+    assert "deadline exhausted before trying openrouter" not in message
+    payload = exc_info.value.error_response
+    assert payload["review"]["skipped_by_max_fallbacks"] == ["openrouter"]
 
 
 def test_review_exhausted_error_includes_tried_provider_trail(mocker) -> None:

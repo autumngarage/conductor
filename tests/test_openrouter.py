@@ -1575,8 +1575,11 @@ def test_exec_classifies_repeated_tool_call_leak(configured, tmp_path):
     assert status["successful_write_tools"] == 0
     assert len(status["tool_errors"]) == 3
     assert len(requests) == 3
-    assert "tool-call leak rejected" in str(exc.value)
-    assert "Reached --max-iterations cap" not in str(exc.value)
+    message = str(exc.value)
+    assert "tool-call leak rejected" in message
+    assert "Reached --max-iterations cap (2)" in message
+    assert "Tool usage: Edit=3" in message
+    assert "git state at cap-fire: commits-on-branch=0" in message
     assert (tmp_path / "README.md").read_text(encoding="utf-8") == "base\n"
 
 
@@ -1690,6 +1693,7 @@ def test_exec_iteration_cap_reports_no_changes_and_cap_diagnostics(
     assert status["cap_diagnostics"]["git_state"]["modified_files"] == 0
     assert status["cap_diagnostics"]["git_state"]["untracked_files"] == 0
     assert "Tool usage: Read=1" in str(exc.value)
+    assert "git state at cap-fire:" in str(exc.value)
     assert "Agent made no changes" in str(exc.value)
     assert "diff did not add to tests/" not in str(exc.value)
 
@@ -1747,6 +1751,8 @@ def test_exec_iteration_cap_does_not_require_tests_for_read_only_recommendations
     assert status["missing_deliverables"] == []
     assert "diff did not add to tests/" not in result.text
     assert "Reached --max-iterations cap (1)" in result.text
+    assert "Tool usage: Read=1" in result.text
+    assert "git state at cap-fire:" in result.text
     assert "Detected unfinished items" not in result.text
 
 
