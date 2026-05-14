@@ -383,34 +383,68 @@ preflight_hash_file_list() {
 }
 
 preflight_worktree_hash() {
-  {
-    git status --porcelain
+  local repo_root="$1"
+
+  (
+    cd "$repo_root" || exit 1
+    git status --porcelain --untracked-files=all
     printf '\n-- worktree diff --\n'
     git diff --binary
     printf '\n-- index diff --\n'
     git diff --cached --binary
-  } 2>/dev/null | preflight_hash_stream
+    printf '\n-- untracked files --\n'
+    while IFS= read -r -d '' rel; do
+      printf 'path\t%s\n' "$rel"
+      if [ -f "$rel" ]; then
+        printf 'sha256\t%s\n' "$(preflight_hash_file "$rel")"
+      else
+        printf 'sha256\tmissing\n'
+      fi
+    done < <(git ls-files --others --exclude-standard -z)
+  ) 2>/dev/null | preflight_hash_stream
 }
 
 preflight_changed_paths_hash() {
-  local base_ref="$1"
+  local repo_root="$1"
+  local base_ref="$2"
 
-  git diff --name-only "$base_ref"...HEAD 2>/dev/null \
+  (cd "$repo_root" && git diff --name-only "$base_ref"...HEAD) 2>/dev/null \
     | sort -u \
     | preflight_hash_stream
 }
 
+preflight_tool_fingerprint() {
+  local tool path version_hash
+
+  for tool in shellcheck shfmt markdownlint-cli2 markdownlint actionlint; do
+    path="$(command -v "$tool" 2>/dev/null || true)"
+    if [ -n "$path" ]; then
+      version_hash="$({ "$tool" --version 2>&1 || true; } | preflight_hash_stream)"
+      printf '%s\t%s\t%s\n' "$tool" "$path" "$version_hash"
+    else
+      printf '%s\tmissing\tmissing\n' "$tool"
+    fi
+  done | preflight_hash_stream
+}
+
+preflight_env_fingerprint() {
+  {
+    printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_SCRIPT=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_SCRIPT:-}"
+    printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_COMMAND=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_COMMAND:-}"
+  } | preflight_hash_stream
+}
+
 preflight_cache_inputs() {
   local base_ref="$1"
-  local event_mode="$2"
   local repo_root head_sha base_sha merge_base changed_paths_hash
-  local checker_hash config_hash worktree_hash
+  local checker_hash config_hash worktree_hash tool_hash env_hash
 
   repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-  head_sha="$(git rev-parse HEAD 2>/dev/null)" || return 1
-  base_sha="$(git rev-parse --verify "$base_ref^{commit}" 2>/dev/null)" || return 1
-  merge_base="$(git merge-base "$base_ref" "$head_sha" 2>/dev/null)" || return 1
-  changed_paths_hash="$(preflight_changed_paths_hash "$base_ref")" || return 1
+  repo_root="$(cd "$repo_root" && pwd)" || return 1
+  head_sha="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null)" || return 1
+  base_sha="$(git -C "$repo_root" rev-parse --verify "$base_ref^{commit}" 2>/dev/null)" || return 1
+  merge_base="$(git -C "$repo_root" merge-base "$base_ref" "$head_sha" 2>/dev/null)" || return 1
+  changed_paths_hash="$(preflight_changed_paths_hash "$repo_root" "$base_ref")" || return 1
   checker_hash="$(preflight_hash_file_list \
     "lib/preflight.sh" "$PREFLIGHT_SCRIPT" \
     "lib/preflight-scope.sh" "$(dirname "$PREFLIGHT_SCRIPT")/preflight-scope.sh" \
@@ -422,12 +456,13 @@ preflight_cache_inputs() {
     ".touchstone-version" \
     ".pre-commit-config.yaml" \
     ".markdownlint.json")"
-  worktree_hash="$(preflight_worktree_hash)" || return 1
+  worktree_hash="$(preflight_worktree_hash "$repo_root")" || return 1
+  tool_hash="$(preflight_tool_fingerprint)"
+  env_hash="$(preflight_env_fingerprint)"
 
-  printf 'version=1\n'
+  printf 'version=2\n'
   printf 'repo_root=%s\n' "$repo_root"
   printf 'scope=diff\n'
-  printf 'event_mode=%s\n' "$event_mode"
   printf 'base_ref=%s\n' "$base_ref"
   printf 'base_sha=%s\n' "$base_sha"
   printf 'head_sha=%s\n' "$head_sha"
@@ -436,11 +471,12 @@ preflight_cache_inputs() {
   printf 'checker_hash=%s\n' "$checker_hash"
   printf 'config_hash=%s\n' "$config_hash"
   printf 'worktree_hash=%s\n' "$worktree_hash"
+  printf 'tool_hash=%s\n' "$tool_hash"
+  printf 'env_hash=%s\n' "$env_hash"
 }
 
 preflight_cache_prepare() {
   local base_ref="$1"
-  local event_mode="$2"
   local cache_dir
 
   PREFLIGHT_CACHE_KEY=""
@@ -451,7 +487,7 @@ preflight_cache_prepare() {
     return 1
   fi
 
-  PREFLIGHT_CACHE_INPUTS="$(preflight_cache_inputs "$base_ref" "$event_mode")" || return 1
+  PREFLIGHT_CACHE_INPUTS="$(preflight_cache_inputs "$base_ref")" || return 1
   PREFLIGHT_CACHE_KEY="$(printf '%s\n' "$PREFLIGHT_CACHE_INPUTS" | preflight_hash_stream)"
   cache_dir="$(git rev-parse --git-path touchstone/preflight-clean 2>/dev/null)" || return 1
   PREFLIGHT_CACHE_FILE="$cache_dir/$PREFLIGHT_CACHE_KEY.clean"
