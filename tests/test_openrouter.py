@@ -1726,25 +1726,28 @@ def test_exec_iteration_cap_does_not_require_tests_for_read_only_recommendations
         router.post("/chat/completions").mock(
             return_value=httpx.Response(200, json=response)
         )
-        with pytest.raises(ProviderExecutionError) as exc:
-            OpenRouterProvider().exec(
-                (
-                    "Read-only investigation. Do not edit files.\n\n"
-                    "Expected output:\n- Root cause\n"
-                    "- Regression tests to add/update"
-                ),
-                model="openai/gpt-5.5",
-                tools=frozenset({"Read"}),
-                task_tags=("code", "tool-use"),
-                sandbox="read-only",
-                cwd=str(tmp_path),
-                max_iterations=1,
-            )
+        result = OpenRouterProvider().exec(
+            (
+                "Read-only investigation. Do not edit files.\n\n"
+                "Expected output:\n- Root cause\n"
+                "- Regression tests to add/update"
+            ),
+            model="openai/gpt-5.5",
+            tools=frozenset({"Read"}),
+            task_tags=("code", "tool-use"),
+            sandbox="read-only",
+            cwd=str(tmp_path),
+            max_iterations=1,
+        )
 
-    status = exc.value.status
-    assert status["state"] == "iteration-cap"
+    status = result.usage["execution_status"]
+    assert status["state"] == "completed"
+    assert status["read_only_text_task"] is True
+    assert status["hit_iteration_cap"] is True
     assert status["missing_deliverables"] == []
-    assert "diff did not add to tests/" not in str(exc.value)
+    assert "diff did not add to tests/" not in result.text
+    assert "Reached --max-iterations cap (1)" in result.text
+    assert "Detected unfinished items" not in result.text
 
 
 def test_exec_allow_completion_stretch_runs_one_extra_turn(configured, tmp_path):

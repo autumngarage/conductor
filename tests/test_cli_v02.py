@@ -679,6 +679,49 @@ def test_ask_code_high_read_only_brief_restricts_exec_tools(mocker):
     assert "read-only brief detected; restricting exec tools to Read,Grep,Glob" in result.stderr
 
 
+def test_ask_code_high_read_only_fallback_stays_read_only(mocker):
+    from conductor.providers.interface import ProviderStalledError
+
+    _stub_all_configured(mocker, {"codex", "openrouter"})
+    codex_exec = mocker.patch.object(
+        CodexProvider,
+        "exec",
+        side_effect=ProviderStalledError("codex CLI stalled after 150s"),
+    )
+    openrouter_exec = mocker.patch.object(
+        OpenRouterProvider,
+        "exec",
+        return_value=_fake_response("openrouter", "openrouter/auto"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "code",
+            "--effort",
+            "high",
+            "--allow-short-brief",
+            "--brief",
+            (
+                "Read-only advisory task. Do not modify files. "
+                "Inspect the repo and recommend the schema/stage approach."
+            ),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert codex_exec.called
+    assert openrouter_exec.called
+    assert openrouter_exec.call_args.kwargs["tools"] == frozenset(
+        {"Read", "Grep", "Glob"}
+    )
+    assert openrouter_exec.call_args.kwargs["sandbox"] == "read-only"
+    assert openrouter_exec.call_args.kwargs["models"] == OPENROUTER_CODING_HIGH
+    assert "read-only brief detected; restricting exec tools to Read,Grep,Glob" in result.stderr
+
+
 def test_ask_code_high_falls_back_immediately_to_openrouter_on_quota(mocker):
     from conductor.providers.interface import ProviderHTTPError
 
