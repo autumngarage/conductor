@@ -584,11 +584,12 @@ class CodexProvider:
         args.append("-")
 
         # `codex review` is not a streaming interface: it commonly writes no
-        # stdout until the final review text. Applying max_stall_sec here turns
-        # normal long reviews into false stalls. The streaming `codex exec`
-        # path still enforces the no-output watchdog.
-        _ = max_stall_sec
+        # stdout until the final review text. Treat max_stall_sec as the
+        # attempt cap rather than a live no-output watchdog so review-gate
+        # fallback budgets still bound non-streaming Codex attempts.
         timeout = self._timeout_sec if timeout_sec is None else timeout_sec
+        if max_stall_sec is not None:
+            timeout = min(timeout, max_stall_sec)
         start = time.monotonic()
 
         def run_review_once(prompt: str) -> subprocess.CompletedProcess[str]:

@@ -1736,7 +1736,7 @@ def test_codex_review_accepts_sentinel_with_footer(mocker):
     )
 
 
-def test_codex_review_uses_wall_clock_timeout_not_stall_watchdog(mocker):
+def test_codex_review_caps_non_streaming_timeout_to_stall_budget(mocker):
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
     captured_timeout: float | None = None
 
@@ -1749,7 +1749,7 @@ def test_codex_review_uses_wall_clock_timeout_not_stall_watchdog(mocker):
 
     response = CodexProvider().review("Review this.", timeout_sec=60, max_stall_sec=0.05)
 
-    assert captured_timeout == 60
+    assert captured_timeout == 0.05
     assert response.text == "CODEX_REVIEW_CLEAN"
 
 
