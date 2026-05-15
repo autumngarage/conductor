@@ -65,6 +65,10 @@ _NETWORK_SIGNALS = (
     "getaddrinfo failed",
 )
 
+_TOOL_EXECUTION_FAILURE_SIGNALS = (
+    "error executing tool",
+)
+
 _UPSTREAM_DOWN_SIGNALS = (
     "service unavailable",
     "bad gateway",
@@ -170,6 +174,14 @@ def detect_retriable_provider_failure(
     if any(sig in lowered for sig in _NETWORK_SIGNALS):
         return ProviderFailureSignal(
             category="network",
+            status_code=_first_status(status_codes),
+            source=source,
+            detail=_compact_detail(raw),
+        )
+
+    if any(sig in lowered for sig in _TOOL_EXECUTION_FAILURE_SIGNALS):
+        return ProviderFailureSignal(
+            category="provider-error",
             status_code=_first_status(status_codes),
             source=source,
             detail=_compact_detail(raw),

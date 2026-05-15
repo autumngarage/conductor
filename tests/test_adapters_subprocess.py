@@ -3379,6 +3379,45 @@ def test_gemini_exec_surfaces_auth_prompt_and_records_notice(mocker, capsys):
     assert "https://accounts.google.com/o/oauth2/auth" in err
 
 
+def test_gemini_exec_fails_fast_on_tool_execution_error_stderr(mocker, tmp_path):
+    mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
+    fake = _FakePopen(
+        stdout_schedule=[],
+        stderr_schedule=[
+            (
+                0,
+                "YOLO mode is enabled. Error executing tool replace: Error: Failed...\n",
+            )
+        ],
+        hang_after_stdout=True,
+    )
+    mocker.patch(
+        "conductor.providers.gemini.subprocess.Popen",
+        side_effect=lambda args, **kwargs: fake,
+    )
+    session_log = SessionLog(path=tmp_path / "gemini-tool-error.ndjson")
+
+    with pytest.raises(ProviderHTTPError) as exc:
+        GeminiProvider().exec(
+            "hi",
+            max_stall_sec=0.5,
+            session_log=session_log,
+        )
+
+    assert fake.terminated is True
+    error_text = str(exc.value)
+    assert "gemini reported provider error on stderr" in error_text
+    assert "Error executing tool replace" in error_text
+    assert "rate limit" not in error_text.lower()
+    events = [
+        json.loads(line)
+        for line in session_log.log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    error_event = next(event for event in events if event["event"] == "error")
+    assert error_event["data"]["reason"] == "provider_terminal_failure"
+    assert error_event["data"]["category"] == "provider-error"
+
+
 def test_gemini_exec_stall_watchdog_kills_silent_provider(mocker):
     mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
     fake = _FakePopen(stdout_schedule=[], hang_after_stdout=True)
