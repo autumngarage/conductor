@@ -1929,9 +1929,18 @@ conductor_route_preflight_for_phase() {
   local phase="$1"
   local subcommand="$2"
   local tools="$3"
-  local route_tags route_exclude route_stderr route_json route_rc provider error
+  local route_kind route_tags route_exclude route_stderr route_json route_rc provider error
   local estimated_input_tokens
   local -a args
+
+  route_kind="exec"
+  if [ "$phase" = "review" ]; then
+    case "$subcommand" in
+      review) route_kind="review" ;;
+      call) route_kind="call" ;;
+      *) route_kind="exec" ;;
+    esac
+  fi
 
   route_tags="$(normalize_conductor_review_tags "${CONDUCTOR_TAGS:-}")"
   route_exclude="${CONDUCTOR_EXCLUDE:-}"
@@ -1961,7 +1970,7 @@ conductor_route_preflight_for_phase() {
   fi
 
   estimated_input_tokens=$((ROUTING_DIFF_LINE_COUNT * 20 + 1000))
-  args=(route --json --prefer "${CONDUCTOR_PREFER:-best}" --effort "${CONDUCTOR_EFFORT:-high}"
+  args=(route --kind "$route_kind" --json --prefer "${CONDUCTOR_PREFER:-best}" --effort "${CONDUCTOR_EFFORT:-high}"
     --estimated-input-tokens "$estimated_input_tokens" --estimated-output-tokens 500)
   [ -n "$route_tags" ] && args+=(--tags "$route_tags")
   [ -n "$tools" ] && args+=(--tools "$tools")

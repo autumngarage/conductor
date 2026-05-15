@@ -399,3 +399,74 @@ def test_codex_review_wrapper_requires_conductor_review_command(
     assert any(line.startswith("review ") for line in conductor_invocations)
     assert not any(line.startswith("exec ") for line in conductor_invocations)
     assert "reviewer exit 2" in result.stdout
+
+
+def test_codex_review_route_preflight_uses_review_kind(tmp_path: Path) -> None:
+    repo, env = _make_review_repo(tmp_path)
+    fakes = tmp_path / "fakes"
+    fakes.mkdir()
+    conductor_args = tmp_path / "conductor-args.txt"
+    conductor = fakes / "conductor"
+    conductor.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            printf '%s\\n' "$*" >> "${FAKE_CONDUCTOR_ARGS:?}"
+            case "$1" in
+              route)
+                if [ "$2" = "--help" ]; then
+                  exit 0
+                fi
+                if [[ " $* " != *" --kind review "* ]]; then
+                  printf '{"error":"expected --kind review"}\\n'
+                  exit 2
+                fi
+                printf '{"provider":"openrouter"}\\n'
+                ;;
+              doctor)
+                printf '{"configured": true}\\n'
+                ;;
+              review)
+                cat >/dev/null
+                printf 'LGTM\\nCODEX_REVIEW_CLEAN\\n'
+                ;;
+              *)
+                exit 1
+                ;;
+            esac
+            """
+        ),
+        encoding="utf-8",
+    )
+    conductor.chmod(0o755)
+
+    script = Path(__file__).resolve().parent.parent / "scripts" / "codex-review.sh"
+    result = subprocess.run(
+        ["bash", str(script)],
+        cwd=repo,
+        env={
+            **env,
+            "PATH": f"{fakes}:{os.environ.get('PATH', '')}",
+            "CODEX_REVIEW_BASE": "HEAD~1",
+            "CODEX_REVIEW_MODE": "review-only",
+            "TOUCHSTONE_REVIEW_ROUTE_PREFLIGHT": "1",
+            "CODEX_REVIEW_DISABLE_CACHE": "1",
+            "CODEX_REVIEW_TIMEOUT": "5",
+            "FAKE_CONDUCTOR_ARGS": str(conductor_args),
+            "NO_COLOR": "1",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    conductor_invocations = conductor_args.read_text(encoding="utf-8").splitlines()
+    route_invocations = [
+        line
+        for line in conductor_invocations
+        if line.startswith("route ") and "--help" not in line
+    ]
+    assert route_invocations, conductor_invocations
+    assert any("--kind review" in line for line in route_invocations), route_invocations
+    assert any(line.startswith("review ") for line in conductor_invocations)
