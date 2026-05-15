@@ -1613,11 +1613,21 @@ def test_codex_call_parses_ndjson_and_usage(mocker):
     assert response.session_id == "sess-codex-1"
 
 
-def test_codex_review_uses_native_review_command(mocker):
+def test_codex_review_uses_exec_with_output_schema(mocker):
+    """Codex review uses `codex exec --output-schema` so the sentinel is
+    enforced via JSON schema (#445), not requested via prompt and hoped for.
+    The synthesized response text preserves the legacy
+    `CODEX_REVIEW_<STATUS>` sentinel-line format for downstream consumers."""
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    mocker.patch(
+        "conductor.providers.codex.build_review_task_prompt",
+        return_value="REVIEW PROMPT BODY",
+    )
     captured = mocker.patch(
         "conductor.providers.codex.subprocess.run",
-        return_value=_fake_completed(stdout="LGTM\n"),
+        return_value=_fake_completed(
+            stdout='{"status":"CLEAN","findings":""}\n'
+        ),
     )
 
     response = CodexProvider().review(
@@ -1628,26 +1638,34 @@ def test_codex_review_uses_native_review_command(mocker):
     )
 
     args = captured.call_args.args[0]
-    assert args[0:2] == ["codex", "review"]
+    assert args[0:2] == ["codex", "exec"]
+    assert "--output-schema" in args
+    schema_path = args[args.index("--output-schema") + 1]
+    assert schema_path.endswith(".json")
+    assert "--sandbox" in args
+    assert args[args.index("--sandbox") + 1] == "read-only"
+    assert "--ephemeral" in args
     assert "-c" in args
     assert args[args.index("-c") + 1] == "model_reasoning_effort=medium"
-    assert "--base" not in args
-    assert "--title" not in args
     assert args[-1] == "-"
     prompt = captured.call_args.kwargs["input"]
-    assert "Review changes against base branch/ref: origin/main" in prompt
-    assert "Review title: PR review" in prompt
-    assert "Use AGENTS.md rubric." in prompt
+    assert prompt == "REVIEW PROMPT BODY"
     assert response.provider == "codex"
     assert response.model == "codex-review"
-    assert response.text == "LGTM"
+    assert response.text == "CODEX_REVIEW_CLEAN"
 
 
 def test_codex_review_encodes_commit_target_in_prompt(mocker):
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    prompt_builder = mocker.patch(
+        "conductor.providers.codex.build_review_task_prompt",
+        return_value="PROMPT WITH COMMIT TARGET",
+    )
     captured = mocker.patch(
         "conductor.providers.codex.subprocess.run",
-        return_value=_fake_completed(stdout="LGTM\n"),
+        return_value=_fake_completed(
+            stdout='{"status":"CLEAN","findings":""}\n'
+        ),
     )
 
     CodexProvider().review(
@@ -1656,20 +1674,28 @@ def test_codex_review_encodes_commit_target_in_prompt(mocker):
     )
 
     args = captured.call_args.args[0]
-    assert args[0:2] == ["codex", "review"]
+    assert args[0:2] == ["codex", "exec"]
     assert "--commit" not in args
     assert "--uncommitted" not in args
     assert args[-1] == "-"
-    prompt = captured.call_args.kwargs["input"]
-    assert "Review commit: abc123" in prompt
-    assert "Use AGENTS.md rubric." in prompt
+    # build_review_task_prompt is what encodes target metadata; assert it
+    # was invoked with the commit target so the codex prompt carries it.
+    prompt_builder.assert_called_once()
+    assert prompt_builder.call_args.kwargs["commit"] == "abc123"
+    assert prompt_builder.call_args.args[0] == "Use AGENTS.md rubric."
 
 
 def test_codex_review_encodes_uncommitted_target_in_prompt(mocker):
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    prompt_builder = mocker.patch(
+        "conductor.providers.codex.build_review_task_prompt",
+        return_value="PROMPT WITH UNCOMMITTED TARGET",
+    )
     captured = mocker.patch(
         "conductor.providers.codex.subprocess.run",
-        return_value=_fake_completed(stdout="LGTM\n"),
+        return_value=_fake_completed(
+            stdout='{"status":"CLEAN","findings":""}\n'
+        ),
     )
 
     CodexProvider().review(
@@ -1678,57 +1704,79 @@ def test_codex_review_encodes_uncommitted_target_in_prompt(mocker):
     )
 
     args = captured.call_args.args[0]
-    assert args[0:2] == ["codex", "review"]
+    assert args[0:2] == ["codex", "exec"]
     assert "--uncommitted" not in args
     assert "--commit" not in args
     assert args[-1] == "-"
-    prompt = captured.call_args.kwargs["input"]
-    assert "Include staged, unstaged, and untracked changes." in prompt
-    assert "Use AGENTS.md rubric." in prompt
+    prompt_builder.assert_called_once()
+    assert prompt_builder.call_args.kwargs["uncommitted"] is True
 
 
-def test_codex_review_fails_fast_on_missing_requested_sentinel(mocker, capsys):
+def test_codex_review_rejects_malformed_json_stdout(mocker, capsys):
+    """Under the structured-output design (#445), --output-schema enforces a
+    JSON shape on codex stdout. Free-form prose without valid JSON is a
+    contract failure surfaced to the review cascade."""
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    mocker.patch(
+        "conductor.providers.codex.build_review_task_prompt",
+        return_value="PROMPT",
+    )
     captured = mocker.patch(
         "conductor.providers.codex.subprocess.run",
         return_value=_fake_completed(stdout="No blocking issues were found.\n"),
     )
 
-    with pytest.raises(ReviewOutputContractError, match="missing"):
+    with pytest.raises(ReviewOutputContractError, match="malformed-json"):
         CodexProvider().review(
             "Return a final standalone CODEX_REVIEW_CLEAN or CODEX_REVIEW_BLOCKED line.",
             base="origin/main",
         )
 
     assert captured.call_count == 1
-    prompt = captured.call_args.kwargs["input"]
-    assert "Review changes against base branch/ref: origin/main" in prompt
     assert (
         "failing this attempt so review fallback can try the next provider"
         in capsys.readouterr().err
     )
 
 
-def test_codex_review_rejects_missing_requested_sentinel_without_retry(mocker):
+def test_codex_review_rejects_invalid_status_enum(mocker):
+    """Schema enforcement should prevent this in practice, but defensive
+    validation catches it if codex's --output-schema misbehaves."""
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    mocker.patch(
+        "conductor.providers.codex.build_review_task_prompt",
+        return_value="PROMPT",
+    )
     captured = mocker.patch(
         "conductor.providers.codex.subprocess.run",
-        return_value=_fake_completed(stdout="The changes need operator review.\n"),
+        return_value=_fake_completed(
+            stdout='{"status":"MAYBE","findings":"unclear"}\n'
+        ),
     )
 
-    with pytest.raises(ReviewOutputContractError, match="codex review output"):
+    with pytest.raises(ReviewOutputContractError, match="invalid-status"):
         CodexProvider().review(
             "Return a final standalone CODEX_REVIEW_CLEAN or CODEX_REVIEW_BLOCKED line.",
         )
     assert captured.call_count == 1
 
 
-def test_codex_review_accepts_sentinel_with_footer(mocker):
+def test_codex_review_synthesizes_findings_with_blocked_sentinel(mocker):
+    """The findings body + sentinel are joined so the final standalone line
+    is the sentinel — matching the legacy text contract that
+    Touchstone's merge-pr.sh parses."""
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    mocker.patch(
+        "conductor.providers.codex.build_review_task_prompt",
+        return_value="PROMPT",
+    )
     mocker.patch(
         "conductor.providers.codex.subprocess.run",
         return_value=_fake_completed(
-            stdout="No blocking issues found.\nCODEX_REVIEW_CLEAN\n---\nreview complete\n"
+            stdout=(
+                '{"status":"BLOCKED",'
+                '"findings":"Missing null check on line 42 will crash."}\n'
+            )
         ),
     )
 
@@ -1737,18 +1785,22 @@ def test_codex_review_accepts_sentinel_with_footer(mocker):
     )
 
     assert response.text == (
-        "No blocking issues found.\n---\nreview complete\nCODEX_REVIEW_CLEAN"
+        "Missing null check on line 42 will crash.\n\nCODEX_REVIEW_BLOCKED"
     )
 
 
 def test_codex_review_caps_non_streaming_timeout_to_stall_budget(mocker):
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    mocker.patch(
+        "conductor.providers.codex.build_review_task_prompt",
+        return_value="PROMPT",
+    )
     captured_timeout: float | None = None
 
     def fake_run(args, **kwargs):
         nonlocal captured_timeout
         captured_timeout = kwargs["timeout"]
-        return _fake_completed(stdout="CODEX_REVIEW_CLEAN\n")
+        return _fake_completed(stdout='{"status":"CLEAN","findings":""}\n')
 
     mocker.patch("conductor.providers.codex.subprocess.run", side_effect=fake_run)
 

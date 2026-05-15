@@ -45,6 +45,7 @@ from conductor.providers.interface import (
 )
 from conductor.providers.review_contract import (
     ReviewOutputContractError,
+    build_review_task_prompt,
     validate_requested_review_sentinel,
 )
 from conductor.providers.terminal_signals import (
@@ -68,6 +69,39 @@ _LOG = logging.getLogger(__name__)
 CODEX_DEFAULT_MODEL = "gpt-5.4"
 CODEX_REVIEW_MODEL = "codex-review"
 CODEX_REQUEST_TIMEOUT_SEC = 180.0
+
+# Codex CLI's `codex exec --output-schema <file>` enforces a JSON-schema
+# shape on the model's final response. Using it for reviews eliminates the
+# sentinel-contract failures that prompted #445 — the model literally
+# cannot return free-form prose without a valid status enum value.
+#
+# We synthesize the legacy `CODEX_REVIEW_<STATUS>` final-line sentinel
+# from this schema's status field so the merge-gate consumer
+# (Touchstone's merge-pr.sh and conductor's own `validate_requested_review_sentinel`)
+# sees the same output contract as before. JSON enforcement lives at the
+# provider boundary; the boundary contract with consumers is unchanged.
+_CODEX_REVIEW_OUTPUT_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["CLEAN", "FIXED", "BLOCKED"],
+            "description": (
+                "CLEAN = no findings to report. "
+                "FIXED = findings exist but were already addressed in the diff. "
+                "BLOCKED = findings exist that the author must address before merging."
+            ),
+        },
+        "findings": {
+            "type": "string",
+            "description": (
+                "Detailed review findings in prose. Empty string when status is CLEAN."
+            ),
+        },
+    },
+    "required": ["status", "findings"],
+    "additionalProperties": False,
+}
 CODEX_STARTUP_PROBE_TIMEOUT_SEC = 8.0
 CODEX_STARTUP_PROBE_CONFIG = (
     "model_reasoning_effort=low",
@@ -151,6 +185,50 @@ def _extract_review_stdout(result: subprocess.CompletedProcess[str]) -> str:
             f"codex review produced empty stdout: {result.stderr[:500]!r}"
         )
     return content
+
+
+def _synthesize_legacy_review_text(*, provider_name: str, raw_stdout: str) -> str:
+    """Convert codex's schema-enforced JSON review into the legacy sentinel text.
+
+    Codex CLI's --output-schema guarantees the final stdout is a JSON object
+    matching `_CODEX_REVIEW_OUTPUT_SCHEMA`. Merge-gate consumers (Touchstone's
+    merge-pr.sh, the openrouter-fallback path, and conductor's own
+    `validate_requested_review_sentinel`) expect text whose final standalone
+    line is one of `CODEX_REVIEW_CLEAN/FIXED/BLOCKED`. Synthesize that format
+    here so the boundary contract with consumers is unchanged.
+    """
+    try:
+        payload = json.loads(raw_stdout)
+    except json.JSONDecodeError as e:
+        raise ReviewOutputContractError(
+            provider_name=provider_name,
+            reason="malformed-json",
+            output_preview=raw_stdout[-200:],
+            possible_findings=False,
+        ) from e
+    if not isinstance(payload, dict):
+        raise ReviewOutputContractError(
+            provider_name=provider_name,
+            reason="not-object",
+            output_preview=raw_stdout[-200:],
+            possible_findings=False,
+        )
+    status = payload.get("status")
+    if status not in {"CLEAN", "FIXED", "BLOCKED"}:
+        raise ReviewOutputContractError(
+            provider_name=provider_name,
+            reason="invalid-status",
+            output_preview=raw_stdout[-200:],
+            possible_findings=False,
+        )
+    findings = payload.get("findings") or ""
+    if not isinstance(findings, str):
+        findings = str(findings)
+    sentinel = f"CODEX_REVIEW_{status}"
+    findings_body = findings.strip()
+    if findings_body:
+        return f"{findings_body}\n\n{sentinel}"
+    return sentinel
 
 
 def _codex_output_path(resume_session_id: str | None) -> Path:
@@ -571,32 +649,61 @@ class CodexProvider:
         codex_effort_flag = (
             _EFFORT_TO_CODEX_FLAG.get(effort) if isinstance(effort, str) else None
         )
-        review_prompt = self._build_review_prompt(
+        # Build the review prompt with diff target metadata AND the inline
+        # patch context — codex exec is generic; without the patch embedded
+        # the agent has no way to know what to review unless it shells out.
+        # `include_patch=True` matches the openrouter call() review path
+        # (cli.py:2792-2810), so both providers see the same review input.
+        review_prompt = build_review_task_prompt(
             task,
             base=base,
             commit=commit,
             uncommitted=uncommitted,
             title=title,
+            cwd=cwd,
+            include_patch=True,
         )
-        args = [self._cli, "review"]
-        if codex_effort_flag:
-            args.extend(["-c", f"model_reasoning_effort={codex_effort_flag}"])
-        args.append("-")
 
-        # `codex review` is not a streaming interface: it commonly writes no
-        # stdout until the final review text. Treat max_stall_sec as the
-        # attempt cap rather than a live no-output watchdog so review-gate
-        # fallback budgets still bound non-streaming Codex attempts.
-        timeout = self._timeout_sec if timeout_sec is None else timeout_sec
-        if max_stall_sec is not None:
-            timeout = min(timeout, max_stall_sec)
-        start = time.monotonic()
+        # Codex CLI's --output-schema enforces a JSON shape on the final
+        # response. The schema is in-memory; write to a tmpfile because
+        # codex CLI consumes it via filesystem path.
+        with tempfile.NamedTemporaryFile(
+            "w",
+            suffix=".json",
+            prefix="conductor-codex-review-schema-",
+            delete=False,
+        ) as schema_fh:
+            json.dump(_CODEX_REVIEW_OUTPUT_SCHEMA, schema_fh)
+            schema_path = schema_fh.name
 
-        def run_review_once(prompt: str) -> subprocess.CompletedProcess[str]:
+        try:
+            args = [
+                self._cli,
+                "exec",
+                "--output-schema",
+                schema_path,
+                "--ephemeral",
+                "--sandbox",
+                "read-only",
+                "--skip-git-repo-check",
+            ]
+            if codex_effort_flag:
+                args.extend(["-c", f"model_reasoning_effort={codex_effort_flag}"])
+            args.append("-")
+
+            # `codex exec` without --json streams the agent_message text and
+            # writes the final response to stdout. We capture it directly;
+            # the schema guarantees the stdout is valid JSON matching the
+            # review contract.
+            timeout = self._timeout_sec if timeout_sec is None else timeout_sec
+            if max_stall_sec is not None:
+                timeout = min(timeout, max_stall_sec)
+            start = time.monotonic()
+
             try:
-                return subprocess.run(
+                result = subprocess.run(
                     args,
-                    input=prompt,
+                    input=review_prompt,
                     capture_output=True,
                     text=True,
                     timeout=timeout,
@@ -607,10 +714,22 @@ class CodexProvider:
                 raise ProviderError(
                     f"codex review timed out after {elapsed:.0f}s"
                 ) from e
+        finally:
+            try:
+                os.unlink(schema_path)
+            except OSError:
+                _LOG.debug("failed to remove codex review schema tmpfile", exc_info=True)
 
-        result = run_review_once(review_prompt)
-        content = _extract_review_stdout(result)
+        raw_stdout = _extract_review_stdout(result)
+        # Parse the schema-enforced JSON response and synthesize the legacy
+        # `CODEX_REVIEW_<STATUS>` sentinel-line format that merge-gate
+        # consumers parse. JSON enforcement is the structural fix (#445);
+        # the synthesized output format keeps the boundary contract stable.
         try:
+            content = _synthesize_legacy_review_text(
+                provider_name=self.name,
+                raw_stdout=raw_stdout,
+            )
             content = validate_requested_review_sentinel(
                 provider_name=self.name,
                 prompt=review_prompt,
@@ -627,7 +746,7 @@ class CodexProvider:
         duration_ms = int((time.monotonic() - start) * 1000)
 
         raw: dict[str, object] = {
-            "command": "codex review",
+            "command": "codex exec --output-schema",
             "stderr": result.stderr,
             "target": {
                 "base": base,
@@ -652,28 +771,6 @@ class CodexProvider:
             },
             raw=raw,
         )
-
-    @staticmethod
-    def _build_review_prompt(
-        task: str,
-        *,
-        base: str | None,
-        commit: str | None,
-        uncommitted: bool,
-        title: str | None,
-    ) -> str:
-        target_lines: list[str] = []
-        if base:
-            target_lines.append(f"- Review changes against base branch/ref: {base}")
-        if commit:
-            target_lines.append(f"- Review commit: {commit}")
-        if uncommitted:
-            target_lines.append("- Include staged, unstaged, and untracked changes.")
-        if title:
-            target_lines.append(f"- Review title: {title}")
-        if not target_lines:
-            return task
-        return "Review target:\n" + "\n".join(target_lines) + "\n\n" + task
 
     def _parse_ndjson(
         self, stdout: str
