@@ -413,16 +413,36 @@ preflight_hash_file_list() {
   done | preflight_hash_stream
 }
 
+preflight_changed_paths() {
+  local repo_root="$1"
+  local base_ref="$2"
+
+  (cd "$repo_root" && git diff --name-only "$base_ref"...HEAD) 2>/dev/null | sort -u
+}
+
 preflight_worktree_hash() {
   local repo_root="$1"
+  local base_ref="$2"
+  local -a paths=()
+  local path
+
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    paths+=("$path")
+  done < <(preflight_changed_paths "$repo_root" "$base_ref")
+
+  if [ "${#paths[@]}" -eq 0 ]; then
+    printf 'no-changed-paths\n' | preflight_hash_stream
+    return
+  fi
 
   (
     cd "$repo_root" || exit 1
-    git status --porcelain --untracked-files=all
+    git status --porcelain --untracked-files=all -- "${paths[@]}"
     printf '\n-- worktree diff --\n'
-    git diff --binary
+    git diff --binary -- "${paths[@]}"
     printf '\n-- index diff --\n'
-    git diff --cached --binary
+    git diff --cached --binary -- "${paths[@]}"
     printf '\n-- untracked files --\n'
     while IFS= read -r -d '' rel; do
       printf 'path\t%s\n' "$rel"
@@ -431,7 +451,7 @@ preflight_worktree_hash() {
       else
         printf 'sha256\tmissing\n'
       fi
-    done < <(git ls-files --others --exclude-standard -z)
+    done < <(git ls-files --others --exclude-standard -z -- "${paths[@]}")
   ) 2>/dev/null | preflight_hash_stream
 }
 
@@ -444,7 +464,7 @@ preflight_changed_paths_hash() {
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     paths+=("$path")
-  done < <((cd "$repo_root" && git diff --name-only "$base_ref"...HEAD) 2>/dev/null | sort -u)
+  done < <(preflight_changed_paths "$repo_root" "$base_ref")
 
   preflight_hash_changed_paths "$repo_root" "${paths[@]}"
 }
@@ -496,11 +516,11 @@ preflight_cache_inputs() {
     ".touchstone-version" \
     ".pre-commit-config.yaml" \
     ".markdownlint.json")"
-  worktree_hash="$(preflight_worktree_hash "$repo_root")" || return 1
+  worktree_hash="$(preflight_worktree_hash "$repo_root" "$base_ref")" || return 1
   tool_hash="$(preflight_tool_fingerprint)"
   env_hash="$(preflight_env_fingerprint)"
 
-  printf 'version=3\n'
+  printf 'version=4\n'
   printf 'repo_root=%s\n' "$repo_root"
   printf 'scope=diff\n'
   printf 'base_ref=%s\n' "$base_ref"

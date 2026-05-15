@@ -134,16 +134,36 @@ touchstone_preflight_hash_file_list() {
   done | touchstone_preflight_hash_stream
 }
 
+touchstone_preflight_changed_paths() {
+  local repo_root="$1"
+  local base_ref="$2"
+
+  (cd "$repo_root" && git diff --name-only "$base_ref"...HEAD) 2>/dev/null | sort -u
+}
+
 touchstone_preflight_worktree_hash() {
   local repo_root="$1"
+  local base_ref="$2"
+  local -a paths=()
+  local path
+
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    paths+=("$path")
+  done < <(touchstone_preflight_changed_paths "$repo_root" "$base_ref")
+
+  if [ "${#paths[@]}" -eq 0 ]; then
+    printf 'no-changed-paths\n' | touchstone_preflight_hash_stream
+    return
+  fi
 
   (
     cd "$repo_root" || exit 1
-    git status --porcelain --untracked-files=all
+    git status --porcelain --untracked-files=all -- "${paths[@]}"
     printf '\n-- worktree diff --\n'
-    git diff --binary
+    git diff --binary -- "${paths[@]}"
     printf '\n-- index diff --\n'
-    git diff --cached --binary
+    git diff --cached --binary -- "${paths[@]}"
     printf '\n-- untracked files --\n'
     while IFS= read -r -d '' rel; do
       printf 'path\t%s\n' "$rel"
@@ -152,7 +172,7 @@ touchstone_preflight_worktree_hash() {
       else
         printf 'sha256\tmissing\n'
       fi
-    done < <(git ls-files --others --exclude-standard -z)
+    done < <(git ls-files --others --exclude-standard -z -- "${paths[@]}")
   ) 2>/dev/null | touchstone_preflight_hash_stream
 }
 
@@ -165,7 +185,7 @@ touchstone_preflight_changed_paths_hash() {
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     paths+=("$path")
-  done < <((cd "$repo_root" && git diff --name-only "$base_ref"...HEAD) 2>/dev/null | sort -u)
+  done < <(touchstone_preflight_changed_paths "$repo_root" "$base_ref")
 
   touchstone_preflight_hash_changed_paths "$repo_root" "${paths[@]}"
 }
@@ -217,11 +237,11 @@ touchstone_preflight_cache_inputs() {
     ".touchstone-version" \
     ".pre-commit-config.yaml" \
     ".markdownlint.json")"
-  worktree_hash="$(touchstone_preflight_worktree_hash "$repo_root")" || return 1
+  worktree_hash="$(touchstone_preflight_worktree_hash "$repo_root" "$base_ref")" || return 1
   tool_hash="$(touchstone_preflight_tool_fingerprint)"
   env_hash="$(touchstone_preflight_env_fingerprint)"
 
-  printf 'version=3\n'
+  printf 'version=4\n'
   printf 'repo_root=%s\n' "$repo_root"
   printf 'scope=diff\n'
   printf 'base_ref=%s\n' "$base_ref"
@@ -370,6 +390,63 @@ touchstone_preflight_test_files() {
       [ -f "$path" ] || continue
       printf '%s\n' "$path"
     done
+}
+
+touchstone_preflight_add_existing_self_tests() {
+  local output_file="$1"
+  shift
+  local test_file
+
+  for test_file in "$@"; do
+    [ -f "$test_file" ] || continue
+    printf '%s\n' "$test_file" >>"$output_file"
+  done
+}
+
+touchstone_preflight_touchstone_scoped_self_test_files() {
+  local output_file="$1"
+  local unique_file="${output_file}.unique"
+  local path saw_path=false
+
+  : >"$output_file"
+
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    saw_path=true
+    case "$path" in
+      tests/test-*.sh)
+        [ -f "$path" ] || return 1
+        touchstone_preflight_add_existing_self_tests "$output_file" "$path"
+        ;;
+      CLAUDE.md | AGENTS.md | GEMINI.md | TOUCHSTONE.md | principles/*)
+        touchstone_preflight_add_existing_self_tests "$output_file" \
+          tests/test-agent-steering-contract.sh \
+          tests/test-dogfood.sh \
+          tests/test-steering-size-caps.sh \
+          tests/test-touchstone-block.sh
+        ;;
+      templates/CLAUDE.md | templates/AGENTS.md | templates/GEMINI.md | .claude/skills/touchstone-*/*)
+        touchstone_preflight_add_existing_self_tests "$output_file" \
+          tests/test-agent-steering-contract.sh \
+          tests/test-dogfood.sh \
+          tests/test-steering-size-caps.sh \
+          tests/test-touchstone-block.sh
+        ;;
+      README.md | CHANGELOG.md | docs/* | audits/* | feedback/*)
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  done < <(touchstone_preflight_changed_files)
+
+  [ "$saw_path" = true ] || return 1
+
+  if [ -s "$output_file" ]; then
+    awk '!seen[$0]++' "$output_file" >"$unique_file"
+    mv "$unique_file" "$output_file"
+  fi
+  return 0
 }
 
 touchstone_preflight_delivery_only_path() {
@@ -724,6 +801,59 @@ touchstone_preflight_is_touchstone_repo() {
     && [ -d tests ]
 }
 
+touchstone_preflight_run_touchstone_self_tests() {
+  local -a test_files=()
+  local test_file failures=0 scoped_tests_file=""
+
+  if [ "$TOUCHSTONE_PREFLIGHT_SCOPE_MODE" = "diff" ]; then
+    scoped_tests_file="$(mktemp -t touchstone-self-tests.XXXXXX)"
+    if touchstone_preflight_touchstone_scoped_self_test_files "$scoped_tests_file"; then
+      while IFS= read -r test_file; do
+        [ -n "$test_file" ] || continue
+        test_files+=("$test_file")
+      done <"$scoped_tests_file"
+      rm -f "$scoped_tests_file"
+
+      if [ "${#test_files[@]}" -eq 0 ]; then
+        touchstone_preflight_skip "tests (touchstone scoped self-tests: no matching test targets)"
+        return 0
+      fi
+
+      touchstone_preflight_info "tests (touchstone scoped self-tests)"
+      for test_file in "${test_files[@]}"; do
+        if TOUCHSTONE_PREFLIGHT_IN_PROGRESS=1 bash "$test_file"; then
+          :
+        else
+          failures=$((failures + 1))
+        fi
+      done
+      if [ "$failures" -eq 0 ]; then
+        touchstone_preflight_ok "tests"
+        return 0
+      fi
+      touchstone_preflight_fail "tests"
+      return 1
+    fi
+    rm -f "$scoped_tests_file"
+  fi
+
+  touchstone_preflight_info "tests (touchstone self-tests)"
+  for test_file in tests/test-*.sh; do
+    [ -f "$test_file" ] || continue
+    if TOUCHSTONE_PREFLIGHT_IN_PROGRESS=1 bash "$test_file"; then
+      :
+    else
+      failures=$((failures + 1))
+    fi
+  done
+  if [ "$failures" -eq 0 ]; then
+    touchstone_preflight_ok "tests"
+    return 0
+  fi
+  touchstone_preflight_fail "tests"
+  return 1
+}
+
 touchstone_preflight_run_list() {
   local label="$1"
   local command_name="$2"
@@ -820,21 +950,8 @@ touchstone_preflight_validate() {
     local test_file failures=0
 
     if touchstone_preflight_is_touchstone_repo; then
-      touchstone_preflight_info "tests (touchstone self-tests)"
-      for test_file in tests/test-*.sh; do
-        [ -f "$test_file" ] || continue
-        if TOUCHSTONE_PREFLIGHT_IN_PROGRESS=1 bash "$test_file"; then
-          :
-        else
-          failures=$((failures + 1))
-        fi
-      done
-      if [ "$failures" -eq 0 ]; then
-        touchstone_preflight_ok "tests"
-        return 0
-      fi
-      touchstone_preflight_fail "tests"
-      return 1
+      touchstone_preflight_run_touchstone_self_tests
+      return $?
     fi
 
     if touchstone_preflight_delivery_only_diff; then
