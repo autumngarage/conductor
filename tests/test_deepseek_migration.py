@@ -102,6 +102,7 @@ def test_deepseek_chat_call_uses_preset_openrouter_model(monkeypatch):
     assert captured["payload"] == {
         "model": DEEPSEEK_CHAT_MODEL,
         "messages": [{"role": "user", "content": "hi"}],
+        "usage": {"include": True},
     }
 
 

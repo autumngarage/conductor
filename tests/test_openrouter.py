@@ -427,7 +427,37 @@ def test_call_sends_reasoning_effort_and_openrouter_headers(configured):
         "model": "anthropic/claude-sonnet-4",
         "messages": [{"role": "user", "content": "hi"}],
         "reasoning": {"effort": "xhigh"},
+        "usage": {"include": True},
     }
+
+
+def test_call_opts_in_to_usage_cost_reporting(configured):
+    """OpenRouter only populates usage.cost in the response when the request
+    includes usage:{include:true}. Without it, multi-turn exec sessions log
+    per-iteration cost as None and the aggregated delegation cost
+    under-reports by ~10x. Lock the request side so future refactors don't
+    silently drop the opt-in. (Regression for #446.)"""
+    captured: dict[str, object] = {}
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "model": OPENROUTER_DEFAULT_MODEL,
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {},
+            },
+        )
+
+    with respx.mock(
+        base_url="https://openrouter.ai/api/v1",
+        assert_all_called=False,
+    ) as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        OpenRouterProvider().call("hi", model="openai/gpt-5.5")
+
+    assert captured["payload"]["usage"] == {"include": True}
 
 
 def test_call_sends_ordered_models_stack(configured):
@@ -465,6 +495,7 @@ def test_call_sends_ordered_models_stack(configured):
         ],
         "messages": [{"role": "user", "content": "hi"}],
         "reasoning": {"effort": "low"},
+        "usage": {"include": True},
     }
     assert len(captured["payload"]["models"]) <= OPENROUTER_MODELS_ARRAY_MAX
 
@@ -513,6 +544,7 @@ def test_call_without_model_invokes_selector_and_builds_payload(configured, mock
         "model": OPENROUTER_DEFAULT_MODEL,
         "messages": [{"role": "user", "content": "hi"}],
         "reasoning": {"effort": "medium"},
+        "usage": {"include": True},
     }
     assert response.model == "google/gemini-flash-1.5"
 

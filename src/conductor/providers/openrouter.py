@@ -208,6 +208,11 @@ class OpenRouterProvider:
         return True, None
 
     def _post_chat(self, payload: dict, *, timeout_sec: float | None = None) -> dict:
+        # OpenRouter only populates `usage.cost` (and other usage details) in
+        # the response when the request opts in via `usage: {include: true}`.
+        # Without it, multi-turn exec/review sessions log per-iteration cost
+        # as None and the aggregated delegation cost under-reports by ~10x.
+        payload = {**payload, "usage": {"include": True}}
         try:
             timeout = self._timeout_sec if timeout_sec is None else timeout_sec
             with provider_http_client(timeout=timeout) as client:

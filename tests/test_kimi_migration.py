@@ -88,6 +88,7 @@ def test_kimi_call_uses_preset_openrouter_model(monkeypatch):
         "model": KIMI_DEFAULT_MODEL,
         "messages": [{"role": "user", "content": "hi"}],
         "reasoning": {"effort": "medium"},
+        "usage": {"include": True},
     }
 
 
