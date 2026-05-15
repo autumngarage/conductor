@@ -113,7 +113,7 @@ read_config_value() {
 }
 
 AUTO_DRAFT_SUBJECT_PREFIX='docs(journal): auto-draft pr-merged entry'
-AUTO_DRAFT_BRANCH_PREFIX='docs/cortex-pr-merged'
+AUTO_DRAFT_BRANCH_PREFIX='docs/journal-pr'
 
 sanitize_branch_component() {
   printf '%s' "$1" \
@@ -129,12 +129,12 @@ resolve_journal_branch() {
 
   local suffix timestamp
   if [ -n "${TOUCHSTONE_MERGED_PR:-}" ]; then
-    suffix="pr-${TOUCHSTONE_MERGED_PR}"
+    suffix="${TOUCHSTONE_MERGED_PR}"
   else
-    suffix="manual"
+    timestamp="$(date -u '+%Y%m%d-%H%M%S')"
+    suffix="$timestamp"
   fi
-  timestamp="$(date '+%Y%m%d%H%M%S')"
-  printf '%s-%s-%s' "$AUTO_DRAFT_BRANCH_PREFIX" "$(sanitize_branch_component "$suffix")" "$timestamp"
+  printf '%s-%s' "$AUTO_DRAFT_BRANCH_PREFIX" "$(sanitize_branch_component "$suffix")"
 }
 
 git_push_clean_env() {
@@ -204,6 +204,11 @@ case "$last_subject" in
   "$AUTO_DRAFT_SUBJECT_PREFIX"*) exit 0 ;;
 esac
 
+if [ ! -f "$PROJECT_DIR/.cortex/SPEC_VERSION" ]; then
+  log "cortex: .cortex/ exists but SPEC_VERSION missing; skipping auto-draft"
+  exit 0
+fi
+
 if ! command -v cortex >/dev/null 2>&1; then
   # Detection passed (`.cortex/` exists, config is auto/on) but the CLI
   # is missing. The brief calls this a graceful-degrade case — don't
@@ -226,7 +231,7 @@ if [ "$force_journal" -eq 0 ]; then
     check_triggers_status=0
     ct_stderr_file="$(mktemp -t cortex-pr-merged-hook.XXXXXX 2>/dev/null || mktemp)"
     trap 'rm -f "$ct_stderr_file"' EXIT
-    check_triggers_stdout="$(cd "$PROJECT_DIR" && cortex check-triggers --since HEAD~1 2>"$ct_stderr_file")" \
+    check_triggers_stdout="$(cd "$PROJECT_DIR" && cortex --no-auto-sync check-triggers --since HEAD~1 2>"$ct_stderr_file")" \
       || check_triggers_status=$?
     check_triggers_stderr="$(cat "$ct_stderr_file" 2>/dev/null || true)"
     rm -f "$ct_stderr_file"
@@ -256,6 +261,26 @@ if [ -n "$(git -C "$PROJECT_DIR" status --porcelain)" ]; then
   exit 1
 fi
 
+publish_direct=false
+journal_branch=""
+if truthy "${TOUCHSTONE_CORTEX_HOOK_DIRECT_PUSH:-0}"; then
+  publish_direct=true
+else
+  journal_branch="$(resolve_journal_branch)"
+  if git -C "$PROJECT_DIR" show-ref --verify --quiet "refs/heads/$journal_branch"; then
+    log "cortex-pr-merged-hook: local journal branch '$journal_branch' already exists; refusing to overwrite."
+    exit 1
+  fi
+  if git -C "$PROJECT_DIR" ls-remote --exit-code --heads origin "$journal_branch" >/dev/null 2>&1; then
+    log "cortex-pr-merged-hook: remote journal branch '$journal_branch' already exists; refusing to overwrite."
+    exit 1
+  fi
+  if ! git -C "$PROJECT_DIR" checkout -b "$journal_branch" >/dev/null; then
+    log "cortex-pr-merged-hook: failed to create journal branch '$journal_branch' before journal draft; default branch remains unchanged."
+    exit 1
+  fi
+fi
+
 # `cortex journal draft pr-merged --no-edit` writes the entry and prints
 # the absolute path on stdout. We capture stdout to grab that path; we
 # leave stderr untouched so any cortex-side warnings (gh not auth'd, etc)
@@ -268,6 +293,9 @@ draft_stdout="$(cd "$PROJECT_DIR" \
   || draft_status=$?
 if [ "$draft_status" -ne 0 ]; then
   log "cortex-pr-merged-hook: cortex journal draft pr-merged exited $draft_status."
+  if [ -n "$journal_branch" ]; then
+    log "  The hook is on recovery branch ${journal_branch}; inspect the worktree there before returning to ${default_branch}."
+  fi
   exit 1
 fi
 
@@ -278,11 +306,17 @@ fi
 candidate="$(printf '%s\n' "$draft_stdout" | awk 'NF{p=$0} END{print p}')"
 if [ -z "$candidate" ]; then
   log "cortex-pr-merged-hook: cortex journal draft returned no path on stdout."
+  if [ -n "$journal_branch" ]; then
+    log "  The hook is on recovery branch ${journal_branch}; default branch remains unchanged."
+  fi
   exit 1
 fi
 
 if [ ! -f "$candidate" ]; then
   log "cortex-pr-merged-hook: returned path '$candidate' is not a regular file."
+  if [ -n "$journal_branch" ]; then
+    log "  The hook is on recovery branch ${journal_branch}; default branch remains unchanged."
+  fi
   exit 1
 fi
 
@@ -338,30 +372,12 @@ if [ -n "${TOUCHSTONE_MERGED_PR:-}" ]; then
   pr_suffix=" for #${TOUCHSTONE_MERGED_PR}"
 fi
 commit_message="${AUTO_DRAFT_SUBJECT_PREFIX}${pr_suffix}"
-publish_direct=false
-journal_branch=""
-
-if truthy "${TOUCHSTONE_CORTEX_HOOK_DIRECT_PUSH:-0}" \
-  || truthy "${TOUCHSTONE_CORTEX_HOOK_SKIP_PUSH:-0}"; then
-  publish_direct=true
-else
-  journal_branch="$(resolve_journal_branch)"
-  if git -C "$PROJECT_DIR" show-ref --verify --quiet "refs/heads/$journal_branch"; then
-    log "cortex-pr-merged-hook: local journal branch '$journal_branch' already exists; refusing to overwrite."
-    exit 1
-  fi
-  if git -C "$PROJECT_DIR" ls-remote --exit-code --heads origin "$journal_branch" >/dev/null 2>&1; then
-    log "cortex-pr-merged-hook: remote journal branch '$journal_branch' already exists; refusing to overwrite."
-    exit 1
-  fi
-  if ! git -C "$PROJECT_DIR" checkout -b "$journal_branch" >/dev/null; then
-    log "cortex-pr-merged-hook: failed to create journal branch '$journal_branch'."
-    exit 1
-  fi
-fi
 
 if ! git -C "$PROJECT_DIR" add -- "$rel_path"; then
   log "cortex-pr-merged-hook: git add '$rel_path' failed."
+  if [ -n "$journal_branch" ]; then
+    log "  The draft remains on recovery branch ${journal_branch}; do not commit this journal file to ${default_branch}."
+  fi
   exit 1
 fi
 if [ -f "$PROJECT_DIR/.cortex/state.md" ]; then
@@ -377,6 +393,9 @@ fi
 # review/validate paths while the merge command is still cleaning up.
 if ! git -C "$PROJECT_DIR" commit --no-verify -m "$commit_message" >/dev/null; then
   log "cortex-pr-merged-hook: git commit failed."
+  if [ -n "$journal_branch" ]; then
+    log "  The draft remains on recovery branch ${journal_branch}; do not commit this journal file to ${default_branch}."
+  fi
   exit 1
 fi
 
@@ -410,39 +429,62 @@ fi
 if ! command -v gh >/dev/null 2>&1; then
   git -C "$PROJECT_DIR" checkout "$default_branch" >/dev/null 2>&1 || true
   log "cortex-pr-merged-hook: gh CLI not found after pushing '$journal_branch'; open a PR for that branch manually."
-  exit 1
+  exit 0
 fi
 
-pr_body="$(mktemp -t cortex-pr-merged-pr.XXXXXX 2>/dev/null || mktemp)"
-{
-  printf 'Auto-drafted Cortex journal entry for merged PR'
-  if [ -n "${TOUCHSTONE_MERGED_PR:-}" ]; then
-    printf ' #%s' "$TOUCHSTONE_MERGED_PR"
-  fi
-  printf '.\n\n'
-  printf 'This PR keeps the T1.9 journal artifact off the local default branch and lets normal repository policy merge it.\n'
-} >"$pr_body"
+pr_body_source_line=""
+if [ -n "${TOUCHSTONE_MERGED_PR:-}" ]; then
+  pr_body_source_line="Source PR: #${TOUCHSTONE_MERGED_PR}"$'\n\n'
+fi
+pr_body="${pr_body_source_line}Auto-drafted by \`cortex-pr-merged-hook\` after the source PR merged. Implements Cortex Protocol section 2 Tier-1 trigger T1.9."
 
-pr_url=""
-if ! pr_url="$(cd "$PROJECT_DIR" \
-  && gh pr create \
-    --base "$default_branch" \
-    --head "$journal_branch" \
-    --title "$commit_message" \
-    --body-file "$pr_body" 2>/dev/null)"; then
-  rm -f "$pr_body"
+label_args=()
+if gh label list --limit 200 --json name --jq '.[].name' 2>/dev/null \
+  | grep -qx 'cortex-auto-draft'; then
+  label_args=(--label cortex-auto-draft)
+fi
+
+pr_create_status=0
+pr_url="$(cd "$PROJECT_DIR" && gh pr create \
+  --title "$commit_message" \
+  --body "$pr_body" \
+  --head "$journal_branch" \
+  --base "$default_branch" \
+  ${label_args[@]+"${label_args[@]}"} 2>&1)" || pr_create_status=$?
+
+if [ "$pr_create_status" -ne 0 ]; then
   git -C "$PROJECT_DIR" checkout "$default_branch" >/dev/null 2>&1 || true
-  log "cortex-pr-merged-hook: failed to open PR for journal branch '$journal_branch'."
-  log "  Branch was pushed; open a PR manually when ready."
-  exit 1
+  log "cortex-pr-merged-hook: 'gh pr create' failed (exit ${pr_create_status})."
+  log "  gh output: ${pr_url}"
+  log "  The auto-draft entry committed locally as ${rel_path} on branch ${journal_branch}."
+  log "  The branch is pushed; finish by running: gh pr create --head ${journal_branch}"
+  exit 0
 fi
-rm -f "$pr_body"
+
+pr_number="${pr_url##*/}"
+pr_number="${pr_number%%[!0-9]*}"
+if [ -z "$pr_number" ]; then
+  git -C "$PROJECT_DIR" checkout "$default_branch" >/dev/null 2>&1 || true
+  log "cortex-pr-merged-hook: could not parse PR number from gh output: ${pr_url}"
+  log "  The branch '${journal_branch}' has been pushed and a PR likely exists; merge it manually."
+  exit 0
+fi
+
+merge_status=0
+(cd "$PROJECT_DIR" && gh pr merge "$pr_number" --squash --delete-branch --auto >/dev/null 2>&1) \
+  || merge_status=$?
+if [ "$merge_status" -ne 0 ]; then
+  git -C "$PROJECT_DIR" checkout "$default_branch" >/dev/null 2>&1 || true
+  log "cortex-pr-merged-hook: 'gh pr merge --auto' on #${pr_number} returned ${merge_status}."
+  log "  PR opened at ${pr_url} but auto-merge could not be queued. Merge it manually."
+  exit 0
+fi
 
 if ! git -C "$PROJECT_DIR" checkout "$default_branch" >/dev/null; then
   log "cortex-pr-merged-hook: opened journal PR but failed to restore local '$default_branch'."
   exit 1
 fi
-git -C "$PROJECT_DIR" branch -D "$journal_branch" >/dev/null 2>&1 || true
+git -C "$PROJECT_DIR" pull --ff-only --quiet 2>/dev/null || true
 
 if [ -n "$pr_url" ]; then
   log "cortex-pr-merged-hook: opened Cortex journal PR: $pr_url"

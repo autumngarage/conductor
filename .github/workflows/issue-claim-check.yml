@@ -19,11 +19,6 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha }}
           path: .touchstone-claim-base
 
-      - name: Checkout PR helper fallback
-        uses: actions/checkout@v4
-        with:
-          path: .touchstone-claim-head
-
       - name: Enforce claim-before-dispatch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -32,7 +27,7 @@ jobs:
         run: |
           helper=".touchstone-claim-base/scripts/issue-claim-check.sh"
           if [ ! -f "$helper" ]; then
-            echo "Trusted base helper is unavailable; using PR helper for this transition run."
-            helper=".touchstone-claim-head/scripts/issue-claim-check.sh"
+            echo "Trusted base helper is unavailable; skipping transition run instead of executing PR-controlled code."
+            exit 0
           fi
           bash "$helper" --pr-number "$PR_NUMBER" --comment-pr
