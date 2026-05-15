@@ -459,8 +459,8 @@ if [ "$CURRENT_BRANCH" = "$DEFAULT_BRANCH" ] || [ "$CURRENT_BRANCH" = "master" ]
 fi
 
 # Warn on uncommitted changes.
-UNTRACKED="$(git ls-files --others --exclude-standard)"
-if ! git diff --quiet || ! git diff --cached --quiet || [ -n "$UNTRACKED" ]; then
+UNTRACKED="$(git -C "$REPO_ROOT" ls-files --others --exclude-standard)"
+if ! git -C "$REPO_ROOT" diff --quiet || ! git -C "$REPO_ROOT" diff --cached --quiet || [ -n "$UNTRACKED" ]; then
   echo "WARNING: working tree has uncommitted changes — they will NOT be included in this PR." >&2
   if [ -n "$UNTRACKED" ]; then
     echo "         Untracked files detected:" >&2
