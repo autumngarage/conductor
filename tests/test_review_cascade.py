@@ -243,6 +243,34 @@ def test_review_fallback_attempts_share_one_deadline(mocker, monkeypatch) -> Non
     assert seen == [("claude", 120, 120), ("codex", 75, 75)]
 
 
+def test_review_gate_caps_non_streaming_codex_timeout_to_stall(mocker) -> None:
+    seen: list[tuple[int | None, int | None]] = []
+
+    def codex_succeeds(*_args, timeout_sec=None, max_stall_sec=None, **_kwargs):
+        seen.append((timeout_sec, max_stall_sec))
+        return _fake_response("codex")
+
+    mocker.patch.object(CodexProvider, "review", side_effect=codex_succeeds)
+
+    response, _fallbacks = cli._invoke_review_with_fallback(
+        _decision("codex"),
+        task="Review this merge using the project reviewer guide.",
+        effort="high",
+        cwd=None,
+        timeout_sec=300,
+        max_stall_sec=75,
+        base=None,
+        commit=None,
+        uncommitted=False,
+        title=None,
+        silent=True,
+        fallback_deadline_monotonic=cli._review_gate_deadline(300),
+    )
+
+    assert response.provider == "codex"
+    assert seen == [(75, 75)]
+
+
 def test_review_fallback_reserves_budget_for_ready_final_provider(
     mocker, monkeypatch
 ) -> None:

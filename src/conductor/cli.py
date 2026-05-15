@@ -613,6 +613,31 @@ def _bounded_review_attempt_budget(
     return attempt_timeout_sec, attempt_max_stall_sec
 
 
+def _cap_review_attempt_timeout_for_provider(
+    *,
+    provider,
+    timeout_sec: int | None,
+    max_stall_sec: int | None,
+    review_deadline_monotonic: float | None,
+) -> tuple[int | None, int | None]:
+    """Apply provider-specific timeout caps for review-gate attempts.
+
+    `codex review` does not stream progress, so review-gate attempts cannot
+    rely on the no-output watchdog to enforce stall budgets. When the review
+    gate supplies both a deadline and a smaller stall budget, cap Codex's
+    wall-clock timeout to that stall ceiling.
+    """
+    if (
+        not isinstance(provider, CodexProvider)
+        or review_deadline_monotonic is None
+        or max_stall_sec is None
+    ):
+        return timeout_sec, max_stall_sec
+    timeout_sec = max_stall_sec if timeout_sec is None else min(timeout_sec, max_stall_sec)
+    max_stall_sec = min(max_stall_sec, timeout_sec)
+    return timeout_sec, max_stall_sec
+
+
 def _read_task(
     task: str | None,
     task_file: str | None,
@@ -2774,6 +2799,12 @@ def _invoke_review_with_fallback(
                 provider_name=candidate.name,
                 is_fallback=idx > 0,
                 remaining_fallback_count=max(0, len(candidates) - idx - 1),
+            )
+            attempt_timeout_sec, attempt_max_stall_sec = _cap_review_attempt_timeout_for_provider(
+                provider=provider,
+                timeout_sec=attempt_timeout_sec,
+                max_stall_sec=attempt_max_stall_sec,
+                review_deadline_monotonic=fallback_deadline_monotonic,
             )
             if isinstance(provider, NativeReviewProvider):
                 response = provider.review(
