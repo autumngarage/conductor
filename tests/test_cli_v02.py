@@ -2274,25 +2274,22 @@ def test_review_auto_codex_subprocess_rejects_missing_requested_sentinel(mocker)
 def test_review_auto_codex_subprocess_retries_missing_requested_sentinel(mocker):
     _stub_all_configured(mocker, {"codex", "claude"})
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    mocker.patch(
+        "conductor.providers.codex.build_review_task_prompt",
+        return_value="Review changes against base branch/ref: origin/main\n\nbrief body",
+    )
+    # Under the structured-output design (#445), codex review uses
+    # --output-schema and the schema enforces a JSON shape on the response.
+    # The retry-on-missing-sentinel path is no longer reachable: the model
+    # cannot emit free-form prose without a valid status enum.
     captured = mocker.patch(
         "conductor.providers.codex.subprocess.run",
-        side_effect=[
-            subprocess.CompletedProcess(
-                args=["codex", "review"],
-                returncode=0,
-                stdout="No blocking issues were found in the diff.\n",
-                stderr="",
-            ),
-            subprocess.CompletedProcess(
-                args=["codex", "review"],
-                returncode=0,
-                stdout=(
-                    "No blocking issues were found in the diff.\n"
-                    "CODEX_REVIEW_CLEAN\n"
-                ),
-                stderr="",
-            ),
-        ],
+        return_value=subprocess.CompletedProcess(
+            args=["codex", "exec", "--output-schema"],
+            returncode=0,
+            stdout='{"status":"CLEAN","findings":"No blocking issues were found."}\n',
+            stderr="",
+        ),
     )
     claude_review = mocker.patch.object(
         ClaudeProvider,
@@ -2318,24 +2315,34 @@ def test_review_auto_codex_subprocess_retries_missing_requested_sentinel(mocker)
     )
 
     assert result.exit_code == 0, result.output
-    assert captured.call_count == 2
-    assert "--base" not in captured.call_args_list[0].args[0]
-    assert "Review changes against base branch/ref: origin/main" in (
-        captured.call_args_list[1].kwargs["input"]
-    )
+    # codex review may be invoked more than once at the CLI level (e.g., the
+    # review cascade probes); the per-invocation behavior is what matters.
+    assert captured.called
+    assert captured.call_args.args[0][0:2] == ["codex", "exec"]
+    assert "--output-schema" in captured.call_args.args[0]
     assert not claude_review.called
     assert result.stdout.strip().endswith("CODEX_REVIEW_CLEAN")
 
 
-def test_review_auto_codex_subprocess_accepts_sentinel_with_footer(mocker):
+def test_review_auto_codex_subprocess_emits_findings_with_sentinel(mocker):
+    """Under structured outputs (#445), codex emits JSON; conductor
+    synthesizes the legacy `<findings>\\n\\n<sentinel>` text so consumers
+    that parse the sentinel-line format still work unchanged."""
     _stub_all_configured(mocker, {"codex", "claude"})
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    mocker.patch(
+        "conductor.providers.codex.build_review_task_prompt",
+        return_value="brief body",
+    )
     captured = mocker.patch(
         "conductor.providers.codex.subprocess.run",
         return_value=subprocess.CompletedProcess(
-            args=["codex", "review"],
+            args=["codex", "exec", "--output-schema"],
             returncode=0,
-            stdout="No blocking issues found.\nCODEX_REVIEW_CLEAN\n---\nreview complete\n",
+            stdout=(
+                '{"status":"CLEAN",'
+                '"findings":"No blocking issues found."}\n'
+            ),
             stderr="",
         ),
     )
@@ -2364,7 +2371,9 @@ def test_review_auto_codex_subprocess_accepts_sentinel_with_footer(mocker):
     assert captured.called
     assert not claude_review.called
     assert result.stdout.strip().endswith("CODEX_REVIEW_CLEAN")
-    assert "review complete\nCODEX_REVIEW_CLEAN" in result.stdout
+    # validate_requested_review_sentinel normalizes the blank line between
+    # findings and the trailing sentinel, so the rendered form is single-\n.
+    assert "No blocking issues found.\nCODEX_REVIEW_CLEAN" in result.stdout
 
 
 def test_review_with_gemini_emits_plain_text_without_json_envelope(mocker):
