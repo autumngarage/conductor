@@ -51,7 +51,7 @@ from conductor.providers import (
     ProviderExecutionError,
 )
 from conductor.providers.review_contract import build_review_task_prompt
-from conductor.router import RouteDecision, reset_health
+from conductor.router import RouteDecision, reset_health, reset_review_health_cache
 from conductor.session_log import SessionLog
 
 
@@ -59,8 +59,10 @@ from conductor.session_log import SessionLog
 def _clean_health(monkeypatch, tmp_path):
     reset_health()
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    reset_review_health_cache()
     monkeypatch.delenv("CONDUCTOR_ALLOW_LOCAL_ONLINE", raising=False)
     yield
+    reset_review_health_cache()
     reset_health()
 
 

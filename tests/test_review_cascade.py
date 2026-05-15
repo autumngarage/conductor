@@ -36,7 +36,12 @@ from conductor.providers import (
     ProviderError,
     review_contract,
 )
-from conductor.router import RankedCandidate, RouteDecision, reset_health
+from conductor.router import (
+    RankedCandidate,
+    RouteDecision,
+    reset_health,
+    reset_review_health_cache,
+)
 
 SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "codex-review.sh"
 LEGACY_SKIP_REASON = "pre-2.0 shell cascade contract; conductor routing tests cover issue #127"
@@ -46,7 +51,9 @@ LEGACY_SKIP_REASON = "pre-2.0 shell cascade contract; conductor routing tests co
 def _clean_health(monkeypatch, tmp_path):
     reset_health()
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    reset_review_health_cache()
     yield
+    reset_review_health_cache()
     reset_health()
 
 
@@ -460,6 +467,70 @@ def test_large_review_codex_timeout_falls_back_to_openrouter_next(mocker) -> Non
     assert fallbacks == ["codex"]
     assert openrouter_call.called
     assert not claude_review.called
+
+
+def test_review_auto_skips_provider_after_recent_contract_failure(mocker) -> None:
+    _stub_all_configured(mocker, {"codex", "openrouter"})
+    codex_review = mocker.patch.object(
+        CodexProvider,
+        "review",
+        return_value=CallResponse(
+            text="Review completed without the required sentinel.",
+            provider="codex",
+            model="codex-review",
+            duration_ms=10,
+            usage={},
+            raw={},
+        ),
+    )
+    openrouter_call = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=CallResponse(
+            text="No blocking issues found.\nCODEX_REVIEW_CLEAN",
+            provider="openrouter",
+            model="test-model",
+            duration_ms=10,
+            usage={},
+            raw={},
+        ),
+    )
+
+    first = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--max-fallbacks",
+            "2",
+            "--brief",
+            "Review this merge. Last line must be CODEX_REVIEW_CLEAN.",
+        ],
+    )
+
+    assert first.exit_code == 0, first.output
+    assert codex_review.call_count == 1
+    assert openrouter_call.call_count == 1
+
+    codex_review.reset_mock()
+    openrouter_call.reset_mock()
+    second = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--verbose-route",
+            "--max-fallbacks",
+            "2",
+            "--brief",
+            "Review this merge. Last line must be CODEX_REVIEW_CLEAN.",
+        ],
+    )
+
+    assert second.exit_code == 0, second.output
+    assert not codex_review.called
+    assert openrouter_call.call_count == 1
+    assert "recent review output-contract failure" in second.stderr
 
 
 def test_review_rate_limit_fallback_caps_late_provider_timeout(mocker) -> None:

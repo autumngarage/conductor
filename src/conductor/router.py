@@ -23,16 +23,19 @@ would be prohibitive. It filters on ``configured()`` (cheap) plus
 session-local health tracking. Users run ``conductor smoke`` manually
 to force a real health check.
 
-Health tracking is session-local; there is no persistent state file in
-v0.2. A rate-limit observed in one ``conductor`` invocation is forgotten
-when the process exits. This is intentional — stateful cross-session
-health would require a cache directory, which is deferred.
+Health tracking has two layers: process-local counters for ordinary routing
+noise, plus a short-lived review-gate circuit breaker for failures that are
+expensive and likely to repeat across adjacent invocations.
 """
 
 from __future__ import annotations
 
+import json
+import os
+import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
 from conductor.muted_providers import load_muted_provider_ids
@@ -71,6 +74,21 @@ class InvalidRouterRequest(ProviderError):  # noqa: N818  — public API name, s
 # --------------------------------------------------------------------------- #
 
 _RATE_LIMIT_COOLDOWN_SEC = 60.0
+_REVIEW_HEALTH_CACHE_VERSION = 1
+_REVIEW_HEALTH_CACHE_NAME = "provider-review-health.json"
+_REVIEW_HEALTH_DEFAULT_TTL_SEC = 15 * 60
+_REVIEW_HEALTH_TTL_ENV = "CONDUCTOR_REVIEW_HEALTH_TTL_SEC"
+_REVIEW_DEGRADING_OUTCOMES = frozenset(
+    {
+        "5xx",
+        "empty-response",
+        "network",
+        "output-contract",
+        "provider-error",
+        "timeout",
+        "transport",
+    }
+)
 
 
 @dataclass
@@ -97,32 +115,47 @@ def mark_auth_failed(name: str) -> None:
     _health(name).last_auth_failed_at = time.monotonic()
 
 
-def mark_outcome(name: str, outcome: str) -> None:
+def mark_outcome(name: str, outcome: str, *, kind: str | None = None) -> None:
     h = _health(name)
     h.recent_outcomes.append(outcome)
     if len(h.recent_outcomes) > 20:
         h.recent_outcomes = h.recent_outcomes[-20:]
+    if kind != "review":
+        return
+    if outcome == "success":
+        _clear_persistent_review_health(name)
+    elif outcome in _REVIEW_DEGRADING_OUTCOMES:
+        _mark_persistent_review_health(name, outcome)
 
 
 def reset_health(name: str | None = None) -> None:
-    """Test helper; reset one provider's health or everything."""
+    """Test helper; reset one provider's process-local health or everything."""
     if name is None:
         _HEALTH.clear()
     elif name in _HEALTH:
         del _HEALTH[name]
 
 
-def _health_filter(name: str) -> str | None:
+def reset_review_health_cache(name: str | None = None) -> None:
+    """Test helper; reset the persistent review-gate circuit breaker."""
+    if name is None:
+        _clear_persistent_review_health()
+    else:
+        _clear_persistent_review_health(name)
+
+
+def _health_filter(name: str, *, kind: str | None = None) -> str | None:
     """Return None if the provider passes, else a skip reason."""
     h = _HEALTH.get(name)
-    if h is None:
-        return None
-    now = time.monotonic()
-    if h.last_rate_limited_at and (now - h.last_rate_limited_at) < _RATE_LIMIT_COOLDOWN_SEC:
-        wait = int(_RATE_LIMIT_COOLDOWN_SEC - (now - h.last_rate_limited_at))
-        return f"rate-limited {int(now - h.last_rate_limited_at)}s ago (cooldown: {wait}s)"
-    if h.last_auth_failed_at:
-        return "auth failed earlier this session"
+    if h is not None:
+        now = time.monotonic()
+        if h.last_rate_limited_at and (now - h.last_rate_limited_at) < _RATE_LIMIT_COOLDOWN_SEC:
+            wait = int(_RATE_LIMIT_COOLDOWN_SEC - (now - h.last_rate_limited_at))
+            return f"rate-limited {int(now - h.last_rate_limited_at)}s ago (cooldown: {wait}s)"
+        if h.last_auth_failed_at:
+            return "auth failed earlier this session"
+    if kind == "review":
+        return _persistent_review_health_filter(name)
     return None
 
 
@@ -140,6 +173,150 @@ def _health_penalty(name: str) -> float:
     if ratio > 0.30:
         return min(0.5, ratio)
     return 0.0
+
+
+def _cache_root() -> Path:
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    root = Path(xdg) if xdg else Path.home() / ".cache"
+    return root / "conductor"
+
+
+def _review_health_cache_path() -> Path:
+    return _cache_root() / _REVIEW_HEALTH_CACHE_NAME
+
+
+def _review_health_ttl_sec() -> int:
+    raw = os.environ.get(_REVIEW_HEALTH_TTL_ENV)
+    if raw:
+        try:
+            value = int(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            _warn_health_cache(f"invalid {_REVIEW_HEALTH_TTL_ENV}={raw!r}; using default")
+        else:
+            _warn_health_cache(f"invalid {_REVIEW_HEALTH_TTL_ENV}={raw!r}; using default")
+    return _REVIEW_HEALTH_DEFAULT_TTL_SEC
+
+
+def _warn_health_cache(message: str) -> None:
+    print(f"[conductor] provider health cache: {message}", file=sys.stderr)
+
+
+def _read_persistent_review_health() -> dict[str, dict[str, object]]:
+    path = _review_health_cache_path()
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        _warn_health_cache(f"could not read {path}: {e}")
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as e:
+        _warn_health_cache(f"invalid JSON in {path}: {e}")
+        _delete_persistent_review_health_file(path)
+        return {}
+    if not isinstance(payload, dict) or payload.get("version") != _REVIEW_HEALTH_CACHE_VERSION:
+        return {}
+    records = payload.get("records")
+    if not isinstance(records, dict):
+        return {}
+    normalized: dict[str, dict[str, object]] = {}
+    for provider, record in records.items():
+        if isinstance(provider, str) and isinstance(record, dict):
+            normalized[provider] = record
+    return normalized
+
+
+def _write_persistent_review_health(records: dict[str, dict[str, object]]) -> None:
+    path = _review_health_cache_path()
+    if not records:
+        _delete_persistent_review_health_file(path)
+        return
+    payload = {"version": _REVIEW_HEALTH_CACHE_VERSION, "records": records}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(f"{path.suffix}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(path)
+    except OSError as e:
+        _warn_health_cache(f"could not write {path}: {e}")
+
+
+def _delete_persistent_review_health_file(path: Path | None = None) -> None:
+    target = path or _review_health_cache_path()
+    try:
+        target.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as e:
+        _warn_health_cache(f"could not delete {target}: {e}")
+
+
+def _mark_persistent_review_health(name: str, outcome: str) -> None:
+    records = _read_persistent_review_health()
+    now = time.time()
+    prior = records.get(name)
+    failures = 1
+    if isinstance(prior, dict):
+        prior_failures = prior.get("failures")
+        if isinstance(prior_failures, int):
+            failures = prior_failures + 1
+    records[name] = {
+        "category": outcome,
+        "failures": failures,
+        "last_failed_at": now,
+        "expires_at": now + _review_health_ttl_sec(),
+    }
+    _write_persistent_review_health(_fresh_persistent_review_records(records, now=now))
+
+
+def _clear_persistent_review_health(name: str | None = None) -> None:
+    if name is None:
+        _delete_persistent_review_health_file()
+        return
+    records = _read_persistent_review_health()
+    if name not in records:
+        return
+    del records[name]
+    _write_persistent_review_health(records)
+
+
+def _fresh_persistent_review_records(
+    records: dict[str, dict[str, object]],
+    *,
+    now: float,
+) -> dict[str, dict[str, object]]:
+    fresh: dict[str, dict[str, object]] = {}
+    for provider, record in records.items():
+        expires_at = record.get("expires_at")
+        if isinstance(expires_at, (int, float)) and now < float(expires_at):
+            fresh[provider] = record
+    return fresh
+
+
+def _persistent_review_health_filter(name: str) -> str | None:
+    now = time.time()
+    records = _read_persistent_review_health()
+    fresh = _fresh_persistent_review_records(records, now=now)
+    if fresh.keys() != records.keys():
+        _write_persistent_review_health(fresh)
+    record = fresh.get(name)
+    if not record:
+        return None
+    category = str(record.get("category") or "provider-error")
+    failures = record.get("failures")
+    failure_count = failures if isinstance(failures, int) else 1
+    expires_at = record.get("expires_at")
+    seconds = 0
+    if isinstance(expires_at, (int, float)):
+        seconds = max(0, int(float(expires_at) - now))
+    return (
+        f"recent review {category} failure "
+        f"({failure_count}x; circuit breaker: {seconds}s)"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -301,6 +478,7 @@ def pick(
     attachments_required: bool = False,
     estimated_input_tokens: int | None = None,
     estimated_output_tokens: int | None = None,
+    health_kind: str | None = None,
 ) -> tuple[Provider, RouteDecision]:
     """Pick the best provider for ``task_tags`` under the given preferences.
 
@@ -315,6 +493,10 @@ def pick(
     have preferred X, but X isn't installed/authed"*. Off by default to
     avoid surprising existing callers (Sentinel, Touchstone) and the CLI's
     `--with` path that doesn't need it.
+
+    ``health_kind`` enables kind-specific provider health checks. It is
+    intentionally caller-selected so generic tag routing is not affected by
+    review-gate health signals.
     """
     if prefer not in VALID_PREFER_MODES:
         raise InvalidRouterRequest(
@@ -397,7 +579,7 @@ def pick(
             skipped.append((name, "does not support image attachments"))
             continue
         # Session-local health filter.
-        health_reason = _health_filter(name)
+        health_reason = _health_filter(name, kind=health_kind)
         if health_reason is not None:
             skipped.append((name, health_reason))
             continue

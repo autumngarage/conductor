@@ -15,9 +15,11 @@ from conductor.router import (
     InvalidRouterRequest,
     NoConfiguredProvider,
     mark_auth_failed,
+    mark_outcome,
     mark_rate_limited,
     pick,
     reset_health,
+    reset_review_health_cache,
 )
 
 
@@ -34,6 +36,9 @@ def _isolated_conductor_home(tmp_path, monkeypatch):
     monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path / ".conductor"))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.chdir(tmp_path)
+    reset_review_health_cache()
+    yield
+    reset_review_health_cache()
 
 
 def _write_router_defaults(home_dir, body: str) -> None:
@@ -403,6 +408,47 @@ def test_auth_failed_provider_is_skipped(mocker):
     assert provider.name == "codex"
     skipped = dict(decision.candidates_skipped)
     assert "auth failed" in skipped["claude"]
+
+
+def test_recent_review_output_contract_failure_is_skipped_across_processes(mocker):
+    from conductor import router
+
+    _stub_configured(mocker, {"codex": True, "openrouter": True})
+    mark_outcome("codex", "output-contract", kind="review")
+    router._HEALTH.clear()
+
+    provider, decision = pick(["code-review"], prefer="best", health_kind="review")
+
+    assert provider.name == "openrouter"
+    skipped = dict(decision.candidates_skipped)
+    assert "recent review output-contract failure" in skipped["codex"]
+
+
+def test_review_circuit_breaker_does_not_affect_non_review_routes(mocker):
+    from conductor import router
+
+    _stub_configured(mocker, {"codex": True, "openrouter": True})
+    mark_outcome("codex", "output-contract", kind="review")
+    router._HEALTH.clear()
+
+    provider, decision = pick(["code-review"], prefer="best")
+
+    assert provider.name == "codex"
+    assert "codex" not in dict(decision.candidates_skipped)
+
+
+def test_review_success_clears_recent_failure_circuit_breaker(mocker):
+    from conductor import router
+
+    _stub_configured(mocker, {"codex": True, "openrouter": True})
+    mark_outcome("codex", "output-contract", kind="review")
+    mark_outcome("codex", "success", kind="review")
+    router._HEALTH.clear()
+
+    provider, decision = pick(["code-review"], prefer="best", health_kind="review")
+
+    assert provider.name == "codex"
+    assert "codex" not in dict(decision.candidates_skipped)
 
 
 # ---------------------------------------------------------------------------
