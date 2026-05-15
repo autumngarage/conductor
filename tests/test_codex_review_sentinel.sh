@@ -62,4 +62,13 @@ if [ -n "$bad_uses" ]; then
   exit 1
 fi
 
+route_preflight_args="$(grep -n 'args=(route --json' "$SCRIPT" | head -1)"
+case "$route_preflight_args" in
+  *'--kind "$subcommand"'*) ;;
+  *)
+    printf 'FAIL: route preflight must pass --kind "$subcommand" so review preflight and semantic review dispatch use the same routing semantics.\n%s\n' "$route_preflight_args" >&2
+    exit 1
+    ;;
+esac
+
 printf 'ok\n'
