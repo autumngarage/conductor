@@ -1085,7 +1085,7 @@ post_clean_review_comment() {
   fi
 
   exit_reason="$(review_comment_json_field "$summary_json" exit_reason 2>/dev/null || true)"
-  if [ -n "$exit_reason" ] && [ "$exit_reason" != "clean" ]; then
+  if [ -n "$exit_reason" ] && [ "$exit_reason" != "clean" ] && [ "$exit_reason" != "cache-hit" ]; then
     if declare -F format_review_failure_comment >/dev/null 2>&1; then
       comment="$(format_review_failure_comment "$summary_json" "" "" "")"
       if post_pr_review_comment "$PR_NUMBER" "$comment"; then

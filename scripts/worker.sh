@@ -351,7 +351,7 @@ worktree_manager_path() {
 }
 
 cmd_abandon() {
-  local worktree_path="" dry_run=false force=false branch base unique_commits manager_path
+  local worktree_path="" dry_run=false force=false branch base unique_commits dirty_status manager_path
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -398,10 +398,16 @@ cmd_abandon() {
   }
   base="$(cd "$worktree_path" && touchstone_worker_default_ref)"
   unique_commits="$(git -C "$worktree_path" log "$base..HEAD" --oneline 2>/dev/null || true)"
+  dirty_status="$(git -C "$worktree_path" status --porcelain 2>/dev/null || true)"
 
   if [ -n "$unique_commits" ] && [ "$force" != true ]; then
     echo "ERROR: refusing to abandon $worktree_path; branch '$branch' has commits not merged into $base." >&2
     echo "       Use --force only after confirming the work is disposable." >&2
+    return 1
+  fi
+  if [ -n "$dirty_status" ] && [ "$force" != true ]; then
+    echo "ERROR: refusing to abandon $worktree_path; worktree has uncommitted changes." >&2
+    echo "       Use --force only after confirming the dirty worktree is disposable." >&2
     return 1
   fi
 
@@ -420,7 +426,11 @@ cmd_abandon() {
     echo "ERROR: could not find a git worktree manager for $worktree_path" >&2
     return 1
   }
-  git -C "$manager_path" worktree remove --force "$worktree_path"
+  if [ "$force" = true ]; then
+    git -C "$manager_path" worktree remove --force "$worktree_path"
+  else
+    git -C "$manager_path" worktree remove "$worktree_path"
+  fi
   if branch_has_open_or_closed_pr "$branch"; then
     echo "Kept remote branch because a PR exists for: $branch"
   elif remote_branch_exists "$manager_path" "$branch"; then
