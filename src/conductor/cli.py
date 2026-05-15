@@ -1701,6 +1701,7 @@ def _build_review_route_decision(
             priority=_semantic_priority(plan),
             shadow=True,
             estimated_input_tokens=estimated_input_tokens,
+            health_kind="review",
         )
     except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
         raise _ReviewRouteSelectionError(e, review_reasons) from e
@@ -2838,7 +2839,7 @@ def _invoke_review_with_fallback(
                     "The malformed output was not accepted as a review result; "
                     f"quarantined possible findings: {details}."
                 )
-            mark_outcome(candidate.name, "success")
+            mark_outcome(candidate.name, "success", kind="review")
             tried.append((candidate.name, "success"))
             attempts.append(
                 ReviewProviderAttempt(
@@ -2863,7 +2864,7 @@ def _invoke_review_with_fallback(
             return response, fallbacks
         except ProviderConfigError as e:
             last_exc = e
-            mark_outcome(candidate.name, "config")
+            mark_outcome(candidate.name, "config", kind="review")
             fallbacks.append(candidate.name)
             tried.append((candidate.name, "config"))
             detail = _format_fallback_error_detail(e)
@@ -2914,7 +2915,7 @@ def _invoke_review_with_fallback(
                 quarantined_contract_errors.append(e)
             if category == "rate-limit":
                 mark_rate_limited(candidate.name)
-            mark_outcome(candidate.name, category)
+            mark_outcome(candidate.name, category, kind="review")
             last_exc = e
             if not retryable:
                 raise
@@ -2948,7 +2949,7 @@ def _invoke_review_with_fallback(
             )
         except ReviewContextError as e:
             last_exc = e
-            mark_outcome(candidate.name, "review-context")
+            mark_outcome(candidate.name, "review-context", kind="review")
             fallbacks.append(candidate.name)
             tried.append((candidate.name, "review-context"))
             detail = _format_fallback_error_detail(e)

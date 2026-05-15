@@ -30,7 +30,7 @@ from conductor.providers import (
     OllamaProvider,
     OpenRouterProvider,
 )
-from conductor.router import reset_health
+from conductor.router import reset_health, reset_review_health_cache
 
 DOC_PATH = Path("docs/consumers.md")
 
@@ -114,8 +114,10 @@ def _isolated_consumer_contract_env(monkeypatch, tmp_path):
     )
     offline_mode.clear()
     reset_health()
+    reset_review_health_cache()
     yield
     offline_mode.clear()
+    reset_review_health_cache()
     reset_health()
 
 
