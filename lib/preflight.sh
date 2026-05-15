@@ -693,6 +693,9 @@ touchstone_preflight_smoke_path() {
     README.md | CHANGELOG.md | docs/* | *.md)
       return 0
       ;;
+    .cortex/.index.json)
+      return 0
+      ;;
   esac
   return 1
 }
