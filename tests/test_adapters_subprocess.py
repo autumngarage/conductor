@@ -55,11 +55,6 @@ from conductor.session_log import (
 )
 
 
-@pytest.fixture(autouse=True)
-def _isolate_xdg_cache_home(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-
-
 def _strip_gemini_auth_env(monkeypatch) -> None:
     """Clear any GEMINI/GOOGLE auth env vars inherited from the host shell.
 
