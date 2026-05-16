@@ -168,7 +168,7 @@ If there are zero blocking issues, the review is just: "LGTM."
 
 @.cortex/protocol.md
 
-<!-- conductor:begin v0.10.26 -->
+<!-- conductor:begin v0.10.27 -->
 ## Conductor delegation
 
 This project has [conductor](https://github.com/autumngarage/conductor)

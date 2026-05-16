@@ -32,6 +32,32 @@ for _var in (
 
 
 @pytest.fixture(autouse=True)
+def _isolate_xdg_cache_home(monkeypatch, tmp_path):
+    """Repo-wide isolation of conductor's user cache so tests can't pollute it.
+
+    Conductor's cache directory resolves via ``conductor.offline_mode._cache_dir``
+    which reads ``$XDG_CACHE_HOME`` and falls back to ``~/.cache``. Any test
+    that exercises a code path which writes there (delegation ledger entries,
+    stall envelopes, sessions, offline marker, OpenRouter catalog) will land
+    real artifacts in the developer's ``~/.cache/conductor/`` unless the
+    test explicitly redirects.
+
+    PR #452 fixed this for ``test_adapters_subprocess.py`` specifically (stall
+    envelope writes). This is the broader version: every test in this
+    repository runs against a tmp ``XDG_CACHE_HOME`` so the user's real
+    cache is read-only as far as the test suite is concerned. A full
+    ``uv run pytest`` should now leave ``~/.cache/conductor/`` byte-identical
+    to its pre-run state.
+
+    Tests that need a specific cache layout (e.g. seeding offline marker,
+    pre-populated catalogs) still work — they read ``XDG_CACHE_HOME`` from
+    the env and write under tmp_path, isolated from siblings *and* from
+    the developer's real cache.
+    """
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
+
+
+@pytest.fixture(autouse=True)
 def _fast_cli_network_profile(monkeypatch):
     """Keep CLI tests off the real network unless they patch this explicitly."""
     from conductor import cli
