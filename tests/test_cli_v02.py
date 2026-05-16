@@ -26,7 +26,6 @@ from click.testing import CliRunner
 
 from conductor import offline_mode
 from conductor.cli import (
-    SANDBOX_DEPRECATION_WARNING,
     _estimate_review_input_tokens,
     _estimate_text_tokens,
     _resolve_exec_max_iterations,
@@ -2438,8 +2437,6 @@ def test_exec_auto_routes_to_tool_capable_provider(mocker):
             "best",
             "--tools",
             "Read,Grep,Edit",
-            "--sandbox",
-            "read-only",
             "--task",
             "review the diff",
         ],
@@ -2447,7 +2444,6 @@ def test_exec_auto_routes_to_tool_capable_provider(mocker):
 
     assert result.exit_code == 0
     assert exec_mock.called
-    assert SANDBOX_DEPRECATION_WARNING in result.stderr
     # kimi would be skipped by the tools filter (supported_tools=frozenset()).
     assert "→ claude" in result.stderr
 
@@ -2494,7 +2490,10 @@ def test_exec_no_write_validation_passes_through_to_http_tool_provider(mocker):
 
 
 @pytest.mark.parametrize("sandbox", ["workspace-write", "read-only", "strict", "none", "surprise"])
-def test_exec_sandbox_values_warn_once_and_are_ignored(mocker, sandbox):
+def test_exec_sandbox_flag_is_hard_break(mocker, sandbox):
+    """--sandbox is removed; passing it errors loudly with a migration hint.
+    Hard-break beats silent compat for agent consumers (agents may retry
+    --sandbox from training data; silent ignore would mislead them)."""
     _stub_all_configured(mocker, {"codex"})
     exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
 
@@ -2503,12 +2502,13 @@ def test_exec_sandbox_values_warn_once_and_are_ignored(mocker, sandbox):
         ["exec", "--auto", "--sandbox", sandbox, "--no-preflight", "--task", "hi"],
     )
 
-    assert result.exit_code == 0, result.output
-    assert result.stderr.count(SANDBOX_DEPRECATION_WARNING) == 1
-    assert exec_mock.call_args.kwargs["sandbox"] == "none"
+    assert result.exit_code != 0
+    assert "--sandbox is removed" in result.output
+    assert "--permission-profile" in result.output
+    assert not exec_mock.called
 
 
-def test_exec_without_sandbox_does_not_warn(mocker):
+def test_exec_without_sandbox_succeeds_without_warning(mocker):
     _stub_all_configured(mocker, {"codex"})
     mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
 
@@ -2518,7 +2518,7 @@ def test_exec_without_sandbox_does_not_warn(mocker):
     )
 
     assert result.exit_code == 0, result.output
-    assert SANDBOX_DEPRECATION_WARNING not in result.stderr
+    assert "--sandbox is removed" not in result.stderr
 
 
 def test_exec_auto_cheapest_code_review_online_excludes_ollama_primary(mocker):

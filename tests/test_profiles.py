@@ -99,6 +99,9 @@ def test_exec_profile_uses_builtin_defaults_without_sandbox(mocker):
 
 
 def test_user_profile_overrides_builtin(mocker, monkeypatch, tmp_path):
+    """Existing profiles with a `sandbox` field continue to load (silently
+    stripped) — the hard-break is only for the explicit CLI flag, not for
+    stored user config that may have been written months ago."""
     profiles_file = tmp_path / "profiles.toml"
     profiles_file.write_text(
         '[profiles.coding]\n'
@@ -139,7 +142,6 @@ def test_user_profile_overrides_builtin(mocker, monkeypatch, tmp_path):
     assert pick_mock.call_args.kwargs["prefer"] == "balanced"
     assert pick_mock.call_args.kwargs["effort"] == "low"
     assert pick_mock.call_args.kwargs["sandbox"] == "none"
-    assert result.stderr.count(SANDBOX_DEPRECATION_WARNING) == 1
 
 
 def test_unknown_profile_raises_usage_error():
@@ -175,8 +177,6 @@ def test_explicit_flags_override_profile_defaults(mocker):
             "high",
             "--tags",
             "coding,tool-use",
-            "--sandbox",
-            "workspace-write",
             "--tools",
             "Read",
             "--no-preflight",
@@ -190,10 +190,12 @@ def test_explicit_flags_override_profile_defaults(mocker):
     assert pick_mock.call_args.kwargs["prefer"] == "best"
     assert pick_mock.call_args.kwargs["effort"] == "high"
     assert pick_mock.call_args.kwargs["sandbox"] == "none"
-    assert result.stderr.count(SANDBOX_DEPRECATION_WARNING) == 1
 
 
 def test_profile_env_cli_precedence(mocker, monkeypatch):
+    """CONDUCTOR_SANDBOX env var is silently dropped (the hard-break is
+    only on the explicit --sandbox CLI flag, not on stored config that the
+    user may have set months ago and forgotten about)."""
     monkeypatch.setenv("CONDUCTOR_PREFER", "fastest")
     monkeypatch.setenv("CONDUCTOR_EFFORT", "low")
     monkeypatch.setenv("CONDUCTOR_TAGS", "cheap")
@@ -232,7 +234,6 @@ def test_profile_env_cli_precedence(mocker, monkeypatch):
     assert pick_mock.call_args.kwargs["prefer"] == "fastest"
     assert pick_mock.call_args.kwargs["effort"] == "high"
     assert pick_mock.call_args.kwargs["sandbox"] == "none"
-    assert result.stderr.count(SANDBOX_DEPRECATION_WARNING) == 1
 
 
 def test_profiles_list_and_show_smoke(monkeypatch, tmp_path):

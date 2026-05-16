@@ -172,11 +172,16 @@ EXEC_PERMISSION_PROFILES: dict[str, frozenset[str]] = {
     "patch": frozenset({"Read", "Grep", "Glob", "Edit", "Write"}),
     "full": frozenset(VALID_TOOLS),
 }
-SANDBOX_DEPRECATION_WARNING = (
-    "[conductor] --sandbox is deprecated and ignored; conductor exec runs "
-    "unsandboxed. Use --permission-profile for an enforceable Conductor "
-    "tool whitelist."
+SANDBOX_REMOVED_MESSAGE = (
+    "--sandbox is removed; conductor exec runs unsandboxed. "
+    "Use --permission-profile for an enforceable tool whitelist "
+    "(read-only | patch | full). "
+    "Drop the --sandbox flag and the call will succeed."
 )
+# Back-compat alias for downstream consumers that imported the old name.
+# Both names point at the same string; the message itself describes the
+# new (hard-break) behavior, not the previous (silently-ignored) one.
+SANDBOX_DEPRECATION_WARNING = SANDBOX_REMOVED_MESSAGE
 VALID_EFFORT_LEVELS = ("minimal", "low", "medium", "high", "max")
 PROFILE_PRECEDENCE_TEXT = (
     "Resolution order: profile defaults < CONDUCTOR_* env vars < explicit CLI flags."
@@ -1083,9 +1088,16 @@ def _ensure_permission_profile_supported(
 def _validate_sandbox(raw: str | None, *, warn: bool = False) -> str:
     if raw is None:
         return "none"
-    if warn:
-        click.echo(SANDBOX_DEPRECATION_WARNING, err=True)
-    return "none"
+    # Hard-break per agent-first surface design: a silently-ignored flag is
+    # a hallucination trap (council feedback on the surface-simplification
+    # proposal). Agents reading old logs or training data will retry
+    # --sandbox and silently get default behavior with no signal that the
+    # flag did nothing. Raise instead so the call fails loudly and the
+    # agent rewrites the command. (The CLI flag is the only path here;
+    # profile.sandbox and CONDUCTOR_SANDBOX env get stripped before
+    # reaching this validator — see _resolve_layered_value sandbox
+    # callsite.)
+    raise click.UsageError(SANDBOX_REMOVED_MESSAGE)
 
 
 def _validate_prefer(raw: str | None) -> str:
@@ -4597,14 +4609,26 @@ def main(ctx: click.Context) -> None:
     required=True,
     type=click.Choice(SEMANTIC_KINDS),
     help=(
-        "Semantic work category. research/code are cheap single-model defaults; "
-        "council is capped OpenRouter multi-model fan-out."
+        "What kind of work this is. Picks the provider stack and physical "
+        "execution shape:\n"
+        "  research = cheap single-model lookup / synthesis\n"
+        "  code     = coding-optimized stack; --effort high switches to a "
+        "multi-turn agent loop\n"
+        "  review   = code review cascade (codex → claude → openrouter)\n"
+        "  council  = multi-model fan-out, cost-capped"
     ),
 )
 @click.option(
     "--effort",
     default=None,
-    help=f"Thinking depth: {' | '.join(VALID_EFFORT_LEVELS)} or integer budget.",
+    help=(
+        "How hard the task is. Higher levels cost more:\n"
+        "  minimal / low = single-shot, cheap models, ~$0.001-0.01/call typical\n"
+        "  medium        = balanced default, ~$0.01-0.10/call typical\n"
+        "  high / max    = curated quality stack; for --kind code this switches "
+        "to a multi-turn agent loop (10-30x cost, $0.30-1.50/session typical)\n"
+        "Or pass an integer for an explicit thinking-token budget."
+    ),
 )
 @click.option(
     "--tags",
@@ -10240,7 +10264,10 @@ def _run_exec_phase_dispatch(
 @click.option(
     "--sandbox",
     default=None,
-    help="Deprecated and ignored; exec always runs unsandboxed.",
+    help=(
+        "Removed. Pass --permission-profile {read-only|patch|full} for an "
+        "enforceable tool whitelist."
+    ),
 )
 @click.option(
     "--exclude",
@@ -10512,11 +10539,14 @@ def exec_cmd(
         permission_profile,
         env_key="CONDUCTOR_PERMISSION_PROFILE",
     )
-    sandbox = _resolve_layered_value(
-        sandbox,
-        env_key="CONDUCTOR_SANDBOX",
-        profile_value=profile_spec.sandbox if profile_spec else None,
-    )
+    # `--sandbox` is removed (raised on explicit use by _validate_sandbox).
+    # Don't consult env or profile — existing user profiles and
+    # CONDUCTOR_SANDBOX env vars shouldn't break every invocation; only
+    # the explicit CLI flag should fail loudly. This is the "hard-break
+    # the surface, soft-break the stored config" trade-off from the
+    # agent-first design discussion.
+    # sandbox stays exactly as the CLI flag passed it (None unless
+    # explicit), which routes into _validate_sandbox below.
     exclude = _resolve_layered_value(exclude, env_key="CONDUCTOR_EXCLUDE")
     provider_id, auto = _apply_offline_flag(offline=offline, provider_id=provider_id, auto=auto)
     if offline is True and provider_id == "ollama":
