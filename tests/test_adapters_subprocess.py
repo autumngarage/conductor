@@ -3080,6 +3080,26 @@ GEMINI_SAVED_JSON = """{
     }
 }"""
 
+# Gemini CLI exits 0 even when its internal `replace` tool errored mid-edit.
+# The failure is recorded in stats.tools.byName.<tool>.fail. Conductor must
+# detect this so the caller doesn't silently inherit a half-edited worktree
+# (issue #443).
+GEMINI_TOOL_FAILURE_JSON = """{
+    "response": "I started editing but ran into an error.",
+    "session_id": "tool-fail-xyz",
+    "stats": {
+        "models": {
+            "gemini-2.5-pro": {"tokens": {"input": 50, "candidates": 20}}
+        },
+        "tools": {
+            "byName": {
+                "replace": {"count": 1, "success": 0, "fail": 1, "durationMs": 12},
+                "Edit":    {"count": 2, "success": 1, "fail": 1, "durationMs": 30}
+            }
+        }
+    }
+}"""
+
 
 def test_gemini_configured_when_cli_present_and_env_authed(mocker, monkeypatch):
     mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
@@ -3238,6 +3258,52 @@ def test_gemini_exec_allows_saved_write_file_response(mocker):
     response = GeminiProvider().exec("write a file", sandbox="workspace-write")
 
     assert "has been saved" in response.text
+
+
+def test_gemini_exec_raises_when_internal_tool_failed(mocker):
+    """Regression for #443: gemini CLI exits 0 even when its `replace` (or
+    `Edit`) tool errored mid-session, leaving partial edits on disk.
+    Conductor must surface that as a ProviderHTTPError so the caller —
+    typically a parent orchestrator dispatching `conductor exec` as a
+    background task — can detect the failure instead of inheriting a
+    silently-corrupted worktree.
+    """
+    mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
+    fake = _FakePopen(stdout_schedule=[(0, GEMINI_TOOL_FAILURE_JSON)])
+
+    def factory(args, **kwargs):
+        fake.args = args
+        return fake
+
+    mocker.patch("conductor.providers.gemini.subprocess.Popen", side_effect=factory)
+
+    with pytest.raises(ProviderHTTPError) as exc:
+        GeminiProvider().exec("edit two files")
+
+    message = str(exc.value)
+    assert "tool failures" in message
+    assert "replace" in message
+    assert "Edit" in message
+    assert "partially-applied" in message
+    assert "git status" in message
+
+
+def test_gemini_exec_succeeds_when_no_tool_failures(mocker):
+    """The tool-failure check is only triggered by actual fail counts —
+    a clean run with success-only counts must still parse normally.
+    """
+    mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
+    fake = _FakePopen(stdout_schedule=[(0, GEMINI_SAVED_JSON)])
+
+    def factory(args, **kwargs):
+        fake.args = args
+        return fake
+
+    mocker.patch("conductor.providers.gemini.subprocess.Popen", side_effect=factory)
+
+    response = GeminiProvider().exec("write something")
+
+    assert response.text  # success path
 
 
 def test_gemini_exec_sets_headless_workspace_trust_env(mocker, monkeypatch):

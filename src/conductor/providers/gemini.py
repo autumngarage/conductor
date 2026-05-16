@@ -626,6 +626,14 @@ class GeminiProvider:
                 auth_prompts=tracker.prompts or None,
             )
 
+        # Gemini's CLI exits 0 even when its internal tools (replace,
+        # write_file, etc.) error mid-session. Without inspecting the JSON
+        # tool stats we silently return success and the caller doesn't
+        # learn that gemini left partial edits behind. See issue #443.
+        tool_failures = _gemini_tool_failures(data)
+        if tool_failures:
+            raise ProviderHTTPError(_gemini_tool_failure_message(tool_failures))
+
         input_tokens, output_tokens = self._sum_usage(data)
         # Gemini's JSON output may carry a session identifier under one of
         # several keys depending on CLI version (`session_id` is the
@@ -708,3 +716,39 @@ def _gemini_used_write_file(data: dict) -> bool:
         if isinstance(count, int) and count > 0:
             return True
     return False
+
+
+def _gemini_tool_failures(data: dict) -> list[tuple[str, int]]:
+    """Return (tool_name, fail_count) pairs from Gemini's per-tool stats.
+
+    Gemini CLI's JSON output records fails per tool under
+    ``stats.tools.byName.<name>.fail`` (camelCase ``byName`` since 0.36+,
+    ``by_name`` in older builds). A non-zero fail count means a tool
+    invocation errored at runtime — for ``replace`` / ``write_file`` /
+    ``Edit`` this typically leaves a partially-applied edit on disk.
+    """
+    stats = data.get("stats") or {}
+    tools = stats.get("tools") or {}
+    by_name = tools.get("byName") or tools.get("by_name") or {}
+    if not isinstance(by_name, dict):
+        return []
+    failures: list[tuple[str, int]] = []
+    for name, entry in by_name.items():
+        if not isinstance(entry, dict):
+            continue
+        fail = entry.get("fail")
+        if isinstance(fail, int) and fail > 0 and isinstance(name, str):
+            failures.append((name, fail))
+    failures.sort(key=lambda pair: (-pair[1], pair[0]))
+    return failures
+
+
+def _gemini_tool_failure_message(failures: list[tuple[str, int]]) -> str:
+    summary = ", ".join(
+        f"{name}={count}" if count != 1 else name for name, count in failures
+    )
+    return (
+        f"gemini agent reported tool failures ({summary}); "
+        "the agent may have left partially-applied edits in the working tree. "
+        "Inspect `git status --short` and revert as needed."
+    )
