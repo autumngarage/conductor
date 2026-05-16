@@ -181,8 +181,6 @@ def test_exec_log_file_writes_structured_ndjson_for_auto_route(
             "best",
             "--tools",
             "Read",
-            "--sandbox",
-            "read-only",
             "--task",
             "review the diff",
             "--log-file",
