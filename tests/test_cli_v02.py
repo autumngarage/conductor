@@ -3432,8 +3432,8 @@ def test_exec_cli_max_stall_seconds_zero_disables_watchdog(mocker):
         ("minimal", 10),
         ("low", 15),
         ("medium", 20),
-        ("high", 60),
-        ("max", 80),
+        ("high", 80),
+        ("max", 100),
     ],
 )
 def test_exec_max_iterations_default_scales_by_effort(effort, expected):

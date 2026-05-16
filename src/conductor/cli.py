@@ -193,12 +193,12 @@ EXEC_MAX_ITERATION_MULTIPLIERS = {
     "minimal": 1.0,
     "low": 1.5,
     "medium": 2.0,
-    "high": 6.0,
-    "max": 8.0,
+    "high": 8.0,
+    "max": 10.0,
 }
 EXEC_MAX_ITERATIONS_HELP = (
     "Maximum Conductor-managed tool-use loop iterations. Default scales with "
-    "--effort from base 10: minimal=10, low=15, medium=20, high=60, max=80. "
+    "--effort from base 10: minimal=10, low=15, medium=20, high=80, max=100. "
     "If --effort is unset, preserves the legacy cap of 10."
 )
 EXEC_MAX_ITERATION_PROVIDER_IDS = frozenset({"codex", "openrouter", "ollama"})
