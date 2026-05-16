@@ -75,15 +75,86 @@ jobs:
     # On the auto-trigger, skip prereleases (RCs, betas) — they shouldn't
     # land in the tap. Manual dispatch always runs so we can re-bump on
     # demand for any tag.
+    #
+    # Inline bump (not the shared workflow @ autumn-garage): the
+    # `mislav/bump-homebrew-formula-action` upstream pin (v4.1 / SHA
+    # ccf2332299a883f6af50a1d2d41e5df7904dd769) has a hard-coded
+    # `if (res.statusCode == 302)` check against GitHub's tarball
+    # redirect. GitHub now returns HTTP 303 for codeload tarball
+    # requests from GitHub Actions runners, so the action errors with
+    # "unexpected HTTP 303 response" and never writes the formula.
+    # See conductor v0.10.27 release run (2026-05-16) for repro.
+    #
+    # This job uses gh + curl directly: download the tagged tarball,
+    # compute SHA256, rewrite the formula's `url` + `sha256` lines, and
+    # PUT the new content via the GitHub Contents API. The shared
+    # workflow at autumn-garage still calls the broken action; a port
+    # of this same fix is in flight there.
     if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
     needs: source-validation
-    uses: autumngarage/autumn-garage/.github/workflows/homebrew-bump.yml@v1
-    with:
-      formula-name: conductor
-      tap-repo: autumngarage/homebrew-conductor
-      tag-name: ${{ inputs.tag_name || github.event.release.tag_name }}
-    secrets:
-      HOMEBREW_TAP_PAT: ${{ secrets.HOMEBREW_TAP_PAT }}
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag_name || github.event.release.tag_name }}
+      TAP_REPO: autumngarage/homebrew-conductor
+      FORMULA_PATH: Formula/conductor.rb
+      SOURCE_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ secrets.HOMEBREW_TAP_PAT }}
+    steps:
+      - name: Bump tap formula (curl + gh api)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${RELEASE_TAG#v}"
+          tarball_url="https://github.com/${SOURCE_REPO}/archive/refs/tags/${RELEASE_TAG}.tar.gz"
+
+          echo "::group::Download tarball and compute SHA256"
+          curl -fL --retry 3 --retry-delay 2 "$tarball_url" -o /tmp/source.tar.gz
+          sha256="$(sha256sum /tmp/source.tar.gz | awk '{print $1}')"
+          echo "version=${version}  sha256=${sha256}"
+          echo "::endgroup::"
+
+          echo "::group::Fetch current formula"
+          gh api "repos/${TAP_REPO}/contents/${FORMULA_PATH}" >/tmp/formula-meta.json
+          jq -r '.content' /tmp/formula-meta.json | base64 -d >/tmp/formula.rb
+          existing_sha="$(jq -r '.sha' /tmp/formula-meta.json)"
+          echo "existing blob sha: ${existing_sha}"
+          echo "::endgroup::"
+
+          echo "::group::Rewrite url + sha256 lines"
+          # `sed -E` with anchors so a stray `url`/`sha256` substring in
+          # the caveats block can't be hit. POSIX `[[:space:]]` instead
+          # of `\s` so the same script runs on BSD sed locally and GNU
+          # sed in the runner.
+          new_url="https://github.com/${SOURCE_REPO}/archive/refs/tags/${RELEASE_TAG}.tar.gz"
+          sed -E -i \
+            -e "s|^([[:space:]]*url )\"[^\"]+\"|\1\"${new_url}\"|" \
+            -e "s|^([[:space:]]*sha256 )\"[0-9a-f]{64}\"|\1\"${sha256}\"|" \
+            /tmp/formula.rb
+
+          if ! grep -q "\"${new_url}\"" /tmp/formula.rb; then
+            echo "::error::sed did not rewrite the url line; formula left unchanged"
+            head -10 /tmp/formula.rb
+            exit 1
+          fi
+          if ! grep -q "\"${sha256}\"" /tmp/formula.rb; then
+            echo "::error::sed did not rewrite the sha256 line; formula left unchanged"
+            head -10 /tmp/formula.rb
+            exit 1
+          fi
+          echo "::endgroup::"
+
+          echo "::group::PUT new formula content"
+          new_content_b64="$(base64 -w0 </tmp/formula.rb)"
+          commit_message="conductor ${version}
+
+          Released by GitHub Actions from ${SOURCE_REPO}@${GITHUB_SHA}."
+          gh api -X PUT "repos/${TAP_REPO}/contents/${FORMULA_PATH}" \
+            -f message="$commit_message" \
+            -f content="$new_content_b64" \
+            -f sha="$existing_sha" \
+            --jq '"committed " + .commit.sha + " — " + .commit.message'
+          echo "::endgroup::"
 
   fresh-install-smoke:
     # This runs only after the reusable workflow has committed the formula
