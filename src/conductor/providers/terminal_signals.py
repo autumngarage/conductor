@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
-FailureCategory = Literal["rate-limit", "5xx", "network", "provider-error"]
+FailureCategory = Literal["rate-limit", "5xx", "network", "tool-error", "provider-error"]
 
 RECENT_TEXT_LIMIT = 4_000
 
@@ -65,6 +65,21 @@ _NETWORK_SIGNALS = (
     "getaddrinfo failed",
 )
 
+# Patterns the agent CLI prints when its OWN internal tool call errored at
+# runtime (not an upstream rate-limit / network issue). Detecting these
+# explicitly prevents misclassifying tool failures as rate-limit when the
+# stderr buffer happens to contain rate-limit-shaped text further downstream.
+_TOOL_ERROR_SIGNALS = (
+    "error executing tool",
+    "tool execution failed",
+    "tool execution error",
+)
+
+_TOOL_ERROR_RE = re.compile(
+    r"error executing tool\s+(\S+)|tool execution (?:failed|error)[:\s]+(\S+)",
+    re.IGNORECASE,
+)
+
 _UPSTREAM_DOWN_SIGNALS = (
     "service unavailable",
     "bad gateway",
@@ -102,6 +117,7 @@ class ProviderFailureSignal:
             "rate-limit": "rate limit",
             "5xx": "upstream unavailable",
             "network": "network failure",
+            "tool-error": "tool execution error",
             "provider-error": "provider error",
         }[self.category]
         status = f" HTTP {self.status_code}" if self.status_code is not None else ""
@@ -141,6 +157,19 @@ def detect_retriable_provider_failure(
     status_codes = _status_codes(payload) if payload is not None else []
     searchable = _searchable_text(raw, payload)
     lowered = searchable.lower()
+
+    # Agent-side tool-execution errors take precedence over rate-limit
+    # detection. The agent CLI's own tool surface ("Error executing tool
+    # replace: ...") is the actionable cause; downstream rate-limit phrases
+    # in the same buffer (often unrelated noise) would otherwise mislabel
+    # the failure as a quota issue. See conductor issue #443.
+    if any(sig in lowered for sig in _TOOL_ERROR_SIGNALS):
+        return ProviderFailureSignal(
+            category="tool-error",
+            status_code=_first_status(status_codes),
+            source=source,
+            detail=_compact_tool_error_detail(raw),
+        )
 
     if (
         429 in status_codes
@@ -272,3 +301,21 @@ def _compact_detail(raw: str) -> str:
     if len(one_line) <= 500:
         return one_line
     return one_line[:497] + "..."
+
+
+def _compact_tool_error_detail(raw: str) -> str:
+    """Like _compact_detail but anchored to the tool-error message itself.
+
+    Prevents the displayed detail from being dominated by upstream noise
+    (deprecation warnings, ripgrep fallback messages) when the actionable
+    signal — "Error executing tool <name>: ..." — is what the operator
+    needs to see.
+    """
+    one_line = " ".join(raw.split())
+    match = _TOOL_ERROR_RE.search(one_line)
+    if match is None:
+        return _compact_detail(raw)
+    snippet = one_line[match.start():]
+    if len(snippet) <= 500:
+        return snippet
+    return snippet[:497] + "..."
