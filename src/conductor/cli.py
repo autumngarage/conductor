@@ -2454,6 +2454,7 @@ def _invoke_with_fallback(
             )
 
     prompted_offline = False
+    previous_provider: str | None = None
     brief_tokens = _estimate_brief_tokens(task)
     idx = 0
     while idx < len(candidates):
@@ -2543,6 +2544,7 @@ def _invoke_with_fallback(
                         effort=effort,
                         task_tags=list(decision.task_tags),
                         prefer=decision.prefer,
+                        previous_provider=previous_provider,
                         log_selection=not silent,
                         tools=tools,
                         sandbox=sandbox,
@@ -2628,6 +2630,7 @@ def _invoke_with_fallback(
                         effort=effort,
                         task_tags=list(decision.task_tags),
                         prefer=decision.prefer,
+                        previous_provider=previous_provider,
                         log_selection=not silent,
                         timeout_sec=attempt_timeout_sec,
                         max_stall_sec=attempt_max_stall_sec,
@@ -2731,6 +2734,7 @@ def _invoke_with_fallback(
                         f"falling through to {next_name} (falling back → {next_name})",
                         err=True,
                     )
+            previous_provider = candidate.name
             idx += 1
             continue
 
@@ -2816,6 +2820,7 @@ def _invoke_review_with_fallback(
                     effort=effort,
                     task_tags=list(decision.task_tags),
                     prefer=decision.prefer,
+                    previous_provider=(candidates[idx - 1].name if idx > 0 else None),
                     log_selection=not silent,
                     timeout_sec=attempt_timeout_sec,
                     max_stall_sec=attempt_max_stall_sec,

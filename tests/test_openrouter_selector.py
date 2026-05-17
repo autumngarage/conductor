@@ -8,6 +8,8 @@ import conductor.providers.openrouter_catalog as openrouter_catalog
 from conductor.openrouter_model_stacks import (
     OPENROUTER_CODING_HIGH,
     OPENROUTER_CODING_MAX,
+    bump_family_to_end,
+    model_family,
 )
 from conductor.providers.interface import ProviderError
 from conductor.providers.openrouter import (
@@ -283,3 +285,27 @@ def test_empty_filtered_result_raises_clear_error(mocker, fixture_catalog):
 
     with pytest.raises(ProviderError, match="tags filtered to empty"):
         select_model_for_task(["vision", "thinking"], "cheapest", "medium")
+
+
+def test_model_family_detects_prefix() -> None:
+    assert model_family("openai/gpt-5.3-codex") == "openai"
+    assert model_family("anthropic/claude-sonnet-4.6") == "anthropic"
+
+
+def test_bump_family_to_end_preserves_relative_order() -> None:
+    assert bump_family_to_end(
+        ("openai/x", "anthropic/y", "openai/z", "google/w"),
+        "openai",
+    ) == ("anthropic/y", "google/w", "openai/x", "openai/z")
+
+
+def test_tool_use_selector_bumps_previous_provider_family_to_end() -> None:
+    payload = select_model_for_task(
+        ["tool-use"],
+        "best",
+        "high",
+        previous_provider="codex",
+    )
+
+    assert payload["models"]
+    assert not str(payload["models"][0]).startswith("openai/")
