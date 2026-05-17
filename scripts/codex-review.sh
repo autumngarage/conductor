@@ -4590,9 +4590,14 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
       AUTOFIX_CHANGED_PATHS="$(changed_paths)"
       if [ -z "$AUTOFIX_CHANGED_PATHS" ]; then
         echo "==> $REVIEWER_LABEL emitted FIXED but no working-tree changes detected."
-        echo "    Treating as ambiguous — not blocking push."
-        log_skip_event other "ambiguous-fixed-no-changes:iter=${iter}"
-        exit 0
+        echo "    Treating as ambiguous — blocking push and surfacing reviewer output."
+        REVIEW_FINDINGS_COUNT="$(extract_findings_block "$OUTPUT" | grep -c '^- ' || true)"
+        REVIEW_EXIT_REASON="ambiguous-fixed-no-changes"
+        write_review_findings "$OUTPUT"
+        append_findings_history_event "CODEX_REVIEW_BLOCKED" "$iter" "$OUTPUT" 0
+        print_summary
+        log_skip_event ran "ambiguous-fixed-no-changes:iter=${iter}:findings=${REVIEW_FINDINGS_COUNT}"
+        exit 1
       fi
 
       if [ "$WORKTREE_DIRTY_BEFORE_REVIEW" = true ]; then

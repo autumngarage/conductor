@@ -399,3 +399,69 @@ def test_codex_review_wrapper_requires_conductor_review_command(
     assert any(line.startswith("review ") for line in conductor_invocations)
     assert not any(line.startswith("exec ") for line in conductor_invocations)
     assert "reviewer exit 2" in result.stdout
+
+
+def test_codex_review_wrapper_blocks_ambiguous_fixed_without_changes(
+    tmp_path: Path,
+) -> None:
+    repo, env = _make_review_repo(tmp_path)
+    fakes = tmp_path / "fakes"
+    fakes.mkdir()
+    summary_file = tmp_path / "review-summary.json"
+    review_log = tmp_path / "review-log.tsv"
+
+    conductor = fakes / "conductor"
+    conductor.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            case "$1" in
+              doctor)
+                printf '{"configured": true}\\n'
+                ;;
+              review|exec)
+                cat >/dev/null
+                printf 'Potential concern: freshness canary no longer covers the new source.\\n'
+                printf 'CODEX_REVIEW_FIXED\\n'
+                ;;
+              *)
+                exit 1
+                ;;
+            esac
+            """
+        ),
+        encoding="utf-8",
+    )
+    conductor.chmod(0o755)
+
+    script = Path(__file__).resolve().parent.parent / "scripts" / "codex-review.sh"
+    result = subprocess.run(
+        ["bash", str(script)],
+        cwd=repo,
+        env={
+            **env,
+            "PATH": f"{fakes}:{os.environ.get('PATH', '')}",
+            "CODEX_REVIEW_BASE": "HEAD~1",
+            "CODEX_REVIEW_MODE": "fix",
+            "CODEX_REVIEW_DISABLE_CACHE": "1",
+            "CODEX_REVIEW_TIMEOUT": "5",
+            "CODEX_REVIEW_SUMMARY_FILE": str(summary_file),
+            "TOUCHSTONE_REVIEW_LOG": str(review_log),
+            "NO_COLOR": "1",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "emitted FIXED but no working-tree changes detected" in result.stdout
+    assert "Treating as ambiguous — blocking push" in result.stdout
+    assert "exit reason:    ambiguous-fixed-no-changes" in result.stdout
+
+    summary = summary_file.read_text(encoding="utf-8")
+    assert '"exit_reason":"ambiguous-fixed-no-changes"' in summary
+
+    log_lines = review_log.read_text(encoding="utf-8").splitlines()
+    assert log_lines
+    assert "\tran\tambiguous-fixed-no-changes:" in log_lines[-1]
