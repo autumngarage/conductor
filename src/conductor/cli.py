@@ -78,6 +78,13 @@ from conductor.git_state import (
     StaleBranch,
     scan_git_state,
 )
+from conductor.hook_scope_detect import (
+    _run_git_command,
+    detect_hook_staged_scope_creep,
+    format_hook_scope_creep_warning,
+    git_head_via_fs,
+    normalize_repo_relative_path,
+)
 from conductor.internal_config import InternalConfigError, internal_telemetry_enabled
 from conductor.muted_providers import (
     MutedProvidersError,
@@ -4033,6 +4040,73 @@ def _collect_session_auth_prompts(session_log: SessionLog | None) -> list[dict] 
     return prompts or None
 
 
+def _collect_exec_agent_write_set(session_log: SessionLog | None, *, cwd: Path) -> set[str]:
+    if session_log is None:
+        return set()
+    try:
+        lines = session_log.log_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return set()
+
+    write_set: set[str] = set()
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("event") != "tool_call":
+            continue
+        data = event.get("data")
+        if not isinstance(data, dict):
+            continue
+        name = data.get("name")
+        if name not in {"Edit", "Write"}:
+            continue
+        args = data.get("args")
+        if not isinstance(args, dict):
+            continue
+        path = args.get("path")
+        if not isinstance(path, str):
+            continue
+        normalized = normalize_repo_relative_path(path, worktree=cwd)
+        if normalized is not None:
+            write_set.add(normalized)
+    return write_set
+
+
+def _emit_exec_hook_scope_creep_warnings(
+    *,
+    cwd: str | None,
+    session_log: SessionLog | None,
+    phase_start_head: str | None,
+) -> None:
+    if phase_start_head is None:
+        return
+
+    worktree = Path(cwd or os.getcwd()).resolve()
+    intended = _collect_exec_agent_write_set(session_log, cwd=worktree)
+    if not intended:
+        return
+
+    current_head = git_head_via_fs(worktree)
+    if current_head is None or current_head == phase_start_head:
+        return
+
+    creep_groups = detect_hook_staged_scope_creep(
+        worktree,
+        intended,
+        base_head=phase_start_head,
+    )
+    for extras in creep_groups:
+        click.echo(
+            format_hook_scope_creep_warning(
+                extra_paths=extras,
+                intended_paths=intended,
+            ),
+            err=True,
+        )
+
+
 def _git_stdout(cwd: str, args: list[str], *, errors: list[str]) -> str | None:
     try:
         result = subprocess.run(
@@ -6112,22 +6186,18 @@ _EXEC_PHASE_GIT_TIMEOUT_SEC = 10.0
 
 def _git_phase_head(cwd: str | None) -> str | None:
     worktree = cwd or os.getcwd()
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=worktree,
-            capture_output=True,
-            text=True,
-            timeout=_EXEC_PHASE_GIT_TIMEOUT_SEC,
-            check=True,
-        )
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+    output = _run_git_command(
+        ["git", "rev-parse", "HEAD"],
+        cwd=Path(worktree),
+        timeout_sec=_EXEC_PHASE_GIT_TIMEOUT_SEC,
+    )
+    if output is None:
         click.echo(
-            f"[conductor] warning: could not capture phase git HEAD in {worktree}: {e}",
+            f"[conductor] warning: could not capture phase git HEAD in {worktree}",
             err=True,
         )
         return None
-    return result.stdout.strip()
+    return output.strip() or None
 
 
 def _git_phase_output(cwd: str | None, args: list[str]) -> str | None:
@@ -10654,6 +10724,9 @@ def exec_cmd(
         brief_input = _with_auto_close_instructions(brief_input)
         phase_started_at = time.monotonic()
         phase_start_head = _git_phase_head(cwd) if multi_phase else None
+        scope_creep_start_head = git_head_via_fs(
+            Path(cwd or os.getcwd()).resolve()
+        )
         try:
             response, decision, session_log = _run_exec_phase_dispatch(
                 provider_id=provider_id,
@@ -10709,6 +10782,12 @@ def exec_cmd(
             sys.exit(e.exit_code)
 
 
+
+        _emit_exec_hook_scope_creep_warnings(
+            cwd=cwd,
+            session_log=session_log,
+            phase_start_head=scope_creep_start_head,
+        )
 
         final_response = response
         final_decision = decision
