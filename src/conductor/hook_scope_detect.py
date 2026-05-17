@@ -67,7 +67,12 @@ def git_head(worktree: Path) -> str | None:
 
 
 def git_head_via_fs(worktree: Path) -> str | None:
-    """Read git HEAD from the filesystem, no subprocess. Returns None if not in a repo."""
+    """Read git HEAD from the filesystem, no subprocess. Returns None if not in a repo.
+
+    Handles linked worktrees: HEAD lives in the worktree's gitdir but shared
+    refs (`refs/heads/...`, `packed-refs`) live in `commondir` (the main repo's
+    .git). Search both locations when resolving a symbolic ref.
+    """
     git_dir = _resolve_git_dir(worktree)
     if git_dir is None:
         return None
@@ -76,24 +81,43 @@ def git_head_via_fs(worktree: Path) -> str | None:
         contents = head_file.read_text(encoding="utf-8").strip()
     except OSError:
         return None
-    if contents.startswith("ref: "):
-        ref_path = contents[5:].strip()
-        ref_file = git_dir / ref_path
+    if not contents.startswith("ref: "):
+        return contents or None
+    ref_path = contents[5:].strip()
+    common = _read_commondir(git_dir)
+    search_dirs: list[Path] = [git_dir]
+    if common is not None and common != git_dir:
+        search_dirs.append(common)
+    for d in search_dirs:
         try:
-            return ref_file.read_text(encoding="utf-8").strip() or None
+            value = (d / ref_path).read_text(encoding="utf-8").strip()
+            if value:
+                return value
         except OSError:
-            packed = git_dir / "packed-refs"
-            try:
-                for line in packed.read_text(encoding="utf-8").splitlines():
-                    if line.startswith(("#", "^")):
-                        continue
-                    parts = line.split(None, 1)
-                    if len(parts) == 2 and parts[1] == ref_path:
-                        return parts[0]
-            except OSError:
-                return None
-            return None
-    return contents or None
+            continue
+    for d in search_dirs:
+        try:
+            lines = (d / "packed-refs").read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            if line.startswith(("#", "^")):
+                continue
+            parts = line.split(None, 1)
+            if len(parts) == 2 and parts[1] == ref_path:
+                return parts[0]
+    return None
+
+
+def _read_commondir(git_dir: Path) -> Path | None:
+    try:
+        line = (git_dir / "commondir").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    candidate = Path(line)
+    if not candidate.is_absolute():
+        candidate = (git_dir / candidate).resolve()
+    return candidate if candidate.is_dir() else None
 
 
 def _resolve_git_dir(worktree: Path) -> Path | None:

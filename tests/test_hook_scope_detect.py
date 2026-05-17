@@ -171,3 +171,26 @@ def test_git_head_via_fs_resolves_from_subdirectory(tmp_path: Path) -> None:
 
     assert head_from_root is not None
     assert head_from_root == head_from_sub
+
+
+def test_git_head_via_fs_resolves_in_linked_worktree(tmp_path: Path) -> None:
+    # Regression: linked worktrees keep HEAD in worktree-local gitdir but
+    # refs/heads/* lives in commondir (the main repo's .git). git_head_via_fs
+    # must follow commondir to resolve the symbolic ref.
+    main_repo = tmp_path / "main"
+    main_repo.mkdir()
+    _init_repo(main_repo)
+
+    wt_path = tmp_path / "wt-branch"
+    _git(main_repo, "worktree", "add", "-b", "feature", str(wt_path))
+
+    head_from_main = git_head_via_fs(main_repo)
+    head_from_wt = git_head_via_fs(wt_path)
+
+    assert head_from_main is not None
+    assert head_from_wt is not None
+    # Both heads should resolve to a SHA (40-char hex) — same commit since
+    # both branches point at the initial commit.
+    assert len(head_from_main) == 40
+    assert len(head_from_wt) == 40
+    assert head_from_main == head_from_wt
