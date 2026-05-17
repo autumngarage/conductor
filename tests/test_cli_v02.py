@@ -759,6 +759,7 @@ def test_ask_code_high_falls_back_immediately_to_openrouter_on_quota(mocker):
     assert codex_exec.called
     assert openrouter_exec.called
     assert openrouter_exec.call_args.kwargs["models"] == OPENROUTER_CODING_HIGH
+    assert openrouter_exec.call_args.kwargs["previous_provider"] == "codex"
     assert "codex failed (rate-limit)" in result.stderr
     assert "falling back" in result.stderr
     assert "→ openrouter" in result.stderr
