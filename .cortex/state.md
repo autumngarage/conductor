@@ -1,9 +1,9 @@
 ---
-Generated: 2026-05-17T12:47:26-04:00
+Generated: 2026-05-17T17:11:42-04:00
 Generator: cortex refresh-state v1.6.4
 Sources:
-  - HEAD sha: 415c62cc7ab0059e563d66fd698b2707d7565379
-  - .cortex/plans/*.md (1 files)
+  - HEAD sha: f67e6d96bb81d92a384c2295b92655623ab13c7e
+  - .cortex/plans/*.md (2 files)
   - .cortex/journal/*.md (26 entries, 2026-04-24..2026-05-17)
   - .cortex/doctrine/*.md (6 entries)
   - .cortex/templates/**/*.md (12 templates)
@@ -44,6 +44,7 @@ Sources-hash:
   .cortex/journal/2026-05-15-alchemist-447.md: c4e59ec94345d9a864fe812c78c2a5cfd06428c8ad452128b6914004cb37c864
   .cortex/journal/2026-05-17-pr-merged-1247.md: bb6436572f1be9273092e8ec20f163791957af15cc0ff7edad8fe3c3a893908e
   .cortex/plans/conductor-blindspots.md: 69b7cec18f5893a5edfe83e3d095eb9ae7e57d5e9e117adf73e417f31ebe11a0
+  .cortex/plans/root-cause-roadmap.md: f9c6019725a55f0822887bc79acc190734cb8df1ae30e5126d7e0412a490fd6c
   .cortex/templates/README.md: 695aa2e623bd7f4e698dae471bded0cde354da0c1d8589266660ceb1be8efad1
   .cortex/templates/digest/monthly.md: 0c13cf6781d15e0858544e3919166a7c123698066e6c93fc70a3b808a8239813
   .cortex/templates/digest/quarterly.md: 8750f1eb703b158d30869204737b071213d2b33370af86ce85daed1f48943f98
@@ -56,7 +57,7 @@ Sources-hash:
   .cortex/templates/journal/release.md: 9a6bc59219156e48b419fb170c7c50ff557767def8672ef20568df3e14eadbd0
   .cortex/templates/journal/sentinel-cycle.md: 2945e2d94af4ec9848584b4b3e9cea7060d2968dd42e78faf21fb6f859137476
   .cortex/templates/plans/template.md: d8156cfa3b86acd2a1fbb36cff07cae37d99f3adee7f72b14b7b16e645c51b44
-Corpus: 26 Journal entries, 1 Plans, 6 Doctrine entries, 12 Templates, 0 Case studies
+Corpus: 26 Journal entries, 2 Plans, 6 Doctrine entries, 12 Templates, 0 Case studies
 Omitted:
   []
 Incomplete:
@@ -70,6 +71,7 @@ Spec: 0.5.0
 ## Active plans
 
 - `conductor-blindspots` — Conductor Blindspot Remediation — Top 3; Goal-hash `b400fba9`; 20% complete (5/25 checkboxes)
+- `root-cause-roadmap` — Conductor Root-Cause Roadmap — Structural Redesigns; Goal-hash `7a463092`; 24% complete (6/25 checkboxes)
 
 ## Shipped recently
 
