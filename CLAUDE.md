@@ -6,7 +6,7 @@ Conductor is a small CLI that owns LLM provider adapters and the user-facing "pi
 
 You are building the fourth peer of the Autumn Garage. The trio (Touchstone, Cortex, Sentinel) composes through file contracts, not shared code. Conductor extends that pattern: it's an independently-released CLI that other garage tools call as a subprocess, never import as a library.
 
-"Good" looks like: a stable, narrow CLI surface (`conductor call`, `conductor list`, `conductor smoke`, `conductor init`, `conductor doctor`); provider adapters that follow the same Provider Protocol regardless of whether they wrap an HTTP API or a CLI; auto-mode routing that's documented and predictable, never magical; setup UX that satisfies Doctrine 0002 (interactive on TTY, flag-driven in CI).
+"Good" looks like: a stable, narrow CLI surface (`conductor call`, `conductor list`, `conductor smoke`, `conductor init`, `conductor doctor`); provider adapters that follow the same Provider Protocol regardless of whether they wrap an HTTP API or a CLI; auto-mode routing that's documented and predictable, never magical; setup UX that satisfies Doctrine 0002 (interactive on TTY, flag-driven in CI); and a hard bias against band-aid fixes — every bug-fix runs the pattern-check process in `principles/bug-triage.md` before implementation begins.
 
 The companion plan in autumn-garage names what v0.1 ships and what's deferred: `~/Repos/autumn-garage/.cortex/plans/conductor-bootstrap.md`. The doctrine that establishes Conductor's role is `~/Repos/autumn-garage/.cortex/doctrine/0004-conductor-as-fourth-peer.md`.
 
@@ -15,6 +15,7 @@ The companion plan in autumn-garage names what v0.1 ships and what's deferred: `
 @principles/engineering-principles.md
 @principles/pre-implementation-checklist.md
 @principles/audit-weak-points.md
+@principles/bug-triage.md
 @principles/documentation-ownership.md
 
 ## Git Workflow
