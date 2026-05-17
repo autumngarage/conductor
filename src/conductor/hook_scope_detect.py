@@ -97,21 +97,30 @@ def git_head_via_fs(worktree: Path) -> str | None:
 
 
 def _resolve_git_dir(worktree: Path) -> Path | None:
-    """Return the .git directory for a worktree, handling worktree's .git-file indirection."""
-    candidate = worktree / ".git"
-    if candidate.is_dir():
-        return candidate
-    if candidate.is_file():
-        try:
-            line = candidate.read_text(encoding="utf-8").strip()
-        except OSError:
+    """Return the .git directory for a worktree, walking parents and handling
+    worktree's .git-file indirection."""
+    try:
+        current = worktree.resolve()
+    except OSError:
+        current = worktree
+    while True:
+        candidate = current / ".git"
+        if candidate.is_dir():
+            return candidate
+        if candidate.is_file():
+            try:
+                line = candidate.read_text(encoding="utf-8").strip()
+            except OSError:
+                return None
+            if line.startswith("gitdir: "):
+                git_dir = Path(line[len("gitdir: ") :].strip())
+                if not git_dir.is_absolute():
+                    git_dir = (current / git_dir).resolve()
+                return git_dir if git_dir.exists() else None
             return None
-        if line.startswith("gitdir: "):
-            git_dir = Path(line[len("gitdir: ") :].strip())
-            if not git_dir.is_absolute():
-                git_dir = (worktree / git_dir).resolve()
-            return git_dir if git_dir.exists() else None
-    return None
+        if current.parent == current:
+            return None
+        current = current.parent
 
 
 def normalize_repo_relative_path(path: str, *, worktree: Path) -> str | None:
@@ -126,7 +135,9 @@ def normalize_repo_relative_path(path: str, *, worktree: Path) -> str | None:
             return None
         normalized = relative.as_posix()
     else:
-        normalized = candidate.as_posix().lstrip("./")
+        normalized = candidate.as_posix()
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
     return normalized or None
 
 

@@ -5,16 +5,18 @@ import os
 import shutil
 import stat
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
 
 import pytest
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
 from conductor import cli
-from conductor.hook_scope_detect import detect_hook_staged_scope_creep, git_head
+from conductor.hook_scope_detect import (
+    detect_hook_staged_scope_creep,
+    git_head,
+    git_head_via_fs,
+    normalize_repo_relative_path,
+)
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
 
@@ -142,3 +144,30 @@ def test_emit_exec_warning_quiet_when_commit_matches_intended(
 
     stderr = capsys.readouterr().err
     assert "commit grew by hook" not in stderr
+
+
+def test_normalize_preserves_dotfile_leading_dot() -> None:
+    # Regression: `.lstrip("./")` would strip leading dots from `.env`. We need
+    # to strip only `./` prefixes, not individual `.` characters.
+    assert normalize_repo_relative_path(".env", worktree=Path("/tmp/x")) == ".env"
+    assert (
+        normalize_repo_relative_path("./src/.env", worktree=Path("/tmp/x"))
+        == "src/.env"
+    )
+    assert normalize_repo_relative_path("./.env", worktree=Path("/tmp/x")) == ".env"
+
+
+def test_git_head_via_fs_resolves_from_subdirectory(tmp_path: Path) -> None:
+    # Regression: _resolve_git_dir() must walk parents so a subdirectory cwd
+    # still finds the repo root's .git directory.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_repo(repo)
+    sub = repo / "src" / "deep"
+    sub.mkdir(parents=True)
+
+    head_from_root = git_head_via_fs(repo)
+    head_from_sub = git_head_via_fs(sub)
+
+    assert head_from_root is not None
+    assert head_from_root == head_from_sub
