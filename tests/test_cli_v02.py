@@ -3432,11 +3432,12 @@ def test_exec_cli_max_stall_seconds_zero_disables_watchdog(mocker):
         ("minimal", 10),
         ("low", 15),
         ("medium", 20),
-        ("high", 60),
-        ("max", 80),
+        ("high", 100),
+        ("max", 140),
     ],
 )
 def test_exec_max_iterations_default_scales_by_effort(effort, expected):
+    # Regression for #459: keep high/max defaults high enough for real refactor loops.
     assert _resolve_exec_max_iterations(None, raw_effort=effort) == expected
 
 
