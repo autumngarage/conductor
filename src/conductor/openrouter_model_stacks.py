@@ -46,6 +46,40 @@ OPENROUTER_CODING_MAX: tuple[str, ...] = (
 )
 
 
+def model_family(model: str) -> str:
+    """Return the lowercased provider family prefix for a model slug."""
+    head, sep, _tail = model.partition("/")
+    if not sep or not head:
+        return ""
+    return head.lower()
+
+
+def bump_family_to_end(models: tuple[str, ...], family: str) -> tuple[str, ...]:
+    """Move the named model family to the end while preserving order."""
+    normalized = family.strip().lower()
+    if not normalized:
+        return models
+
+    keep: list[str] = []
+    bumped: list[str] = []
+    for model in models:
+        if model_family(model) == normalized:
+            bumped.append(model)
+        else:
+            keep.append(model)
+    return tuple([*keep, *bumped])
+
+
+def provider_family_hint(provider_id: str) -> str | None:
+    """Return a model-family hint for a provider id when known."""
+    mapping = {
+        "codex": "openai",
+        "claude": "anthropic",
+        "gemini": "google",
+    }
+    return mapping.get(provider_id.strip().lower())
+
+
 def openrouter_coding_stack(effort: str | int) -> tuple[str, ...]:
     """Return the OpenRouter model stack for tool-using coding work."""
     if effort == "max":

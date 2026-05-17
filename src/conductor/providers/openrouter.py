@@ -29,7 +29,11 @@ from conductor.exec_completion import (
     detect_missing_deliverables,
     format_missing_deliverables_cap_message,
 )
-from conductor.openrouter_model_stacks import openrouter_coding_stack
+from conductor.openrouter_model_stacks import (
+    bump_family_to_end,
+    openrouter_coding_stack,
+    provider_family_hint,
+)
 from conductor.providers.interface import (
     PROVIDER_RUNTIME_STATELESS_TOOL_LOOP,
     CallResponse,
@@ -260,6 +264,7 @@ class OpenRouterProvider:
         task_tags: list[str] | tuple[str, ...] | None,
         prefer: str,
         exclude: set[str] | frozenset[str] | None,
+        previous_provider: str | None,
         log_selection: bool,
     ) -> tuple[dict, str]:
         if model is not None and models:
@@ -294,6 +299,7 @@ class OpenRouterProvider:
                 prefer=prefer,
                 effort=effort,
                 exclude=exclude,
+                previous_provider=previous_provider,
             )
             payload.update(selector_payload)
             if "models" in payload:
@@ -308,6 +314,7 @@ class OpenRouterProvider:
                     task_tags=task_tags,
                     prefer=prefer,
                     payload=payload,
+                    previous_provider=previous_provider,
                 )
         else:
             payload["model"] = selected_model
@@ -327,6 +334,7 @@ class OpenRouterProvider:
         task_tags: list[str] | tuple[str, ...] | None = None,
         prefer: str = "balanced",
         exclude: set[str] | frozenset[str] | None = None,
+        previous_provider: str | None = None,
         log_selection: bool = True,
         max_tokens: int | None = None,
         timeout_sec: int | None = None,
@@ -352,6 +360,7 @@ class OpenRouterProvider:
             task_tags=task_tags,
             prefer=prefer,
             exclude=exclude,
+            previous_provider=previous_provider,
             log_selection=log_selection,
         )
         payload: dict = {
@@ -433,6 +442,7 @@ class OpenRouterProvider:
         task_tags: list[str] | tuple[str, ...] | None = None,
         prefer: str = "balanced",
         exclude: set[str] | frozenset[str] | None = None,
+        previous_provider: str | None = None,
         log_selection: bool = True,
         tools: frozenset[str] = frozenset(),
         sandbox: str = "none",
@@ -459,6 +469,7 @@ class OpenRouterProvider:
                 task_tags=task_tags,
                 prefer=prefer,
                 exclude=exclude,
+                previous_provider=previous_provider,
                 log_selection=log_selection,
                 timeout_sec=timeout_sec,
                 max_stall_sec=max_stall_sec,
@@ -482,6 +493,7 @@ class OpenRouterProvider:
             task_tags=effective_task_tags,
             prefer=prefer,
             exclude=exclude,
+            previous_provider=previous_provider,
             log_selection=log_selection,
         )
         empty_response_retry_base = (
@@ -1179,6 +1191,7 @@ def select_model_for_task(
     prefer: str,
     effort: str | int,
     exclude: set[str] | frozenset[str] | None = None,
+    previous_provider: str | None = None,
 ) -> dict[str, object]:
     """Select an OpenRouter completion target.
 
@@ -1199,6 +1212,7 @@ def select_model_for_task(
 
     task_tag_set = set(task_tags or [])
     exclude_set = set(exclude or ())
+    family_hint = provider_family_hint(previous_provider or "")
 
     if prefer in {"best", "balanced"}:
         if "tool-use" in task_tag_set:
@@ -1207,6 +1221,8 @@ def select_model_for_task(
                 for model in openrouter_coding_stack(effort)
                 if model not in exclude_set
             )
+            if family_hint is not None:
+                coding_stack = bump_family_to_end(coding_stack, family_hint)
             if not coding_stack:
                 raise ProviderError(
                     "OpenRouter coding stack was fully excluded. "
@@ -1323,6 +1339,7 @@ def _log_selector_choice(
     task_tags: list[str] | tuple[str, ...] | None,
     prefer: str,
     payload: dict[str, object],
+    previous_provider: str | None,
 ) -> None:
     tags_text = ",".join(task_tags or []) or "none"
     if "models" in payload:
@@ -1337,8 +1354,16 @@ def _log_selector_choice(
         target = f"auto shortlist={shortlist}" if shortlist else "auto unrestricted"
     else:
         target = f"model={payload['model']}"
+    annotation = ""
+    family_hint = provider_family_hint(previous_provider or "")
+    if family_hint is not None and "models" in payload:
+        annotation = (
+            f" (recovering from {previous_provider} stall — "
+            f"bumping {family_hint}/* down)"
+        )
     sys.stderr.write(
-        f"[conductor] openrouter selector: tags={tags_text} prefer={prefer} -> {target}\n"
+        "[conductor] openrouter selector: "
+        f"tags={tags_text} prefer={prefer}{annotation} -> {target}\n"
     )
     sys.stderr.flush()
 

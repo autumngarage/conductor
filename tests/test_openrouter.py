@@ -539,6 +539,7 @@ def test_call_without_model_invokes_selector_and_builds_payload(configured, mock
         prefer="balanced",
         effort="medium",
         exclude=None,
+        previous_provider=None,
     )
     assert captured["payload"] == {
         "model": OPENROUTER_DEFAULT_MODEL,
