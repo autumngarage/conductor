@@ -1,15 +1,15 @@
 ---
-Generated: 2026-05-13T09:13:16-04:00
-Generator: cortex refresh-state v1.6.3
+Generated: 2026-05-17T12:47:26-04:00
+Generator: cortex refresh-state v1.6.4
 Sources:
-  - HEAD sha: 029862ccc1821cd399dd1c292448987aec15cc7b
+  - HEAD sha: 415c62cc7ab0059e563d66fd698b2707d7565379
   - .cortex/plans/*.md (1 files)
-  - .cortex/journal/*.md (24 entries, 2026-04-24..2026-05-11)
+  - .cortex/journal/*.md (26 entries, 2026-04-24..2026-05-17)
   - .cortex/doctrine/*.md (6 entries)
   - .cortex/templates/**/*.md (12 templates)
   - docs/case-studies/*.md (0 case studies)
   - SPEC version: 0.5.0
-  - pyproject.toml: conductor + cortex package version: 1.6.3
+  - pyproject.toml: conductor + cortex package version: 1.6.4
 Sources-hash:
   .cortex/doctrine/0001-readme.md: 6ba51021185ac81b252780f755f85f6afe388518f9c90009a0b14c1e60b54153
   .cortex/doctrine/0002-audit-weak-points.md: 9d0dbf91fd4af7b42c1e16ecefae6ab228f369bf83d70ca2019de59c60947d55
@@ -41,6 +41,8 @@ Sources-hash:
   .cortex/journal/2026-05-11-pr-354-merged.md: a08ee660f35f363428c19436e42fc916de10e5f763e3568e0edcf652eccbbd42
   .cortex/journal/2026-05-11-pr-355-merged.md: 6606a755d646fb807f4a4853283b797fb8971ddc1436aab28cbc71ba98852b63
   .cortex/journal/2026-05-11-pr-356-merged.md: f62f6f43175b771f73c1a53797b634f88d5af23c18018e87817815ee6ba3521a
+  .cortex/journal/2026-05-15-alchemist-447.md: c4e59ec94345d9a864fe812c78c2a5cfd06428c8ad452128b6914004cb37c864
+  .cortex/journal/2026-05-17-pr-merged-1247.md: bb6436572f1be9273092e8ec20f163791957af15cc0ff7edad8fe3c3a893908e
   .cortex/plans/conductor-blindspots.md: 69b7cec18f5893a5edfe83e3d095eb9ae7e57d5e9e117adf73e417f31ebe11a0
   .cortex/templates/README.md: 695aa2e623bd7f4e698dae471bded0cde354da0c1d8589266660ceb1be8efad1
   .cortex/templates/digest/monthly.md: 0c13cf6781d15e0858544e3919166a7c123698066e6c93fc70a3b808a8239813
@@ -54,7 +56,7 @@ Sources-hash:
   .cortex/templates/journal/release.md: 9a6bc59219156e48b419fb170c7c50ff557767def8672ef20568df3e14eadbd0
   .cortex/templates/journal/sentinel-cycle.md: 2945e2d94af4ec9848584b4b3e9cea7060d2968dd42e78faf21fb6f859137476
   .cortex/templates/plans/template.md: d8156cfa3b86acd2a1fbb36cff07cae37d99f3adee7f72b14b7b16e645c51b44
-Corpus: 24 Journal entries, 1 Plans, 6 Doctrine entries, 12 Templates, 0 Case studies
+Corpus: 26 Journal entries, 1 Plans, 6 Doctrine entries, 12 Templates, 0 Case studies
 Omitted:
   []
 Incomplete:
@@ -89,6 +91,7 @@ Spec: 0.5.0
 - **2026-05-11** — PR #354 merged - reject no-context OpenRouter review output (`.cortex/journal/2026-05-11-pr-354-merged.md`, Type: pr-merged)
 - **2026-05-11** — PR #355 merged - classify OpenRouter pre-output failures (`.cortex/journal/2026-05-11-pr-355-merged.md`, Type: pr-merged)
 - **2026-05-11** — PR #356 merged - force terminal review answer near tool cap (`.cortex/journal/2026-05-11-pr-356-merged.md`, Type: pr-merged)
+- **2026-05-17** — PR #467 merged — --body-file (`.cortex/journal/2026-05-17-pr-merged-1247.md`, Type: pr-merged)
 
 ## Stale-now / handle-later
 
