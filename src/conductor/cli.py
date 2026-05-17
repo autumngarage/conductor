@@ -796,6 +796,32 @@ def _reject_call_mode_side_effect_brief(kind: str, body: str) -> None:
     )
 
 
+def _call_mode_requests_grounded_citations(body: str) -> bool:
+    patterns = (
+        re.compile(r"(?i)\bverify every path you cite\b"),
+        re.compile(r"(?i)\bcite\b.{0,120}\bpath\s*:\s*line\b"),
+        re.compile(r"(?i)\bpath\s*:\s*line\b.{0,120}\bcite\b"),
+        re.compile(r"(?i)\bcitation\b.{0,120}\b(path|line|file)\b"),
+        re.compile(r"(?i)\b(verify|validate|confirm|ground)\b.{0,120}\b(citation|citations|path|line)\b"),
+    )
+    return any(pattern.search(body) for pattern in patterns)
+
+
+def _maybe_warn_call_mode_citation_limit(kind: str, body: str) -> None:
+    if kind != "research":
+        return
+    if not _call_mode_requests_grounded_citations(body):
+        return
+    click.echo(
+        "[conductor] brief asks for repository-grounded citations, but "
+        f"`conductor ask --kind {kind}` uses call mode and cannot read local files. "
+        "Any path:line claims are unverified. For grounded citations, use "
+        "`conductor ask --kind code --effort high --cwd <repo>` or "
+        "`conductor exec --with codex --cwd <repo> --ground-citations`.",
+        err=True,
+    )
+
+
 def _ensure_supports_attachments(
     provider_obj: object,
     attachments: tuple[Path, ...],
@@ -4916,6 +4942,8 @@ def ask(
     if plan.mode not in {"review", "council"}:
         brief_input = _with_auto_close_instructions(brief_input)
     body = brief_input.body
+    if plan.mode == "call":
+        _maybe_warn_call_mode_citation_limit(kind, body)
     attachments = brief_input.attachments
     estimated_input_tokens = _estimate_text_tokens(body)
 

@@ -514,6 +514,64 @@ def test_ask_research_low_lets_openrouter_auto_select(mocker):
     assert payload["semantic"]["candidates"][0]["models"] == []
 
 
+def test_ask_research_warns_when_brief_demands_grounded_citations(mocker):
+    _stub_all_configured(mocker, {"openrouter"})
+    call_mock = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response("openrouter", "openrouter/auto"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "research",
+            "--effort",
+            "medium",
+            "--brief",
+            (
+                "Read these files and cite path:line references for each claim. "
+                "Verify every path you cite."
+            ),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert call_mock.called
+    assert "cannot read local files" in result.stderr
+    assert "Any path:line claims are unverified" in result.stderr
+    assert "conductor ask --kind code --effort high --cwd <repo>" in result.stderr
+
+
+def test_ask_research_no_citation_warning_for_normal_brief(mocker):
+    _stub_all_configured(mocker, {"openrouter"})
+    mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response("openrouter", "openrouter/auto"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "research",
+            "--effort",
+            "medium",
+            "--brief",
+            "Summarize trade-offs for the migration plan.",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Any path:line claims are unverified" not in result.stderr
+
+
 def test_ask_research_rejects_repo_side_effect_brief(mocker):
     _stub_all_configured(mocker, {"openrouter"})
     call_mock = mocker.patch.object(
