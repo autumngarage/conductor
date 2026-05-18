@@ -114,17 +114,25 @@ print_orphan_warning() {
   } >&2
 }
 
-# Verify the PR actually merged. Returns 0 if mergedAt is non-empty, 1 otherwise.
+# Verify the PR actually merged. Returns 0 if mergedAt is non-empty, or if the
+# PR state is already MERGED (mergedAt can lag briefly after merge).
 # Used as the post-merge sanity check that turns the script's exit contract from
 # "merge-pr.sh exited 0" (proxy) into "GitHub says it's merged" (truth).
 verify_pr_merged() {
   local pr_number="$1"
-  local merged_at
+  local merged_at pr_state
   merged_at="$(gh pr view "$pr_number" --json mergedAt --jq '.mergedAt // empty' 2>/dev/null || echo "")"
   if [ -n "$merged_at" ]; then
     echo "==> Verified: PR #$pr_number merged at $merged_at"
     return 0
   fi
+
+  pr_state="$(gh pr view "$pr_number" --json state --jq '.state // empty' 2>/dev/null || echo "")"
+  if [ "$pr_state" = "MERGED" ]; then
+    echo "==> Verified: PR #$pr_number is merged (state=MERGED; mergedAt pending)."
+    return 0
+  fi
+
   return 1
 }
 
