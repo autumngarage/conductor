@@ -39,7 +39,6 @@
 #     [review.conductor].tags   = "code-review,..."
 #     [review.conductor].with   = "<provider>"  (pins a specific provider)
 #     [review.conductor].exclude = "<p1>,<p2>"  (skips in auto-routing)
-#     [review.conductor].minimum_version = "0.10.29"  (block known-bad binaries)
 #     [review.context].mode     = "auto"|"full"  (auto prunes simple diffs)
 #   See hooks/conductor-review.config.example.toml for the full spec.
 #
@@ -426,7 +425,6 @@ CONDUCTOR_EFFORT=""
 CONDUCTOR_TAGS=""
 CONDUCTOR_EXCLUDE=""
 CONDUCTOR_EXCLUDE_CONFIGURED=false
-CONDUCTOR_MINIMUM_VERSION="${TOUCHSTONE_CONDUCTOR_MINIMUM_VERSION:-}"
 CONDUCTOR_PREFLIGHT_REVIEW_PROVIDER=""
 CONDUCTOR_PREFLIGHT_FIX_PROVIDER=""
 ROUTING_ENABLED=true
@@ -875,9 +873,6 @@ if [ -f "$CONFIG_FILE" ]; then
           effort) CONDUCTOR_EFFORT="${CONDUCTOR_EFFORT:-$(toml_unquote "$value")}" ;;
           tags) CONDUCTOR_TAGS="${CONDUCTOR_TAGS:-$(toml_normalize_array "$value")}" ;;
           with) CONDUCTOR_WITH="${CONDUCTOR_WITH:-$(toml_unquote "$value")}" ;;
-          minimum_version | min_version)
-            CONDUCTOR_MINIMUM_VERSION="${CONDUCTOR_MINIMUM_VERSION:-$(toml_unquote "$value")}"
-            ;;
           exclude)
             CONDUCTOR_EXCLUDE="${CONDUCTOR_EXCLUDE:-$(toml_normalize_array "$value")}"
             CONDUCTOR_EXCLUDE_CONFIGURED=true
@@ -1710,73 +1705,28 @@ reviewer_conductor_auth_ok() {
   # Delegate to `conductor doctor --json` — cheap check, makes no upstream
   # calls, confirms at least one provider is configured.
   local doctor_json
-  doctor_json=$(conductor doctor --json 2>/dev/null) || return 1
-  echo "$doctor_json" | grep -q '"configured"[[:space:]]*:[[:space:]]*true'
-}
-
-conductor_current_version() {
-  conductor --version 2>/dev/null \
-    | sed -nE 's/.*([0-9]+[.][0-9]+[.][0-9]+).*/\1/p' \
-    | head -1
-}
-
-conductor_version_at_least() {
-  local current="$1"
-  local minimum="$2"
-  local current_major current_minor current_patch
-  local minimum_major minimum_minor minimum_patch
-
-  current="${current#v}"
-  minimum="${minimum#v}"
-  current="${current%%[-+]*}"
-  minimum="${minimum%%[-+]*}"
-
-  IFS=. read -r current_major current_minor current_patch <<EOF_VERSION
-$current
-EOF_VERSION
-  IFS=. read -r minimum_major minimum_minor minimum_patch <<EOF_VERSION
-$minimum
-EOF_VERSION
-
-  case "$current_major.$current_minor.$current_patch.$minimum_major.$minimum_minor.$minimum_patch" in
-    *[!0-9.]* | .* | *..* | *.) return 1 ;;
-  esac
-
-  current_minor="${current_minor:-0}"
-  current_patch="${current_patch:-0}"
-  minimum_minor="${minimum_minor:-0}"
-  minimum_patch="${minimum_patch:-0}"
-
-  if [ "$current_major" -gt "$minimum_major" ]; then return 0; fi
-  if [ "$current_major" -lt "$minimum_major" ]; then return 1; fi
-  if [ "$current_minor" -gt "$minimum_minor" ]; then return 0; fi
-  if [ "$current_minor" -lt "$minimum_minor" ]; then return 1; fi
-  [ "$current_patch" -ge "$minimum_patch" ]
-}
-
-enforce_conductor_minimum_version() {
-  local current_version
-
-  [ "${ACTIVE_REVIEWER:-}" = "conductor" ] || return 0
-  [ -n "${CONDUCTOR_MINIMUM_VERSION:-}" ] || return 0
-
-  current_version="$(conductor_current_version)"
-  if [ -n "$current_version" ] \
-    && conductor_version_at_least "$current_version" "$CONDUCTOR_MINIMUM_VERSION"; then
+  doctor_json=$(conductor doctor --json 2>/dev/null) || doctor_json=""
+  if echo "$doctor_json" | grep -q '"configured"[[:space:]]*:[[:space:]]*true'; then
     return 0
   fi
 
-  echo "ERROR: Conductor review gate requires conductor >= ${CONDUCTOR_MINIMUM_VERSION}." >&2
-  echo "       installed: ${current_version:-unknown}" >&2
-  echo "       configured by: TOUCHSTONE_CONDUCTOR_MINIMUM_VERSION or [review.conductor].minimum_version" >&2
-  echo "       next action: brew update && brew upgrade autumngarage/conductor/conductor" >&2
-  REVIEW_EXIT_REASON="conductor-version-too-old"
-  REVIEW_FINDINGS_COUNT=0
-  DIFF_LINE_COUNT="$ROUTING_DIFF_LINE_COUNT"
-  print_summary
-  log_skip_event "FAIL_CLOSED_CONDUCTOR_VERSION" \
-    "minimum=${CONDUCTOR_MINIMUM_VERSION}:installed=${current_version:-unknown}"
-  exit 1
+  reviewer_conductor_route_auth_ok
+}
+
+reviewer_conductor_route_auth_ok() {
+  local route_json provider
+  local -a args
+
+  if ! conductor route --help >/dev/null 2>&1; then
+    return 1
+  fi
+
+  args=(route --json --kind review)
+  [ -n "${CONDUCTOR_WITH:-}" ] && args+=(--with "$CONDUCTOR_WITH")
+  route_json="$(conductor "${args[@]}" 2>/dev/null)" || return 1
+  provider="$(conductor_route_json_string_field "$route_json" selected_provider)"
+  [ -n "$provider" ] || provider="$(conductor_route_json_string_field "$route_json" provider)"
+  [ -n "$provider" ]
 }
 
 conductor_inner_timeout() {
@@ -1960,6 +1910,14 @@ conductor_route_json_string_field() {
     | head -1
 }
 
+conductor_route_selected_provider() {
+  local json="$1"
+  local provider
+  provider="$(conductor_route_json_string_field "$json" selected_provider)"
+  [ -n "$provider" ] || provider="$(conductor_route_json_string_field "$json" provider)"
+  printf '%s' "$provider"
+}
+
 conductor_csv_contains() {
   local csv="$1"
   local wanted="$2"
@@ -2043,7 +2001,7 @@ conductor_route_preflight_for_phase() {
   route_rc=$?
   set -e
 
-  provider="$(conductor_route_json_string_field "$route_json" provider)"
+  provider="$(conductor_route_selected_provider "$route_json")"
   error="$(conductor_route_json_string_field "$route_json" error)"
   if [ -z "$error" ] && [ -s "$route_stderr" ]; then
     error="$(tr '\n' ' ' <"$route_stderr" | sed 's/[[:space:]][[:space:]]*/ /g')"
@@ -4415,8 +4373,6 @@ print_banner() {
   tk_verdict info "REVIEW STARTING" "${label} · merge code review"
   BANNER_PRINTED=true
 }
-
-enforce_conductor_minimum_version
 
 if ! run_conductor_route_preflight; then
   REVIEW_EXIT_REASON="provider-unavailable"
