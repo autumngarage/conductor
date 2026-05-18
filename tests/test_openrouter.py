@@ -1603,16 +1603,15 @@ def test_exec_classifies_repeated_tool_call_leak(configured, tmp_path):
 
     status = exc.value.status
     assert status["state"] == "tool-call-leak"
-    assert status["hit_iteration_cap"] is True
+    assert status["hit_iteration_cap"] is False
     assert status["iteration_cap"] == 2
+    assert status["unrecoverable_tool_call_leak"] is True
     assert status["successful_write_tools"] == 0
-    assert len(status["tool_errors"]) == 3
-    assert len(requests) == 3
+    assert len(status["tool_errors"]) == 2
+    assert len(requests) == 2
     message = str(exc.value)
-    assert "tool-call leak rejected" in message
-    assert "Reached --max-iterations cap (2)" in message
-    assert "Tool usage: Edit=3" in message
-    assert "git state at cap-fire: commits-on-branch=0" in message
+    assert "repeated tool-call leak rejected" in message
+    assert "Reached --max-iterations cap (2)" not in message
     assert (tmp_path / "README.md").read_text(encoding="utf-8") == "base\n"
 
 
