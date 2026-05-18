@@ -796,6 +796,48 @@ def _reject_call_mode_side_effect_brief(kind: str, body: str) -> None:
     )
 
 
+_GROUNDED_CODE_REFERENCE_PATTERNS = (
+    re.compile(r"(?i)\b(?:path|file)\s*:\s*line\b"),
+    re.compile(
+        r"(?i)\b[\w./-]+\."
+        r"(?:py|md|toml|yaml|yml|json|ts|tsx|js|jsx|go|rs|java|sh):\d+\b"
+    ),
+    re.compile(r"(?i)\bline[- ]?(?:number(?:ed)?\s*)?(?:citations?|references?)\b"),
+    re.compile(
+        r"(?is)\b(?:cite|cites|citation|citations|reference|references)\b"
+        r".{0,80}\b(?:files?|paths?)\b.{0,40}\b(?:lines?|line numbers?)\b"
+    ),
+    re.compile(
+        r"(?is)\b(?:verified|grounded|concrete|exact)\b.{0,80}"
+        r"\b(?:code|repo|repository|files?|source)\b.{0,80}"
+        r"\b(?:citations?|references?)\b"
+    ),
+    re.compile(
+        r"(?is)\b(?:citations?|references?)\b.{0,80}"
+        r"\b(?:verified|grounded|concrete|exact)\b.{0,80}"
+        r"\b(?:code|repo|repository|files?|source)\b"
+    ),
+)
+
+
+def _brief_requests_grounded_code_references(body: str) -> bool:
+    return any(pattern.search(body) for pattern in _GROUNDED_CODE_REFERENCE_PATTERNS)
+
+
+def _warn_if_text_only_research_grounding_requested(plan: SemanticPlan, body: str) -> None:
+    if plan.kind != "research" or plan.mode != "call":
+        return
+    if not _brief_requests_grounded_code_references(body):
+        return
+    click.echo(
+        "[conductor] warning: text-only research routes cannot verify repository "
+        "path:line citations or grounded code references. Use "
+        "`conductor ask --kind code --effort high` or `conductor exec` when the "
+        "answer must inspect files.",
+        err=True,
+    )
+
+
 def _ensure_supports_attachments(
     provider_obj: object,
     attachments: tuple[Path, ...],
@@ -5125,6 +5167,7 @@ def ask(
     if plan.mode == "exec":
         session_log = _start_exec_session_log(log_file=log_file, resume_session_id=None)
         _emit_session_route_decision(session_log, decision)
+    _warn_if_text_only_research_grounding_requested(plan, body)
     print_caller_banner(decision.provider, silent=silent_route or as_json)
     _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
     token_warning = _semantic_tool_context_warning(
