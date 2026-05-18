@@ -512,6 +512,40 @@ def test_ask_research_low_lets_openrouter_auto_select(mocker):
     assert payload["semantic"]["mode"] == "call"
     assert payload["semantic"]["candidates"][0]["provider"] == "openrouter"
     assert payload["semantic"]["candidates"][0]["models"] == []
+    assert "cannot verify repository path:line citations" not in result.stderr
+
+
+def test_ask_research_warns_on_grounded_code_citation_brief(mocker):
+    _stub_all_configured(mocker, {"openrouter"})
+    call_mock = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response("openrouter", "openrouter/auto"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "research",
+            "--effort",
+            "low",
+            "--brief",
+            (
+                "Inspect the repo and return verified path:line citations for "
+                "each concrete code reference."
+            ),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert call_mock.called
+    assert "text-only research routes cannot verify" in result.stderr
+    assert "repository path:line citations" in result.stderr
+    assert "conductor ask --kind code --effort high" in result.stderr
+    assert "conductor exec" in result.stderr
 
 
 def test_ask_research_rejects_repo_side_effect_brief(mocker):
