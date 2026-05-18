@@ -371,9 +371,32 @@ def _review_sentinel_violation(text: str) -> tuple[str | None, str, list[str]]:
         body = "\n".join(body_lines).rstrip()
         normalized = f"{body}\n{sentinel}" if body else sentinel
         return None, normalized, lines
+    if len(sentinel_indexes) > 1:
+        normalized = _normalize_duplicate_terminal_sentinel(lines, sentinel_indexes)
+        if normalized is not None:
+            return None, normalized, lines
     if not sentinel_indexes:
         return "missing", stripped, lines
     return "multiple", stripped, lines
+
+
+def _normalize_duplicate_terminal_sentinel(
+    lines: list[str],
+    sentinel_indexes: list[int],
+) -> str | None:
+    first_sentinel_idx = sentinel_indexes[0]
+    first_match = _REVIEW_SENTINEL_RE.match(lines[first_sentinel_idx])
+    if first_match is None:
+        return None
+    sentinel = first_match.group(1)
+
+    for line in lines[first_sentinel_idx:]:
+        match = _REVIEW_SENTINEL_RE.match(line)
+        if line.strip() and (match is None or match.group(1) != sentinel):
+            return None
+
+    body = "\n".join(lines[:first_sentinel_idx]).rstrip()
+    return f"{body}\n{sentinel}" if body else sentinel
 
 
 def _contract_error_preview(text: str) -> str:
