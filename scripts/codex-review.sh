@@ -3289,10 +3289,14 @@ append_findings_history_event() {
   commits="$(review_history_commits_since_prior "$prior_head" "$head")"
 
   findings_block="$(extract_findings_block "$output")"
-  if [ -z "$findings_block" ] && [ "$result" = "CODEX_REVIEW_FIXED" ]; then
+  if [ -z "$findings_block" ] \
+    && { [ "$result" = "CODEX_REVIEW_FIXED" ] || [ "$result" = "CODEX_REVIEW_BLOCKED" ]; }; then
     findings_block="$(extract_review_body_without_sentinel "$output")"
   fi
   findings_count="$(printf '%s\n' "$findings_block" | grep -c '^- ' || true)"
+  if [ "$findings_count" -eq 0 ] && [ -n "$findings_block" ]; then
+    findings_count=1
+  fi
   if [ "$result" = "CODEX_REVIEW_FIXED" ] && [ "$auto_fixed_count" -eq 0 ] && [ -n "$findings_block" ]; then
     auto_fixed_count="$findings_count"
     [ "$auto_fixed_count" -gt 0 ] || auto_fixed_count=1
@@ -4244,7 +4248,7 @@ ${fix_output}"
 
 review_completion_status() {
   case "${1:-}" in
-    clean | blocked | cache-hit)
+    clean | blocked | ambiguous-fixed-no-changes | cache-hit)
       printf 'completed\n'
       ;;
     *)
@@ -4690,10 +4694,24 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
 
       AUTOFIX_CHANGED_PATHS="$(changed_paths)"
       if [ -z "$AUTOFIX_CHANGED_PATHS" ]; then
+        findings_block="$(extract_findings_block "$OUTPUT")"
+        REVIEW_FINDINGS_COUNT="$(printf '%s\n' "$findings_block" | grep -c '^- ' || true)"
+        if [ "$REVIEW_FINDINGS_COUNT" -eq 0 ] \
+          && [ -n "$(extract_review_body_without_sentinel "$OUTPUT")" ]; then
+          REVIEW_FINDINGS_COUNT=1
+        fi
         echo "==> $REVIEWER_LABEL emitted FIXED but no working-tree changes detected."
-        echo "    Treating as ambiguous — not blocking push."
-        log_skip_event other "ambiguous-fixed-no-changes:iter=${iter}"
-        exit 0
+        echo "    Treating as ambiguous — blocking push and surfacing reviewer output."
+        tk_verdict fail "PUSH BLOCKED" "${REVIEWER_LABEL} returned FIXED without file changes"
+        printf '%s\n' "$OUTPUT" | sed 's/^/    /'
+        echo ""
+        echo "    Resolve the ambiguity or rerun the review before merging."
+        REVIEW_EXIT_REASON="ambiguous-fixed-no-changes"
+        print_summary
+        write_review_findings "$OUTPUT"
+        append_findings_history_event "CODEX_REVIEW_BLOCKED" "$iter" "$OUTPUT" 0
+        log_skip_event ran "ambiguous-fixed-no-changes:iter=${iter}:findings=${REVIEW_FINDINGS_COUNT}"
+        exit 1
       fi
 
       if [ "$WORKTREE_DIRTY_BEFORE_REVIEW" = true ]; then
