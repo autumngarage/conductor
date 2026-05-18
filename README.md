@@ -121,6 +121,11 @@ Shipped:
 - Credentials resolver (`conductor.credentials`): env var first, then `key_command`, then macOS Keychain under service `conductor`.
 - Offline-mode fallback: on a real connectivity failure (DNS, TCP reset, unreachable host) during `--auto` routing, Conductor prompts once to switch to the local `ollama` provider and remembers that choice for a short window. `conductor call --offline --brief "..."` is the non-interactive form — useful on a plane, in CI, or any time you want to force local. Clear the sticky flag with `--no-offline`. While the machine is online, direct `--with ollama` usage requires explicit local opt-in with `--offline` or `CONDUCTOR_ALLOW_LOCAL_ONLINE=1`; `conductor list` reports Ollama as `local/offline-only` rather than a peer hosted provider. Ollama requests use `CONDUCTOR_OLLAMA_MODEL` when set; when no explicit `--model` is passed and the requested local model is missing, Conductor queries `/api/tags` and retries once with a non-embedding installed chat model.
 - Review-gate routing: `--auto` routes tagged `code-review` derive bounded provider budgets from prompt size and fallback count, so consumers do not need to guess raw timeout flags for normal review delegation. For these review-gate routes, Conductor owns provider timeout/stall budgets even when a caller accidentally forwards timeout flags. OpenRouter empty responses are retried against the remaining model stack before surfacing a provider error.
+- Review gates can pin a minimum Conductor binary with
+  `[review.conductor].minimum_version = "0.10.29"` (or
+  `TOUCHSTONE_CONDUCTOR_MINIMUM_VERSION`). This blocks known-bad installed
+  binaries with an explicit Homebrew upgrade command instead of silently
+  running an unsafe reviewer.
 
 Deferred (see `autumn-garage/.cortex/plans/conductor-bootstrap.md`):
 
@@ -169,6 +174,13 @@ to call `conductor refresh-on-commit`. Normal diagnostic and delegation
 commands do not rewrite tracked repo-scope integration files by default. Set
 `CONDUCTOR_AUTO_REFRESH_REPO_SCOPE=1` only if you intentionally want the older
 ambient repo-refresh behavior.
+
+For hotfix releases that need uptake verification, `scripts/release.sh` can
+watch the release workflow and fan out repo integration refresh branches:
+
+```bash
+scripts/release.sh --patch --wait --update-consumers --consumer-config consumers.toml
+```
 
 ## How Sentinel and Touchstone use it
 
