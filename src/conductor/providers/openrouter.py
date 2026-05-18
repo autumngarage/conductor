@@ -532,6 +532,8 @@ class OpenRouterProvider:
         completion_stretched = False
         terminal_answer_stretched = False
         tool_call_leak_stretched = False
+        unrecoverable_tool_call_leak = False
+        tool_call_leak_signatures: dict[tuple[str, str], int] = {}
         repo_changing_task = _is_repo_changing_tool_task(effective_task_tags, tools)
         git_status_before = _git_clean_status(workdir) if repo_changing_task else None
         iteration_cap = max_iterations or OPENROUTER_MAX_TOOL_ITERATIONS
@@ -646,6 +648,7 @@ class OpenRouterProvider:
             )
 
             saw_tool_call_leak = False
+            repeated_tool_call_leak = False
             for idx, call in enumerate(tool_calls):
                 name, args, result = _parse_tool_call(call)
                 recent_tool_calls.append({"name": name, "args": args or {}})
@@ -665,6 +668,12 @@ class OpenRouterProvider:
                 if tool_error is not None:
                     if _is_tool_call_leak_error(tool_error):
                         saw_tool_call_leak = True
+                        signature = (name, tool_error)
+                        leak_count = tool_call_leak_signatures.get(signature, 0) + 1
+                        tool_call_leak_signatures[signature] = leak_count
+                        repeated_tool_call_leak = repeated_tool_call_leak or (
+                            tool_call_leak_stretched and leak_count > 1
+                        )
                     tool_errors.append(
                         {
                             "iteration": iteration,
@@ -707,6 +716,30 @@ class OpenRouterProvider:
                     "content": result,
                 }
                 messages.append(tool_msg)
+
+            if (
+                saw_tool_call_leak
+                and repeated_tool_call_leak
+                and write_success_count == 0
+            ):
+                unrecoverable_tool_call_leak = True
+                _LOG.info(
+                    "tool-call leak recovery exhausted: provider=%s "
+                    "iteration=%s iteration_cap=%s",
+                    self.name,
+                    iteration,
+                    original_iteration_cap,
+                )
+                if session_log is not None:
+                    session_log.emit(
+                        "tool_call_leak_recovery_exhausted",
+                        {
+                            "provider": self.name,
+                            "iteration": iteration,
+                            "iteration_cap": original_iteration_cap,
+                        },
+                    )
+                break
 
             if saw_tool_call_leak and not tool_call_leak_stretched:
                 messages.append(
@@ -823,6 +856,7 @@ class OpenRouterProvider:
             missing_deliverables=missing_deliverables,
             cap_diagnostics=cap_diagnostics,
             read_only_text_task=brief_declares_read_only_text_output(task),
+            unrecoverable_tool_call_leak=unrecoverable_tool_call_leak,
         )
         duration_ms = int((time.monotonic() - start) * 1000)
         execution_status["duration_ms"] = duration_ms
@@ -1079,6 +1113,7 @@ def _execution_status(
     git_status_after: dict[str, object] | None,
     missing_deliverables: list[MissingDeliverable],
     cap_diagnostics: CapDiagnostics | None,
+    unrecoverable_tool_call_leak: bool,
 ) -> dict[str, object]:
     state = "completed"
     after_clean = (
@@ -1115,6 +1150,7 @@ def _execution_status(
         ),
         "git_status_before": git_status_before,
         "git_status_after": git_status_after,
+        "unrecoverable_tool_call_leak": unrecoverable_tool_call_leak,
     }
 
 
@@ -1123,6 +1159,12 @@ def _execution_failure_message(status: dict[str, object]) -> str | None:
     if state == "iteration-cap":
         return _cap_failure_message(status)
     if state == "tool-call-leak":
+        if status.get("unrecoverable_tool_call_leak") is True:
+            return _with_cap_failure_detail(
+                status,
+                "repeated tool-call leak rejected generated file content "
+                "before any edit/write succeeded",
+            )
         return _with_cap_failure_detail(
             status,
             "tool-call leak rejected generated file content before any "
