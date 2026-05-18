@@ -1714,7 +1714,10 @@ def test_codex_review_rejects_malformed_json_stdout(mocker, capsys):
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
     mocker.patch(
         "conductor.providers.codex.build_review_task_prompt",
-        return_value="PROMPT",
+        return_value=(
+            "Return a final standalone CODEX_REVIEW_CLEAN or "
+            "CODEX_REVIEW_BLOCKED line."
+        ),
     )
     captured = mocker.patch(
         "conductor.providers.codex.subprocess.run",
@@ -1782,6 +1785,43 @@ def test_codex_review_synthesizes_findings_with_blocked_sentinel(mocker):
     assert response.text == (
         "Missing null check on line 42 will crash.\n\nCODEX_REVIEW_BLOCKED"
     )
+
+
+def test_codex_review_normalizes_duplicate_blocked_sentinel_from_findings(mocker):
+    """Codex can repeat the requested sentinel inside the structured findings.
+    The legacy boundary still emits exactly one final sentinel line."""
+    mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    mocker.patch(
+        "conductor.providers.codex.build_review_task_prompt",
+        return_value=(
+            "Return a final standalone CODEX_REVIEW_CLEAN or "
+            "CODEX_REVIEW_BLOCKED line."
+        ),
+    )
+    mocker.patch(
+        "conductor.providers.codex.subprocess.run",
+        return_value=_fake_completed(
+            stdout=json.dumps(
+                {
+                    "status": "BLOCKED",
+                    "findings": (
+                        "Missing null check on line 42 will crash.\n"
+                        "CODEX_REVIEW_BLOCKED"
+                    ),
+                }
+            )
+            + "\n"
+        ),
+    )
+
+    response = CodexProvider().review(
+        "Return a final standalone CODEX_REVIEW_CLEAN or CODEX_REVIEW_BLOCKED line.",
+    )
+
+    assert response.text == (
+        "Missing null check on line 42 will crash.\nCODEX_REVIEW_BLOCKED"
+    )
+    assert response.text.splitlines().count("CODEX_REVIEW_BLOCKED") == 1
 
 
 def test_codex_review_caps_non_streaming_timeout_to_stall_budget(mocker):

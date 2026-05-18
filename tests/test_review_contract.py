@@ -79,6 +79,46 @@ def test_review_sentinel_contract_rejects_multiple_sentinels():
         )
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "Review body.\nCODEX_REVIEW_BLOCKED\nCODEX_REVIEW_BLOCKED\n",
+            "Review body.\nCODEX_REVIEW_BLOCKED",
+        ),
+        (
+            "Review body.\nCODEX_REVIEW_BLOCKED\n\nCODEX_REVIEW_BLOCKED\n",
+            "Review body.\nCODEX_REVIEW_BLOCKED",
+        ),
+    ],
+)
+def test_review_sentinel_contract_normalizes_duplicate_terminal_sentinel(
+    text: str,
+    expected: str,
+):
+    validated = validate_requested_review_sentinel(
+        provider_name="codex",
+        prompt=STRICT_SENTINEL_PROMPT,
+        text=text,
+    )
+
+    assert validated == expected
+
+
+def test_review_sentinel_contract_rejects_duplicate_sentinel_with_trailing_prose():
+    with pytest.raises(ReviewOutputContractError, match="multiple"):
+        validate_requested_review_sentinel(
+            provider_name="codex",
+            prompt=STRICT_SENTINEL_PROMPT,
+            text=(
+                "Review body.\n"
+                "CODEX_REVIEW_BLOCKED\n"
+                "Additional prose after the verdict.\n"
+                "CODEX_REVIEW_BLOCKED\n"
+            ),
+        )
+
+
 def test_review_sentinel_contract_accepts_footer_and_normalizes_final_sentinel():
     validated = validate_requested_review_sentinel(
         provider_name="codex",
