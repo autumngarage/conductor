@@ -1,10 +1,10 @@
 ---
-Generated: 2026-05-17T17:16:22-04:00
+Generated: 2026-05-18T07:42:59-04:00
 Generator: cortex refresh-state v1.6.4
 Sources:
-  - HEAD sha: 4dd6e8fe421c170b222b17c4ae00258d1f6af9af
+  - HEAD sha: 6ccd8f82d5a3e21235d1271af5507a043f340abb
   - .cortex/plans/*.md (2 files)
-  - .cortex/journal/*.md (27 entries, 2026-04-24..2026-05-17)
+  - .cortex/journal/*.md (29 entries, 2026-04-24..2026-05-18)
   - .cortex/doctrine/*.md (6 entries)
   - .cortex/templates/**/*.md (12 templates)
   - docs/case-studies/*.md (0 case studies)
@@ -44,6 +44,8 @@ Sources-hash:
   .cortex/journal/2026-05-15-alchemist-447.md: c4e59ec94345d9a864fe812c78c2a5cfd06428c8ad452128b6914004cb37c864
   .cortex/journal/2026-05-17-pr-merged-1247.md: bb6436572f1be9273092e8ec20f163791957af15cc0ff7edad8fe3c3a893908e
   .cortex/journal/2026-05-17-pr-merged-1716.md: ac8f436bf45c79df07ad35131ba2efd1d2ad6dd75c225bd10368598d86ac376a
+  .cortex/journal/2026-05-18-pr-482-merged.md: 461a3d0f503d208c201aff0e85db92694925184c5a2ad38f5e4bc9fde728316d
+  .cortex/journal/2026-05-18-release-v0.10.29.md: 0c6228e0069855907f43c26eda6d5e8f95e753009e1daaa1899df97c77afadbb
   .cortex/plans/conductor-blindspots.md: 69b7cec18f5893a5edfe83e3d095eb9ae7e57d5e9e117adf73e417f31ebe11a0
   .cortex/plans/root-cause-roadmap.md: f9c6019725a55f0822887bc79acc190734cb8df1ae30e5126d7e0412a490fd6c
   .cortex/templates/README.md: 695aa2e623bd7f4e698dae471bded0cde354da0c1d8589266660ceb1be8efad1
@@ -58,7 +60,7 @@ Sources-hash:
   .cortex/templates/journal/release.md: 9a6bc59219156e48b419fb170c7c50ff557767def8672ef20568df3e14eadbd0
   .cortex/templates/journal/sentinel-cycle.md: 2945e2d94af4ec9848584b4b3e9cea7060d2968dd42e78faf21fb6f859137476
   .cortex/templates/plans/template.md: d8156cfa3b86acd2a1fbb36cff07cae37d99f3adee7f72b14b7b16e645c51b44
-Corpus: 27 Journal entries, 2 Plans, 6 Doctrine entries, 12 Templates, 0 Case studies
+Corpus: 29 Journal entries, 2 Plans, 6 Doctrine entries, 12 Templates, 0 Case studies
 Omitted:
   []
 Incomplete:
@@ -96,6 +98,8 @@ Spec: 0.5.0
 - **2026-05-11** — PR #356 merged - force terminal review answer near tool cap (`.cortex/journal/2026-05-11-pr-356-merged.md`, Type: pr-merged)
 - **2026-05-17** — PR #467 merged — --body-file (`.cortex/journal/2026-05-17-pr-merged-1247.md`, Type: pr-merged)
 - **2026-05-17** — PR #476 merged — --body-file (`.cortex/journal/2026-05-17-pr-merged-1716.md`, Type: pr-merged)
+- **2026-05-18** — PR #482 merged - normalize duplicate review sentinels (`.cortex/journal/2026-05-18-pr-482-merged.md`, Type: pr-merged)
+- **2026-05-18** — Release v0.10.29 - duplicate review sentinel hotfix (`.cortex/journal/2026-05-18-release-v0.10.29.md`, Type: release)
 
 ## Stale-now / handle-later
 
