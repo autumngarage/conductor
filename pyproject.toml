@@ -48,7 +48,7 @@ dev = [
 # change. Bump this date deliberately when you want to refresh deps —
 # it then becomes a single intentional "refresh deps" PR instead of
 # accidental noise on every unrelated branch.
-exclude-newer = "2026-04-25T00:00:00Z"
+exclude-newer = "2026-05-20T00:00:00Z"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
