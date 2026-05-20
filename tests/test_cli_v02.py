@@ -35,7 +35,7 @@ from conductor.cli import (
 )
 from conductor.network_profile import NetworkProfile
 from conductor.openrouter_model_stacks import (
-    OPENROUTER_CODING_HIGH,
+    OPENROUTER_CODING_CHEAP,
     OPENROUTER_REVIEW_CHEAP,
 )
 from conductor.providers import (
@@ -723,6 +723,9 @@ def test_ask_code_high_read_only_brief_restricts_exec_tools(mocker):
 def test_ask_code_high_read_only_fallback_stays_read_only(mocker):
     from conductor.providers.interface import ProviderStalledError
 
+    # Claude not in stub set → its configured() returns False, so the
+    # cascade walks past it to openrouter. Mirrors a real CI environment
+    # where only OPENROUTER_API_KEY is set.
     _stub_all_configured(mocker, {"codex", "openrouter"})
     codex_exec = mocker.patch.object(
         CodexProvider,
@@ -759,7 +762,7 @@ def test_ask_code_high_read_only_fallback_stays_read_only(mocker):
         {"Read", "Grep", "Glob"}
     )
     assert openrouter_exec.call_args.kwargs["sandbox"] == "read-only"
-    assert openrouter_exec.call_args.kwargs["models"] == OPENROUTER_CODING_HIGH
+    assert openrouter_exec.call_args.kwargs["models"] == OPENROUTER_CODING_CHEAP
     assert "read-only brief detected; restricting exec tools to Read,Grep,Glob" in result.stderr
 
 
@@ -795,7 +798,7 @@ def test_ask_code_high_falls_back_immediately_to_openrouter_on_quota(mocker):
     assert result.exit_code == 0, result.output
     assert codex_exec.called
     assert openrouter_exec.called
-    assert openrouter_exec.call_args.kwargs["models"] == OPENROUTER_CODING_HIGH
+    assert openrouter_exec.call_args.kwargs["models"] == OPENROUTER_CODING_CHEAP
     assert openrouter_exec.call_args.kwargs["previous_provider"] == "codex"
     assert "codex failed (rate-limit)" in result.stderr
     assert "falling back" in result.stderr
@@ -840,15 +843,26 @@ def test_ask_code_high_falls_back_to_openrouter_exec_before_ollama(mocker):
     assert exec_mock.call_args.kwargs["tools"] == frozenset(
         {"Read", "Grep", "Glob", "Edit", "Write", "Bash"}
     )
-    assert exec_mock.call_args.kwargs["models"] == OPENROUTER_CODING_HIGH
+    assert exec_mock.call_args.kwargs["models"] == OPENROUTER_CODING_CHEAP
     assert "excluding ollama from fallback chain" in result.stderr
     assert "falling through to ollama" not in result.stderr
     payload = json.loads(result.stdout)
+    # Plan now includes claude between codex and openrouter (per #448 — both
+    # flat-rate subscriptions are exhausted before any metered call). The
+    # semantic candidates field shows the routing intent, not the configured
+    # subset, so claude appears even though it's unconfigured here.
     assert [candidate["provider"] for candidate in payload["semantic"]["candidates"]] == [
         "codex",
+        "claude",
         "openrouter",
     ]
-    assert payload["semantic"]["candidates"][1]["models"] == list(OPENROUTER_CODING_HIGH)
+    openrouter_idx = next(
+        i for i, c in enumerate(payload["semantic"]["candidates"])
+        if c["provider"] == "openrouter"
+    )
+    assert payload["semantic"]["candidates"][openrouter_idx]["models"] == list(
+        OPENROUTER_CODING_CHEAP
+    )
 
 
 def test_ask_code_high_without_frontier_fallback_refuses_ollama(mocker):
@@ -4966,6 +4980,7 @@ def test_exclusion_rule_registry_applies_all_current_rules_without_conflict(mock
     assert online_message == OLLAMA_ONLINE_EXCLUSION_MESSAGE
     assert [candidate.provider for candidate in online_plan.candidates] == [
         "codex",
+        "claude",
         "openrouter",
     ]
 
@@ -4981,6 +4996,7 @@ def test_exclusion_rule_registry_applies_all_current_rules_without_conflict(mock
     assert tagged_message == OLLAMA_ONLINE_EXCLUSION_MESSAGE
     assert [candidate.provider for candidate in tagged_plan.candidates] == [
         "codex",
+        "claude",
         "openrouter",
     ]
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from conductor.openrouter_model_stacks import (
+    OPENROUTER_CODING_CHEAP,
     OPENROUTER_CODING_HIGH,
     OPENROUTER_CODING_MAX,
     OPENROUTER_REVIEW_CHEAP,
@@ -46,21 +47,45 @@ def test_high_code_escalates_to_agentic_coding_stack(effort):
     plan = plan_for("code", effort)
 
     assert plan.mode == "exec"
+    # Per #448: claude CLI sits between codex and the metered openrouter step
+    # so both flat-rate subscriptions are exhausted before any per-token spend.
     assert [candidate.provider for candidate in plan.candidates] == [
         "codex",
+        "claude",
         "openrouter",
         "ollama",
     ]
-    openrouter_candidate = plan.candidates[1]
-    expected_stack = (
-        OPENROUTER_CODING_MAX if effort == "max" else OPENROUTER_CODING_HIGH
-    )
-    assert openrouter_candidate.models == expected_stack
-    assert openrouter_candidate.models[0] == "openai/gpt-5.3-codex"
-    assert "openrouter/auto" not in openrouter_candidate.models
-    assert "google/gemini-2.5-flash-lite" not in openrouter_candidate.models
+    openrouter_candidate = plan.candidates[2]
+    assert openrouter_candidate.models == OPENROUTER_CODING_CHEAP
     assert plan.tools == frozenset({"Read", "Grep", "Glob", "Edit", "Write", "Bash"})
     assert plan.sandbox == "none"
+
+
+@pytest.mark.parametrize("effort", ["high", "max"])
+def test_code_openrouter_step_never_starts_with_premium_model(effort):
+    """Regression guard for #448 (parallel to the review-cascade guard).
+
+    Why: the openrouter step used to start with `openai/gpt-5.3-codex` and
+    drove ~$30/day at observed volume. The cascade must fall to a cheap
+    coding-tuned model first, not the most expensive same-category one.
+    Premium models stay available via the legacy CODING_HIGH / CODING_MAX
+    stacks for callers that explicitly opt in.
+    """
+    plan = plan_for("code", effort)
+    openrouter_models = plan.candidates[2].models
+
+    assert openrouter_models[0] != "openai/gpt-5.3-codex"
+    assert "openai/gpt-5.3-codex" not in openrouter_models
+    assert "openai/gpt-5.5-pro" not in openrouter_models
+    assert "anthropic/claude-opus-4.7" not in openrouter_models
+
+
+def test_legacy_premium_coding_stacks_still_available_for_opt_in():
+    """OPENROUTER_CODING_HIGH/MAX stay defined so callers that explicitly
+    want premium-first can import them. The cascade default no longer uses
+    them, but they're not dead code — they're an opt-in escape hatch."""
+    assert OPENROUTER_CODING_HIGH[0] == "openai/gpt-5.3-codex"
+    assert OPENROUTER_CODING_MAX[0] == "openai/gpt-5.3-codex"
 
 
 @pytest.mark.parametrize("effort", ["minimal", "low", "medium", "high", "max"])

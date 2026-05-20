@@ -55,6 +55,18 @@ OPENROUTER_REVIEW_CHEAP: tuple[str, ...] = (
     "qwen/qwen3-coder-plus",
 )
 
+# Coding-tool-use fallback stack. Used when both flat-rate subscriptions
+# (codex CLI, claude CLI) are unavailable and the cascade has to spend
+# metered budget. Ordering bias differs from review: put the
+# coding-specialized model first, then the strong-reasoning model, then
+# the long-context backstop for huge diffs. See issue #448 for the
+# cost-shape argument; PR landed alongside the review-cascade fix in #502.
+OPENROUTER_CODING_CHEAP: tuple[str, ...] = (
+    "qwen/qwen3-coder-plus",
+    "deepseek/deepseek-v4-pro",
+    "moonshotai/kimi-k2.6",
+)
+
 
 def model_family(model: str) -> str:
     """Return the lowercased provider family prefix for a model slug."""

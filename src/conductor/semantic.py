@@ -12,8 +12,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from conductor.openrouter_model_stacks import (
-    OPENROUTER_CODING_HIGH,
-    OPENROUTER_CODING_MAX,
+    OPENROUTER_CODING_CHEAP,
     OPENROUTER_REVIEW_CHEAP,
 )
 
@@ -176,7 +175,8 @@ _CODE: dict[EffortBucket, SemanticPlan] = {
         tools=_CODE_EXEC_TOOLS,
         candidates=(
             SemanticCandidate("codex"),
-            SemanticCandidate("openrouter", OPENROUTER_CODING_HIGH),
+            SemanticCandidate("claude"),
+            SemanticCandidate("openrouter", OPENROUTER_CODING_CHEAP),
             SemanticCandidate("ollama"),
         ),
     ),
@@ -189,7 +189,8 @@ _CODE: dict[EffortBucket, SemanticPlan] = {
         tools=_CODE_EXEC_TOOLS,
         candidates=(
             SemanticCandidate("codex"),
-            SemanticCandidate("openrouter", OPENROUTER_CODING_MAX),
+            SemanticCandidate("claude"),
+            SemanticCandidate("openrouter", OPENROUTER_CODING_CHEAP),
             SemanticCandidate("ollama"),
         ),
     ),
