@@ -671,6 +671,75 @@ def test_bash_tool_truncates_huge_output(tmp_path: Path):
     assert "truncated" in out
 
 
+# --------------------------------------------------------------------------- #
+# BashTool — env-var scrubbing (issue #496)
+# --------------------------------------------------------------------------- #
+
+
+def test_bash_tool_scrubs_secret_looking_env_vars(tmp_path: Path, monkeypatch):
+    """Regression guard for #496.
+
+    Why: BashTool runs `shell=True` and used to inherit the parent process
+    environment unchanged. That meant any provider API key the operator
+    exported for conductor itself was readable by every shell command the
+    model ran. The fix: scrub secret-looking names from the subprocess env
+    before invocation. This test pins the contract.
+    """
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-secret-leak")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret-leak")
+    monkeypatch.setenv("MY_CUSTOM_TOKEN", "another-secret")
+    monkeypatch.setenv("DATABASE_PASSWORD", "hunter2")
+    monkeypatch.setenv("APP_SECRET_KEY", "shh")
+    # And one that should survive scrubbing — looks normal:
+    monkeypatch.setenv("EDITOR", "vim")
+
+    tool = get_tool("Bash")
+    out = tool.execute(
+        {"command": "env | sort"}, cwd=tmp_path
+    )
+
+    # Secret-shaped vars must not appear in the subprocess env at all.
+    assert "OPENROUTER_API_KEY" not in out
+    assert "ANTHROPIC_API_KEY" not in out
+    assert "MY_CUSTOM_TOKEN" not in out
+    assert "DATABASE_PASSWORD" not in out
+    assert "APP_SECRET_KEY" not in out
+    # Their values must not appear either (cheap belt-and-suspenders check).
+    assert "sk-or-v1-secret-leak" not in out
+    assert "sk-ant-secret-leak" not in out
+    assert "hunter2" not in out
+    # Normal env vars survive.
+    assert "EDITOR=vim" in out
+
+
+def test_bash_tool_allow_env_opts_specific_vars_back_in(tmp_path: Path, monkeypatch):
+    """The CONDUCTOR_BASH_ALLOW_ENV escape hatch lets the operator opt
+    specific scrubbed-pattern names back in (e.g. NPM_TOKEN for private
+    package installs). Comma-separated."""
+    monkeypatch.setenv("NPM_TOKEN", "npm-secret-build-token")
+    monkeypatch.setenv("LEAKED_TOKEN", "should-stay-blocked")
+    monkeypatch.setenv("CONDUCTOR_BASH_ALLOW_ENV", "NPM_TOKEN")
+
+    tool = get_tool("Bash")
+    out = tool.execute({"command": "env"}, cwd=tmp_path)
+
+    assert "NPM_TOKEN=npm-secret-build-token" in out
+    assert "LEAKED_TOKEN" not in out
+
+
+def test_bash_tool_description_does_not_claim_workspace_confinement(tmp_path: Path):
+    """Per #496 the tool description used to claim 'you cannot cd outside
+    it', which is false — shell=True with no OS sandbox can `cd /` or use
+    absolute paths freely. The description must be honest about what's
+    actually enforced (start cwd is pinned; the shell itself is not
+    confined) so callers don't build security assumptions on top of a
+    misleading claim."""
+    tool = get_tool("Bash")
+    assert "cannot cd outside" not in tool.description
+    assert "does not OS-sandbox" in tool.description
+    assert "scrubbed" in tool.description.lower()
+
+
 def test_executor_still_blocks_path_escape(tmp_path: Path):
     executor = ToolExecutor(cwd=tmp_path)
     with pytest.raises(ToolExecutionError) as exc:
