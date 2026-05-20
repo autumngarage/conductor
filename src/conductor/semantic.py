@@ -14,6 +14,7 @@ from typing import Literal
 from conductor.openrouter_model_stacks import (
     OPENROUTER_CODING_HIGH,
     OPENROUTER_CODING_MAX,
+    OPENROUTER_REVIEW_CHEAP,
 )
 
 SemanticKind = Literal["research", "code", "review", "council"]
@@ -205,12 +206,7 @@ _REVIEW: dict[EffortBucket, SemanticPlan] = {
         candidates=(
             SemanticCandidate("codex"),
             SemanticCandidate("claude"),
-            SemanticCandidate(
-                "openrouter",
-                OPENROUTER_CODING_MAX
-                if bucket == "max"
-                else OPENROUTER_CODING_HIGH,
-            ),
+            SemanticCandidate("openrouter", OPENROUTER_REVIEW_CHEAP),
         ),
     )
     for bucket in EFFORT_BUCKETS

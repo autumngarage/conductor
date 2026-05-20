@@ -7,6 +7,7 @@ import pytest
 from conductor.openrouter_model_stacks import (
     OPENROUTER_CODING_HIGH,
     OPENROUTER_CODING_MAX,
+    OPENROUTER_REVIEW_CHEAP,
 )
 from conductor.semantic import SEMANTIC_KINDS, plan_for
 
@@ -63,7 +64,7 @@ def test_high_code_escalates_to_agentic_coding_stack(effort):
 
 
 @pytest.mark.parametrize("effort", ["minimal", "low", "medium", "high", "max"])
-def test_review_uses_openrouter_code_stack_after_native_reviewers(effort):
+def test_review_falls_back_to_cheap_openrouter_stack(effort):
     plan = plan_for("review", effort)
 
     assert plan.mode == "review"
@@ -72,10 +73,25 @@ def test_review_uses_openrouter_code_stack_after_native_reviewers(effort):
         "claude",
         "openrouter",
     ]
-    expected_stack = (
-        OPENROUTER_CODING_MAX if effort == "max" else OPENROUTER_CODING_HIGH
-    )
-    assert plan.candidates[2].models == expected_stack
+    assert plan.candidates[2].models == OPENROUTER_REVIEW_CHEAP
+
+
+@pytest.mark.parametrize("effort", ["minimal", "low", "medium", "high", "max"])
+def test_review_openrouter_step_never_starts_with_premium_coding_model(effort):
+    """Regression guard for #501.
+
+    Why: when codex and claude native review fail, the OpenRouter step used to
+    start with `openai/gpt-5.3-codex` (premium), burning ~$30/day at the
+    operator's observed volume. The cascade must fail toward the cheapest
+    correct provider, not the most expensive same-category one.
+    """
+    plan = plan_for("review", effort)
+    openrouter_models = plan.candidates[2].models
+
+    assert openrouter_models[0] != "openai/gpt-5.3-codex"
+    assert "openai/gpt-5.3-codex" not in openrouter_models
+    assert "openai/gpt-5.5-pro" not in openrouter_models
+    assert "anthropic/claude-opus-4.7" not in openrouter_models
 
 
 def test_integer_effort_maps_into_bucketed_matrix():

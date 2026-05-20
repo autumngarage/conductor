@@ -45,6 +45,16 @@ OPENROUTER_CODING_MAX: tuple[str, ...] = (
     "deepseek/deepseek-v4-pro",
 )
 
+# Review fallback stack — used when codex/claude native review are unavailable.
+# Starts cheap on purpose: review is a high-volume path (every push through the
+# Touchstone merge gate retries the cascade) and the coding stacks above cost
+# ~20x more per equivalent review. See issue #501.
+OPENROUTER_REVIEW_CHEAP: tuple[str, ...] = (
+    "deepseek/deepseek-v4-pro",
+    "moonshotai/kimi-k2.6",
+    "qwen/qwen3-coder-plus",
+)
+
 
 def model_family(model: str) -> str:
     """Return the lowercased provider family prefix for a model slug."""
