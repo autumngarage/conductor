@@ -425,6 +425,38 @@ def run_init_wizard(
         _print_next_steps(outcomes)
     if aborted or not wiring_ok:
         return 1
+    # Per #494: silent skip in non-interactive mode is a footgun for CI /
+    # Dockerfile users who set CONDUCTOR_* env vars and reasonably expect
+    # init -y to either succeed or fail loud. If zero providers ended up
+    # configured AND we were non-interactive AND the caller didn't scope
+    # to a single provider (--only), that's a hard "no credential sources
+    # available" failure, not a success.
+    if not interactive and not only:
+        # Ollama is local — its readiness doesn't prove the operator has
+        # network providers wired. Require at least one remote provider
+        # to be configured at the end of init -y. Re-check current state
+        # (rather than counting wizard outcomes) so `--remaining` skips
+        # of already-configured providers count toward the threshold.
+        remote_configured = 0
+        for provider_name in known_providers():
+            if provider_name == "ollama":
+                continue
+            provider = get_provider(provider_name)
+            ok, _reason = provider.configured()
+            if ok:
+                remote_configured += 1
+                break
+        if remote_configured == 0:
+            if not quiet:
+                click.echo("")
+                click.echo(
+                    "conductor: init -y completed with no remote providers configured."
+                )
+                click.echo(
+                    "  Set a credential env var (e.g. OPENROUTER_API_KEY) "
+                    "and re-run, or run `conductor init` on a TTY."
+                )
+            return 2
     return 0
 
 

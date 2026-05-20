@@ -20,6 +20,15 @@ def _isolated_agent_homes(tmp_path, monkeypatch):
     monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path / ".conductor"))
     monkeypatch.setenv("CLAUDE_HOME", str(tmp_path / ".claude"))
     monkeypatch.setattr("shutil.which", lambda _cmd: None)
+    # Per #494: init -y exits 2 when no remote providers are configured.
+    # These tests exercise hook-install / refresh behavior, not credential
+    # setup, so keep OpenRouter at configured=True to mirror the realistic
+    # CI scenario (OPENROUTER_API_KEY in env).
+    from conductor.providers import OpenRouterProvider
+
+    monkeypatch.setattr(
+        OpenRouterProvider, "configured", lambda self: (True, None)
+    )
 
 
 def _git(repo: Path, *args: str) -> str:
