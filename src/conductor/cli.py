@@ -13186,8 +13186,9 @@ def doctor(as_json: bool) -> None:
     "--hooks/--no-hooks",
     default=True,
     help=(
-        "Install pre-commit refresh hook for embed-only files "
-        "(default: yes; pass --no-hooks to skip)."
+        "Install pre-commit refresh hook in the current directory "
+        "(default: yes; pass --no-hooks to skip). "
+        "No-op when the current directory is not a git repository."
     ),
 )
 def init(
@@ -13261,8 +13262,23 @@ def _run_unwire() -> int:
 
 
 def _run_install_hooks(*, quiet: bool = False) -> int:
-    """Install the local pre-commit hook entry for refresh-on-commit."""
-    config_path = Path.cwd() / PRE_COMMIT_CONFIG
+    """Install the local pre-commit hook entry for refresh-on-commit.
+
+    Per issue #493: the hook is meaningful only inside a git repo. When the
+    user runs `conductor init` from `~/`, `~/Downloads`, or any non-repo cwd,
+    silently writing `.pre-commit-config.yaml` there is a surprise — the file
+    is dead weight and pollutes the directory. Skip with a clear notice
+    instead.
+    """
+    cwd = Path.cwd()
+    if not (cwd / ".git").exists():
+        if not quiet:
+            click.echo(
+                f"==> Skipping conductor-refresh pre-commit hook install: "
+                f"{cwd} is not a git repository."
+            )
+        return 0
+    config_path = cwd / PRE_COMMIT_CONFIG
     try:
         changed = _install_refresh_pre_commit_hook(config_path)
     except OSError as e:

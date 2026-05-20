@@ -307,6 +307,7 @@ def test_update_check_exits_zero_when_current(tmp_path, monkeypatch):
 
 def test_init_hooks_creates_pre_commit_config_by_default(tmp_path):
     repo = tmp_path / "repo"
+    _init_git_repo(repo)
 
     result = CliRunner().invoke(main, ["init", "--yes"])
 
@@ -322,6 +323,7 @@ def test_init_hooks_creates_pre_commit_config_by_default(tmp_path):
 
 def test_init_no_hooks_skips_pre_commit_config(tmp_path):
     repo = tmp_path / "repo"
+    _init_git_repo(repo)
 
     result = CliRunner().invoke(main, ["init", "--yes", "--no-hooks"])
 
@@ -331,6 +333,7 @@ def test_init_no_hooks_skips_pre_commit_config(tmp_path):
 
 def test_init_accept_defaults_no_hooks_skips_prompts_and_hooks(tmp_path):
     repo = tmp_path / "repo"
+    _init_git_repo(repo)
 
     result = CliRunner().invoke(main, ["init", "-y", "--no-hooks"])
 
@@ -339,16 +342,38 @@ def test_init_accept_defaults_no_hooks_skips_prompts_and_hooks(tmp_path):
     assert not (repo / ".pre-commit-config.yaml").exists()
 
 
+def test_init_hooks_skipped_when_cwd_is_not_git_repo(tmp_path):
+    """Regression guard for #493.
+
+    Why: running `conductor init` from `~/`, `~/Downloads`, or any non-repo
+    directory used to silently write `.pre-commit-config.yaml` there. The hook
+    is dead weight outside a git repo. Skip with a clear notice instead.
+    """
+    repo = tmp_path / "repo"
+    # Deliberately do NOT call _init_git_repo — this is the no-git case.
+
+    result = CliRunner().invoke(main, ["init", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert not (repo / ".pre-commit-config.yaml").exists()
+    assert "Skipping conductor-refresh pre-commit hook install" in result.output
+    assert "is not a git repository" in result.output
+
+
 def test_init_help_documents_hooks_default():
     result = CliRunner().invoke(main, ["init", "--help"])
 
     assert result.exit_code == 0, result.output
     assert "--hooks / --no-hooks" in result.output
-    assert "default: yes; pass --no-hooks to skip" in result.output
+    # Click wraps the help text, so check normalized whitespace.
+    normalized = " ".join(result.output.split())
+    assert "default: yes" in normalized
+    assert "is not a git repository" in normalized
 
 
 def test_init_hooks_merges_existing_config_without_duplication(tmp_path):
     repo = tmp_path / "repo"
+    _init_git_repo(repo)
     config = repo / ".pre-commit-config.yaml"
     config.write_text(
         """repos:
@@ -371,6 +396,7 @@ def test_init_hooks_merges_existing_config_without_duplication(tmp_path):
 
 def test_init_hooks_inserts_inside_repos_before_later_top_level_keys(tmp_path):
     repo = tmp_path / "repo"
+    _init_git_repo(repo)
     config = repo / ".pre-commit-config.yaml"
     config.write_text(
         """repos:
@@ -394,6 +420,7 @@ default_language_version:
 
 def test_init_hooks_is_idempotent(tmp_path):
     repo = tmp_path / "repo"
+    _init_git_repo(repo)
 
     first = CliRunner().invoke(main, ["init", "--yes"])
     second = CliRunner().invoke(main, ["init", "--yes"])

@@ -214,7 +214,11 @@ def test_init_1password_choice_only_appears_when_op_detected(
     )
 
     assert result.exit_code == 0, result.output
-    assert "1password" not in result.output.lower()
+    # Test name leaks into tmp_path, which can appear in our new "skipping hook
+    # install" diagnostic. Check for the wizard's actual 1Password prompt copy
+    # instead of a bare substring.
+    assert "1Password indirection" not in result.output
+    assert "op read op://" not in result.output
 
 
 def test_init_1password_invalid_reference_aborts(mocker, monkeypatch, tmp_path):
