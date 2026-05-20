@@ -34,7 +34,10 @@ from conductor.cli import (
     main,
 )
 from conductor.network_profile import NetworkProfile
-from conductor.openrouter_model_stacks import OPENROUTER_CODING_HIGH
+from conductor.openrouter_model_stacks import (
+    OPENROUTER_CODING_HIGH,
+    OPENROUTER_REVIEW_CHEAP,
+)
 from conductor.providers import (
     CallResponse,
     ClaudeProvider,
@@ -1621,7 +1624,7 @@ def test_review_with_openrouter_uses_hosted_review_prompt(mocker, tmp_path):
         "call",
         return_value=_fake_response(
             "openrouter",
-            OPENROUTER_CODING_HIGH[0],
+            OPENROUTER_REVIEW_CHEAP[0],
             text="No blocking issues found.\nCODEX_REVIEW_CLEAN",
         ),
     )
@@ -1648,7 +1651,7 @@ def test_review_with_openrouter_uses_hosted_review_prompt(mocker, tmp_path):
 
     assert result.exit_code == 0, result.output
     assert openrouter_call.called
-    assert openrouter_call.call_args.kwargs["models"] == OPENROUTER_CODING_HIGH
+    assert openrouter_call.call_args.kwargs["models"] == OPENROUTER_REVIEW_CHEAP
     assert openrouter_call.call_args.kwargs["task_tags"] == ["code-review"]
     assert openrouter_call.call_args.kwargs["prefer"] == "best"
     prompt = openrouter_call.call_args.args[0]
@@ -1731,7 +1734,7 @@ def test_review_auto_claude_rate_limit_falls_through_to_next_provider(mocker):
         "call",
         return_value=_fake_response(
             "openrouter",
-            OPENROUTER_CODING_HIGH[0],
+            OPENROUTER_REVIEW_CHEAP[0],
             text="No blocking issues found.\nCODEX_REVIEW_CLEAN",
         ),
     )
@@ -1772,7 +1775,7 @@ def test_review_auto_next_provider_success_json_reports_winner_and_status(mocker
         "call",
         return_value=_fake_response(
             "openrouter",
-            OPENROUTER_CODING_HIGH[0],
+            OPENROUTER_REVIEW_CHEAP[0],
             text="No blocking issues found.\nCODEX_REVIEW_CLEAN",
         ),
     )
@@ -1804,7 +1807,7 @@ def test_review_auto_next_provider_success_json_reports_winner_and_status(mocker
     assert payload["exit_class"] == "clean"
     assert payload["failure_code"] is None
     assert payload["selected_provider"] == "openrouter"
-    assert payload["selected_model"] == OPENROUTER_CODING_HIGH[0]
+    assert payload["selected_model"] == OPENROUTER_REVIEW_CHEAP[0]
     assert payload["review_verdict"] == "clean"
     assert [
         (attempt["provider"], attempt["status"], attempt["failure_code"])
@@ -2053,7 +2056,7 @@ def test_review_auto_generic_fallback_prompt_includes_diff(mocker, tmp_path):
     )
 
     assert result.exit_code == 0, result.output
-    assert openrouter_call.call_args.kwargs["models"] == OPENROUTER_CODING_HIGH
+    assert openrouter_call.call_args.kwargs["models"] == OPENROUTER_REVIEW_CHEAP
     assert openrouter_call.call_args.kwargs["task_tags"] == ["code-review"]
     assert openrouter_call.call_args.kwargs["timeout_sec"] == 75
     assert openrouter_call.call_args.kwargs["max_stall_sec"] == 75
@@ -2063,7 +2066,7 @@ def test_review_auto_generic_fallback_prompt_includes_diff(mocker, tmp_path):
     assert "+fallback diff marker" in prompt
 
 
-def test_ask_review_uses_openrouter_code_stack_instead_of_gemini(mocker, tmp_path):
+def test_ask_review_uses_cheap_openrouter_stack_instead_of_gemini(mocker, tmp_path):
     from conductor.providers.interface import ProviderStalledError
 
     repo = _make_diff_repo(tmp_path)
@@ -2089,7 +2092,7 @@ def test_ask_review_uses_openrouter_code_stack_instead_of_gemini(mocker, tmp_pat
     openrouter_call = mocker.patch.object(
         OpenRouterProvider,
         "call",
-        return_value=_fake_response("openrouter", OPENROUTER_CODING_HIGH[0]),
+        return_value=_fake_response("openrouter", OPENROUTER_REVIEW_CHEAP[0]),
     )
 
     result = CliRunner().invoke(
@@ -2113,7 +2116,7 @@ def test_ask_review_uses_openrouter_code_stack_instead_of_gemini(mocker, tmp_pat
     assert result.exit_code == 0, result.output
     assert not gemini_review.called
     assert openrouter_call.called
-    assert openrouter_call.call_args.kwargs["models"] == OPENROUTER_CODING_HIGH
+    assert openrouter_call.call_args.kwargs["models"] == OPENROUTER_REVIEW_CHEAP
     assert openrouter_call.call_args.kwargs["task_tags"] == ["code-review"]
     assert openrouter_call.call_args.kwargs["timeout_sec"] == 75
     assert openrouter_call.call_args.kwargs["max_stall_sec"] == 75
@@ -2125,7 +2128,7 @@ def test_ask_review_uses_openrouter_code_stack_instead_of_gemini(mocker, tmp_pat
         "claude",
         "openrouter",
     ]
-    assert payload["semantic"]["candidates"][2]["models"] == list(OPENROUTER_CODING_HIGH)
+    assert payload["semantic"]["candidates"][2]["models"] == list(OPENROUTER_REVIEW_CHEAP)
 
 
 def test_review_auto_generic_fallback_rejects_missing_requested_sentinel(
