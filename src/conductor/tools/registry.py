@@ -29,6 +29,59 @@ _BASH_DEFAULT_TIMEOUT_SEC = 60
 _BASH_MAX_TIMEOUT_SEC = 600
 _BASH_MAX_OUTPUT_BYTES = 256_000
 
+# Per #496: BashTool runs with `shell=True` and inherits the parent
+# environment. Any provider API key or credential the operator exported
+# for conductor itself was previously visible to every shell command the
+# model ran. Scrub names matching these patterns before invoking
+# subprocess. Set CONDUCTOR_BASH_ALLOW_ENV to a comma-separated list of
+# names to opt specific vars back in (e.g. NPM_TOKEN for private deps).
+_BASH_ENV_SCRUB_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"API_KEY$", re.IGNORECASE),
+    re.compile(r"_TOKEN$", re.IGNORECASE),
+    re.compile(r"SECRET", re.IGNORECASE),
+    re.compile(r"PASSWORD", re.IGNORECASE),
+    re.compile(r"_CREDENTIALS?$", re.IGNORECASE),
+)
+_BASH_ENV_SCRUB_EXPLICIT: frozenset[str] = frozenset(
+    {
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "CLOUDFLARE_API_TOKEN",
+        "HUGGINGFACE_API_TOKEN",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+    }
+)
+
+
+def _build_bash_subprocess_env() -> dict[str, str]:
+    """Return a copy of ``os.environ`` with secret-looking vars stripped.
+
+    Per #496. The operator can opt specific vars back in via
+    ``CONDUCTOR_BASH_ALLOW_ENV=NAME1,NAME2,...``. Never returns the
+    actual values to the caller — this is a sealed copy.
+    """
+    allow_raw = os.environ.get("CONDUCTOR_BASH_ALLOW_ENV", "")
+    allow: set[str] = {
+        name.strip() for name in allow_raw.split(",") if name.strip()
+    }
+    env: dict[str, str] = {}
+    for name, value in os.environ.items():
+        if name in allow:
+            env[name] = value
+            continue
+        if name in _BASH_ENV_SCRUB_EXPLICIT:
+            continue
+        if any(pat.search(name) for pat in _BASH_ENV_SCRUB_PATTERNS):
+            continue
+        env[name] = value
+    return env
+
 # --------------------------------------------------------------------------- #
 # Public error types
 # --------------------------------------------------------------------------- #
@@ -505,10 +558,14 @@ WriteTool.parameters_schema = {
 class BashTool:
     name = "Bash"
     description = (
-        "Run a shell command inside the workspace. The command's working "
-        "directory is pinned to the workspace root; you cannot cd outside "
-        "it. Output is captured up to 256KB. Per-command timeout is 60 "
-        "seconds by default (configurable up to 600)."
+        "Run a shell command. The command starts in the workspace root, "
+        "but this tool does not OS-sandbox the shell — `cd`, absolute "
+        "paths, and other filesystem operations work as they would in a "
+        "normal terminal. Output is captured up to 256KB. Per-command "
+        "timeout is 60 seconds by default (configurable up to 600). "
+        "Provider API keys and other secret-looking environment variables "
+        "are scrubbed from the subprocess; opt specific vars back in via "
+        "CONDUCTOR_BASH_ALLOW_ENV=NAME1,NAME2."
     )
     parameters_schema: dict  # assigned below
 
@@ -529,6 +586,7 @@ class BashTool:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                env=_build_bash_subprocess_env(),
             )
         except subprocess.TimeoutExpired as e:
             # text=True on the run() call ensures e.stdout/e.stderr are str,
