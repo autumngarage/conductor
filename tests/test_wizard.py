@@ -13,7 +13,15 @@ from conductor.providers.openrouter import OPENROUTER_API_KEY_ENV
 def _isolated_agent_homes(tmp_path, monkeypatch):
     """Isolate ~/.claude, ~/.conductor, and cwd for every wizard test —
     otherwise a wizard run could write into the developer's real home
-    dir, and AGENTS.md detection would see the real repo's file."""
+    dir, and AGENTS.md detection would see the real repo's file.
+
+    Per #494: `init -y` now exits 2 when zero remote providers end up
+    configured. Tests that exercise non-credential behavior (agent
+    wiring, summary printing, etc.) get OpenRouter pre-stubbed as
+    configured so they continue to assert exit_code == 0 without
+    needing to mock providers themselves. Tests that care about the
+    no-providers-configured case override this explicitly.
+    """
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
     monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path / ".conductor"))
@@ -25,12 +33,22 @@ def _isolated_agent_homes(tmp_path, monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("CLOUDFLARE_API_TOKEN", raising=False)
     monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
+    # Default: one remote provider configured so tests that don't care
+    # about credentials still get exit_code == 0. Tests that need a
+    # "nothing configured" scenario override this in their own setup.
+    from conductor.providers import OpenRouterProvider
+
+    monkeypatch.setattr(
+        OpenRouterProvider, "configured", lambda self: (True, None)
+    )
     # Default: Claude CLI not on PATH. Tests that need it patch explicitly.
     monkeypatch.setattr("shutil.which", lambda _cmd: None)
 
 
 def test_init_non_interactive_mode_reports_state(mocker, monkeypatch):
-    # Non-interactive: everything unconfigured, wizard should report and exit 0.
+    # Non-interactive: everything unconfigured. Per #494 this now exits 2 with
+    # a clear "no remote providers configured" message — silent skip is the
+    # original bug being fixed.
     from conductor.providers import (
         ClaudeProvider,
         CodexProvider,
@@ -52,10 +70,42 @@ def test_init_non_interactive_mode_reports_state(mocker, monkeypatch):
     mocker.patch("conductor.wizard.credentials.get", return_value=None)
 
     result = CliRunner().invoke(main, ["init", "--yes"])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 2, result.output
     assert "Summary" in result.output
     for name in ("kimi", "claude", "codex", "gemini", "ollama", "openrouter"):
         assert name in result.output
+    # New diagnostic: tell the operator why init -y is exiting non-zero.
+    assert "no remote providers configured" in result.output
+
+
+def test_init_yes_succeeds_when_remote_provider_already_configured(mocker):
+    """Counterpart to test_init_non_interactive_mode_reports_state.
+
+    Per #494: when at least one remote provider is configured (e.g. via
+    OPENROUTER_API_KEY in env), `init -y` exits 0 — the no-remote-providers
+    exit-2 only fires when nothing is wired.
+    """
+    from conductor.providers import (
+        ClaudeProvider,
+        CodexProvider,
+        GeminiProvider,
+        KimiProvider,
+        OllamaProvider,
+        OpenRouterProvider,
+    )
+
+    # The autouse fixture already stubs OpenRouter as configured. Keep
+    # the rest unconfigured to mirror a realistic CI scenario where only
+    # OPENROUTER_API_KEY is set.
+    for cls in (
+        ClaudeProvider, CodexProvider, GeminiProvider, KimiProvider, OllamaProvider
+    ):
+        mocker.patch.object(cls, "configured", lambda self: (False, "stubbed"))
+    assert OpenRouterProvider().configured()[0] is True  # sanity-check fixture
+
+    result = CliRunner().invoke(main, ["init", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "no remote providers configured" not in result.output
 
 
 def test_init_skips_already_configured_providers(mocker):
@@ -812,9 +862,19 @@ _ALL_PROVIDER_CLASSES = (
 
 
 def _stub_all_providers_unconfigured(mocker):
+    """Stub every provider as unconfigured EXCEPT OpenRouter.
+
+    Per #494, `init -y` now exits 2 when no remote providers end up
+    configured. These wiring tests assert exit_code == 0 because they
+    exercise agent-integration writes, not the credential-failure path.
+    Leaving OpenRouter at the autouse fixture's configured=True default
+    keeps the init walk succeeding so the wiring assertions are meaningful.
+    """
     import conductor.providers as providers_pkg
 
     for class_name in _ALL_PROVIDER_CLASSES:
+        if class_name == "OpenRouterProvider":
+            continue
         cls = getattr(providers_pkg, class_name)
         mocker.patch.object(cls, "configured", lambda self: (False, "stubbed"))
 

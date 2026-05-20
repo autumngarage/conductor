@@ -38,6 +38,13 @@ def _set_version(monkeypatch, version: str) -> None:
 
 
 def _stub_all_providers_unconfigured(monkeypatch) -> None:
+    """Stub every non-OpenRouter provider as unconfigured.
+
+    Per #494, `init -y` exits 2 when no remote provider is configured.
+    These end-to-end migration tests exercise the post-install + commit-hook
+    refresh path, not credential setup, so stub OpenRouter as configured
+    (matching the realistic CI scenario where OPENROUTER_API_KEY is in env).
+    """
     from conductor.providers import (
         ClaudeProvider,
         CodexProvider,
@@ -57,9 +64,9 @@ def _stub_all_providers_unconfigured(monkeypatch) -> None:
         GeminiProvider,
         KimiProvider,
         OllamaProvider,
-        OpenRouterProvider,
     ):
         monkeypatch.setattr(cls, "configured", lambda self: (False, "stubbed"))
+    monkeypatch.setattr(OpenRouterProvider, "configured", lambda self: (True, None))
 
 
 def _versions_by_kind(repo: Path) -> dict[str, str | None]:
