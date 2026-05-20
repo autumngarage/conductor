@@ -12762,6 +12762,102 @@ def git_cleanup(
         click.echo("Run with --execute to actually delete.")
 
 
+@main.command("reap")
+@click.option(
+    "--older-than",
+    "older_than",
+    default="1h",
+    show_default=True,
+    help="Age threshold (30s, 5m, 2h, 1d). Processes younger than this are ignored.",
+)
+@click.option(
+    "--execute",
+    is_flag=True,
+    default=False,
+    help="Send SIGTERM then SIGKILL to matching processes. Dry-run by default.",
+)
+@click.option(
+    "--pattern",
+    "extra_patterns",
+    multiple=True,
+    help=(
+        "Additional command substring to match. May be repeated. Defaults cover "
+        "codex --dangerously, codex exec, conductor exec, conductor swarm."
+    ),
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Emit structured reap report as JSON.",
+)
+def reap(
+    older_than: str,
+    execute: bool,
+    extra_patterns: tuple[str, ...],
+    as_json: bool,
+) -> None:
+    """Find and kill long-running provider processes that escape attention.
+
+    See issue #499. Detects codex / conductor-spawned processes alive longer
+    than --older-than and offers to terminate them. Dry-run by default so an
+    operator can confirm the list before killing.
+    """
+    from conductor.reap import (
+        DEFAULT_REAP_PATTERNS,
+        format_etime_human,
+        parse_duration,
+        reap_processes,
+        scan_stale_processes,
+    )
+
+    try:
+        threshold = parse_duration(older_than)
+    except ValueError as e:
+        raise click.UsageError(str(e)) from e
+
+    patterns = DEFAULT_REAP_PATTERNS + tuple(extra_patterns)
+    stale = scan_stale_processes(threshold_sec=threshold, patterns=patterns)
+
+    killed: list[int] = []
+    errors: list[dict[str, object]] = []
+    if execute and stale:
+        killed, errors = reap_processes(stale)
+
+    if as_json:
+        payload = {
+            "dry_run": not execute,
+            "threshold_sec": threshold,
+            "patterns": list(patterns),
+            "stale": [p.payload() for p in stale],
+            "killed": killed,
+            "errors": errors,
+        }
+        click.echo(json.dumps(payload, indent=2))
+        return
+
+    click.echo(
+        f"Provider processes older than {older_than} ({len(stale)} found):"
+    )
+    if stale:
+        for p in stale:
+            human = format_etime_human(p.etime_seconds)
+            click.echo(f"  pid={p.pid} ppid={p.ppid} age={human}  {p.command}")
+    else:
+        click.echo("  (none)")
+
+    click.echo("")
+    if execute:
+        click.echo(f"Killed {len(killed)} processes.")
+        if errors:
+            click.echo(f"{len(errors)} processes could not be terminated:")
+            for err in errors:
+                click.echo(f"  pid={err['pid']}: {err['error']}", err=True)
+    else:
+        click.echo("Run with --execute to send SIGTERM then SIGKILL.")
+
+
 @main.command()
 @click.option(
     "--json",
@@ -12972,6 +13068,22 @@ def doctor(as_json: bool) -> None:
         click.echo("  Refresh with:")
         click.echo("    conductor git-cleanup           # dry-run (default)")
         click.echo("    conductor git-cleanup --execute # actually delete")
+
+    try:
+        from conductor.reap import format_etime_human, scan_stale_processes
+
+        stale_procs = scan_stale_processes()
+    except Exception:
+        stale_procs = []
+    if stale_procs:
+        click.echo("")
+        click.echo("⚠ Long-running provider processes detected:")
+        for p in stale_procs:
+            human = format_etime_human(p.etime_seconds)
+            click.echo(f"    pid={p.pid} age={human}  {p.command[:80]}")
+        click.echo("  These keep burning provider tokens until killed. Reap with:")
+        click.echo("    conductor reap                  # dry-run (default)")
+        click.echo("    conductor reap --execute        # SIGTERM then SIGKILL")
 
     click.echo("")
     click.echo("Next steps:")
