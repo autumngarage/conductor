@@ -69,6 +69,55 @@ class InvalidRouterRequest(ProviderError):  # noqa: N818  — public API name, s
     """Raised when the caller passes an invalid combination (e.g. unknown prefer mode)."""
 
 
+def format_no_provider_error(
+    headline: str,
+    skipped: list[tuple[str, str]] | tuple[tuple[str, str], ...],
+    *,
+    context: dict[str, object] | None = None,
+) -> str:
+    """Format a NoConfiguredProvider error as a scannable multi-line block.
+
+    Per issue #495: the old format was one ~700-char line with a Python tuple
+    repr of ``skipped`` embedded. Mirror ``conductor doctor`` / ``conductor
+    list``'s shape — one provider per line, with the provider's ``fix_command``
+    when known.
+    """
+    lines = [headline]
+    if context:
+        ctx_bits = []
+        for key, val in context.items():
+            if val is None or val == "" or val == () or val == []:
+                continue
+            ctx_bits.append(f"{key}={val!r}" if isinstance(val, str) else f"{key}={val}")
+        if ctx_bits:
+            lines.append("  context: " + ", ".join(ctx_bits))
+    if skipped:
+        lines.append("  skipped:")
+        for name, reason in skipped:
+            reason_one_line = " ".join((reason or "").split())
+            lines.append(f"    ✗ {name}")
+            lines.append(f"        └─ {reason_one_line}")
+            fix = _lookup_fix_command(name, reason)
+            if fix:
+                lines.append(f"        → fix: {fix}")
+    return "\n".join(lines)
+
+
+def _lookup_fix_command(provider_name: str, reason: str | None) -> str | None:
+    """Best-effort: pull the provider's class-level fix_command. Never raises."""
+    try:
+        provider = get_provider(provider_name)
+    except Exception:
+        return None
+    fix_for_reason = getattr(provider, "fix_command_for_reason", None)
+    if callable(fix_for_reason):
+        try:
+            return fix_for_reason(reason)
+        except Exception:
+            pass
+    return getattr(provider, "fix_command", None)
+
+
 # --------------------------------------------------------------------------- #
 # Session-local health tracking.
 # --------------------------------------------------------------------------- #
@@ -599,10 +648,16 @@ def pick(
 
     if not ranked:
         raise NoConfiguredProvider(
-            "no provider satisfies the routing request. "
-            f"prefer={prefer!r} tools={sorted(tools_set)} "
-            f"attachments_required={attachments_required} "
-            f"exclude={sorted(exclude_set)}. Skipped: {skipped}"
+            format_no_provider_error(
+                "no provider satisfies the routing request.",
+                skipped,
+                context={
+                    "prefer": prefer,
+                    "tools": sorted(tools_set),
+                    "attachments_required": attachments_required,
+                    "exclude": sorted(exclude_set),
+                },
+            )
         )
 
     tag_default_applied: dict[str, str] = {}

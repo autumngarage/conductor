@@ -2192,11 +2192,12 @@ def _apply_auto_route_exclusion_rules(
     if len(retained) == len(decision.ranked):
         return decision, inclusion_message
     if not retained:
-        detail = f"{'; '.join(messages)}. " if messages else ""
-        raise NoConfiguredProvider(
-            "no provider satisfies the routing request after planning exclusions. "
-            f"{detail}Skipped: {skipped}"
-        )
+        from conductor.router import format_no_provider_error
+
+        headline = "no provider satisfies the routing request after planning exclusions."
+        if messages:
+            headline += " " + "; ".join(messages)
+        raise NoConfiguredProvider(format_no_provider_error(headline, skipped))
 
     winner = retained[0]
     return (
