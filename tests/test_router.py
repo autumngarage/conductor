@@ -136,7 +136,11 @@ def test_pick_raises_when_no_provider_configured(mocker):
     with pytest.raises(NoConfiguredProvider) as exc:
         pick(["long-context"])
     # Error lists what was skipped so users can see which CLI/env is missing.
-    assert "Skipped" in str(exc.value)
+    # Issue #495: format is now multi-line per-provider with → fix: lines.
+    rendered = str(exc.value)
+    assert "skipped:" in rendered
+    assert "→ fix:" in rendered
+    assert "✗ kimi" in rendered
 
 
 def test_pick_empty_tags_falls_back_to_priority(mocker):

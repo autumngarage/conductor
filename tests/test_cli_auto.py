@@ -150,6 +150,14 @@ def test_call_auto_with_no_configured_providers_exits_2(mocker):
     )
     assert result.exit_code == 2
     assert "no provider satisfies" in result.output.lower()
+    # Issue #495: error must be multi-line with one entry per skipped provider,
+    # not a Python tuple repr on a single line. Reuse doctor's → fix: style.
+    assert "skipped:" in result.output
+    assert "✗ kimi" in result.output
+    assert "→ fix:" in result.output
+    # No literal Python tuple repr (the bug we're fixing).
+    assert "('kimi'," not in result.output
+    assert "', '" not in result.output  # tuple-of-tuples separator
 
 
 # ---------------------------------------------------------------------------
