@@ -29,6 +29,9 @@ class KimiProvider(OpenRouterProvider):
     runtime_kind = PROVIDER_RUNTIME_TEXT_ONLY
     supported_tools: frozenset[str] = frozenset()
     supports_effort = True
+    supports_exec_iteration_cap = False
+    streams_output = False
+    model_family = "moonshot"
     effort_to_thinking = {
         "minimal": 0,
         "low": 2_000,

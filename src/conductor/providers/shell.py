@@ -92,6 +92,10 @@ class ShellProvider:
     enforces_exec_tool_permissions: bool = False
     supports_effort: bool = False
     supports_image_attachments: bool = False
+    supports_exec_iteration_cap: bool = False
+    streams_output: bool = False
+    model_family: str | None = None
+    max_context_tokens: int | None = None
     effort_to_thinking: dict[str, int] = {}  # noqa: RUF012
     cost_per_1k_thinking: float = 0.0
 

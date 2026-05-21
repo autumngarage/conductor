@@ -110,6 +110,9 @@ class GeminiProvider:
     enforces_exec_tool_permissions = False
     supports_effort = True
     supports_image_attachments = False
+    supports_exec_iteration_cap = False
+    streams_output = True
+    model_family = "google"
     effort_to_thinking = {
         "minimal": 0,
         "low": 2_000,

@@ -384,6 +384,9 @@ class CodexProvider:
     enforces_exec_tool_permissions = False
     supports_effort = True
     supports_image_attachments = True
+    supports_exec_iteration_cap = True
+    streams_output = True
+    model_family = "openai"
     effort_to_thinking = {
         "minimal": 0,
         "low": 2_000,

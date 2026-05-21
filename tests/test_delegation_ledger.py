@@ -58,10 +58,15 @@ def test_schema_writes_all_commands_and_preserves_nulls(monkeypatch, tmp_path):
             "tags",
             "session_log_path",
             "schema_version",
+            "chain_input_tokens",
+            "chain_output_tokens",
+            "chain_cost_usd",
+            "fallback_attempt_count",
         ):
             assert field in row
         assert row["input_tokens"] is None
         assert row["cost_usd"] is None
+        assert row["chain_input_tokens"] is None
 
 
 def test_query_filters(monkeypatch, tmp_path):

@@ -365,15 +365,11 @@ When invoked:
    result and parse it before returning:
 
        conductor exec --with codex --tools Read,Grep,Glob,Edit,Write,Bash \\
-           --max-stall-seconds 600 --timeout 1800 \\
            --brief-file "$brief_path" --json
 
-   `--max-stall-seconds 600` kills the run if codex produces no output
-   for 10 minutes (the documented silent-hang failure mode — see
-   conductor's .cortex/journal/2026-04-26-codex-exec-wedge-trace.md).
-   `--timeout 1800` is a 30-minute wall-clock cap. Both can be tuned
-   per task: a larger refactor can take longer, a one-line fix should
-   not. Without these flags the run can hang indefinitely.
+   Conductor owns run-health monitoring and structured failure output.
+   Advanced timeout and iteration overrides still parse for incident
+   response, but default delegation should not tune magic caps.
 
    If you background the call and return, conductor will keep running
    but its output will be lost; the parent agent will see a successful

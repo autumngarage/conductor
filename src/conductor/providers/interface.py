@@ -21,6 +21,8 @@ Capability declarations (v0.2):
   - supports_effort         — whether the provider has a thinking/reasoning dial
   - supports_image_attachments — whether the provider can accept image file attachments
                                  alongside the brief (today: codex only)
+  - supports_exec_iteration_cap — whether Conductor can enforce its managed
+                                  tool-loop iteration cap for this provider
   - endpoint_url           — HTTPS URL whose RTT represents provider network path
   - effort_to_thinking      — mapping from symbolic effort level to expected thinking tokens
   - cost_per_1k_in/out/thinking — for prefer=cheapest scoring
@@ -228,6 +230,10 @@ class Provider(Protocol):
     enforces_exec_tool_permissions: ClassVar[bool]
     supports_effort: ClassVar[bool]
     supports_image_attachments: ClassVar[bool]
+    supports_exec_iteration_cap: ClassVar[bool]
+    streams_output: ClassVar[bool]
+    model_family: ClassVar[str | None]
+    max_context_tokens: ClassVar[int | None]
     effort_to_thinking: ClassVar[dict[str, int]]
     cost_per_1k_in: ClassVar[float]
     cost_per_1k_out: ClassVar[float]
