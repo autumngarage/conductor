@@ -121,6 +121,12 @@ def test_fallback_attempt_receives_bounded_summary_not_raw_transcript(mocker) ->
     long_brief = "x" * 5_000
     first_error = ProviderHTTPError("HTTP 503: " + ("upstream unavailable " * 200))
     second_error = ProviderHTTPError("HTTP 429: rate limited")
+    provider_instances = {
+        "claude": object.__new__(ClaudeProvider),
+        "codex": object.__new__(CodexProvider),
+        "openrouter": object.__new__(OpenRouterProvider),
+    }
+    mocker.patch("conductor.cli.get_provider", side_effect=provider_instances.__getitem__)
     mocker.patch.object(ClaudeProvider, "call", side_effect=first_error)
     mocker.patch.object(CodexProvider, "call", side_effect=second_error)
     openrouter_call = mocker.patch.object(
