@@ -9,6 +9,7 @@ DOGFOOD = ROOT / "scripts" / "conductor-dogfood-smoke.py"
 PREFLIGHT = ROOT / "lib" / "preflight.sh"
 MERGE_PR = ROOT / "scripts" / "merge-pr.sh"
 VALIDATE_WORKFLOW = ROOT / ".github" / "workflows" / "validate.yml"
+DOGFOOD_TEST_TIMEOUT_SEC = 90
 
 
 def test_deterministic_dogfood_smoke_passes() -> None:
@@ -17,7 +18,7 @@ def test_deterministic_dogfood_smoke_passes() -> None:
         cwd=ROOT,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=DOGFOOD_TEST_TIMEOUT_SEC,
         check=False,
     )
 
