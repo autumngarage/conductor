@@ -193,6 +193,9 @@ class ClaudeProvider:
     enforces_exec_tool_permissions = True
     supports_effort = True
     supports_image_attachments = False
+    supports_exec_iteration_cap = False
+    streams_output = True
+    model_family = "anthropic"
     effort_to_thinking = {
         "minimal": 0,
         "low": 2_000,

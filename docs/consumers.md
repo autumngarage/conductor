@@ -66,7 +66,7 @@ Use `conductor review` for code review. Its auto route uses the same semantic re
 
 Rows with mode `call` return text on stdout only. They do not have tool access and cannot write files, create branches, commit, push, or open PRs. Use `code` with `high`/`max` effort or `conductor exec` when the brief requires repository side effects.
 
-Council has conservative default caps: 180 seconds total wall-clock, 6,000 reported output tokens across members plus synthesis, and $0.25 total known OpenRouter cost. Override them with `--council-timeout`, `--council-max-output-tokens`, and `--council-max-cost-usd`. When a cap stops the council before synthesis, the command exits nonzero and emits a partial `CallResponse`; `raw.conductor_council.cap_hit` includes the cap kind, requested/observed limit, elapsed time, completed member count, completed member models, and skipped member models. `--timeout` remains the per-call provider timeout and is bounded by the remaining council wall-clock cap.
+Council has conservative internal caps: 180 seconds total wall-clock, 6,000 reported output tokens across members plus synthesis, and $0.25 total known OpenRouter cost. Compatibility overrides (`--council-timeout`, `--council-max-output-tokens`, and `--council-max-cost-usd`) remain accepted but hidden from default help. When a cap stops the council before synthesis, the command exits nonzero and emits a partial `CallResponse`; `raw.conductor_council.cap_hit` includes the cap kind, requested/observed limit, elapsed time, completed member count, completed member models, and skipped member models. Degraded council output is prefixed with a structural `Council degraded:` summary when failed or unreached members materially reduce confidence.
 
 `--offline` is rejected for council because it violates the OpenRouter-only invariant.
 
@@ -108,9 +108,9 @@ Current enforcement support:
 
 If the workflow only needs review with no file mutation, prefer `conductor review` or `conductor ask --kind review`. Use `exec --permission-profile read-only` only for agentic inspection workflows that need the multi-turn exec machinery.
 
-`conductor exec --help` is the canonical reference for agentic code/edit mode. Its stable exec-specific flags are: --tools, --permission-profile, --sandbox, --cwd, --timeout, --max-stall-seconds, --start-timeout, --max-iterations, --log-file, --preflight, --no-preflight, and --allow-short-brief. `--sandbox` remains parseable for compatibility but is deprecated and ignored.
+`conductor exec --help` is the canonical reference for agentic code/edit mode. Its stable exec-specific flags are: --tools, --permission-profile, --sandbox, --cwd, --log-file, --preflight, --no-preflight, and --allow-short-brief. `--sandbox` remains parseable for compatibility but fails loudly because exec is unsandboxed unless a provider can enforce a `--permission-profile`.
 
-`--max-iterations <n>` is an exec-only Conductor-managed tool-use loop cap. If unset, it defaults from base 10 by effective `--effort`: unset/minimal=10, low=15, medium=20, high=30, max=40.
+Advanced termination overrides such as `--timeout`, `--max-stall-seconds`, `--start-timeout`, and `--max-iterations` remain parseable for compatibility and incident response, but they are hidden from the default help path. Normal callers should rely on Conductor's run-health reporting and structured failure output instead of tuning caps.
 
 ## Flags
 
@@ -140,7 +140,7 @@ The canonical reference is `conductor call --help`. The contract-level commitmen
 | `--offline` / `--no-offline` | bool | stable | Force/clear local-only routing |
 | `--profile <name>` | string | stable | Apply named profile defaults |
 
-`conductor ask --help` is the canonical reference for the semantic API. Its stable flags are: --kind, --effort, --cwd, --timeout, --max-stall-seconds, --council-timeout, --council-max-output-tokens, --council-max-cost-usd, --base, --commit, --uncommitted, --title, --brief, --brief-file, --issue, --issue-comment-limit, --task, --task-file, --log-file, --json, --verbose-route, --silent-route, --offline, --no-offline, --preflight, --no-preflight, and --allow-short-brief.
+`conductor ask --help` is the canonical reference for the semantic API. Its stable default-path flags are: --kind, --effort, --cwd, --base, --commit, --uncommitted, --title, --brief, --brief-file, --issue, --issue-comment-limit, --task, --task-file, --log-file, --json, --verbose-route, --silent-route, --offline, --no-offline, --preflight, --no-preflight, and --allow-short-brief.
 
 ## Output (`--json`)
 
@@ -272,13 +272,7 @@ conductor ask --kind code --effort high --brief-file /tmp/brief.md --json
 conductor ask --kind council --effort medium --brief-file /tmp/brief.md --json
 ```
 
-`council` is multi-call OpenRouter fan-out. For budget-sensitive routine delegation, use `research` or `code`; when using `council`, set tighter caps explicitly if the caller owns a smaller budget:
-
-```bash
-conductor ask --kind council --effort medium --brief-file /tmp/brief.md \
-  --council-timeout 90 --council-max-output-tokens 3000 \
-  --council-max-cost-usd 0.10 --json
-```
+`council` is multi-call OpenRouter fan-out. For budget-sensitive routine delegation, use `research` or `code`; council's compatibility cap overrides are intentionally hidden so normal callers see the outcome and degradation reason rather than a set of magic numbers to tune.
 
 For merge review, Touchstone should continue to use `conductor review` or `conductor ask --kind review`; both must trigger the review cascade, not generic code chat.
 

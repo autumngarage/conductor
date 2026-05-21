@@ -109,6 +109,9 @@ class OpenRouterProvider:
     enforces_exec_tool_permissions = True
     supports_effort = True
     supports_image_attachments = False
+    supports_exec_iteration_cap = True
+    streams_output = False
+    model_family = "openrouter"
     effort_to_thinking = {
         "minimal": 0,
         "low": 2_000,

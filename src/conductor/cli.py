@@ -65,7 +65,14 @@ from conductor.delegation_ledger import (
     record_delegation,
 )
 from conductor.delegation_report import build_delegation_report
+from conductor.exec_boundary import (
+    ExecBoundarySnapshot,
+    brief_declares_exec_boundary_scope,
+    capture_exec_boundary_snapshot,
+    enforce_exec_boundary,
+)
 from conductor.exec_completion import brief_declares_read_only_text_output
+from conductor.fallback_summary import FallbackAttempt, FallbackSummary
 from conductor.git_state import (
     DEFAULT_BRANCH_SCAN_LIMIT,
     DEFAULT_KEEP_WORKTREE_DAYS,
@@ -105,8 +112,8 @@ from conductor.openrouter_stack_audit import (
     audit_openrouter_coding_stacks,
 )
 from conductor.profiles import ProfileError, ProfileSpec, get_profile, load_profiles
+from conductor.provider_capabilities import capabilities_for
 from conductor.providers import (
-    PROVIDER_RUNTIME_KINDS,
     PROVIDER_RUNTIME_STATEFUL_AGENT,
     PROVIDER_RUNTIME_STATELESS_TOOL_LOOP,
     PROVIDER_RUNTIME_TEXT_ONLY,
@@ -154,6 +161,11 @@ from conductor.router_defaults import (
     repo_router_defaults_path,
     set_home_tag_default,
     unset_home_tag_default,
+)
+from conductor.run_health import (
+    analyze_exec_session,
+    council_degradation,
+    degraded_council_prefix,
 )
 from conductor.semantic import (
     SEMANTIC_KINDS,
@@ -208,7 +220,6 @@ EXEC_MAX_ITERATIONS_HELP = (
     "--effort from base 10: minimal=10, low=15, medium=20, high=100, max=140. "
     "If --effort is unset, preserves the legacy cap of 10."
 )
-EXEC_MAX_ITERATION_PROVIDER_IDS = frozenset({"codex", "openrouter", "ollama"})
 GIT_RECOVERY_COMMAND_TIMEOUT_SEC = 2.0
 GIT_RECOVERY_MAX_COMMITS = 5
 GIT_RECOVERY_MAX_STATUS_PATHS = 8
@@ -933,11 +944,16 @@ def _resolve_exec_max_iterations(
 
 
 def _provider_supports_exec_max_iterations(provider_id: str) -> bool:
-    return provider_id in EXEC_MAX_ITERATION_PROVIDER_IDS
+    try:
+        return capabilities_for(get_provider(provider_id)).supports_exec_iteration_cap
+    except KeyError:
+        return False
 
 
 def _exec_max_iterations_unsupported_message(provider_id: str) -> str:
-    supported = ", ".join(sorted(EXEC_MAX_ITERATION_PROVIDER_IDS))
+    supported = ", ".join(
+        name for name in known_providers() if _provider_supports_exec_max_iterations(name)
+    )
     return (
         "--max-iterations only applies to Conductor-managed tool-use loops "
         f"({supported}); {provider_id} cannot honor it."
@@ -1066,14 +1082,11 @@ def _resolve_exec_tools(
 
 
 def _provider_enforces_exec_tool_permissions(provider_obj: object) -> bool:
-    return bool(getattr(provider_obj, "enforces_exec_tool_permissions", False))
+    return capabilities_for(provider_obj).enforces_exec_tool_permissions
 
 
 def _provider_runtime_kind(provider_obj: object) -> str:
-    runtime_kind = getattr(provider_obj, "runtime_kind", PROVIDER_RUNTIME_TEXT_ONLY)
-    if isinstance(runtime_kind, str) and runtime_kind in PROVIDER_RUNTIME_KINDS:
-        return runtime_kind
-    return PROVIDER_RUNTIME_TEXT_ONLY
+    return capabilities_for(provider_obj).runtime_kind
 
 
 def _provider_runtime_kind_by_name(provider_id: str) -> str:
@@ -1414,6 +1427,67 @@ def _format_fallback_error_detail(err: Exception) -> str:
     if len(detail) <= _FALLBACK_ERROR_DETAIL_MAX_CHARS:
         return detail
     return detail[: _FALLBACK_ERROR_DETAIL_MAX_CHARS - 3].rstrip() + "..."
+
+
+def _response_usage_int(response: CallResponse, key: str) -> int | None:
+    value = (response.usage or {}).get(key)
+    if isinstance(value, bool):
+        return None
+    return value if isinstance(value, int) else None
+
+
+def _fallback_attempt_from_response(response: CallResponse) -> FallbackAttempt:
+    return FallbackAttempt(
+        provider=response.provider,
+        status="success",
+        detail="provider returned a response",
+        elapsed_ms=response.duration_ms,
+        input_tokens=_response_usage_int(response, "input_tokens"),
+        output_tokens=_response_usage_int(response, "output_tokens"),
+        cost_usd=response.cost_usd,
+    )
+
+
+def _fallback_attempt_from_error(
+    *,
+    provider: str,
+    status: str,
+    err: Exception,
+    elapsed_ms: int,
+    cwd: str | None,
+) -> FallbackAttempt:
+    return FallbackAttempt(
+        provider=provider,
+        status=status,
+        detail=_format_fallback_error_detail(err),
+        elapsed_ms=elapsed_ms,
+        artifacts=tuple(_fallback_dirty_artifacts(cwd)),
+    )
+
+
+def _fallback_dirty_artifacts(cwd: str | None) -> list[str]:
+    if cwd is None:
+        return []
+    output = _git_stdout(cwd, ["status", "--porcelain"], errors=[])
+    if not output:
+        return []
+    paths: list[str] = []
+    for line in output.splitlines():
+        if len(line) > 3:
+            paths.append(line[3:])
+    return paths[:12]
+
+
+def _response_with_fallback_metadata(
+    response: CallResponse,
+    summary: FallbackSummary,
+) -> CallResponse:
+    if not summary.attempts:
+        return response
+    return replace(
+        response,
+        raw={**(response.raw or {}), "conductor_fallback": summary.to_dict()},
+    )
 
 
 def _review_failure_mode(err: Exception) -> str:
@@ -2479,6 +2553,7 @@ def _invoke_with_fallback(
     last_exc: Exception | None = None
     fallbacks: list[str] = []
     candidates = list(decision.ranked)
+    fallback_summary = FallbackSummary()
 
     if offline_mode.is_active():
         if _ollama_index(candidates) is None:
@@ -2564,6 +2639,10 @@ def _invoke_with_fallback(
                     "sandbox": sandbox,
                     "cwd": cwd,
                     "resume_session_id": resume_session_id,
+                    "fallback_attempt": idx + 1,
+                    "fallback_summary": fallback_summary.to_dict()
+                    if fallback_summary.attempts
+                    else None,
                 },
             )
         attempt_timeout_sec, attempt_max_stall_sec = _bounded_attempt_budget(
@@ -2584,11 +2663,13 @@ def _invoke_with_fallback(
                 else min(attempt_timeout_sec, attempt_max_stall_sec)
             )
             attempt_max_stall_sec = min(attempt_max_stall_sec, attempt_timeout_sec)
+        attempt_started_at = time.monotonic()
+        attempt_task = fallback_summary.apply_to_task(task)
         try:
             if mode == "exec":
                 if isinstance(provider, OpenRouterProvider):
                     response = provider.exec(
-                        task,
+                        attempt_task,
                         model=model,
                         models=candidate_models,
                         effort=effort,
@@ -2610,7 +2691,7 @@ def _invoke_with_fallback(
                 elif isinstance(provider, ClaudeProvider):
                     _ensure_supports_attachments(provider, attachments)
                     response = provider.exec(
-                        task,
+                        attempt_task,
                         model=model,
                         effort=effort,
                         tools=tools,
@@ -2625,7 +2706,7 @@ def _invoke_with_fallback(
                     )
                 elif isinstance(provider, CodexProvider):
                     response = provider.exec(
-                        task,
+                        attempt_task,
                         model=model,
                         effort=effort,
                         tools=tools,
@@ -2642,7 +2723,7 @@ def _invoke_with_fallback(
                 elif isinstance(provider, OllamaProvider):
                     _ensure_supports_attachments(provider, attachments)
                     response = provider.exec(
-                        task,
+                        attempt_task,
                         model=model,
                         effort=effort,
                         tools=tools,
@@ -2659,7 +2740,7 @@ def _invoke_with_fallback(
                 else:
                     _ensure_supports_attachments(provider, attachments)
                     response = provider.exec(
-                        task,
+                        attempt_task,
                         model=model,
                         effort=effort,
                         tools=tools,
@@ -2674,7 +2755,7 @@ def _invoke_with_fallback(
                 if isinstance(provider, OpenRouterProvider):
                     _ensure_supports_attachments(provider, attachments)
                     response = provider.call(
-                        task,
+                        attempt_task,
                         model=model,
                         models=candidate_models,
                         effort=effort,
@@ -2688,7 +2769,7 @@ def _invoke_with_fallback(
                     )
                 elif isinstance(provider, CodexProvider):
                     response = provider.call(
-                        task,
+                        attempt_task,
                         model=model,
                         effort=effort,
                         timeout_sec=attempt_timeout_sec,
@@ -2699,7 +2780,7 @@ def _invoke_with_fallback(
                 else:
                     _ensure_supports_attachments(provider, attachments)
                     response = provider.call(
-                        task,
+                        attempt_task,
                         model=model,
                         effort=effort,
                         timeout_sec=attempt_timeout_sec,
@@ -2707,6 +2788,10 @@ def _invoke_with_fallback(
                         resume_session_id=resume_session_id,
                     )
             mark_outcome(candidate.name, "success")
+            fallback_summary = fallback_summary.with_attempt(
+                _fallback_attempt_from_response(response)
+            )
+            response = _response_with_fallback_metadata(response, fallback_summary)
             if session_log is not None:
                 session_log.set_session_id(response.session_id)
                 session_log.emit(
@@ -2716,6 +2801,7 @@ def _invoke_with_fallback(
                         "model": response.model,
                         "duration_ms": response.duration_ms,
                         "session_id": response.session_id,
+                        "fallback_summary": fallback_summary.to_dict(),
                     },
                 )
             return response, fallbacks
@@ -2725,6 +2811,14 @@ def _invoke_with_fallback(
             raise
         except UnsupportedCapability:
             # Router filter should prevent this; if it leaks through, skip.
+            fallback_summary = fallback_summary.with_attempt(
+                FallbackAttempt(
+                    provider=candidate.name,
+                    status="unsupported",
+                    detail="provider does not support requested capability",
+                    elapsed_ms=_council_elapsed_ms(attempt_started_at),
+                )
+            )
             fallbacks.append(candidate.name)
             idx += 1
             continue
@@ -2734,12 +2828,22 @@ def _invoke_with_fallback(
                 mark_rate_limited(candidate.name)
             mark_outcome(candidate.name, category)
             last_exc = e
+            fallback_summary = fallback_summary.with_attempt(
+                _fallback_attempt_from_error(
+                    provider=candidate.name,
+                    status=category,
+                    err=e,
+                    elapsed_ms=_council_elapsed_ms(attempt_started_at),
+                    cwd=cwd,
+                )
+            )
             if session_log is not None:
                 failure_event: dict[str, object] = {
                     "provider": candidate.name,
                     "category": category,
                     "error_class": e.__class__.__name__,
                     "error": str(e),
+                    "fallback_summary": fallback_summary.to_dict(),
                 }
                 if isinstance(e, ProviderExecutionError):
                     failure_event["execution_status"] = e.status
@@ -2819,6 +2923,7 @@ def _invoke_review_with_fallback(
     quarantined_contract_errors: list[ReviewOutputContractError] = []
     ranked_candidates = list(decision.ranked)
     candidates = ranked_candidates[:max_fallbacks]
+    fallback_summary = FallbackSummary()
     skipped_by_max_fallbacks = [
         candidate.name for candidate in ranked_candidates[max_fallbacks:]
     ]
@@ -2832,7 +2937,8 @@ def _invoke_review_with_fallback(
         )
         attempt_route_mode = _route_provider_mode("review", provider)
         attempt_started_at = time.monotonic()
-        contract_prompt = task
+        attempt_task = fallback_summary.apply_to_task(task)
+        contract_prompt = attempt_task
         try:
             attempt_timeout_sec, attempt_max_stall_sec = _bounded_review_attempt_budget(
                 timeout_sec=timeout_sec,
@@ -2844,7 +2950,7 @@ def _invoke_review_with_fallback(
             )
             if isinstance(provider, NativeReviewProvider):
                 response = provider.review(
-                    task,
+                    attempt_task,
                     effort=effort,
                     cwd=cwd,
                     timeout_sec=attempt_timeout_sec,
@@ -2856,7 +2962,7 @@ def _invoke_review_with_fallback(
                 )
             elif isinstance(provider, OpenRouterProvider):
                 contract_prompt = build_review_task_prompt(
-                    task,
+                    attempt_task,
                     base=base,
                     commit=commit,
                     uncommitted=uncommitted,
@@ -2877,7 +2983,7 @@ def _invoke_review_with_fallback(
                 )
             else:
                 contract_prompt = build_review_task_prompt(
-                    task,
+                    attempt_task,
                     base=base,
                     commit=commit,
                     uncommitted=uncommitted,
@@ -2907,6 +3013,9 @@ def _invoke_review_with_fallback(
                     f"quarantined possible findings: {details}."
                 )
             mark_outcome(candidate.name, "success", kind="review")
+            fallback_summary = fallback_summary.with_attempt(
+                _fallback_attempt_from_response(response)
+            )
             tried.append((candidate.name, "success"))
             attempts.append(
                 ReviewProviderAttempt(
@@ -2923,6 +3032,7 @@ def _invoke_review_with_fallback(
                 statuses=statuses,
                 attempts=attempts,
             )
+            response = _response_with_fallback_metadata(response, fallback_summary)
             if not silent and len(tried) > 1:
                 click.echo(
                     f"[conductor] review tried providers: {_format_tried_providers(tried)}",
@@ -2932,6 +3042,15 @@ def _invoke_review_with_fallback(
         except ProviderConfigError as e:
             last_exc = e
             mark_outcome(candidate.name, "config", kind="review")
+            fallback_summary = fallback_summary.with_attempt(
+                _fallback_attempt_from_error(
+                    provider=candidate.name,
+                    status="config",
+                    err=e,
+                    elapsed_ms=_council_elapsed_ms(attempt_started_at),
+                    cwd=cwd,
+                )
+            )
             fallbacks.append(candidate.name)
             tried.append((candidate.name, "config"))
             detail = _format_fallback_error_detail(e)
@@ -2955,6 +3074,15 @@ def _invoke_review_with_fallback(
             )
         except UnsupportedCapability as e:
             last_exc = e
+            fallback_summary = fallback_summary.with_attempt(
+                _fallback_attempt_from_error(
+                    provider=candidate.name,
+                    status="unsupported",
+                    err=e,
+                    elapsed_ms=_council_elapsed_ms(attempt_started_at),
+                    cwd=cwd,
+                )
+            )
             fallbacks.append(candidate.name)
             tried.append((candidate.name, "unsupported"))
             detail = _format_fallback_error_detail(e)
@@ -2984,6 +3112,15 @@ def _invoke_review_with_fallback(
                 mark_rate_limited(candidate.name)
             mark_outcome(candidate.name, category, kind="review")
             last_exc = e
+            fallback_summary = fallback_summary.with_attempt(
+                _fallback_attempt_from_error(
+                    provider=candidate.name,
+                    status=category,
+                    err=e,
+                    elapsed_ms=_council_elapsed_ms(attempt_started_at),
+                    cwd=cwd,
+                )
+            )
             if not retryable:
                 raise
             fallbacks.append(candidate.name)
@@ -3017,6 +3154,15 @@ def _invoke_review_with_fallback(
         except ReviewContextError as e:
             last_exc = e
             mark_outcome(candidate.name, "review-context", kind="review")
+            fallback_summary = fallback_summary.with_attempt(
+                _fallback_attempt_from_error(
+                    provider=candidate.name,
+                    status="review-context",
+                    err=e,
+                    elapsed_ms=_council_elapsed_ms(attempt_started_at),
+                    cwd=cwd,
+                )
+            )
             fallbacks.append(candidate.name)
             tried.append((candidate.name, "review-context"))
             detail = _format_fallback_error_detail(e)
@@ -3281,6 +3427,7 @@ def _invoke_council(
         cost_usd=cost_usd,
         raw={**(synthesis.raw or {}), **raw},
     )
+    parent_response = _response_with_council_health(parent_response)
     _record_response_delegation(
         "council",
         parent_response,
@@ -3292,6 +3439,18 @@ def _invoke_council(
         synthesis_delegation_id=synthesis_delegation_id,
     )
     return parent_response
+
+
+def _response_with_council_health(response: CallResponse) -> CallResponse:
+    report = council_degradation(response.raw or {})
+    if report.status == "unknown":
+        return response
+    raw = {**(response.raw or {}), "conductor_run_health": report.to_dict()}
+    prefix = degraded_council_prefix(report)
+    text = response.text
+    if prefix and not text.startswith("Council degraded:"):
+        text = f"{prefix}\n\n{text}"
+    return replace(response, text=text, raw=raw)
 
 
 def _council_member_failure_response(
@@ -3410,7 +3569,7 @@ def _raise_if_council_cap_hit(
         cost_usd=cost_usd,
         raw=raw,
     )
-    raise CouncilCapError(response)
+    raise CouncilCapError(_response_with_council_health(response))
 
 
 def _council_cap_hit_payload(
@@ -3913,6 +4072,8 @@ def _delegation_event_from_response(
         decision=decision,
         semantic_plan=semantic_plan,
     )
+    fallback_payload = (response.raw or {}).get("conductor_fallback")
+    chain_usage = fallback_payload if isinstance(fallback_payload, dict) else {}
     return DelegationEvent(
         delegation_id=delegation_id or DelegationEvent().delegation_id,
         command=command,
@@ -3936,6 +4097,15 @@ def _delegation_event_from_response(
         route=route_payload,
         semantic=semantic_payload,
         fallback_chain=fallback_chain if fallback_chain else None,
+        chain_input_tokens=_usage_int_or_none(chain_usage.get("chain_input_tokens")),
+        chain_output_tokens=_usage_int_or_none(chain_usage.get("chain_output_tokens")),
+        chain_cost_usd=(
+            float(chain_usage["chain_cost_usd"])
+            if isinstance(chain_usage.get("chain_cost_usd"), int | float)
+            and not isinstance(chain_usage.get("chain_cost_usd"), bool)
+            else None
+        ),
+        fallback_attempt_count=_usage_int_or_none(chain_usage.get("attempt_count")),
     )
 
 
@@ -4148,6 +4318,34 @@ def _emit_exec_hook_scope_creep_warnings(
             ),
             err=True,
         )
+
+
+def _apply_exec_commit_boundary(
+    *,
+    snapshot: ExecBoundarySnapshot | None,
+    brief: str,
+    session_log: SessionLog | None,
+    cwd: str | None,
+) -> dict | None:
+    if session_log is None or snapshot is None:
+        return None
+    worktree = Path(cwd or os.getcwd()).resolve()
+    result = enforce_exec_boundary(
+        snapshot,
+        brief=brief,
+        agent_write_set=_collect_exec_agent_write_set(session_log, cwd=worktree),
+    )
+    payload = result.to_dict()
+    session_log.emit("exec_commit_boundary", payload)
+    for warning in result.warnings:
+        click.echo(f"[conductor] {warning}", err=True)
+    if result.status == "committed" and result.commit_sha:
+        click.echo(
+            "[conductor] exec committed in-scope changes: "
+            f"{result.commit_sha} ({', '.join(result.committed_paths)})",
+            err=True,
+        )
+    return payload
 
 
 def _git_stdout(cwd: str, args: list[str], *, errors: list[str]) -> str | None:
@@ -4441,6 +4639,20 @@ def _emit_session_usage(
             "cost_usd": response.cost_usd,
             "duration_ms": response.duration_ms,
         },
+    )
+
+
+def _response_with_exec_run_health(
+    response: CallResponse,
+    session_log: SessionLog | None,
+) -> CallResponse:
+    if session_log is None:
+        return response
+    report = analyze_exec_session(session_log.log_path)
+    session_log.emit("run_health", report.to_dict())
+    return replace(
+        response,
+        raw={**(response.raw or {}), "conductor_run_health": report.to_dict()},
     )
 
 
@@ -4763,6 +4975,7 @@ def main(ctx: click.Context) -> None:
     "timeout_sec",
     default=None,
     type=int,
+    hidden=True,
     help=(
         "Wall-clock timeout in seconds for review/exec provider calls. "
         "Unbounded by default. Review-tagged auto routes derive their own "
@@ -4774,6 +4987,7 @@ def main(ctx: click.Context) -> None:
     "max_stall_sec",
     default=DEFAULT_EXEC_MAX_STALL_SEC,
     type=int,
+    hidden=True,
     help=(
         "Kill streaming exec/review providers after this many silent seconds. "
         "Review-tagged auto routes derive their own stall budget. Set 0 to disable."
@@ -4785,6 +4999,7 @@ def main(ctx: click.Context) -> None:
     default=DEFAULT_COUNCIL_TIMEOUT_SEC,
     type=click.IntRange(min=1),
     show_default=True,
+    hidden=True,
     help=(
         "For council: total wall-clock cap in seconds across members and synthesis. "
         "--timeout remains the per-call provider timeout."
@@ -4795,6 +5010,7 @@ def main(ctx: click.Context) -> None:
     default=DEFAULT_COUNCIL_MAX_OUTPUT_TOKENS,
     type=click.IntRange(min=1),
     show_default=True,
+    hidden=True,
     help="For council: stop before more calls once reported output tokens reach this total.",
 )
 @click.option(
@@ -4802,6 +5018,7 @@ def main(ctx: click.Context) -> None:
     default=DEFAULT_COUNCIL_MAX_COST_USD,
     type=click.FloatRange(min=0.0),
     show_default=True,
+    hidden=True,
     help=(
         "For council: stop before more calls once total known OpenRouter cost "
         "reaches this USD budget."
@@ -5288,6 +5505,8 @@ def ask(
         _maybe_echo_stall_recovery_hint(e, cwd=cwd)
         sys.exit(1)
 
+    if plan.mode == "exec":
+        response = _response_with_exec_run_health(response, session_log)
     _emit_usage_log(response, silent=silent_route or as_json)
     _emit_session_usage(session_log, response)
     if session_log is not None:
@@ -10314,6 +10533,7 @@ def _run_exec_phase_dispatch(
             },
         )
 
+    response = _response_with_exec_run_health(response, session_log)
     if auto and not as_json:
         _emit_usage_log(response, silent=silent_route)
     _emit_session_usage(session_log, response)
@@ -10403,6 +10623,7 @@ def _run_exec_phase_dispatch(
     "timeout_sec",
     default=None,
     type=int,
+    hidden=True,
     help=(
         "Wall-clock timeout in seconds. Unbounded by default. Set explicitly "
         "(e.g. --timeout 600) for non-review CI or unattended runs that need "
@@ -10414,6 +10635,7 @@ def _run_exec_phase_dispatch(
     "max_stall_sec",
     default=DEFAULT_EXEC_MAX_STALL_SEC,
     type=int,
+    hidden=True,
     help=(
         "Kill the underlying provider if it produces no output for this many "
         "seconds. Default: 360, just past codex's 5-minute internal websocket "
@@ -10426,6 +10648,7 @@ def _run_exec_phase_dispatch(
     "--strict-stall",
     is_flag=True,
     default=False,
+    hidden=True,
     help=(
         "Codex exec only. Reset --max-stall-seconds only on tool-use/tool-result "
         "events and stderr, ignoring assistant text and turn-boundary events."
@@ -10436,6 +10659,7 @@ def _run_exec_phase_dispatch(
     "start_timeout_sec",
     default=None,
     type=float,
+    hidden=True,
     help=(
         "Startup watchdog in seconds for providers that may cold-load before "
         "their first byte. Set 0 to disable. After first output, "
@@ -10446,12 +10670,14 @@ def _run_exec_phase_dispatch(
     "--max-iterations",
     default=None,
     type=click.IntRange(min=1),
+    hidden=True,
     help=EXEC_MAX_ITERATIONS_HELP,
 )
 @click.option(
     "--allow-completion-stretch",
     is_flag=True,
     default=False,
+    hidden=True,
     help=(
         "When a managed exec loop hits --max-iterations with detected unfinished "
         "brief deliverables, grant exactly one final clarifying turn."
@@ -10771,6 +10997,11 @@ def exec_cmd(
         scope_creep_start_head = git_head_via_fs(
             Path(cwd or os.getcwd()).resolve()
         )
+        boundary_snapshot = (
+            capture_exec_boundary_snapshot(cwd)
+            if brief_declares_exec_boundary_scope(brief_input.body)
+            else None
+        )
         try:
             response, decision, session_log = _run_exec_phase_dispatch(
                 provider_id=provider_id,
@@ -10832,6 +11063,17 @@ def exec_cmd(
             session_log=session_log,
             phase_start_head=scope_creep_start_head,
         )
+        boundary_payload = _apply_exec_commit_boundary(
+            snapshot=boundary_snapshot,
+            brief=brief_input.body,
+            session_log=session_log,
+            cwd=cwd,
+        )
+        if boundary_payload is not None:
+            response = replace(
+                response,
+                raw={**(response.raw or {}), "conductor_exec_boundary": boundary_payload},
+            )
 
         final_response = response
         final_decision = decision

@@ -61,6 +61,10 @@ class DelegationEvent:
     route: dict | None = None
     semantic: dict | None = None
     fallback_chain: list[str] | None = None
+    chain_input_tokens: int | None = None
+    chain_output_tokens: int | None = None
+    chain_cost_usd: float | None = None
+    fallback_attempt_count: int | None = None
 
     def to_dict(self) -> dict:
         payload = asdict(self)

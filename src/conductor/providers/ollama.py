@@ -221,6 +221,9 @@ class OllamaProvider:
     enforces_exec_tool_permissions = True
     supports_effort = False  # base ollama models don't expose a thinking dial
     supports_image_attachments = False
+    supports_exec_iteration_cap = True
+    streams_output = False
+    model_family = "local"
     effort_to_thinking: dict[str, int] = {}
     cost_per_1k_in = 0.0
     cost_per_1k_out = 0.0
