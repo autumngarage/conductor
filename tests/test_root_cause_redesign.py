@@ -10,6 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 from conductor.cli import (
+    _apply_exec_commit_boundary,
     _invoke_with_fallback,
     _provider_supports_exec_max_iterations,
     _response_with_council_health,
@@ -25,6 +26,7 @@ from conductor.providers import (
     ProviderHTTPError,
 )
 from conductor.router import RankedCandidate, RouteDecision
+from conductor.session_log import SessionLog
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
 
@@ -98,6 +100,8 @@ def _git(repo: Path, *args: str) -> str:
 
 def _init_repo(repo: Path) -> None:
     _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test User")
     (repo / "README.md").write_text("base\n", encoding="utf-8")
     _git(repo, "add", "README.md")
     _git(repo, "commit", "-q", "-m", "base")
@@ -176,6 +180,33 @@ def test_exec_boundary_commits_only_in_scope_dirty_paths(tmp_path: Path) -> None
         "src/app.py"
     ]
     assert "?? AGENTS.md" in _git(repo, "status", "--short")
+
+
+def test_apply_exec_commit_boundary_uses_logged_write_scope(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_repo(repo)
+    (repo / "src").mkdir()
+
+    snapshot = capture_exec_boundary_snapshot(str(repo))
+    target = repo / "src" / "app.py"
+    target.write_text("print('ok')\n", encoding="utf-8")
+    session_log = SessionLog(path=tmp_path / "session.ndjson")
+    session_log.emit("tool_call", {"name": "Edit", "args": {"path": str(target)}})
+
+    payload = _apply_exec_commit_boundary(
+        snapshot=snapshot,
+        brief="Edit `src/app.py` only.",
+        session_log=session_log,
+        cwd=str(repo),
+    )
+
+    assert payload is not None
+    assert payload["status"] == "committed"
+    assert payload["committed_paths"] == ["src/app.py"]
+    assert _git(repo, "show", "--name-only", "--format=", "HEAD").splitlines() == [
+        "src/app.py"
+    ]
 
 
 def test_council_degraded_output_is_structural() -> None:
