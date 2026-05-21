@@ -46,6 +46,30 @@ def _isolated_agent_homes(tmp_path, monkeypatch):
     monkeypatch.setattr("shutil.which", lambda _cmd: None)
 
 
+def _stub_openrouter_configured_for_init(mocker, monkeypatch):
+    """Per #494: `init -y` exits 2 when no remote providers are configured.
+
+    Tests that chain `init -y --remaining` as a setup step (consumer refresh,
+    update-all, etc.) need at least one remote provider configured for that
+    step to exit 0. Mirrors the realistic CI scenario where OPENROUTER_API_KEY
+    is in env. Tests that exercise the no-remote-providers path don't call
+    this helper.
+
+    update-all spawns init as a subprocess (`python -m conductor.cli init -y
+    --remaining`), so a mocker-only patch wouldn't apply across the process
+    boundary. Set ``OPENROUTER_API_KEY`` in the parent env (via monkeypatch
+    so the value reverts at test teardown without leaking) so the subprocess
+    inherits it and ``OpenRouterProvider.configured()`` returns True there.
+    The in-process mocker stub is kept for the parent-process check.
+    """
+    from conductor.providers import OpenRouterProvider
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-test-key-not-used-for-network")
+    mocker.patch.object(
+        OpenRouterProvider, "configured", lambda self: (True, None)
+    )
+
+
 def _stub_all_unconfigured(mocker):
     from conductor.providers import (
         ClaudeProvider,
@@ -1132,8 +1156,9 @@ def test_refresh_consumers_alias_warns_and_still_works():
     assert "No consumer repos configured." in result.output
 
 
-def test_update_all_commits_updated_repo_integration(mocker, tmp_path):
+def test_update_all_commits_updated_repo_integration(mocker, tmp_path, monkeypatch):
     _stub_all_unconfigured(mocker)
+    _stub_openrouter_configured_for_init(mocker, monkeypatch)
     version = cli_mod.__version__.split("+", 1)[0]
 
     consumer = tmp_path / "consumer"
@@ -1171,7 +1196,8 @@ def test_update_all_commits_updated_repo_integration(mocker, tmp_path):
     ).stdout
 
 
-def test_refresh_consumers_default_branch_uses_typed_prefix(mocker, tmp_path):
+def test_refresh_consumers_default_branch_uses_typed_prefix(mocker, tmp_path, monkeypatch):
+    _stub_openrouter_configured_for_init(mocker, monkeypatch)
     """Default branch name should have the `chore/` type prefix so that
     consumer repos with the standard `<type>/<slug>` branch-naming pre-push
     hook accept the push (closes conductor#273)."""
@@ -1201,7 +1227,8 @@ def test_refresh_consumers_default_branch_uses_typed_prefix(mocker, tmp_path):
     assert _git(consumer, "branch", "--show-current").stdout.strip() == expected_branch
 
 
-def test_refresh_consumers_auto_stashes_dirty_repo(mocker, tmp_path):
+def test_refresh_consumers_auto_stashes_dirty_repo(mocker, tmp_path, monkeypatch):
+    _stub_openrouter_configured_for_init(mocker, monkeypatch)
     """Dirty repo with operator changes outside the conductor sentinel block
     should be auto-stashed, refreshed on the refresh branch, and popped back
     on the original branch (closes #289 piece 3)."""
@@ -1278,8 +1305,9 @@ def test_refresh_consumers_no_auto_stash_skips_dirty_repo(mocker, tmp_path):
     assert (consumer / "operator-file.txt").read_text(encoding="utf-8") == "dirty\n"
 
 
-def test_refresh_consumers_reads_config_file(mocker, tmp_path):
+def test_refresh_consumers_reads_config_file(mocker, tmp_path, monkeypatch):
     _stub_all_unconfigured(mocker)
+    _stub_openrouter_configured_for_init(mocker, monkeypatch)
     consumer = tmp_path / "consumer-from-config"
     consumer.mkdir()
     _git(consumer, "init", "-q", "-b", "main")
