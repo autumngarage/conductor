@@ -55,6 +55,9 @@ jobs:
         # centralized instead of duplicating them as separate CI steps.
         run: uv run bash scripts/touchstone-run.sh validate
 
+      - name: Deterministic Conductor dogfood smoke
+        run: uv run python scripts/conductor-dogfood-smoke.py
+
   live-smoke:
     # Only runs on manual dispatch with the checkbox enabled — live calls cost
     # real tokens and the Kimi endpoint is quota-constrained. Mocked tests in
