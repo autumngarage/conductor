@@ -427,6 +427,7 @@ def test_call_sends_reasoning_effort_and_openrouter_headers(configured):
         "model": "anthropic/claude-sonnet-4",
         "messages": [{"role": "user", "content": "hi"}],
         "reasoning": {"effort": "xhigh"},
+        "max_tokens": 8192,
         "usage": {"include": True},
     }
 
@@ -458,6 +459,157 @@ def test_call_opts_in_to_usage_cost_reporting(configured):
         OpenRouterProvider().call("hi", model="openai/gpt-5.5")
 
     assert captured["payload"]["usage"] == {"include": True}
+
+
+@pytest.mark.parametrize(
+    ("effort", "expected_max_tokens"),
+    [
+        ("minimal", 512),
+        ("low", 1024),
+        ("medium", 2048),
+        ("high", 4096),
+        ("max", 8192),
+    ],
+)
+def test_call_caps_default_max_tokens_by_effort(
+    configured,
+    effort,
+    expected_max_tokens,
+):
+    """Regression for #513: OpenRouter charges/affordability preflight checks
+    the request's max_tokens ceiling, so Conductor must send a bounded output
+    budget instead of letting hosted models default to 65k+ tokens."""
+    captured: dict[str, object] = {}
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "model": "openai/gpt-5.5",
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {},
+            },
+        )
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        OpenRouterProvider().call("hi", model="openai/gpt-5.5", effort=effort)
+
+    assert captured["payload"]["max_tokens"] == expected_max_tokens
+
+
+def test_call_honors_explicit_max_tokens(configured):
+    captured: dict[str, object] = {}
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "model": "openai/gpt-5.5",
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {},
+            },
+        )
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        OpenRouterProvider().call(
+            "hi",
+            model="openai/gpt-5.5",
+            max_tokens=333,
+        )
+
+    assert captured["payload"]["max_tokens"] == 333
+
+
+def test_call_retries_openrouter_credit_402_with_affordable_max_tokens(configured):
+    requests: list[dict] = []
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        requests.append(payload)
+        if len(requests) == 1:
+            return httpx.Response(
+                402,
+                json={
+                    "error": {
+                        "message": (
+                            "This request requires more credits, or fewer max_tokens. "
+                            "You requested up to 2048 tokens, but can only afford 1688."
+                        ),
+                        "code": 402,
+                    }
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "model": "openai/gpt-5.5",
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {},
+            },
+        )
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        response = OpenRouterProvider().call(
+            "hi",
+            model="openai/gpt-5.5",
+            effort="medium",
+        )
+
+    assert response.text == "ok"
+    assert requests[0]["max_tokens"] == 2048
+    assert requests[1]["max_tokens"] == 1688
+
+
+def test_exec_with_tools_retries_credit_402_with_affordable_max_tokens(
+    configured,
+    tmp_path,
+):
+    requests: list[dict] = []
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        requests.append(payload)
+        if len(requests) == 1:
+            return httpx.Response(
+                402,
+                json={
+                    "error": {
+                        "message": (
+                            "This request requires more credits, or fewer max_tokens. "
+                            "You requested up to 2048 tokens, but can only afford 1688."
+                        ),
+                        "code": 402,
+                    }
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "model": "openai/gpt-5.5",
+                "choices": [{"message": {"content": "done"}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+            },
+        )
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        response = OpenRouterProvider().exec(
+            "Inspect the repo.",
+            model="openai/gpt-5.5",
+            tools=frozenset({"Read"}),
+            cwd=str(tmp_path),
+        )
+
+    assert response.text == "done"
+    assert requests[0]["max_tokens"] == 2048
+    assert requests[0]["tools"][0]["function"]["name"] == "Read"
+    assert requests[1]["max_tokens"] == 1688
+    assert requests[1]["tools"][0]["function"]["name"] == "Read"
 
 
 def test_call_sends_ordered_models_stack(configured):
@@ -495,6 +647,7 @@ def test_call_sends_ordered_models_stack(configured):
         ],
         "messages": [{"role": "user", "content": "hi"}],
         "reasoning": {"effort": "low"},
+        "max_tokens": 1024,
         "usage": {"include": True},
     }
     assert len(captured["payload"]["models"]) <= OPENROUTER_MODELS_ARRAY_MAX
@@ -545,6 +698,7 @@ def test_call_without_model_invokes_selector_and_builds_payload(configured, mock
         "model": OPENROUTER_DEFAULT_MODEL,
         "messages": [{"role": "user", "content": "hi"}],
         "reasoning": {"effort": "medium"},
+        "max_tokens": 2048,
         "usage": {"include": True},
     }
     assert response.model == "google/gemini-flash-1.5"
@@ -695,6 +849,8 @@ def test_exec_with_tools_runs_openai_tool_loop(configured, tmp_path):
     assert response.usage["iterations"][1]["cost_usd"] == pytest.approx(0.002)
     assert response.cost_usd == pytest.approx(0.003)
     assert requests[0]["tools"][0]["function"]["name"] == "Read"
+    assert requests[0]["max_tokens"] == 2048
+    assert requests[1]["max_tokens"] == 2048
     assert "parallel_tool_calls" not in requests[0]
     assert requests[1]["messages"][1]["tool_calls"][0]["id"] == "call_read"
     assert requests[1]["messages"][2] == {
@@ -762,6 +918,8 @@ def test_exec_with_write_tools_disables_parallel_tool_calls(configured, tmp_path
         )
 
     assert response.text == "done"
+    assert requests[0]["max_tokens"] == 2048
+    assert requests[1]["max_tokens"] == 2048
     assert requests[0]["parallel_tool_calls"] is False
     assert requests[1]["parallel_tool_calls"] is False
 
