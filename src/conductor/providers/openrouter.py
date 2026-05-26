@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -65,6 +66,18 @@ OPENROUTER_MAX_TOOL_ITERATIONS = 10
 OPENROUTER_MODELS_ARRAY_MAX = 3
 OPENROUTER_HTTP_REFERER = "https://github.com/autumngarage/conductor"
 OPENROUTER_X_TITLE = "conductor"
+OPENROUTER_MAX_TOKENS_BY_EFFORT = {
+    "minimal": 512,
+    "low": 1_024,
+    "medium": 2_048,
+    "high": 4_096,
+    "max": 8_192,
+}
+_OPENROUTER_MAX_TOKENS_AFFORDABILITY_RE = re.compile(
+    r"requested up to\s+(?P<requested>[\d,]+)\s+tokens.*?"
+    r"can only afford\s+(?P<affordable>[\d,]+)",
+    re.IGNORECASE | re.DOTALL,
+)
 _TERMINAL_REVIEW_ANSWER_PROMPT = (
     "You are at the review tool-iteration cap. Stop calling tools and give the "
     "final review answer now. If the prompt requested a final sentinel such as "
@@ -228,6 +241,24 @@ class OpenRouterProvider:
                     headers=self._headers(),
                     json=payload,
                 )
+                retry_payload = _max_tokens_affordability_retry_payload(
+                    resp.status_code,
+                    resp.text,
+                    payload,
+                )
+                if retry_payload is not None:
+                    _LOG.info(
+                        "retrying OpenRouter request with lower max_tokens: "
+                        "requested=%s retry=%s",
+                        payload.get("max_tokens"),
+                        retry_payload.get("max_tokens"),
+                    )
+                    resp = client.post(
+                        f"{self._base_url}/chat/completions",
+                        headers=self._headers(),
+                        json=retry_payload,
+                    )
+                    payload = retry_payload
         except httpx.TimeoutException as e:
             raise ProviderHTTPError(
                 f"network error calling OpenRouter: {e}",
@@ -372,6 +403,8 @@ class OpenRouterProvider:
         }
         if max_tokens is not None:
             payload["max_tokens"] = max(1, max_tokens)
+        else:
+            payload["max_tokens"] = _max_tokens_for_effort(effort)
 
         attempts: list[dict[str, object]] = []
         start = time.monotonic()
@@ -550,6 +583,7 @@ class OpenRouterProvider:
                 "messages": messages,
                 "tools": tool_specs,
                 "tool_choice": "auto",
+                "max_tokens": _max_tokens_for_effort(effort),
             }
             if tools & {"Bash", "Edit", "Write"}:
                 payload["parallel_tool_calls"] = False
@@ -1375,6 +1409,23 @@ def _reasoning_payload(effort: str | int) -> dict[str, str] | None:
     return {"effort": mapped}
 
 
+def _max_tokens_for_effort(effort: str | int) -> int:
+    if isinstance(effort, int):
+        if effort <= 0:
+            return OPENROUTER_MAX_TOKENS_BY_EFFORT["minimal"]
+        if effort <= 2_000:
+            return OPENROUTER_MAX_TOKENS_BY_EFFORT["low"]
+        if effort <= 8_000:
+            return OPENROUTER_MAX_TOKENS_BY_EFFORT["medium"]
+        if effort <= 24_000:
+            return OPENROUTER_MAX_TOKENS_BY_EFFORT["high"]
+        return OPENROUTER_MAX_TOKENS_BY_EFFORT["max"]
+    return OPENROUTER_MAX_TOKENS_BY_EFFORT.get(
+        effort,
+        OPENROUTER_MAX_TOKENS_BY_EFFORT["medium"],
+    )
+
+
 def _openrouter_models_wire_list(models: tuple[str, ...] | list[str]) -> list[str]:
     return list(models[:OPENROUTER_MODELS_ARRAY_MAX])
 
@@ -1435,6 +1486,46 @@ def _format_openrouter_http_error(status_code: int, response_text: str, payload:
         )
     parts.append(f"upstream response: {response_text[:500]}")
     return " ".join(parts)
+
+
+def _max_tokens_affordability_retry_payload(
+    status_code: int,
+    response_text: str,
+    payload: dict,
+) -> dict | None:
+    if status_code != 402:
+        return None
+    current = _positive_int(payload.get("max_tokens"))
+    requested, affordable = _parse_max_tokens_affordability(response_text)
+    if current is None:
+        current = requested
+    if current is None or affordable is None or affordable <= 0:
+        return None
+    if current <= affordable:
+        return None
+    retry_payload = dict(payload)
+    retry_payload["max_tokens"] = max(1, affordable)
+    return retry_payload
+
+
+def _parse_max_tokens_affordability(response_text: str) -> tuple[int | None, int | None]:
+    match = _OPENROUTER_MAX_TOKENS_AFFORDABILITY_RE.search(response_text)
+    if match is None:
+        return None, None
+    return (
+        _positive_int(match.group("requested")),
+        _positive_int(match.group("affordable")),
+    )
+
+
+def _positive_int(value: object) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        parsed = int(str(value).replace(",", ""))
+    except ValueError:
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _openrouter_http_failure_reason(status_code: int, response_text: str) -> str:
