@@ -1,4 +1,4 @@
-"""Deterministic semantic routing policies for ``conductor ask``.
+"""Deterministic semantic routing policies for Conductor job verbs.
 
 The classic ``call`` / ``exec`` / ``review`` commands expose provider-level
 knobs. This module owns the higher-level ``kind × effort`` matrix so callers

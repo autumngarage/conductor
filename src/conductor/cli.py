@@ -399,6 +399,9 @@ def _parameter_is_default(name: str) -> bool:
     ctx = click.get_current_context(silent=True)
     if ctx is None:
         return True
+    inherited_defaults = ctx.meta.get("conductor_inherited_default_parameters")
+    if isinstance(inherited_defaults, set) and name in inherited_defaults:
+        return True
     return ctx.get_parameter_source(name) == ParameterSource.DEFAULT
 
 
@@ -4909,10 +4912,11 @@ def main(ctx: click.Context) -> None:
 @main.command()
 @click.option(
     "--kind",
-    required=True,
+    required=False,
+    default=None,
     type=click.Choice(SEMANTIC_KINDS),
     help=(
-        "What kind of work this is. Picks the provider stack and physical "
+        "Legacy semantic kind. Omit for cheap general Q&A. Picks the provider stack and physical "
         "execution shape:\n"
         "  research = cheap single-model lookup / synthesis\n"
         "  code     = coding-optimized stack; --effort high switches to a "
@@ -5058,8 +5062,9 @@ def main(ctx: click.Context) -> None:
     default=False,
     help="Suppress the short-brief warning when semantic code routes to exec.",
 )
+@click.argument("prompt_words", nargs=-1)
 def ask(
-    kind: str,
+    kind: str | None,
     effort: str | None,
     tags: str | None,
     cwd: str | None,
@@ -5086,8 +5091,27 @@ def ask(
     offline: bool | None,
     preflight: bool,
     allow_short_brief: bool,
+    prompt_words: tuple[str, ...],
 ) -> None:
-    """Run a task through Conductor's deterministic semantic routing matrix."""
+    """Ask a question. With --kind, use the legacy semantic matrix surface."""
+    if kind is None:
+        kind = "research"
+        if effort is None:
+            effort = "minimal"
+    prompt = " ".join(prompt_words).strip()
+    if prompt:
+        if any(value is not None for value in (task, task_file, brief, brief_file, issue)):
+            raise click.UsageError(
+                "brief source is ambiguous. Use a prompt argument or one of "
+                "--brief, --brief-file, --task, --task-file, or --issue."
+            )
+        task = prompt
+    ctx = click.get_current_context(silent=True)
+    ledger_command = (
+        str(ctx.meta.get("conductor_record_command"))
+        if ctx is not None and ctx.meta.get("conductor_record_command")
+        else "ask"
+    )
     timeout_is_default = _parameter_is_default("timeout_sec")
     max_stall_is_default = _parameter_is_default("max_stall_sec")
     effort_value = _parse_effort(effort)
@@ -5267,7 +5291,7 @@ def ask(
             )
         except ProviderConfigError as e:
             _record_failed_delegation(
-                "ask",
+                ledger_command,
                 provider_id=decision.provider,
                 model=None,
                 effort=effort_value,
@@ -5280,7 +5304,7 @@ def ask(
             sys.exit(2)
         except ProviderError as e:
             _record_failed_delegation(
-                "ask",
+                ledger_command,
                 provider_id=decision.provider,
                 model=None,
                 effort=effort_value,
@@ -5293,7 +5317,7 @@ def ask(
             sys.exit(1)
         _emit_usage_log(response, silent=silent_route or as_json)
         _record_response_delegation(
-            "ask",
+            ledger_command,
             response,
             effort=effort_value,
             decision=decision,
@@ -5377,7 +5401,7 @@ def ask(
                 )
                 session_log.mark_finished()
             _record_failed_delegation(
-                "ask",
+                ledger_command,
                 provider_id=provider_obj.name,
                 model=None,
                 effort=effort_value,
@@ -5417,7 +5441,7 @@ def ask(
             session_log.emit("provider_failed", {"error": str(e)})
             session_log.mark_finished()
         _record_failed_delegation(
-            "ask",
+            ledger_command,
             provider_id=decision.provider,
             model=None,
             effort=effort_value,
@@ -5434,7 +5458,7 @@ def ask(
             session_log.emit("provider_failed", {"error": str(e)})
             session_log.mark_finished()
         _record_failed_delegation(
-            "ask",
+            ledger_command,
             provider_id=decision.provider,
             model=None,
             effort=effort_value,
@@ -5450,7 +5474,7 @@ def ask(
         if session_log is not None:
             session_log.mark_finished()
         _record_failed_delegation(
-            "ask",
+            ledger_command,
             provider_id=decision.provider,
             model=None,
             effort=effort_value,
@@ -5481,7 +5505,7 @@ def ask(
     if session_log is not None:
         session_log.mark_finished()
     _record_response_delegation(
-        "ask",
+        ledger_command,
         response,
         effort=effort_value,
         decision=decision,
@@ -5495,6 +5519,233 @@ def ask(
         decision=decision,
         semantic_plan=plan,
         auth_prompts=_collect_session_auth_prompts(session_log),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# simplified job verbs
+# --------------------------------------------------------------------------- #
+
+
+def _invoke_job_verb(ctx: click.Context, command_name: str, **kwargs: object) -> None:
+    previous = ctx.meta.get("conductor_record_command")
+    had_previous = "conductor_record_command" in ctx.meta
+    previous_inherited_defaults = ctx.meta.get("conductor_inherited_default_parameters")
+    had_previous_inherited_defaults = "conductor_inherited_default_parameters" in ctx.meta
+    ctx.meta["conductor_record_command"] = command_name
+    ctx.meta["conductor_inherited_default_parameters"] = {
+        "timeout_sec",
+        "max_stall_sec",
+    }
+    try:
+        ctx.invoke(ask, **kwargs)
+    finally:
+        if had_previous:
+            ctx.meta["conductor_record_command"] = previous
+        else:
+            ctx.meta.pop("conductor_record_command", None)
+        if had_previous_inherited_defaults:
+            ctx.meta["conductor_inherited_default_parameters"] = previous_inherited_defaults
+        else:
+            ctx.meta.pop("conductor_inherited_default_parameters", None)
+
+
+@main.command(name="code")
+@click.option("--cwd", default=None, help="Repository working directory.")
+@click.option("--task", default=None, help="The coding task. Alias: --brief.")
+@click.option("--task-file", default=None, help="Read the coding task from a UTF-8 file.")
+@click.option("--brief", default=None, help="Delegation brief / prompt.")
+@click.option(
+    "--brief-file",
+    default=None,
+    help="Read the delegation brief from a UTF-8 file. Use '-' to read stdin.",
+)
+@click.option(
+    "--issue",
+    default=None,
+    help="Use a GitHub issue as the seed brief. Accepts N or owner/repo#N.",
+)
+@click.option(
+    "--issue-comment-limit",
+    default=10,
+    type=click.IntRange(min=0),
+    show_default=True,
+    help="Number of recent GitHub issue comments to include with --issue.",
+)
+@click.option(
+    "--attach",
+    "attach",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False, readable=True),
+    help="Attach a file to the brief. Repeat for multiple.",
+)
+@click.option("--log-file", default=None, help="Write structured NDJSON exec events.")
+@click.option("--json", "as_json", is_flag=True, default=False)
+@click.option("--silent-route", is_flag=True, default=False)
+@click.option(
+    "--preflight/--no-preflight",
+    "preflight",
+    default=True,
+    help="Run a provider health probe before forwarding tool-using code work.",
+)
+@click.option(
+    "--allow-short-brief",
+    is_flag=True,
+    default=False,
+    help="Suppress the short-brief warning for code delegation.",
+)
+@click.argument("prompt_words", nargs=-1)
+@click.pass_context
+def code_cmd(
+    ctx: click.Context,
+    cwd: str | None,
+    task: str | None,
+    task_file: str | None,
+    brief: str | None,
+    brief_file: str | None,
+    issue: str | None,
+    issue_comment_limit: int,
+    attach: tuple[str, ...],
+    log_file: str | None,
+    as_json: bool,
+    silent_route: bool,
+    preflight: bool,
+    allow_short_brief: bool,
+    prompt_words: tuple[str, ...],
+) -> None:
+    """Run code work through Conductor's default coding cascade."""
+    _invoke_job_verb(
+        ctx,
+        "code",
+        kind="code",
+        effort="high",
+        cwd=cwd,
+        task=task,
+        task_file=task_file,
+        brief=brief,
+        brief_file=brief_file,
+        issue=issue,
+        issue_comment_limit=issue_comment_limit,
+        attach=attach,
+        log_file=log_file,
+        as_json=as_json,
+        silent_route=silent_route,
+        preflight=preflight,
+        allow_short_brief=allow_short_brief,
+        prompt_words=prompt_words,
+    )
+
+
+@main.command(name="research")
+@click.option("--cwd", default=None, help="Repository working directory for issue context.")
+@click.option("--task", default=None, help="The research task. Alias: --brief.")
+@click.option("--task-file", default=None, help="Read the research task from a UTF-8 file.")
+@click.option("--brief", default=None, help="Delegation brief / prompt.")
+@click.option(
+    "--brief-file",
+    default=None,
+    help="Read the delegation brief from a UTF-8 file. Use '-' to read stdin.",
+)
+@click.option(
+    "--issue",
+    default=None,
+    help="Use a GitHub issue as the seed brief. Accepts N or owner/repo#N.",
+)
+@click.option(
+    "--issue-comment-limit",
+    default=10,
+    type=click.IntRange(min=0),
+    show_default=True,
+    help="Number of recent GitHub issue comments to include with --issue.",
+)
+@click.option("--json", "as_json", is_flag=True, default=False)
+@click.option("--silent-route", is_flag=True, default=False)
+@click.argument("prompt_words", nargs=-1)
+@click.pass_context
+def research_cmd(
+    ctx: click.Context,
+    cwd: str | None,
+    task: str | None,
+    task_file: str | None,
+    brief: str | None,
+    brief_file: str | None,
+    issue: str | None,
+    issue_comment_limit: int,
+    as_json: bool,
+    silent_route: bool,
+    prompt_words: tuple[str, ...],
+) -> None:
+    """Run research through Conductor's default research cascade."""
+    _invoke_job_verb(
+        ctx,
+        "research",
+        kind="research",
+        effort="medium",
+        cwd=cwd,
+        task=task,
+        task_file=task_file,
+        brief=brief,
+        brief_file=brief_file,
+        issue=issue,
+        issue_comment_limit=issue_comment_limit,
+        as_json=as_json,
+        silent_route=silent_route,
+        prompt_words=prompt_words,
+    )
+
+
+@main.command(name="council")
+@click.option("--task", default=None, help="The council task. Alias: --brief.")
+@click.option("--task-file", default=None, help="Read the council task from a UTF-8 file.")
+@click.option("--brief", default=None, help="Delegation brief / prompt.")
+@click.option(
+    "--brief-file",
+    default=None,
+    help="Read the delegation brief from a UTF-8 file. Use '-' to read stdin.",
+)
+@click.option(
+    "--issue",
+    default=None,
+    help="Use a GitHub issue as the seed brief. Accepts N or owner/repo#N.",
+)
+@click.option(
+    "--issue-comment-limit",
+    default=10,
+    type=click.IntRange(min=0),
+    show_default=True,
+    help="Number of recent GitHub issue comments to include with --issue.",
+)
+@click.option("--json", "as_json", is_flag=True, default=False)
+@click.option("--silent-route", is_flag=True, default=False)
+@click.argument("prompt_words", nargs=-1)
+@click.pass_context
+def council_cmd(
+    ctx: click.Context,
+    task: str | None,
+    task_file: str | None,
+    brief: str | None,
+    brief_file: str | None,
+    issue: str | None,
+    issue_comment_limit: int,
+    as_json: bool,
+    silent_route: bool,
+    prompt_words: tuple[str, ...],
+) -> None:
+    """Run a multi-model council and synthesize the result."""
+    _invoke_job_verb(
+        ctx,
+        "council",
+        kind="council",
+        effort="medium",
+        task=task,
+        task_file=task_file,
+        brief=brief,
+        brief_file=brief_file,
+        issue=issue,
+        issue_comment_limit=issue_comment_limit,
+        as_json=as_json,
+        silent_route=silent_route,
+        prompt_words=prompt_words,
     )
 
 

@@ -149,6 +149,61 @@ def test_ask_records_ledger_event(monkeypatch):
     assert events[0].route is None
 
 
+def test_code_command_records_code_ledger_event(monkeypatch):
+    events = []
+    monkeypatch.setenv("CONDUCTOR_INTERNAL_TELEMETRY", "0")
+    monkeypatch.setattr("conductor.cli.record_delegation", events.append)
+    monkeypatch.setattr("conductor.cli.pick", lambda *args, **kwargs: ("codex", _decision()))
+    monkeypatch.setattr(
+        "conductor.cli._invoke_with_fallback",
+        lambda *args, **kwargs: (_response(provider="codex", model="gpt-test"), []),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "code",
+            "--allow-short-brief",
+            "--no-preflight",
+            "this",
+            "is",
+            "semantic",
+            "code",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(events) == 1
+    assert events[0].command == "code"
+    assert events[0].provider == "codex"
+    assert events[0].status == "ok"
+
+
+def test_research_command_records_research_ledger_event(monkeypatch):
+    events = []
+    monkeypatch.setenv("CONDUCTOR_INTERNAL_TELEMETRY", "0")
+    monkeypatch.setattr("conductor.cli.record_delegation", events.append)
+    monkeypatch.setattr(
+        "conductor.cli.pick",
+        lambda *args, **kwargs: ("openrouter", _decision("openrouter")),
+    )
+    monkeypatch.setattr(
+        "conductor.cli._invoke_with_fallback",
+        lambda *args, **kwargs: (_response(provider="openrouter", model="fake-model"), []),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["research", "summarize", "this", "topic"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(events) == 1
+    assert events[0].command == "research"
+    assert events[0].provider == "openrouter"
+    assert events[0].status == "ok"
+
+
 def test_internal_telemetry_records_route_metadata(monkeypatch):
     events = []
     monkeypatch.setenv("CONDUCTOR_INTERNAL_TELEMETRY", "1")
@@ -199,3 +254,24 @@ def test_council_records_parent_and_member_events(monkeypatch):
     assert parent_events[0].command == "council"
     assert parent_events[0].provider == "openrouter"
     assert child_events
+
+
+def test_council_command_uses_council_semantic_route(monkeypatch):
+    events = []
+    fake_council = FakeCouncilProvider()
+    monkeypatch.setattr("conductor.cli.record_delegation", events.append)
+    monkeypatch.setattr(
+        "conductor.cli._openrouter_council_provider",
+        lambda **kwargs: fake_council,
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["council", "--json", "Compare", "these", "options"],
+    )
+
+    assert result.exit_code == 0, result.output
+    parent_events = [event for event in events if event.council_role == "parent"]
+    assert len(parent_events) == 1
+    assert parent_events[0].command == "council"
+    assert parent_events[0].semantic["kind"] == "council"
