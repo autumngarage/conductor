@@ -86,7 +86,7 @@ Manual provider calls are the escape hatch, not the default:
 
 Read-only code review using Conductor's review cascade:
 
-    conductor review --base origin/main \\
+    conductor ask --kind review --base origin/main \\
         --brief-file /tmp/review-brief.md
 
 Pipe content in as the brief:
@@ -594,7 +594,7 @@ Use it when:
 - You need fresh web information (`conductor call --with gemini --brief "..."`).
 - You want to stay local / offline (`conductor call --with ollama --brief "..."`).
 - You want a code review cascade:
-  `conductor review --base origin/main --brief-file /tmp/review.md`.
+  `conductor ask --kind review --base origin/main --brief-file /tmp/review.md`.
 - You're not sure which provider fits — let the router pick:
   `conductor call --auto --tags <tag1>,<tag2> --brief "..."`.
 
