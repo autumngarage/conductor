@@ -480,6 +480,78 @@ def test_call_auto_can_route_to_openrouter_without_catalog_restrictions(mocker, 
 # ---------------------------------------------------------------------------
 
 
+def test_bare_ask_defaults_to_cheap_research(mocker):
+    _stub_all_configured(mocker, {"openrouter"})
+    call_mock = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response("openrouter", "openrouter/auto"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["ask", "--json", "Summarize", "this", "paper."],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert call_mock.called
+    assert set(call_mock.call_args.kwargs["task_tags"]) == {
+        "research",
+        "long-context",
+        "cheap",
+    }
+    payload = json.loads(result.stdout)
+    assert payload["semantic"]["kind"] == "research"
+    assert payload["semantic"]["effort_bucket"] == "minimal"
+    assert payload["semantic"]["mode"] == "call"
+
+
+def test_research_command_uses_research_semantic_route(mocker):
+    _stub_all_configured(mocker, {"openrouter"})
+    call_mock = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        return_value=_fake_response("openrouter", "openrouter/auto"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["research", "--json", "Find", "the", "background."],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert call_mock.called
+    payload = json.loads(result.stdout)
+    assert payload["semantic"]["kind"] == "research"
+    assert payload["semantic"]["effort_bucket"] == "medium"
+    assert payload["semantic"]["mode"] == "call"
+
+
+def test_code_command_uses_default_tool_using_code_cascade(mocker):
+    _stub_all_configured(mocker, {"codex"})
+    exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "code",
+            "--allow-short-brief",
+            "Implement",
+            "the",
+            "scoped",
+            "coding",
+            "change.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert exec_mock.called
+    assert exec_mock.call_args.kwargs["tools"] == frozenset(
+        {"Read", "Grep", "Glob", "Edit", "Write", "Bash"}
+    )
+    assert exec_mock.call_args.kwargs["sandbox"] == "none"
+
+
 def test_ask_research_low_lets_openrouter_auto_select(mocker):
     _stub_all_configured(mocker, {"openrouter"})
     call_mock = mocker.patch.object(

@@ -199,3 +199,24 @@ def test_council_records_parent_and_member_events(monkeypatch):
     assert parent_events[0].command == "council"
     assert parent_events[0].provider == "openrouter"
     assert child_events
+
+
+def test_council_command_uses_council_semantic_route(monkeypatch):
+    events = []
+    fake_council = FakeCouncilProvider()
+    monkeypatch.setattr("conductor.cli.record_delegation", events.append)
+    monkeypatch.setattr(
+        "conductor.cli._openrouter_council_provider",
+        lambda **kwargs: fake_council,
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["council", "--json", "Compare", "these", "options"],
+    )
+
+    assert result.exit_code == 0, result.output
+    parent_events = [event for event in events if event.council_role == "parent"]
+    assert len(parent_events) == 1
+    assert parent_events[0].command == "council"
+    assert parent_events[0].semantic["kind"] == "council"
