@@ -527,8 +527,16 @@ def _apply_review_gate_auto_budget(
     )
     caller_timeout_sec = None if timeout_is_default else timeout_sec
     caller_stall_sec = None if max_stall_is_default else max_stall_sec
-    timeout_sec = budget_timeout_sec
-    max_stall_sec = budget_stall_sec
+    if timeout_is_default:
+        timeout_sec = budget_timeout_sec
+        if (
+            caller_stall_sec is not None
+            and caller_stall_sec > 0
+            and candidate_count > 1
+        ):
+            timeout_sec = max(timeout_sec, caller_stall_sec * candidate_count)
+    if max_stall_is_default:
+        max_stall_sec = budget_stall_sec
     if not silent:
         stall_label = "disabled" if max_stall_sec is None else f"{max_stall_sec}s"
         ignored_parts: list[str] = []
@@ -1651,39 +1659,6 @@ def _large_review_input(decision: RouteDecision) -> bool:
         _review_gate_timeout_sec(decision.estimated_input_tokens)
         > REVIEW_GATE_MIN_TIMEOUT_SEC
     )
-
-
-def _prioritize_openrouter_after_codex_review_failure(
-    candidates: list[RankedCandidate],
-    *,
-    failed_index: int,
-    decision: RouteDecision,
-    err: Exception,
-) -> None:
-    """Move OpenRouter to the next fallback slot after large Codex review failures.
-
-    Invariant: this only reorders candidates already admitted by routing and
-    the caller's ``--max-fallbacks`` cap; it never expands the fallback set.
-    """
-    if (
-        failed_index >= len(candidates)
-        or candidates[failed_index].name != "codex"
-        or not _large_review_input(decision)
-    ):
-        return
-
-    retryable, category = _is_retryable(err)
-    if not retryable:
-        return
-    if not isinstance(err, ReviewOutputContractError) and category != "timeout":
-        return
-
-    next_index = failed_index + 1
-    for openrouter_index in range(next_index, len(candidates)):
-        if candidates[openrouter_index].name == "openrouter":
-            if openrouter_index != next_index:
-                candidates.insert(next_index, candidates.pop(openrouter_index))
-            return
 
 
 def _validate_max_fallbacks(raw: int) -> int:
@@ -3144,12 +3119,6 @@ def _invoke_review_with_fallback(
                     detail=detail,
                     route_mode=attempt_route_mode,
                 )
-            )
-            _prioritize_openrouter_after_codex_review_failure(
-                candidates,
-                failed_index=idx,
-                decision=decision,
-                err=e,
             )
         except ReviewContextError as e:
             last_exc = e

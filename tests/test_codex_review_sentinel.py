@@ -235,6 +235,134 @@ def test_codex_review_large_diff_uses_large_low_risk_route(tmp_path: Path) -> No
     assert all("--timeout" not in line for line in review_invocations)
 
 
+def test_codex_review_wrapper_prefers_source_checkout_conductor(tmp_path: Path) -> None:
+    repo, env = _make_review_repo(tmp_path)
+    (repo / "pyproject.toml").write_text('[project]\nname = "conductor"\n', encoding="utf-8")
+    (repo / "src" / "conductor").mkdir(parents=True)
+    (repo / "src" / "conductor" / "cli.py").write_text("# source checkout\n", encoding="utf-8")
+
+    fakes = tmp_path / "fakes"
+    fakes.mkdir()
+    uv_args = tmp_path / "uv-args.txt"
+    uv = fakes / "uv"
+    uv.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            printf '%s\\n' "$*" >> "${FAKE_UV_ARGS:?}"
+            if [ "$1" = "run" ] && [ "$2" = "conductor" ]; then
+              shift 2
+            else
+              exit 9
+            fi
+            case "$1" in
+              doctor)
+                printf '{"configured": true}\\n'
+                ;;
+              review|exec)
+                cat >/dev/null
+                printf 'LGTM\\nCODEX_REVIEW_CLEAN\\n'
+                ;;
+              *)
+                exit 1
+                ;;
+            esac
+            """
+        ),
+        encoding="utf-8",
+    )
+    uv.chmod(0o755)
+
+    script = Path(__file__).resolve().parent.parent / "scripts" / "codex-review.sh"
+    result = subprocess.run(
+        ["bash", str(script)],
+        cwd=repo,
+        env={
+            **env,
+            "PATH": f"{fakes}:{os.environ.get('PATH', '')}",
+            "CODEX_REVIEW_BASE": "HEAD~1",
+            "CODEX_REVIEW_MODE": "review-only",
+            "CODEX_REVIEW_DISABLE_CACHE": "1",
+            "FAKE_UV_ARGS": str(uv_args),
+            "NO_COLOR": "1",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    invocations = uv_args.read_text(encoding="utf-8").splitlines()
+    assert any(line.startswith("run conductor doctor") for line in invocations)
+    assert any(line.startswith("run conductor review ") for line in invocations)
+
+
+def test_codex_review_wrapper_passes_configured_max_stall(tmp_path: Path) -> None:
+    repo, env = _make_review_repo(tmp_path)
+    config = repo / ".codex-review.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "max_diff_lines = 5000\n",
+            "max_diff_lines = 5000\nmax_stall_sec = 300\n",
+        ),
+        encoding="utf-8",
+    )
+
+    fakes = tmp_path / "fakes"
+    fakes.mkdir()
+    conductor_args = tmp_path / "conductor-args.txt"
+    conductor = fakes / "conductor"
+    conductor.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            printf '%s\\n' "$*" >> "${FAKE_CONDUCTOR_ARGS:?}"
+            case "$1" in
+              doctor)
+                printf '{"configured": true}\\n'
+                ;;
+              review|exec)
+                cat >/dev/null
+                printf 'LGTM\\nCODEX_REVIEW_CLEAN\\n'
+                ;;
+              *)
+                exit 1
+                ;;
+            esac
+            """
+        ),
+        encoding="utf-8",
+    )
+    conductor.chmod(0o755)
+
+    script = Path(__file__).resolve().parent.parent / "scripts" / "codex-review.sh"
+    result = subprocess.run(
+        ["bash", str(script)],
+        cwd=repo,
+        env={
+            **env,
+            "PATH": f"{fakes}:{os.environ.get('PATH', '')}",
+            "CODEX_REVIEW_BASE": "HEAD~1",
+            "CODEX_REVIEW_MODE": "review-only",
+            "CODEX_REVIEW_DISABLE_CACHE": "1",
+            "FAKE_CONDUCTOR_ARGS": str(conductor_args),
+            "NO_COLOR": "1",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    review_invocations = [
+        line
+        for line in conductor_args.read_text(encoding="utf-8").splitlines()
+        if line.startswith("review ")
+    ]
+    assert review_invocations
+    assert any("--max-stall-seconds 300" in line for line in review_invocations)
+
+
 def test_codex_review_wrapper_fail_opens_malformed_sentinel_by_default(
     tmp_path: Path,
 ) -> None:
