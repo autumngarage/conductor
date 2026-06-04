@@ -5103,6 +5103,12 @@ def ask(
                 "--brief, --brief-file, --task, --task-file, or --issue."
             )
         task = prompt
+    ctx = click.get_current_context(silent=True)
+    ledger_command = (
+        str(ctx.meta.get("conductor_record_command"))
+        if ctx is not None and ctx.meta.get("conductor_record_command")
+        else "ask"
+    )
     timeout_is_default = _parameter_is_default("timeout_sec")
     max_stall_is_default = _parameter_is_default("max_stall_sec")
     effort_value = _parse_effort(effort)
@@ -5282,7 +5288,7 @@ def ask(
             )
         except ProviderConfigError as e:
             _record_failed_delegation(
-                "ask",
+                ledger_command,
                 provider_id=decision.provider,
                 model=None,
                 effort=effort_value,
@@ -5295,7 +5301,7 @@ def ask(
             sys.exit(2)
         except ProviderError as e:
             _record_failed_delegation(
-                "ask",
+                ledger_command,
                 provider_id=decision.provider,
                 model=None,
                 effort=effort_value,
@@ -5308,7 +5314,7 @@ def ask(
             sys.exit(1)
         _emit_usage_log(response, silent=silent_route or as_json)
         _record_response_delegation(
-            "ask",
+            ledger_command,
             response,
             effort=effort_value,
             decision=decision,
@@ -5392,7 +5398,7 @@ def ask(
                 )
                 session_log.mark_finished()
             _record_failed_delegation(
-                "ask",
+                ledger_command,
                 provider_id=provider_obj.name,
                 model=None,
                 effort=effort_value,
@@ -5432,7 +5438,7 @@ def ask(
             session_log.emit("provider_failed", {"error": str(e)})
             session_log.mark_finished()
         _record_failed_delegation(
-            "ask",
+            ledger_command,
             provider_id=decision.provider,
             model=None,
             effort=effort_value,
@@ -5449,7 +5455,7 @@ def ask(
             session_log.emit("provider_failed", {"error": str(e)})
             session_log.mark_finished()
         _record_failed_delegation(
-            "ask",
+            ledger_command,
             provider_id=decision.provider,
             model=None,
             effort=effort_value,
@@ -5465,7 +5471,7 @@ def ask(
         if session_log is not None:
             session_log.mark_finished()
         _record_failed_delegation(
-            "ask",
+            ledger_command,
             provider_id=decision.provider,
             model=None,
             effort=effort_value,
@@ -5496,7 +5502,7 @@ def ask(
     if session_log is not None:
         session_log.mark_finished()
     _record_response_delegation(
-        "ask",
+        ledger_command,
         response,
         effort=effort_value,
         decision=decision,
@@ -5516,6 +5522,19 @@ def ask(
 # --------------------------------------------------------------------------- #
 # simplified job verbs
 # --------------------------------------------------------------------------- #
+
+
+def _invoke_job_verb(ctx: click.Context, command_name: str, **kwargs: object) -> None:
+    previous = ctx.meta.get("conductor_record_command")
+    had_previous = "conductor_record_command" in ctx.meta
+    ctx.meta["conductor_record_command"] = command_name
+    try:
+        ctx.invoke(ask, **kwargs)
+    finally:
+        if had_previous:
+            ctx.meta["conductor_record_command"] = previous
+        else:
+            ctx.meta.pop("conductor_record_command", None)
 
 
 @main.command(name="code")
@@ -5582,8 +5601,9 @@ def code_cmd(
     prompt_words: tuple[str, ...],
 ) -> None:
     """Run code work through Conductor's default coding cascade."""
-    ctx.invoke(
-        ask,
+    _invoke_job_verb(
+        ctx,
+        "code",
         kind="code",
         effort="high",
         cwd=cwd,
@@ -5643,8 +5663,9 @@ def research_cmd(
     prompt_words: tuple[str, ...],
 ) -> None:
     """Run research through Conductor's default research cascade."""
-    ctx.invoke(
-        ask,
+    _invoke_job_verb(
+        ctx,
+        "research",
         kind="research",
         effort="medium",
         cwd=cwd,
@@ -5698,8 +5719,9 @@ def council_cmd(
     prompt_words: tuple[str, ...],
 ) -> None:
     """Run a multi-model council and synthesize the result."""
-    ctx.invoke(
-        ask,
+    _invoke_job_verb(
+        ctx,
+        "council",
         kind="council",
         effort="medium",
         task=task,

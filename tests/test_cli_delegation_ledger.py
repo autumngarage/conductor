@@ -149,6 +149,58 @@ def test_ask_records_ledger_event(monkeypatch):
     assert events[0].route is None
 
 
+def test_code_command_records_code_ledger_event(monkeypatch):
+    events = []
+    monkeypatch.setenv("CONDUCTOR_INTERNAL_TELEMETRY", "0")
+    monkeypatch.setattr("conductor.cli.record_delegation", events.append)
+    monkeypatch.setattr("conductor.cli.pick", lambda *args, **kwargs: ("codex", _decision()))
+    monkeypatch.setattr(
+        "conductor.cli._invoke_with_fallback",
+        lambda *args, **kwargs: (_response(provider="codex", model="gpt-test"), []),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "code",
+            "--allow-short-brief",
+            "--no-preflight",
+            "this",
+            "is",
+            "semantic",
+            "code",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(events) == 1
+    assert events[0].command == "code"
+    assert events[0].provider == "codex"
+    assert events[0].status == "ok"
+
+
+def test_research_command_records_research_ledger_event(monkeypatch):
+    events = []
+    monkeypatch.setenv("CONDUCTOR_INTERNAL_TELEMETRY", "0")
+    monkeypatch.setattr("conductor.cli.record_delegation", events.append)
+    monkeypatch.setattr("conductor.cli.pick", lambda *args, **kwargs: ("fake", _decision("fake")))
+    monkeypatch.setattr(
+        "conductor.cli._invoke_with_fallback",
+        lambda *args, **kwargs: (_response(provider="fake", model="fake-model"), []),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["research", "summarize", "this", "topic"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(events) == 1
+    assert events[0].command == "research"
+    assert events[0].provider == "fake"
+    assert events[0].status == "ok"
+
+
 def test_internal_telemetry_records_route_metadata(monkeypatch):
     events = []
     monkeypatch.setenv("CONDUCTOR_INTERNAL_TELEMETRY", "1")
