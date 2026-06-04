@@ -224,7 +224,7 @@ recommended_retry_provider() {
   local failed_csv="$1"
   local provider
 
-  for provider in openrouter claude codex gemini kimi deepseek-chat deepseek-reasoner; do
+  for provider in codex claude gemini openrouter kimi deepseek-chat deepseek-reasoner; do
     if ! csv_contains "$failed_csv" "$provider"; then
       printf '%s' "$provider"
       return 0
@@ -262,7 +262,7 @@ print_review_infra_retry_guidance() {
     echo "  failed/stalled provider(s): $failed_csv" >&2
   fi
   echo "  retry command: $retry_command" >&2
-  echo "  alternate route: TOUCHSTONE_CONDUCTOR_WITH=<configured-hosted-provider> bash scripts/merge-pr.sh $PR_NUMBER" >&2
+  echo "  alternate route: TOUCHSTONE_CONDUCTOR_WITH=codex bash scripts/merge-pr.sh $PR_NUMBER" >&2
 }
 
 BYPASS_REASON="$(trim "$(printf '%s' "$BYPASS_REASON" | tr '\r\n\t' '   ')")"

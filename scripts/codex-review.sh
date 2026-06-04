@@ -259,6 +259,29 @@ CONFIG_FILE="$(resolve_review_config_file "$REPO_ROOT")"
 CONFIG_DISPLAY_NAME="$(basename "$CONFIG_FILE")"
 cd "$REPO_ROOT"
 
+default_conductor_bin() {
+  if [ -f "$REPO_ROOT/pyproject.toml" ] \
+    && [ -f "$REPO_ROOT/src/conductor/cli.py" ] \
+    && grep -q 'name = "conductor"' "$REPO_ROOT/pyproject.toml" 2>/dev/null \
+    && command -v uv >/dev/null 2>&1; then
+    printf 'uv run conductor'
+    return 0
+  fi
+  printf 'conductor'
+}
+
+CONDUCTOR_BIN="${CONDUCTOR_BIN:-$(default_conductor_bin)}"
+read -ra CONDUCTOR_BIN_ARGV <<<"$CONDUCTOR_BIN"
+
+conductor() {
+  command "${CONDUCTOR_BIN_ARGV[@]}" "$@"
+}
+
+conductor_binary_available() {
+  [ "${#CONDUCTOR_BIN_ARGV[@]}" -gt 0 ] || return 1
+  command -v "${CONDUCTOR_BIN_ARGV[0]}" >/dev/null 2>&1
+}
+
 PREFLIGHT_SCRIPT="$TOUCHSTONE_ROOT/lib/preflight.sh"
 if [ -f "$PREFLIGHT_SCRIPT" ]; then
   # shellcheck source=../lib/preflight.sh
@@ -400,6 +423,7 @@ CONFIG_MODE=""
 REVIEW_ENABLED="${CODEX_REVIEW_ENABLED:-true}"
 PREFLIGHT_REQUIRED=true
 REVIEW_TIMEOUT="${CODEX_REVIEW_TIMEOUT:-0}"
+REVIEW_MAX_STALL_SEC="${CODEX_REVIEW_MAX_STALL_SEC:-}"
 CONDUCTOR_TIMEOUT_GRACE_SEC="${TOUCHSTONE_CONDUCTOR_TIMEOUT_GRACE_SEC:-30}"
 REVIEW_HEARTBEAT_SEC="${TOUCHSTONE_REVIEW_HEARTBEAT_SEC:-60}"
 ON_ERROR="${CODEX_REVIEW_ON_ERROR:-fail-open}"
@@ -986,6 +1010,7 @@ if [ -f "$CONFIG_FILE" ]; then
           safe_by_default) SAFE_BY_DEFAULT="$(normalize_bool "$value")" ;;
           mode) CONFIG_MODE="$(toml_unquote "$value")" ;;
           timeout) REVIEW_TIMEOUT="${CODEX_REVIEW_TIMEOUT:-$value}" ;;
+          max_stall_sec) REVIEW_MAX_STALL_SEC="${CODEX_REVIEW_MAX_STALL_SEC:-$value}" ;;
           on_error) ON_ERROR="${CODEX_REVIEW_ON_ERROR:-$(toml_unquote "$value")}" ;;
           unsafe_paths)
             if [[ "$value" == "["* ]]; then
@@ -1703,7 +1728,7 @@ ASSIST_EOF
 # and lets the router pick.
 
 reviewer_conductor_available() {
-  command -v conductor >/dev/null 2>&1
+  conductor_binary_available
 }
 
 reviewer_conductor_auth_ok() {
@@ -1854,6 +1879,9 @@ reviewer_conductor_exec() {
     if conductor_timeout="$(conductor_inner_timeout "${REVIEW_TIMEOUT:-0}")"; then
       args+=(--timeout "$conductor_timeout")
     fi
+    if [ -n "${REVIEW_MAX_STALL_SEC:-}" ]; then
+      args+=(--max-stall-seconds "$REVIEW_MAX_STALL_SEC")
+    fi
     printf '%s' "$prompt" \
       | CODEX_REVIEW_IN_PROGRESS=1 conductor review "${args[@]}"
     return
@@ -1875,6 +1903,9 @@ reviewer_conductor_exec() {
     args+=(--tools "$tools")
     if conductor_timeout="$(conductor_inner_timeout "${REVIEW_TIMEOUT:-0}")"; then
       args+=(--timeout "$conductor_timeout")
+    fi
+    if [ -n "${REVIEW_MAX_STALL_SEC:-}" ]; then
+      args+=(--max-stall-seconds "$REVIEW_MAX_STALL_SEC")
     fi
     if [ -n "${REVIEW_CONDUCTOR_LOG_FILE:-}" ]; then
       args+=(--log-file "$REVIEW_CONDUCTOR_LOG_FILE")

@@ -3426,7 +3426,7 @@ def test_exec_auto_code_review_derives_budget_without_timeout(mocker):
     assert "review gate budget: timeout=300s stall=75s" in result.stderr
 
 
-def test_exec_auto_code_review_ignores_caller_timeout_budget(mocker):
+def test_exec_auto_code_review_honors_caller_timeout_budget(mocker):
     _stub_all_configured(mocker, {"claude", "codex"})
     mocker.patch(
         "conductor.cli.get_network_profile",
@@ -3459,10 +3459,10 @@ def test_exec_auto_code_review_ignores_caller_timeout_budget(mocker):
     )
 
     assert result.exit_code == 0, result.output
-    assert exec_mock.call_args.kwargs["timeout_sec"] == 300
-    assert exec_mock.call_args.kwargs["max_stall_sec"] == 75
-    assert "review gate budget: timeout=300s stall=75s" in result.stderr
-    assert "ignored caller timeout=10s max-stall=999s" in result.stderr
+    assert exec_mock.call_args.kwargs["timeout_sec"] == 10
+    assert exec_mock.call_args.kwargs["max_stall_sec"] == 10
+    assert "review gate budget: timeout=10s stall=999s" in result.stderr
+    assert "ignored caller" not in result.stderr
 
 
 def test_exec_cli_max_stall_seconds_zero_disables_watchdog(mocker):

@@ -169,7 +169,7 @@ def test_review_chain_walks_past_codex_to_next_code_review_provider(mocker) -> N
     assert "codex (stall), claude (stall), openrouter (success)" in result.stderr
 
 
-def test_review_fallback_call_uses_conductor_owned_budget(mocker) -> None:
+def test_review_fallback_call_honors_explicit_budget(mocker) -> None:
     from conductor.providers.interface import ProviderStalledError
 
     _stub_all_configured(mocker, {"claude", "codex", "openrouter"})
@@ -206,10 +206,38 @@ def test_review_fallback_call_uses_conductor_owned_budget(mocker) -> None:
     )
 
     assert result.exit_code == 0, result.output
-    assert openrouter_call.call_args.kwargs["timeout_sec"] == 75
-    assert openrouter_call.call_args.kwargs["max_stall_sec"] == 75
-    assert "review gate budget: timeout=300s stall=75s" in result.stderr
-    assert "ignored caller timeout=7s max-stall=3s" in result.stderr
+    assert openrouter_call.call_args.kwargs["timeout_sec"] == 3
+    assert openrouter_call.call_args.kwargs["max_stall_sec"] == 3
+    assert "review gate budget: timeout=7s stall=3s" in result.stderr
+    assert "ignored caller" not in result.stderr
+
+
+def test_review_explicit_stall_extends_default_total_budget(mocker) -> None:
+    _stub_all_configured(mocker, {"claude", "codex"})
+    codex_review = mocker.patch.object(
+        CodexProvider,
+        "review",
+        return_value=_fake_response("codex"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--max-fallbacks",
+            "2",
+            "--max-stall-seconds",
+            "300",
+            "--brief",
+            "Review this merge using the project reviewer guide.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert codex_review.call_args.kwargs["timeout_sec"] == 300
+    assert codex_review.call_args.kwargs["max_stall_sec"] == 300
+    assert "review gate budget: timeout=600s stall=300s" in result.stderr
 
 
 def test_review_fallback_attempts_share_one_deadline(mocker, monkeypatch) -> None:
@@ -332,7 +360,7 @@ def test_review_budget_exhaustion_before_provider_is_reported(
     assert "review gate budget exhausted before trying gemini" in message
 
 
-def test_large_review_codex_contract_failure_falls_back_to_openrouter_next(
+def test_large_review_codex_contract_failure_falls_back_to_claude_next(
     mocker, capsys
 ) -> None:
     _stub_all_configured(mocker, {"codex", "claude", "openrouter"})
@@ -395,20 +423,20 @@ def test_large_review_codex_contract_failure_falls_back_to_openrouter_next(
     )
 
     captured = capsys.readouterr()
-    assert response.provider == "openrouter"
+    assert response.provider == "claude"
     assert fallbacks == ["codex"]
     assert codex_review.called
-    assert openrouter_call.called
-    assert not claude_review.called
+    assert claude_review.called
+    assert not openrouter_call.called
     assert "codex review failed (output-contract)" in captured.err
-    assert "falling back → openrouter" in captured.err
+    assert "falling back → claude" in captured.err
     assert (
-        "review tried providers: codex (output-contract), openrouter (success)"
+        "review tried providers: codex (output-contract), claude (success)"
         in captured.err
     )
 
 
-def test_large_review_codex_timeout_falls_back_to_openrouter_next(mocker) -> None:
+def test_large_review_codex_timeout_falls_back_to_claude_next(mocker) -> None:
     from conductor.providers.interface import ProviderStalledError
 
     _stub_all_configured(mocker, {"codex", "claude", "openrouter"})
@@ -463,10 +491,10 @@ def test_large_review_codex_timeout_falls_back_to_openrouter_next(mocker) -> Non
         fallback_deadline_monotonic=cli._review_gate_deadline(300),
     )
 
-    assert response.provider == "openrouter"
+    assert response.provider == "claude"
     assert fallbacks == ["codex"]
-    assert openrouter_call.called
-    assert not claude_review.called
+    assert claude_review.called
+    assert not openrouter_call.called
 
 
 def test_review_auto_skips_provider_after_recent_contract_failure(mocker) -> None:
