@@ -399,6 +399,9 @@ def _parameter_is_default(name: str) -> bool:
     ctx = click.get_current_context(silent=True)
     if ctx is None:
         return True
+    inherited_defaults = ctx.meta.get("conductor_inherited_default_parameters")
+    if isinstance(inherited_defaults, set) and name in inherited_defaults:
+        return True
     return ctx.get_parameter_source(name) == ParameterSource.DEFAULT
 
 
@@ -5527,7 +5530,13 @@ def ask(
 def _invoke_job_verb(ctx: click.Context, command_name: str, **kwargs: object) -> None:
     previous = ctx.meta.get("conductor_record_command")
     had_previous = "conductor_record_command" in ctx.meta
+    previous_inherited_defaults = ctx.meta.get("conductor_inherited_default_parameters")
+    had_previous_inherited_defaults = "conductor_inherited_default_parameters" in ctx.meta
     ctx.meta["conductor_record_command"] = command_name
+    ctx.meta["conductor_inherited_default_parameters"] = {
+        "timeout_sec",
+        "max_stall_sec",
+    }
     try:
         ctx.invoke(ask, **kwargs)
     finally:
@@ -5535,6 +5544,10 @@ def _invoke_job_verb(ctx: click.Context, command_name: str, **kwargs: object) ->
             ctx.meta["conductor_record_command"] = previous
         else:
             ctx.meta.pop("conductor_record_command", None)
+        if had_previous_inherited_defaults:
+            ctx.meta["conductor_inherited_default_parameters"] = previous_inherited_defaults
+        else:
+            ctx.meta.pop("conductor_inherited_default_parameters", None)
 
 
 @main.command(name="code")

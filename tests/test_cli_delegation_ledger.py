@@ -183,10 +183,13 @@ def test_research_command_records_research_ledger_event(monkeypatch):
     events = []
     monkeypatch.setenv("CONDUCTOR_INTERNAL_TELEMETRY", "0")
     monkeypatch.setattr("conductor.cli.record_delegation", events.append)
-    monkeypatch.setattr("conductor.cli.pick", lambda *args, **kwargs: ("fake", _decision("fake")))
+    monkeypatch.setattr(
+        "conductor.cli.pick",
+        lambda *args, **kwargs: ("openrouter", _decision("openrouter")),
+    )
     monkeypatch.setattr(
         "conductor.cli._invoke_with_fallback",
-        lambda *args, **kwargs: (_response(provider="fake", model="fake-model"), []),
+        lambda *args, **kwargs: (_response(provider="openrouter", model="fake-model"), []),
     )
 
     result = CliRunner().invoke(
@@ -197,7 +200,7 @@ def test_research_command_records_research_ledger_event(monkeypatch):
     assert result.exit_code == 0, result.output
     assert len(events) == 1
     assert events[0].command == "research"
-    assert events[0].provider == "fake"
+    assert events[0].provider == "openrouter"
     assert events[0].status == "ok"
 
 

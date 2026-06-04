@@ -552,6 +552,33 @@ def test_code_command_uses_default_tool_using_code_cascade(mocker):
     assert exec_mock.call_args.kwargs["sandbox"] == "none"
 
 
+def test_code_command_preserves_default_stall_scaling(mocker):
+    _stub_all_configured(mocker, {"codex"})
+    mocker.patch(
+        "conductor.cli.get_network_profile",
+        return_value=NetworkProfile(310, "https://api.openai.com", 1_000),
+    )
+    exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "code",
+            "--allow-short-brief",
+            "--no-preflight",
+            "Implement",
+            "the",
+            "scoped",
+            "coding",
+            "change.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert exec_mock.call_args.kwargs["timeout_sec"] is None
+    assert exec_mock.call_args.kwargs["max_stall_sec"] == 1080
+
+
 def test_ask_research_low_lets_openrouter_auto_select(mocker):
     _stub_all_configured(mocker, {"openrouter"})
     call_mock = mocker.patch.object(
