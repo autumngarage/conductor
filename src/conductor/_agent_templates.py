@@ -23,14 +23,13 @@ run conductor, read back the answer, present it to the user with attribution.
 
 **DO delegate when:**
 - The task is **long-context reading or summarization** over a large file
-  or many files (>50 KB combined). Kimi and Gemini are stronger per-dollar
-  for broad reading than most flagship models.
-- The task needs **fresh web information** — Gemini is the only conductor
-  provider with native web search.
-- The task is a **cheap second opinion** on a diff, a piece of code, or a
-  design choice. Kimi gives you a fast, low-cost sanity check.
+  or many files (>50 KB combined).
+- The task needs **fresh web information**.
+- The task is a **text review** of prose, docs, prompts, instructions, or a
+  decision note, not a code diff.
+- The task is a **cheap second opinion** on a design choice or implementation
+  direction.
 - The task is **privacy-sensitive** and should not leave the machine.
-  Ollama runs locally.
 
 **DON'T delegate when:**
 - The task is mid-conversation reasoning where you hold active context.
@@ -51,12 +50,14 @@ Default to semantic routing. Choose only `kind` and `effort`; let
 Conductor choose providers and models unless the user explicitly asks for
 a specific provider.
 
-Invocation moment:
+Use this decision ladder; pick the first line that fits:
 
 - Quick factual/background ask:
   `conductor ask --kind research --effort minimal --brief-file /tmp/brief.md`
 - Deeper synthesis/research:
   `conductor ask --kind research --effort medium --brief-file /tmp/brief.md`
+- Text/prose/docs/instructions review:
+  `conductor ask --kind text-review --effort medium --brief-file /tmp/brief.md`
 - Code explanation or small coding judgment:
   `conductor ask --kind code --effort low --brief-file /tmp/brief.md`
 - Repo-changing implementation/debugging:
@@ -69,16 +70,17 @@ Invocation moment:
 Semantic routing by kind and effort:
 
     conductor ask --kind research --effort medium --brief-file /tmp/brief.md
+    conductor ask --kind text-review --effort medium --brief-file /tmp/brief.md
     conductor ask --kind code --effort high --brief-file /tmp/brief.md
     conductor ask --kind council --effort medium --brief-file /tmp/brief.md
+
+`text-review` is for prose, docs, prompts, and instructions. It is
+single-turn text output, cannot write files or open PRs, and defaults to
+flat-rate providers before OpenRouter overflow.
 
 Use `council` when the user wants multiple perspectives. Council always
 routes through OpenRouter and asks multiple models independently before a
 synthesis pass. Do not route council to Codex, Claude, Gemini CLI, or Ollama.
-
-Let the lower-level router pick by tags:
-
-    conductor call --auto --tags long-context,cheap --brief "..."
 
 Manual provider calls are the escape hatch, not the default:
 
@@ -91,11 +93,11 @@ Read-only code review using Conductor's review cascade:
 
 Pipe content in as the brief:
 
-    cat long-file.md | conductor call --with kimi --brief "Summarize."
+    cat long-file.md | conductor ask --kind research --brief "Summarize."
 
 Multi-turn agent session with tools:
 
-    conductor exec --with <provider> --tools Read,Grep,Edit \\
+    conductor ask --kind code --effort high \\
         --brief-file /tmp/conductor-brief.md
 
 Use `--permission-profile read-only`, `patch`, or `full` instead of
@@ -104,17 +106,15 @@ whitelist; profiles route only to providers that honor that whitelist.
 
 Get JSON for scripting / piping into other tools:
 
-    conductor call --with kimi --brief "..." --json
+    conductor ask --kind research --brief "..." --json
 
-## Providers at a glance
+## Provider Pinning
 
-| Provider | Best for                     | Cost   | Auth                         |
-|----------|------------------------------|--------|------------------------------|
-| kimi     | long-context, cheap reviews  | $      | env var (OpenRouter-backed)  |
-| gemini   | web search, multimodal       | $$     | env var or gcloud            |
-| claude   | strongest reasoning          | $$$    | OAuth (Claude subscription)  |
-| codex    | coding agent                 | $$$    | OAuth (ChatGPT subscription) |
-| ollama   | private, offline             | free   | local (no auth)              |
+Default routing is semantic and flat-rate-first when the job contract allows
+it. Do not choose providers manually unless the user asks for a provider, a
+provider-specific capability is required, or the semantic API does not fit.
+OpenRouter-backed presets such as Kimi and DeepSeek are metered gateway
+presets, not local or flat-rate providers.
 
 Discover what's currently configured:
 
@@ -149,8 +149,8 @@ you actually want ollama.
 
 When you delegate from inside an active Claude Code session (or any agent
 shell that already holds a `claude` / `codex` OAuth session), prefer the
-**env-var-auth providers** (`openrouter`, `kimi`, `deepseek`, `gemini`) for
-headless paths.
+semantic `ask` routes for normal work; if you must pin a headless provider,
+prefer an env-var-auth path such as `openrouter` or `gemini`.
 
 The OAuth-CLI providers (`claude`, `codex`) hold a per-process session
 lock for their CLI's auth state. A second invocation of the same CLI
@@ -163,9 +163,10 @@ delegations to env-var-auth providers.
 Two practical defaults:
 
 - `conductor exec --with codex` from inside a Claude Code session →
-  prefer `--with openrouter` (or `--auto --kind code`) instead.
+  prefer `conductor ask --kind code --effort high` or an explicit
+  `--with openrouter` fallback instead.
 - `conductor call --with claude` from inside another Claude session →
-  prefer `--with openrouter` or `--with kimi`.
+  prefer `--with openrouter`.
 
 The `--with claude` / `--with codex` paths still work when invoked from
 a non-OAuth-holding shell (e.g. a CI runner, a non-Claude-Code terminal).
@@ -523,12 +524,15 @@ This project has [conductor](https://github.com/autumngarage/conductor)
 available for delegating tasks to other LLMs from inside an agent loop.
 You can shell out to it instead of trying to do everything yourself.
 
-Quick reference:
+Pick the job type first; do not pick a provider unless the user explicitly
+asks for one:
 
 - Quick factual/background ask:
   `conductor ask --kind research --effort minimal --brief-file /tmp/brief.md`.
 - Deeper synthesis/research:
   `conductor ask --kind research --effort medium --brief-file /tmp/brief.md`.
+- Text/prose/docs/instructions review:
+  `conductor ask --kind text-review --effort medium --brief-file /tmp/brief.md`.
 - Code explanation or small coding judgment:
   `conductor ask --kind code --effort low --brief-file /tmp/brief.md`.
 - Repo-changing implementation/debugging:
@@ -546,13 +550,9 @@ Default to `conductor ask`; use provider-specific `call` / `exec` only
 when the user explicitly asks for a provider or the semantic API does not
 fit.
 
-Providers commonly worth delegating to:
-
-- `kimi` — long-context summarization, cheap second opinions.
-- `gemini` — web search, multimodal.
-- `claude` / `codex` — strongest reasoning / coding agent loops.
-- `ollama` — local, offline, privacy-sensitive.
-- `council` kind — OpenRouter-only multi-model deliberation and synthesis.
+Default routing is flat-rate-first when the job contract allows it, then
+OpenRouter as metered overflow. `review` means code diff/PR review;
+`text-review` means prose/docs/prompt review without diff tooling.
 
 Full delegation guidance (when to delegate, when not to, error handling):
 
@@ -574,14 +574,16 @@ GEMINI_MD_BLOCK = AGENTS_MD_BLOCK  # Identical content today; split if divergent
 CURSOR_RULE_BODY = """# Conductor delegation
 
 This project has [conductor](https://github.com/autumngarage/conductor)
-available — a CLI that dispatches work to other LLMs (Kimi, Gemini,
-Claude, Codex, Ollama) under a uniform interface.
+available — a CLI that dispatches work to other LLMs under a uniform
+semantic job interface.
 
 Use it when:
 - Quick factual/background ask:
   `conductor ask --kind research --effort minimal --brief-file /tmp/brief.md`.
 - Deeper synthesis/research:
   `conductor ask --kind research --effort medium --brief-file /tmp/brief.md`.
+- Text/prose/docs/instructions review:
+  `conductor ask --kind text-review --effort medium --brief-file /tmp/brief.md`.
 - Code explanation or small coding judgment:
   `conductor ask --kind code --effort low --brief-file /tmp/brief.md`.
 - Repo-changing implementation/debugging:
@@ -590,13 +592,8 @@ Use it when:
   `conductor ask --kind review --base <ref> --brief-file /tmp/review.md`.
 - You want multiple model perspectives:
   `conductor ask --kind council --effort medium --brief-file /tmp/brief.md`.
-- You want a cheap second opinion (`conductor call --with kimi --brief "..."`).
-- You need fresh web information (`conductor call --with gemini --brief "..."`).
-- You want to stay local / offline (`conductor call --with ollama --brief "..."`).
 - You want a code review cascade:
   `conductor ask --kind review --base origin/main --brief-file /tmp/review.md`.
-- You're not sure which provider fits — let the router pick:
-  `conductor call --auto --tags <tag1>,<tag2> --brief "..."`.
 
 Conductor does not inherit your conversation context. Write a complete
 brief before delegating; for `exec`, prefer `--brief-file` with goal,
@@ -607,10 +604,14 @@ fit.
 
 For longer running tool-using sessions:
 
-    conductor exec --with <provider> --tools Read,Edit,Bash \\
+    conductor ask --kind code --effort high \\
         --brief-file /tmp/conductor-brief.md
 
 Discover configured providers: `conductor list`.
+
+Default routing is flat-rate-first when the job contract allows it, then
+OpenRouter as metered overflow. `review` means code diff/PR review;
+`text-review` means prose/docs/prompt review without diff tooling.
 
 Full delegation guidance (when to delegate, when not to, error handling):
 `~/.conductor/delegation-guidance.md`
@@ -624,15 +625,24 @@ delegate but doesn't know which provider is best.
 
 When invoked:
 
-1. First decide whether the task fits one of the semantic kinds:
+1. First choose exactly one semantic kind. This is the main decision; do
+   not pick providers yourself unless no semantic kind fits.
 - `research` — broad reading, synthesis, summarization, current context
+- `text-review` — prose, docs, prompts, instructions, PR body/description
+  text, or Cortex/Touchstone text artifacts
 - `code` — code explanation, implementation, debugging, or engineering
 - `review` — code review of a diff, merge, PR, or commit
-   - `council` — multiple reasoning models should debate and synthesize
-   If it does, prefer:
+- `council` — multiple reasoning models should debate and synthesize
+
+   If the task fits one of those, run:
 
        conductor ask --kind <kind> --effort <minimal|low|medium|high|max> \\
            --brief-file /tmp/conductor-brief.md --json
+
+   Use `review` only for code diffs, PRs, merges, and commits. Use
+   `text-review` for text-only critique. `text-review` runs in call mode,
+   cannot write files, and defaults to flat-rate providers before
+   OpenRouter overflow.
 
    `council` always calls OpenRouter. Do not override council to a local
    provider or a single CLI model.
@@ -645,6 +655,7 @@ When invoked:
    - `vision` — task involves images
    - `tool-use` — task needs file/code tools
    - `code-review` — reviewing a diff or piece of code
+   - `text-review` — reviewing prose, docs, prompts, or instructions
    - `cheap` — user explicitly asked for a cheap run
    - `offline` — user explicitly asked for local-only
    Pick 1–3 tags; do NOT invent new ones.
@@ -657,10 +668,13 @@ When invoked:
    Use this for PR/merge review. Do not use it for auto-fix work; fixes
    are engineering tasks and belong in `conductor exec`.
 
-4. For normal single-turn routing, run:
+4. For rare non-semantic single-turn routing, run:
 
        conductor call --auto --tags <tag1>,<tag2> --prefer <mode> \\
            --brief "<prompt>" --json
+
+   This is the fallback path, not the default path. Prefer `conductor ask`
+   whenever a semantic kind applies.
 
    For the prefer axis:
    - Default: `--prefer balanced` (what conductor does by default).

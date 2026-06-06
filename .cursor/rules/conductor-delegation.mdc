@@ -8,14 +8,16 @@ managed-by: conductor v0.10.34
 # Conductor delegation
 
 This project has [conductor](https://github.com/autumngarage/conductor)
-available — a CLI that dispatches work to other LLMs (Kimi, Gemini,
-Claude, Codex, Ollama) under a uniform interface.
+available — a CLI that dispatches work to other LLMs under a uniform
+semantic job interface.
 
 Use it when:
 - Quick factual/background ask:
   `conductor ask --kind research --effort minimal --brief-file /tmp/brief.md`.
 - Deeper synthesis/research:
   `conductor ask --kind research --effort medium --brief-file /tmp/brief.md`.
+- Text/prose/docs/instructions review:
+  `conductor ask --kind text-review --effort medium --brief-file /tmp/brief.md`.
 - Code explanation or small coding judgment:
   `conductor ask --kind code --effort low --brief-file /tmp/brief.md`.
 - Repo-changing implementation/debugging:
@@ -24,13 +26,8 @@ Use it when:
   `conductor ask --kind review --base <ref> --brief-file /tmp/review.md`.
 - You want multiple model perspectives:
   `conductor ask --kind council --effort medium --brief-file /tmp/brief.md`.
-- You want a cheap second opinion (`conductor call --with kimi --brief "..."`).
-- You need fresh web information (`conductor call --with gemini --brief "..."`).
-- You want to stay local / offline (`conductor call --with ollama --brief "..."`).
 - You want a code review cascade:
   `conductor ask --kind review --base origin/main --brief-file /tmp/review.md`.
-- You're not sure which provider fits — let the router pick:
-  `conductor call --auto --tags <tag1>,<tag2> --brief "..."`.
 
 Conductor does not inherit your conversation context. Write a complete
 brief before delegating; for `exec`, prefer `--brief-file` with goal,
@@ -41,10 +38,14 @@ fit.
 
 For longer running tool-using sessions:
 
-    conductor exec --with <provider> --tools Read,Edit,Bash \
+    conductor ask --kind code --effort high \
         --brief-file /tmp/conductor-brief.md
 
 Discover configured providers: `conductor list`.
+
+Default routing is flat-rate-first when the job contract allows it, then
+OpenRouter as metered overflow. `review` means code diff/PR review;
+`text-review` means prose/docs/prompt review without diff tooling.
 
 Full delegation guidance (when to delegate, when not to, error handling):
 `~/.conductor/delegation-guidance.md`

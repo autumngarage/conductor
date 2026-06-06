@@ -14,7 +14,7 @@
 
 Pick an LLM, give it a job. Job verbs plus compatibility routing across providers.
 
-**Status:** shipping. Current releases are published through the Homebrew tap and GitHub Releases — built-in providers for `kimi`, `openrouter`, `deepseek-chat`, `deepseek-reasoner`, `claude`, `codex`, `gemini`, and `ollama`; simplified job verbs; manual + auto compatibility routing; single-turn `call`; native `review`; multi-turn unsandboxed `exec` with tools; and agent-wiring for Claude Code, Codex, Gemini, Cursor, and repo instruction files.
+**Status:** shipping. Current releases are published through the Homebrew tap and GitHub Releases — built-in providers for `kimi`, `openrouter`, `deepseek-chat`, `deepseek-reasoner`, `claude`, `codex`, `gemini`, and `ollama`; simplified job verbs; manual + auto compatibility routing; single-turn `call`; text review; native code `review`; multi-turn unsandboxed `exec` with tools; and agent-wiring for Claude Code, Codex, Gemini, Cursor, and repo instruction files.
 
 DeepSeek note: `deepseek-chat` and `deepseek-reasoner` now use OpenRouter credentials. Set `OPENROUTER_API_KEY`; `DEEPSEEK_API_KEY` is deprecated. Conductor resolves the newest matching DeepSeek slug from the OpenRouter catalog and falls back to the pinned default if the catalog is unavailable.
 Kimi note: `kimi` now routes through OpenRouter. Set `OPENROUTER_API_KEY`; legacy `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` are no longer used. Conductor resolves the newest matching Kimi slug from the OpenRouter catalog and falls back to the pinned default if the catalog is unavailable.
@@ -74,8 +74,9 @@ export OPENROUTER_API_KEY=sk-or-v1-...
 # Ask a cheap text question. Conductor chooses the provider.
 conductor ask "What is 2+2?"
 
-# Research, code work, and council synthesis are first-class job verbs.
+# Research, text review, code work, and council synthesis are first-class job verbs.
 conductor research --brief-file /tmp/research.md
+conductor text-review --brief-file /tmp/instructions-review.md
 conductor code --brief-file /tmp/implementation.md
 conductor council --brief-file /tmp/options.md
 
@@ -83,19 +84,20 @@ conductor council --brief-file /tmp/options.md
 cat README.md | conductor ask --brief "Summarize this in one sentence."
 
 # Compatibility mode: hard-pin a specific provider when you really need to.
-conductor call --with kimi --brief "Use this provider explicitly."
+conductor call --with openrouter --brief "Use this provider explicitly."
 
-# Override the default model (default: moonshotai/kimi-k2.6)
-conductor call --with kimi --model moonshotai/kimi-k2 --brief "..."
+# Override the default model for a pinned provider.
+conductor call --with openrouter --model provider/model-id --brief "..."
 
 # Get the full response as JSON (for scripting)
-conductor call --with kimi --brief "ping" --json
+conductor ask --kind research --brief "ping" --json
 
 # Read-only code review uses the semantic review cascade by default
 conductor review --base origin/main --brief-file /tmp/review.md
 
 # Legacy semantic API remains available during the migration
 conductor ask --kind research --effort medium --brief-file /tmp/brief.md
+conductor ask --kind text-review --effort medium --brief-file /tmp/brief.md
 conductor ask --kind code --effort high --brief-file /tmp/brief.md
 conductor ask --kind council --effort medium --brief-file /tmp/brief.md
 ```
@@ -114,7 +116,7 @@ Headless orchestrators can run repo-changing work with
 Shipped:
 
 - Built-in providers: `kimi` (OpenRouter-backed HTTP preset), `openrouter`, `deepseek-chat`, `deepseek-reasoner`, `claude`, `codex`, `gemini`, and `ollama`.
-- `conductor ask`, `conductor research`, `conductor code`, and `conductor council` — simplified job verbs backed by deterministic semantic routing. Text verbs favor call-mode answer synthesis and cannot write files or open PRs; code work uses the coding cascade through Codex, Claude, cheap OpenRouter tool-use exec, then eligible local fallback; council fans out through OpenRouter and synthesizes the results. Legacy `conductor ask --kind <research|code|review|council> --effort <level>` remains available during migration.
+- `conductor ask`, `conductor research`, `conductor text-review`, `conductor code`, and `conductor council` — simplified job verbs backed by deterministic semantic routing. Text verbs favor call-mode answer synthesis and cannot write files or open PRs; text review uses flat-rate providers before OpenRouter overflow; code work uses the coding cascade through Codex, Claude, cheap OpenRouter tool-use exec, then eligible local fallback; council fans out through OpenRouter and synthesizes the results. Legacy `conductor ask --kind <research|code|review|text-review|council> --effort <level>` remains available during migration.
 - `conductor call --with <id> --brief "..."` — manual mode for any provider.
 - `conductor call --auto [--tags a,b,c] --brief "..."` — rule-based router picks the best configured provider for the task's tags.
 - `conductor swarm --brief a.md --brief b.md --provider codex --max-parallel 2 --json` — first-class multi-task coding supervisor with isolated worktrees and structured per-task results.

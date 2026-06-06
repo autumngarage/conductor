@@ -119,6 +119,22 @@ def test_review_openrouter_step_never_starts_with_premium_coding_model(effort):
     assert "anthropic/claude-opus-4.7" not in openrouter_models
 
 
+@pytest.mark.parametrize("effort", ["minimal", "low", "medium", "high", "max"])
+def test_text_review_is_text_only_and_flat_rate_first(effort):
+    plan = plan_for("text-review", effort)
+
+    assert plan.mode == "call"
+    assert plan.prefer == "balanced"
+    assert plan.tags == ("text-review",)
+    assert [candidate.provider for candidate in plan.candidates] == [
+        "claude",
+        "codex",
+        "gemini",
+        "openrouter",
+    ]
+    assert plan.tools == frozenset()
+
+
 def test_integer_effort_maps_into_bucketed_matrix():
     assert plan_for("research", 0).effort_bucket == "minimal"
     assert plan_for("research", 1).effort_bucket == "low"

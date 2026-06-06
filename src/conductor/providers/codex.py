@@ -373,7 +373,7 @@ def _terminate_codex_startup_probe(process: subprocess.Popen[str]) -> None:
 
 class CodexProvider:
     name = "codex"
-    tags = ["strong-reasoning", "code-review", "tool-use"]
+    tags = ["strong-reasoning", "code-review", "text-review", "tool-use"]
     default_model = CODEX_DEFAULT_MODEL
     supports_native_review = True
 

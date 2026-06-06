@@ -22,7 +22,7 @@ Regression tests cover the high-risk pieces of this surface, including JSON auto
 conductor call --auto --tags <tag1,tag2> [options]
 
 # Semantic intent routing
-conductor ask --kind <research|code|review|council> --effort <level> [options]
+conductor ask --kind <research|code|review|text-review|council> --effort <level> [options]
 
 # Explicit provider
 conductor call --with <provider> [options]
@@ -43,7 +43,7 @@ Use `conductor ask` when the caller knows the semantic kind but does not want to
 
 Usually, exactly one of `--auto` or `--with` is required for `call` and `exec`. `review` is auto-routed by default when `--with` is absent; `--auto` remains accepted for compatibility. `--auto` runs the router using `--tags`, `--prefer`, and `--exclude` to pick a configured provider; `--with` bypasses the router for direct provider use. `--offline` is the exception for `call` and `exec`: it may be used without `--auto` or `--with`, sets the sticky offline flag, and rewrites the call to `--with ollama`. Passing `--offline --with <non-ollama>` is an error. `--no-offline` clears the sticky flag, then normal `--auto` / `--with` rules apply.
 
-Use `conductor review` for code review. Its auto route uses the same semantic review cascade as `conductor ask --kind review`: Codex `codex review`, Claude Code `/review`, then an OpenRouter hosted review prompt. Use `--with codex` / `--with claude` for a native-review hard pin, or `--with openrouter` for a hosted-review hard pin. Use `conductor exec` for engineering or auto-fix tasks that may edit files.
+Use `conductor review` for code review. Its auto route uses the same semantic review cascade as `conductor ask --kind review`: Codex `codex review`, Claude Code `/review`, then an OpenRouter hosted review prompt. Use `conductor ask --kind text-review` or `conductor text-review` for prose, docs, prompt, or instruction review with no diff tooling. Use `conductor exec` for engineering or auto-fix tasks that may edit files.
 
 ## Semantic matrix
 
@@ -58,13 +58,14 @@ Use `conductor review` for code review. Its auto route uses the same semantic re
 | `code` | `medium` | `call` | `openrouter` auto with coding/thinking bias → `ollama` |
 | `code` | `high`, `max` | `exec` | `codex` -> `claude` -> `openrouter` -> `ollama`, with `Read,Grep,Glob,Edit,Write,Bash`; exec runs unsandboxed, and callers can opt into tool permission profiles |
 | `review` | all levels | `review` | `codex` -> `claude` -> `openrouter` hosted review prompt |
+| `text-review` | all levels | `call` | `claude` -> `codex` -> `gemini` -> `openrouter` |
 | `council` | `minimal`, `low` | `council` | OpenRouter fan-out: `~google/gemini-flash-latest`, `~openai/gpt-mini-latest`; synthesize with the same stack |
 | `council` | `medium` | `council` | OpenRouter fan-out: `~google/gemini-pro-latest`, `~moonshotai/kimi-latest`, `deepseek/deepseek-v4-pro`; synthesize with `~google/gemini-pro-latest` → `~openai/gpt-latest` |
 | `council` | `high`, `max` | `council` | OpenRouter fan-out: `~google/gemini-pro-latest`, `~anthropic/claude-sonnet-latest`, `~openai/gpt-latest`, `deepseek/deepseek-v4-pro`, `qwen/qwen3.6-max-preview`; synthesize with `~openai/gpt-latest` → `~anthropic/claude-sonnet-latest` |
 
-`council` is intentionally OpenRouter-only and is not the cheap default delegation path. It runs independent member calls through OpenRouter, then sends those outputs to an OpenRouter synthesis model. Use `research` or `code` for routine single-model delegation; reserve `council` for explicit multi-model judgment.
+`council` is intentionally OpenRouter-only and is not the cheap default delegation path. It runs independent member calls through OpenRouter, then sends those outputs to an OpenRouter synthesis model. Use `research`, `text-review`, or `code` for routine single-model delegation; reserve `council` for explicit multi-model judgment.
 
-Rows with mode `call` return text on stdout only. They do not have tool access and cannot write files, create branches, commit, push, or open PRs. Use `code` with `high`/`max` effort or `conductor exec` when the brief requires repository side effects.
+Rows with mode `call` return text on stdout only. They do not have tool access and cannot write files, create branches, commit, push, or open PRs. Use `text-review` for prose/docs/prompt critique and `review` only for code diffs, PRs, merges, or commits. Use `code` with `high`/`max` effort or `conductor exec` when the brief requires repository side effects.
 
 Council has conservative internal caps: 180 seconds total wall-clock, 6,000 reported output tokens across members plus synthesis, and $0.25 total known OpenRouter cost. Compatibility overrides (`--council-timeout`, `--council-max-output-tokens`, and `--council-max-cost-usd`) remain accepted but hidden from default help. When a cap stops the council before synthesis, the command exits nonzero and emits a partial `CallResponse`; `raw.conductor_council.cap_hit` includes the cap kind, requested/observed limit, elapsed time, completed member count, completed member models, and skipped member models. Degraded council output is prefixed with a structural `Council degraded:` summary when failed or unreached members materially reduce confidence.
 
@@ -106,7 +107,7 @@ Current enforcement support:
 | `gemini` | No | Gemini CLI exec approval mode is not a Conductor tool whitelist |
 | custom shell providers | No | The shell command owns its own behavior |
 
-If the workflow only needs review with no file mutation, prefer `conductor review` or `conductor ask --kind review`. Use `exec --permission-profile read-only` only for agentic inspection workflows that need the multi-turn exec machinery.
+If the workflow needs code diff review with no file mutation, prefer `conductor review` or `conductor ask --kind review`. If it needs prose, docs, prompt, instruction, issue, or Cortex/Touchstone text review, prefer `conductor text-review` or `conductor ask --kind text-review`. Use `exec --permission-profile read-only` only for agentic inspection workflows that need the multi-turn exec machinery.
 
 `conductor exec --help` is the canonical reference for agentic code/edit mode. Its stable exec-specific flags are: --tools, --permission-profile, --sandbox, --cwd, --log-file, --preflight, --no-preflight, and --allow-short-brief. `--sandbox` remains parseable for compatibility but fails loudly because exec is unsandboxed unless a provider can enforce a `--permission-profile`.
 
@@ -268,13 +269,14 @@ Agents that do not need provider-level control should prefer `ask`:
 
 ```bash
 conductor ask --kind research --effort medium --brief-file /tmp/brief.md --json
+conductor ask --kind text-review --effort medium --brief-file /tmp/brief.md --json
 conductor ask --kind code --effort high --brief-file /tmp/brief.md --json
 conductor ask --kind council --effort medium --brief-file /tmp/brief.md --json
 ```
 
-`council` is multi-call OpenRouter fan-out. For budget-sensitive routine delegation, use `research` or `code`; council's compatibility cap overrides are intentionally hidden so normal callers see the outcome and degradation reason rather than a set of magic numbers to tune.
+`council` is multi-call OpenRouter fan-out. For budget-sensitive routine delegation, use `research`, `text-review`, or `code`; council's compatibility cap overrides are intentionally hidden so normal callers see the outcome and degradation reason rather than a set of magic numbers to tune.
 
-For merge review, Touchstone should continue to use `conductor review` or `conductor ask --kind review`; both must trigger the review cascade, not generic code chat.
+For merge review, Touchstone should continue to use `conductor review` or `conductor ask --kind review`; both must trigger the review cascade, not generic code chat. For Touchstone/Cortex prose or doctrine review, use `text-review` so simple text critique does not pay the native code-review cost.
 
 ## Versioning policy
 

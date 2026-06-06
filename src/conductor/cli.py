@@ -4916,12 +4916,13 @@ def main(ctx: click.Context) -> None:
     default=None,
     type=click.Choice(SEMANTIC_KINDS),
     help=(
-        "Legacy semantic kind. Omit for cheap general Q&A. Picks the provider stack and physical "
+        "Semantic job kind. Omit for cheap general Q&A. Picks the provider stack and physical "
         "execution shape:\n"
         "  research = cheap single-model lookup / synthesis\n"
         "  code     = coding-optimized stack; --effort high switches to a "
         "multi-turn agent loop\n"
         "  review   = code review cascade (codex → claude → openrouter)\n"
+        "  text-review = prose/docs/instructions review; text-only, no diff tools\n"
         "  council  = multi-model fan-out, cost-capped"
     ),
 )
@@ -5151,6 +5152,11 @@ def ask(
     review_target_count = sum(1 for value in (base, commit, uncommitted) if value)
     if review_target_count > 1:
         raise click.UsageError("use only one of --base, --commit, or --uncommitted.")
+    if plan.kind == "text-review" and review_target_count:
+        raise click.UsageError(
+            "--base, --commit, and --uncommitted are for code diff review. "
+            "For text-review, put the text to review in --brief-file or stdin."
+        )
 
     brief_input = _read_task(
         task,
@@ -5680,6 +5686,64 @@ def research_cmd(
         ctx,
         "research",
         kind="research",
+        effort="medium",
+        cwd=cwd,
+        task=task,
+        task_file=task_file,
+        brief=brief,
+        brief_file=brief_file,
+        issue=issue,
+        issue_comment_limit=issue_comment_limit,
+        as_json=as_json,
+        silent_route=silent_route,
+        prompt_words=prompt_words,
+    )
+
+
+@main.command(name="text-review")
+@click.option("--cwd", default=None, help="Repository working directory for issue context.")
+@click.option("--task", default=None, help="The text review task. Alias: --brief.")
+@click.option("--task-file", default=None, help="Read the text review task from a UTF-8 file.")
+@click.option("--brief", default=None, help="Delegation brief / prompt.")
+@click.option(
+    "--brief-file",
+    default=None,
+    help="Read the delegation brief from a UTF-8 file. Use '-' to read stdin.",
+)
+@click.option(
+    "--issue",
+    default=None,
+    help="Use a GitHub issue as the seed brief. Accepts N or owner/repo#N.",
+)
+@click.option(
+    "--issue-comment-limit",
+    default=10,
+    type=click.IntRange(min=0),
+    show_default=True,
+    help="Number of recent GitHub issue comments to include with --issue.",
+)
+@click.option("--json", "as_json", is_flag=True, default=False)
+@click.option("--silent-route", is_flag=True, default=False)
+@click.argument("prompt_words", nargs=-1)
+@click.pass_context
+def text_review_cmd(
+    ctx: click.Context,
+    cwd: str | None,
+    task: str | None,
+    task_file: str | None,
+    brief: str | None,
+    brief_file: str | None,
+    issue: str | None,
+    issue_comment_limit: int,
+    as_json: bool,
+    silent_route: bool,
+    prompt_words: tuple[str, ...],
+) -> None:
+    """Review prose, docs, prompts, or instructions without diff tooling."""
+    _invoke_job_verb(
+        ctx,
+        "text-review",
+        kind="text-review",
         effort="medium",
         cwd=cwd,
         task=task,

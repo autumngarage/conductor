@@ -527,6 +527,65 @@ def test_research_command_uses_research_semantic_route(mocker):
     assert payload["semantic"]["mode"] == "call"
 
 
+def test_text_review_command_uses_text_only_flat_rate_route(mocker):
+    _stub_all_configured(mocker, {"claude", "codex", "gemini", "openrouter"})
+    call_mock = mocker.patch.object(
+        ClaudeProvider,
+        "call",
+        return_value=_fake_response("claude", "sonnet"),
+    )
+    codex_review = mocker.patch.object(CodexProvider, "review")
+    claude_review = mocker.patch.object(ClaudeProvider, "review")
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "text-review",
+            "--json",
+            "--brief",
+            "Review these project instructions for clarity.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert call_mock.called
+    assert not codex_review.called
+    assert not claude_review.called
+    payload = json.loads(result.stdout)
+    assert payload["provider"] == "claude"
+    assert payload["route"]["task_tags"] == ["text-review"]
+    assert payload["semantic"]["kind"] == "text-review"
+    assert payload["semantic"]["mode"] == "call"
+    assert payload["semantic"]["candidates"] == [
+        {"provider": "claude", "models": []},
+        {"provider": "codex", "models": []},
+        {"provider": "gemini", "models": []},
+        {"provider": "openrouter", "models": []},
+    ]
+
+
+def test_ask_text_review_rejects_code_review_targets(mocker):
+    _stub_all_configured(mocker, {"claude"})
+    call_mock = mocker.patch.object(ClaudeProvider, "call")
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "text-review",
+            "--base",
+            "origin/main",
+            "--brief",
+            "Review these instructions.",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert not call_mock.called
+    assert "--base, --commit, and --uncommitted are for code diff review" in result.output
+
+
 def test_code_command_uses_default_tool_using_code_cascade(mocker):
     _stub_all_configured(mocker, {"codex"})
     exec_mock = mocker.patch.object(CodexProvider, "exec", return_value=_fake_response("codex"))

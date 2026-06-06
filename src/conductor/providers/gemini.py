@@ -99,7 +99,15 @@ def _extract_review_response_text(response: object) -> str:
 
 class GeminiProvider:
     name = "gemini"
-    tags = ["long-context", "web-search", "thinking", "cheap", "code-review", "tool-use"]
+    tags = [
+        "long-context",
+        "web-search",
+        "thinking",
+        "cheap",
+        "code-review",
+        "text-review",
+        "tool-use",
+    ]
     default_model = GEMINI_DEFAULT_MODEL
     supports_native_review = True
 
