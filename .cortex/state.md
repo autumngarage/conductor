@@ -1,10 +1,10 @@
 ---
-Generated: 2026-06-05T23:38:14-04:00
+Generated: 2026-06-05T23:45:38-04:00
 Generator: cortex refresh-state v1.6.4
 Sources:
-  - HEAD sha: 9583a5c24b7a9a44119cf9b20deb281d8ecf882c
+  - HEAD sha: 8a97e7f6dfbe1159ffb2e385390f36b4c9548fc5
   - .cortex/plans/*.md (2 files)
-  - .cortex/journal/*.md (30 entries, 2026-04-24..2026-06-06)
+  - .cortex/journal/*.md (31 entries, 2026-04-24..2026-06-06)
   - .cortex/doctrine/*.md (7 entries)
   - .cortex/templates/**/*.md (12 templates)
   - docs/case-studies/*.md (0 case studies)
@@ -48,6 +48,7 @@ Sources-hash:
   .cortex/journal/2026-05-18-pr-482-merged.md: 461a3d0f503d208c201aff0e85db92694925184c5a2ad38f5e4bc9fde728316d
   .cortex/journal/2026-05-18-release-v0.10.29.md: 0c6228e0069855907f43c26eda6d5e8f95e753009e1daaa1899df97c77afadbb
   .cortex/journal/2026-06-06-flat-rate-first-conductor-vision.md: 8f91e74d1b86d041951648d0946950743fe222c150b5c693fd5f3cae57fe31e0
+  .cortex/journal/2026-06-06-touchstone-help-sync-bug.md: c143da43e9e87b178e9f24aa231f2f324245499c75fdfb971ced81ce6f99d4df
   .cortex/plans/conductor-blindspots.md: 69b7cec18f5893a5edfe83e3d095eb9ae7e57d5e9e117adf73e417f31ebe11a0
   .cortex/plans/root-cause-roadmap.md: c5e34c7dbe620747b74c68b6b184a21c056b1ce05d60bdca463d0d530763b1c1
   .cortex/templates/README.md: 695aa2e623bd7f4e698dae471bded0cde354da0c1d8589266660ceb1be8efad1
@@ -62,7 +63,7 @@ Sources-hash:
   .cortex/templates/journal/release.md: 9a6bc59219156e48b419fb170c7c50ff557767def8672ef20568df3e14eadbd0
   .cortex/templates/journal/sentinel-cycle.md: 2945e2d94af4ec9848584b4b3e9cea7060d2968dd42e78faf21fb6f859137476
   .cortex/templates/plans/template.md: d8156cfa3b86acd2a1fbb36cff07cae37d99f3adee7f72b14b7b16e645c51b44
-Corpus: 30 Journal entries, 2 Plans, 7 Doctrine entries, 12 Templates, 0 Case studies
+Corpus: 31 Journal entries, 2 Plans, 7 Doctrine entries, 12 Templates, 0 Case studies
 Omitted:
   []
 Incomplete:
