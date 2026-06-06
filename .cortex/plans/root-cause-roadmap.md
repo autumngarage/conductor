@@ -5,7 +5,7 @@ Author: human
 Goal-hash: 7a463092
 Updated-by:
   - 2026-05-17T17:09 human (created via cortex plan spawn)
-Cites: doctrine/0002-audit-weak-points, doctrine/0004-engineering-principles, .cortex/journal/2026-05-17-pr-merged-1247.md, .cortex/state.md § Active plans
+Cites: doctrine/0002-audit-weak-points, doctrine/0004-engineering-principles, doctrine/0007-flat-rate-first-delivery-control-plane, .cortex/journal/2026-05-17-pr-merged-1247.md, .cortex/journal/2026-06-06-flat-rate-first-conductor-vision.md, .cortex/state.md § Active plans
 ---
 
 # Conductor Root-Cause Roadmap — Structural Redesigns
@@ -18,6 +18,7 @@ This plan is grounded in three durable sources:
 
 - **[doctrine/0002-audit-weak-points](../doctrine/0002-audit-weak-points.md)** — when a structural weakness surfaces, name the pattern, audit its instances, and add a guardrail. This plan applies that doctrine to four failure classes simultaneously instead of one.
 - **[doctrine/0004-engineering-principles](../doctrine/0004-engineering-principles.md)** — the "No band-aids" hard-requirement and "Audit weak-point classes" rules name what each thread is meant to prevent.
+- **[doctrine/0007-flat-rate-first-delivery-control-plane](../doctrine/0007-flat-rate-first-delivery-control-plane.md)** — Conductor's durable lane is flat-rate-first AI delivery control, with OpenRouter as metered overflow rather than the default first hop.
 - **[journal/2026-05-17-pr-merged-1247](../journal/2026-05-17-pr-merged-1247.md)** — the T1.9 record of the bug-triage principle's merge (PR #467), which is the immediate trigger for converting the issue tracker from symptom-organized to root-cause-organized.
 
 `principles/bug-triage.md` (shipped 2026-05-17 in PR #467) codifies the pattern check that runs *before* a bug-fix implementation begins: scan recent issues, name the failure class, decide root-cause-fix vs. scoped-symptom-patch consciously. Applying that principle to the existing closed-issue backlog surfaced four recurring classes that have been patched repeatedly without the underlying design being addressed. This plan names those four classes as the active roadmap and links each to a tracking issue.
@@ -31,7 +32,7 @@ Four threads, each owned by a single GitHub tracking issue. Each thread has its 
 | Thread | Failure class | Tracking issue | Depends on |
 |---|---|---|---|
 | **A** | Operator-facing termination knobs (iteration cap, output cap, wall-clock cap) across exec/council/ask | [#469](https://github.com/autumngarage/conductor/issues/469) | C (for fallback summary shape), D (for checkpoint contract) |
-| **B** | Provider Capability Model is too shallow → routing patches in shared code | [#472](https://github.com/autumngarage/conductor/issues/472) | independent |
+| **B** | Provider Capability Model is too shallow, including missing provider economics → routing patches in shared code | [#472](https://github.com/autumngarage/conductor/issues/472) | independent |
 | **C** | Retry/fallback cascade re-prepends raw transcript → silent cost amplifier | [#473](https://github.com/autumngarage/conductor/issues/473) | independent |
 | **D** | Exec has no commit-boundary contract → scope creep, lost commits, empty final responses | [#474](https://github.com/autumngarage/conductor/issues/474) | independent |
 
@@ -39,7 +40,7 @@ Four threads, each owned by a single GitHub tracking issue. Each thread has its 
 
 A (run-health) is the most integrative thread. Its "graduated intervention" path needs **C** (the summary shape it hands to the next provider on fallback) and **D** (the commit-boundary contract it invokes at checkpoint time) to be defined before A's interventions can write. C and D are each independently shippable but A pulls them together.
 
-B (capability model) is structurally independent — it could ship in parallel with any of the others. It has the longest tail (one PR per migrated shared-code branch) and benefits from landing the cross-cutting smell-test guardrail first (see Work items).
+B (capability model) is structurally independent — it could ship in parallel with any of the others. It has the longest tail (one PR per migrated shared-code branch) and benefits from landing the cross-cutting smell-test guardrail first (see Work items). After doctrine 0007, B also owns the provider-economics boundary: plan-backed and local providers are not interchangeable with metered gateways, and Kimi/DeepSeek compatibility IDs must not lead routing as if they were independent flat-rate providers.
 
 ### Method per thread (uniform across A–D)
 
@@ -51,7 +52,7 @@ B (capability model) is structurally independent — it could ship in parallel w
 
 - **Plan-level**: every closed conductor issue filed between 2026-04-12 and 2026-05-17 mapping to a failure class is referenced from one of the four tracking issues (#469, #472, #473, #474) as a "Symptoms observed" link. Verifiable via `gh issue list --state closed --search "<keyword>"` against each thread's symptoms table.
 - **A — run-health** (per #469): `--help` output of `conductor exec`, `conductor council`, and `conductor ask` contains no termination knobs in the default path; a council run with one failed member reports the failure structurally (no "directionally clear" framing when ≥ 30% of members failed silently).
-- **B — capability model** (per #472): a CI lint scans for `provider == ` / `provider in {"…"}` patterns in `src/conductor/cli.py`, `src/conductor/semantic.py`, `src/conductor/router.py` and warns when a new occurrence is added. Existing occurrences are documented in an audit at issue-open time, and the count decreases monotonically.
+- **B — capability model** (per #472): a CI lint scans for `provider == ` / `provider in {"…"}` patterns in `src/conductor/cli.py`, `src/conductor/semantic.py`, `src/conductor/router.py` and warns when a new occurrence is added. Existing occurrences are documented in an audit at issue-open time, and the count decreases monotonically. Provider capabilities include an economics field (`plan-backed`, `local`, or `metered-gateway`), semantic routing leads with eligible plan-backed providers before OpenRouter, and Kimi/DeepSeek remain OpenRouter-backed presets rather than default first-hop provider choices.
 - **C — fallback carry-over** (per #473): a deterministic test asserts that attempt N+1's input tokens grow sub-linearly across a 3-provider fallback chain (bounded by `O(brief_size + summary_size)`, not `O(N * brief_size)`).
 - **D — commit-boundary** (per #474): an exec run where the agent edits 3 brief-scope files and the hook auto-bumps 2 unrelated files produces a commit containing only the in-scope files plus a structured warning naming the out-of-scope diff — without the agent having to remember the boundary.
 
@@ -74,7 +75,10 @@ B (capability model) is structurally independent — it could ship in parallel w
 ### Thread B — Provider Capability Model (#472)
 
 - [ ] Audit shared-code `provider == ` / capability-shaped branches in routing/preflight; classify each as (adapter / parameterized-shared / router-global).
-- [ ] Deepen `Provider.capabilities` with the fields surfaced by the audit (streaming, runtime type, model family, output-contract shape, native-extension status).
+- [ ] Deepen `Provider.capabilities` with the fields surfaced by the audit (billing/economics class, streaming, runtime type, model family, output-contract shape, native-extension status).
+- [ ] Make the semantic matrix flat-rate-first by default: Codex/Claude/Gemini/Factory-if-present before OpenRouter when they satisfy the job contract, local/offline only when explicitly appropriate, and OpenRouter as metered overflow.
+- [ ] Keep Kimi and DeepSeek as OpenRouter-backed compatibility presets; remove them from any docs, prompts, or defaults that imply local, plan-backed, or independent first-hop routing.
+- [ ] Add route diagnostics that make metered gateway fallback explicit: provider tried, billing class, fallback reason, and whether OpenRouter was selected by explicit pin or overflow.
 - [ ] Migrate shared-code branches to capability queries, one PR per class. Add regression tests per migration.
 
 ### Thread C — Retry/fallback carry-over (#473)
@@ -101,7 +105,7 @@ B (capability model) is structurally independent — it could ship in parallel w
 - **No timeline.** Threads are dependency-ordered, not date-ordered. The plan does not commit to a quarter or month; the next issue claim and PR sequence does.
 - **Symptom-patch shipping is not banned during the redesign.** Per `principles/bug-triage.md`, a documented symptom patch with a linked root-cause issue is allowed. The plan reduces the *rate* of band-aids, not to zero.
 - **`conductor-blindspots.md` is not adjudicated by this plan.** That older plan (20% complete, 2026-04-24) covers a different structural surface (subprocess-adapter live smoke, subagent prompt drift, exec authority sandbox). It is not in conflict with this plan but is stale; classifying its remaining checkboxes as shipped / deferred / still-active is a separate audit and is intentionally outside this plan's scope.
-- **#448 (OPENROUTER_CODING_HIGH cost-aware ordering) is not bundled.** Tactical fix, doesn't fit any of the four classes. Ships independently against the open issue, or folds into Thread B's capability-model work late if convenient. Tracked on GitHub at issue #448.
+- **#448 (OPENROUTER_CODING_HIGH cost-aware ordering) is superseded by the flat-rate-first economics model.** The tactical cost-aware ordering fix should either close as stale after Thread B lands or be folded into Thread B as the OpenRouter-overflow route receipt and billing-class work. Tracked on GitHub at issue #448.
 
 <!--
 Authoring checklist (remove before committing):

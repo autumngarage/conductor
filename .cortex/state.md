@@ -1,11 +1,11 @@
 ---
-Generated: 2026-05-18T07:42:59-04:00
+Generated: 2026-06-05T23:38:14-04:00
 Generator: cortex refresh-state v1.6.4
 Sources:
-  - HEAD sha: 6ccd8f82d5a3e21235d1271af5507a043f340abb
+  - HEAD sha: 9583a5c24b7a9a44119cf9b20deb281d8ecf882c
   - .cortex/plans/*.md (2 files)
-  - .cortex/journal/*.md (29 entries, 2026-04-24..2026-05-18)
-  - .cortex/doctrine/*.md (6 entries)
+  - .cortex/journal/*.md (30 entries, 2026-04-24..2026-06-06)
+  - .cortex/doctrine/*.md (7 entries)
   - .cortex/templates/**/*.md (12 templates)
   - docs/case-studies/*.md (0 case studies)
   - SPEC version: 0.5.0
@@ -17,6 +17,7 @@ Sources-hash:
   .cortex/doctrine/0004-engineering-principles.md: 547fd9b0013814bf07b48ca75f2d63e79975c41c63d7724c3d38dd08d30daa9a
   .cortex/doctrine/0005-git-workflow.md: 44ef17c0726fd45d8c86d902112540695d62a4ebccec0f8d31ed41b4088e1138
   .cortex/doctrine/0006-pre-implementation-checklist.md: 88a98cd31fff09c0e5ff34b76a2e1ba0a363d6fe623c3f413aca0ebf96b65b9f
+  .cortex/doctrine/0007-flat-rate-first-delivery-control-plane.md: ed9b69c62a204a5aed0bfcdc0e69fbb716db25dabbb41085990eb1997a84208e
   .cortex/journal/2026-04-24-blindspot-followups-noted.md: 6e3eb0dd5511b95fa19bd2a34cd4095d187f4096b1eb88151e02e96163616b25
   .cortex/journal/2026-04-24-codex-plan-review.md: dd80e54d37f262b70f70adf4f74d2eb62d33a727d20012191bb7bc0e710de299
   .cortex/journal/2026-04-24-llm-as-router-client.md: 0d59e2d275c66802365d76ad825f1fed79ff64bdaf13a3daf19ac154f12a6767
@@ -46,8 +47,9 @@ Sources-hash:
   .cortex/journal/2026-05-17-pr-merged-1716.md: ac8f436bf45c79df07ad35131ba2efd1d2ad6dd75c225bd10368598d86ac376a
   .cortex/journal/2026-05-18-pr-482-merged.md: 461a3d0f503d208c201aff0e85db92694925184c5a2ad38f5e4bc9fde728316d
   .cortex/journal/2026-05-18-release-v0.10.29.md: 0c6228e0069855907f43c26eda6d5e8f95e753009e1daaa1899df97c77afadbb
+  .cortex/journal/2026-06-06-flat-rate-first-conductor-vision.md: 8f91e74d1b86d041951648d0946950743fe222c150b5c693fd5f3cae57fe31e0
   .cortex/plans/conductor-blindspots.md: 69b7cec18f5893a5edfe83e3d095eb9ae7e57d5e9e117adf73e417f31ebe11a0
-  .cortex/plans/root-cause-roadmap.md: f9c6019725a55f0822887bc79acc190734cb8df1ae30e5126d7e0412a490fd6c
+  .cortex/plans/root-cause-roadmap.md: c5e34c7dbe620747b74c68b6b184a21c056b1ce05d60bdca463d0d530763b1c1
   .cortex/templates/README.md: 695aa2e623bd7f4e698dae471bded0cde354da0c1d8589266660ceb1be8efad1
   .cortex/templates/digest/monthly.md: 0c13cf6781d15e0858544e3919166a7c123698066e6c93fc70a3b808a8239813
   .cortex/templates/digest/quarterly.md: 8750f1eb703b158d30869204737b071213d2b33370af86ce85daed1f48943f98
@@ -60,7 +62,7 @@ Sources-hash:
   .cortex/templates/journal/release.md: 9a6bc59219156e48b419fb170c7c50ff557767def8672ef20568df3e14eadbd0
   .cortex/templates/journal/sentinel-cycle.md: 2945e2d94af4ec9848584b4b3e9cea7060d2968dd42e78faf21fb6f859137476
   .cortex/templates/plans/template.md: d8156cfa3b86acd2a1fbb36cff07cae37d99f3adee7f72b14b7b16e645c51b44
-Corpus: 29 Journal entries, 2 Plans, 6 Doctrine entries, 12 Templates, 0 Case studies
+Corpus: 30 Journal entries, 2 Plans, 7 Doctrine entries, 12 Templates, 0 Case studies
 Omitted:
   []
 Incomplete:
@@ -74,7 +76,7 @@ Spec: 0.5.0
 ## Active plans
 
 - `conductor-blindspots` — Conductor Blindspot Remediation — Top 3; Goal-hash `b400fba9`; 20% complete (5/25 checkboxes)
-- `root-cause-roadmap` — Conductor Root-Cause Roadmap — Structural Redesigns; Goal-hash `7a463092`; 24% complete (6/25 checkboxes)
+- `root-cause-roadmap` — Conductor Root-Cause Roadmap — Structural Redesigns; Goal-hash `7a463092`; 21% complete (6/28 checkboxes)
 
 ## Shipped recently
 
@@ -104,3 +106,4 @@ Spec: 0.5.0
 ## Stale-now / handle-later
 
 - `conductor-blindspots` — active plan stale since 2026-04-24; open checkboxes remain
+- `root-cause-roadmap` — active plan stale since 2026-05-17; open checkboxes remain
