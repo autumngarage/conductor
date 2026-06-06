@@ -90,6 +90,7 @@ EXPECTED_TEMPLATE_COVERAGE = {
         "read-only",
         "research",
         "review",
+        "text-review",
         "tool-use",
         "vision",
         "web-search",

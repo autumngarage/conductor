@@ -16,11 +16,17 @@ from conductor.openrouter_model_stacks import (
     OPENROUTER_REVIEW_CHEAP,
 )
 
-SemanticKind = Literal["research", "code", "review", "council"]
+SemanticKind = Literal["research", "code", "review", "text-review", "council"]
 SemanticMode = Literal["call", "exec", "review", "council"]
 EffortBucket = Literal["minimal", "low", "medium", "high", "max"]
 
-SEMANTIC_KINDS: tuple[str, ...] = ("research", "code", "review", "council")
+SEMANTIC_KINDS: tuple[str, ...] = (
+    "research",
+    "code",
+    "review",
+    "text-review",
+    "council",
+)
 EFFORT_BUCKETS: tuple[EffortBucket, ...] = ("minimal", "low", "medium", "high", "max")
 
 EFFORT_TOKEN_BUCKETS: tuple[tuple[int, EffortBucket], ...] = (
@@ -214,6 +220,24 @@ _REVIEW: dict[EffortBucket, SemanticPlan] = {
 }
 
 
+_TEXT_REVIEW: dict[EffortBucket, SemanticPlan] = {
+    bucket: SemanticPlan(
+        kind="text-review",
+        effort_bucket=bucket,
+        mode="call",
+        prefer="balanced",
+        tags=("text-review",),
+        candidates=(
+            SemanticCandidate("claude"),
+            SemanticCandidate("codex"),
+            SemanticCandidate("gemini"),
+            SemanticCandidate("openrouter"),
+        ),
+    )
+    for bucket in EFFORT_BUCKETS
+}
+
+
 _COUNCIL_LOW = (
     OPENROUTER_GEMINI_FLASH,
     OPENROUTER_OPENAI_MINI,
@@ -289,6 +313,7 @@ DEFAULT_SEMANTIC_MATRIX: dict[SemanticKind, dict[EffortBucket, SemanticPlan]] = 
     "research": _RESEARCH,
     "code": _CODE,
     "review": _REVIEW,
+    "text-review": _TEXT_REVIEW,
     "council": _COUNCIL,
 }
 

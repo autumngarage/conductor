@@ -182,7 +182,13 @@ def _claude_startup_lock_snapshot() -> tuple[int, str]:
 
 class ClaudeProvider:
     name = "claude"
-    tags = ["strong-reasoning", "long-context", "tool-use", "code-review"]
+    tags = [
+        "strong-reasoning",
+        "long-context",
+        "tool-use",
+        "code-review",
+        "text-review",
+    ]
     default_model = CLAUDE_DEFAULT_MODEL
     supports_native_review = True
 

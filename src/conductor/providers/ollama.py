@@ -208,7 +208,7 @@ def _is_missing_model_response(resp: httpx.Response) -> bool:
 
 class OllamaProvider:
     name = "ollama"
-    tags = ["cheap", "local", "offline", "code-review"]
+    tags = ["cheap", "local", "offline", "code-review", "text-review"]
     default_model = OLLAMA_DEFAULT_MODEL
 
     # Capability declarations (see interface.py)

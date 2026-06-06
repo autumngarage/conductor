@@ -107,6 +107,7 @@ class OpenRouterProvider:
         "long-context",
         "thinking",
         "code-review",
+        "text-review",
         "tool-use",
         "vision",
         "cheap",
