@@ -96,8 +96,10 @@ worker_has_uncommitted() {
 }
 
 worker_pr_field() {
-  local repo_path="$1" branch="$2" field="$3"
-  (cd "$repo_path" && touchstone_worker_pr_field "$branch" "$field")
+  local branch="$1" field="$2"
+  command -v gh >/dev/null 2>&1 || return 0
+  gh pr list --head "$branch" --state all --json number,url,state,mergedAt \
+    --jq ".[0].$field // empty" 2>/dev/null || true
 }
 
 worker_status_json() {
@@ -117,16 +119,9 @@ worker_status_json() {
     head_sha="$(worker_head_sha "$worktree_path")"
     has_uncommitted="$(worker_has_uncommitted "$worktree_path")"
     if [ -n "$branch" ] && [ "$branch" != "HEAD" ]; then
-      if (cd "$worktree_path" && touchstone_worker_remote_supports_github_prs); then
-        if pr_number="$(worker_pr_field "$worktree_path" "$branch" number)"; then
-          if ! pr_url="$(worker_pr_field "$worktree_path" "$branch" url)"; then
-            pr_url=""
-          fi
-          if ! merged_at="$(worker_pr_field "$worktree_path" "$branch" mergedAt)"; then
-            merged_at=""
-          fi
-        fi
-      fi
+      pr_number="$(worker_pr_field "$branch" number)"
+      pr_url="$(worker_pr_field "$branch" url)"
+      merged_at="$(worker_pr_field "$branch" mergedAt)"
     fi
   fi
 
@@ -200,10 +195,7 @@ cmd_spawn() {
   repo_root="$(repo_root_or_die)"
   slug="$(sanitize_task_slug "$task")"
   branch="$type/$slug"
-  if ! base_ref="$(cd "$repo_root" && touchstone_worker_default_ref)"; then
-    echo "ERROR: could not resolve a default branch ref for worker spawn." >&2
-    return 1
-  fi
+  base_ref="$(cd "$repo_root" && touchstone_worker_default_ref)"
   base_branch="${base_ref#origin/}"
 
   output="$(cd "$repo_root" && bash "$TOUCHSTONE_ROOT/scripts/spawn-worktree.sh" "$branch")"
@@ -342,48 +334,14 @@ cmd_ship() {
 }
 
 branch_has_open_or_closed_pr() {
-  local repo_path="$1" branch="$2" number
-  if ! number="$(worker_pr_field "$repo_path" "$branch" number)"; then
-    return 2
-  fi
+  local branch="$1" number
+  number="$(worker_pr_field "$branch" number)"
   [ -n "$number" ]
 }
 
 remote_branch_exists() {
   local repo_path="$1" branch="$2"
   git -C "$repo_path" ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1
-}
-
-abandon_remote_action() {
-  local repo_path="$1" branch="$2" force="$3" pr_status
-
-  if ! remote_branch_exists "$repo_path" "$branch"; then
-    echo "none"
-    return 0
-  fi
-
-  if ! (cd "$repo_path" && touchstone_worker_remote_supports_github_prs); then
-    echo "delete"
-    return 0
-  fi
-
-  if branch_has_open_or_closed_pr "$repo_path" "$branch"; then
-    echo "keep_pr"
-    return 0
-  else
-    pr_status=$?
-  fi
-  if [ "$pr_status" -ne 1 ]; then
-    if [ "$force" = true ]; then
-      echo "keep_unknown"
-      return 0
-    fi
-    echo "ERROR: refusing to abandon $branch; could not inspect PRs before deleting origin/$branch." >&2
-    echo "       Use --force only after confirming the branch is not backing a PR." >&2
-    return 1
-  fi
-
-  echo "delete"
 }
 
 worktree_manager_path() {
@@ -393,7 +351,7 @@ worktree_manager_path() {
 }
 
 cmd_abandon() {
-  local worktree_path="" dry_run=false force=false branch base unique_commits dirty_status manager_path remote_action
+  local worktree_path="" dry_run=false force=false branch base unique_commits dirty_status manager_path
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -438,30 +396,9 @@ cmd_abandon() {
     echo "ERROR: cannot abandon detached worktree." >&2
     return 1
   }
-  if ! base="$(cd "$worktree_path" && touchstone_worker_default_ref)"; then
-    if [ "$force" != true ]; then
-      echo "ERROR: refusing to abandon $worktree_path; could not resolve a default branch ref." >&2
-      echo "       Use --force only after confirming the work is disposable." >&2
-      return 1
-    fi
-    base=""
-    unique_commits=""
-  elif ! unique_commits="$(git -C "$worktree_path" log "$base..HEAD" --oneline --max-count=1 2>/dev/null)"; then
-    if [ "$force" != true ]; then
-      echo "ERROR: refusing to abandon $worktree_path; could not compare branch '$branch' against $base." >&2
-      echo "       Use --force only after confirming the work is disposable." >&2
-      return 1
-    fi
-    unique_commits=""
-  fi
-  if ! dirty_status="$(git -C "$worktree_path" status --porcelain 2>/dev/null)"; then
-    if [ "$force" != true ]; then
-      echo "ERROR: refusing to abandon $worktree_path; could not inspect uncommitted changes." >&2
-      echo "       Use --force only after confirming the dirty worktree is disposable." >&2
-      return 1
-    fi
-    dirty_status=""
-  fi
+  base="$(cd "$worktree_path" && touchstone_worker_default_ref)"
+  unique_commits="$(git -C "$worktree_path" log "$base..HEAD" --oneline 2>/dev/null || true)"
+  dirty_status="$(git -C "$worktree_path" status --porcelain 2>/dev/null || true)"
 
   if [ -n "$unique_commits" ] && [ "$force" != true ]; then
     echo "ERROR: refusing to abandon $worktree_path; branch '$branch' has commits not merged into $base." >&2
@@ -475,15 +412,10 @@ cmd_abandon() {
   fi
 
   if [ "$dry_run" = true ]; then
-    if ! remote_action="$(abandon_remote_action "$worktree_path" "$branch" "$force")"; then
-      return 1
-    fi
     echo "Would remove worktree: $worktree_path"
-    if [ "$remote_action" = "keep_pr" ]; then
+    if branch_has_open_or_closed_pr "$branch"; then
       echo "Would keep remote branch because a PR exists for: $branch"
-    elif [ "$remote_action" = "keep_unknown" ]; then
-      echo "Would keep remote branch because PR state could not be inspected for: $branch"
-    elif [ "$remote_action" = "delete" ]; then
+    elif remote_branch_exists "$worktree_path" "$branch"; then
       echo "Would delete remote branch: origin/$branch"
     fi
     return 0
@@ -494,19 +426,14 @@ cmd_abandon() {
     echo "ERROR: could not find a git worktree manager for $worktree_path" >&2
     return 1
   }
-  if ! remote_action="$(abandon_remote_action "$manager_path" "$branch" "$force")"; then
-    return 1
-  fi
   if [ "$force" = true ]; then
     git -C "$manager_path" worktree remove --force "$worktree_path"
   else
     git -C "$manager_path" worktree remove "$worktree_path"
   fi
-  if [ "$remote_action" = "keep_pr" ]; then
+  if branch_has_open_or_closed_pr "$branch"; then
     echo "Kept remote branch because a PR exists for: $branch"
-  elif [ "$remote_action" = "keep_unknown" ]; then
-    echo "Kept remote branch because PR state could not be inspected for: $branch"
-  elif [ "$remote_action" = "delete" ]; then
+  elif remote_branch_exists "$manager_path" "$branch"; then
     git -C "$manager_path" push origin --delete "$branch"
   fi
   touchstone_emit_event worker_abandoned worktree_path="$worktree_path" branch="$branch"

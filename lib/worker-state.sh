@@ -33,7 +33,7 @@ touchstone_worker_default_ref() {
     fi
   done
 
-  return 1
+  printf 'origin/main\n'
 }
 
 touchstone_worker_review_marker_key() {
@@ -70,21 +70,9 @@ touchstone_worker_has_blocked_signal() {
 
 touchstone_worker_pr_field() {
   local branch="$1" field="$2"
-  command -v gh >/dev/null 2>&1 || {
-    echo "ERROR: cannot inspect PRs for branch '$branch'; gh CLI is not installed." >&2
-    return 1
-  }
+  command -v gh >/dev/null 2>&1 || return 0
   gh pr list --head "$branch" --state all --json number,url,state,mergedAt \
-    --jq ".[0].$field // empty"
-}
-
-touchstone_worker_remote_supports_github_prs() {
-  local origin_url
-  origin_url="$(git config --get remote.origin.url 2>/dev/null || true)"
-  case "$origin_url" in
-    *github.com:* | *github.com/*) return 0 ;;
-    *) return 1 ;;
-  esac
+    --jq ".[0].$field // empty" 2>/dev/null || true
 }
 
 derive_worker_state() {
@@ -99,42 +87,23 @@ derive_worker_state() {
   (
     cd "$worktree_path" || exit 0
 
-    if ! base="$(touchstone_worker_default_ref)"; then
-      echo "unknown"
-      exit 0
-    fi
+    base="$(touchstone_worker_default_ref)"
     branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
     [ -n "$branch" ] && [ "$branch" != "HEAD" ] || {
       echo "abandoned"
       exit 0
     }
 
-    if ! has_commits="$(git log "$base..HEAD" --oneline --max-count=1 2>/dev/null)"; then
-      echo "unknown"
-      exit 0
-    fi
-    if ! has_uncommitted="$(git status --porcelain 2>/dev/null)"; then
-      echo "unknown"
-      exit 0
-    fi
+    has_commits="$(git log "$base..HEAD" --oneline 2>/dev/null | head -1 || true)"
+    has_uncommitted="$(git status --porcelain 2>/dev/null || true)"
 
     if [ -z "$has_commits" ]; then
       echo "spawned"
       exit 0
     fi
 
-    pr_state=""
-    merged_at=""
-    if touchstone_worker_remote_supports_github_prs; then
-      if ! pr_state="$(touchstone_worker_pr_field "$branch" state)"; then
-        echo "unknown"
-        exit 0
-      fi
-      if ! merged_at="$(touchstone_worker_pr_field "$branch" mergedAt)"; then
-        echo "unknown"
-        exit 0
-      fi
-    fi
+    pr_state="$(touchstone_worker_pr_field "$branch" state)"
+    merged_at="$(touchstone_worker_pr_field "$branch" mergedAt)"
 
     if [ "$pr_state" = "MERGED" ] || { [ "$pr_state" = "CLOSED" ] && [ -n "$merged_at" ]; }; then
       echo "cleanup_failed"
