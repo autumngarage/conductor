@@ -1,10 +1,10 @@
 ---
-Generated: 2026-06-05T23:45:38-04:00
+Generated: 2026-06-05T23:58:40-04:00
 Generator: cortex refresh-state v1.6.4
 Sources:
-  - HEAD sha: 8a97e7f6dfbe1159ffb2e385390f36b4c9548fc5
+  - HEAD sha: c1e62a037c99fbd28742a6e33b9a48988966fe1c
   - .cortex/plans/*.md (2 files)
-  - .cortex/journal/*.md (31 entries, 2026-04-24..2026-06-06)
+  - .cortex/journal/*.md (32 entries, 2026-04-24..2026-06-06)
   - .cortex/doctrine/*.md (7 entries)
   - .cortex/templates/**/*.md (12 templates)
   - docs/case-studies/*.md (0 case studies)
@@ -47,6 +47,7 @@ Sources-hash:
   .cortex/journal/2026-05-17-pr-merged-1716.md: ac8f436bf45c79df07ad35131ba2efd1d2ad6dd75c225bd10368598d86ac376a
   .cortex/journal/2026-05-18-pr-482-merged.md: 461a3d0f503d208c201aff0e85db92694925184c5a2ad38f5e4bc9fde728316d
   .cortex/journal/2026-05-18-release-v0.10.29.md: 0c6228e0069855907f43c26eda6d5e8f95e753009e1daaa1899df97c77afadbb
+  .cortex/journal/2026-06-05-pr-merged-2358.md: e5cd2bbd4dc2cf6a47073e8d7f2e77a092780f1cc9efd23a4606dc7a54ae51c5
   .cortex/journal/2026-06-06-flat-rate-first-conductor-vision.md: 8f91e74d1b86d041951648d0946950743fe222c150b5c693fd5f3cae57fe31e0
   .cortex/journal/2026-06-06-touchstone-help-sync-bug.md: c143da43e9e87b178e9f24aa231f2f324245499c75fdfb971ced81ce6f99d4df
   .cortex/plans/conductor-blindspots.md: 69b7cec18f5893a5edfe83e3d095eb9ae7e57d5e9e117adf73e417f31ebe11a0
@@ -63,7 +64,7 @@ Sources-hash:
   .cortex/templates/journal/release.md: 9a6bc59219156e48b419fb170c7c50ff557767def8672ef20568df3e14eadbd0
   .cortex/templates/journal/sentinel-cycle.md: 2945e2d94af4ec9848584b4b3e9cea7060d2968dd42e78faf21fb6f859137476
   .cortex/templates/plans/template.md: d8156cfa3b86acd2a1fbb36cff07cae37d99f3adee7f72b14b7b16e645c51b44
-Corpus: 31 Journal entries, 2 Plans, 7 Doctrine entries, 12 Templates, 0 Case studies
+Corpus: 32 Journal entries, 2 Plans, 7 Doctrine entries, 12 Templates, 0 Case studies
 Omitted:
   []
 Incomplete:
@@ -103,6 +104,7 @@ Spec: 0.5.0
 - **2026-05-17** — PR #476 merged — --body-file (`.cortex/journal/2026-05-17-pr-merged-1716.md`, Type: pr-merged)
 - **2026-05-18** — PR #482 merged - normalize duplicate review sentinels (`.cortex/journal/2026-05-18-pr-482-merged.md`, Type: pr-merged)
 - **2026-05-18** — Release v0.10.29 - duplicate review sentinel hotfix (`.cortex/journal/2026-05-18-release-v0.10.29.md`, Type: release)
+- **2026-06-05** — PR #526 merged — Codify flat-rate-first Conductor vision (`.cortex/journal/2026-06-05-pr-merged-2358.md`, Type: pr-merged)
 
 ## Stale-now / handle-later
 
