@@ -75,7 +75,6 @@ Human user
 - The exact commit merged has passed deterministic checks after its last mutation.
 - The exact commit merged has passed Conductor review after its last mutation.
 - LLM review uses Conductor as the only model access path. Driver CLIs do not call provider-specific review commands directly.
-- Conductor routes through plan-backed or local providers before metered gateways when they can satisfy the same job contract. OpenRouter is the metered overflow path unless the caller explicitly pins it.
 - PR creation is not the expensive gate. It should be fast enough to create reviewable work early.
 - Feature-branch push is not the expensive gate. It should preserve cheap local guardrails without running full test suites or LLM review by default.
 - Merge is the expensive gate. It is the one place where required deterministic checks and required Conductor review run.
@@ -102,9 +101,6 @@ Conductor is the LLM router for review and delegated model work.
 
 - Required LLM review runs through Conductor at the merge gate.
 - Conductor chooses the configured provider/model and handles provider fallback.
-- Conductor owns the provider economics policy: plan-backed providers first, local/offline when explicitly appropriate, and OpenRouter as metered overflow.
-- OpenRouter-backed Kimi and DeepSeek compatibility IDs are model presets, not independent local or flat-rate provider paths.
-- Factory, if used, is a stateful-agent provider behind Conductor's provider contract rather than a second default router stacked in front of OpenRouter.
 - Conductor may apply safe fixes only when the review mode and path policy allow it.
 - Conductor findings are either fixed and committed on the PR branch, or block the merge.
 

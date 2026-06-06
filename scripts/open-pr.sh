@@ -74,6 +74,7 @@ ORPHAN_PR_NUMBER=""
 BODY_FILE=""
 ADVISORY_AT_PR_OPEN=false
 PREFLIGHT_REQUIRED=true
+REPO_FULL_NAME=""
 
 on_exit() {
   local rc="$?"
@@ -96,16 +97,11 @@ print_orphan_warning() {
   # Re-check merge state on exit — if the PR actually merged in flight (e.g.
   # we ran past the merge step but tripped on a follow-up like the local pull)
   # then this isn't an orphan. The exit code stays nonzero; we just suppress
-  # the misleading orphan banner. Per #489: use `state=MERGED` as the
-  # authoritative signal alongside `mergedAt`, since `mergedAt` can briefly
-  # come back empty during the seconds right after `gh pr merge` returns.
-  if [ -n "$ORPHAN_PR_NUMBER" ] && command -v gh >/dev/null 2>&1; then
-    local exit_state exit_payload
-    exit_payload="$(gh pr view "$ORPHAN_PR_NUMBER" --json state,mergedAt 2>/dev/null || echo '{}')"
-    exit_state="$(printf '%s' "$exit_payload" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state",""))' 2>/dev/null || echo "")"
-    if [ "$exit_state" = "MERGED" ]; then
-      return 0
-    fi
+  # the misleading orphan banner.
+  if [ -n "$ORPHAN_PR_NUMBER" ] \
+    && command -v gh >/dev/null 2>&1 \
+    && [ -n "$(gh_pr_view "$ORPHAN_PR_NUMBER" --json mergedAt --jq '.mergedAt // empty' 2>/dev/null || true)" ]; then
+    return 0
   fi
   touchstone_emit_event failed phase=open-pr reason=orphan-risk pr_number="$ORPHAN_PR_NUMBER"
   {
@@ -119,35 +115,28 @@ print_orphan_warning() {
   } >&2
 }
 
-# Verify the PR actually merged. Returns 0 if the PR is MERGED on GitHub,
-# 1 otherwise. Used as the post-merge sanity check that turns the script's
-# exit contract from "merge-pr.sh exited 0" (proxy) into "GitHub says it's
-# merged" (truth).
-#
-# Per #489: the previous implementation read only `mergedAt` from a single
-# `gh pr view`, which produced false-alarm ORPHAN RISK banners on PRs that
-# were actually merged. Root cause was a brief API lag right after the
-# merge call — `mergedAt` came back empty for a window even though the PR
-# state was already MERGED. Now: prefer the `state` field as authoritative
-# (it's the strongest signal), fall back to `mergedAt`, and retry once with
-# a short backoff on transient empties before declaring failure.
+gh_pr_view() {
+  local pr_number="$1"
+  shift
+
+  if [ -n "$REPO_FULL_NAME" ]; then
+    gh pr view "$pr_number" --repo "$REPO_FULL_NAME" "$@"
+  else
+    gh pr view "$pr_number" "$@"
+  fi
+}
+
+# Verify the PR actually merged. Returns 0 if mergedAt is non-empty, 1 otherwise.
+# Used as the post-merge sanity check that turns the script's exit contract from
+# "merge-pr.sh exited 0" (proxy) into "GitHub says it's merged" (truth).
 verify_pr_merged() {
   local pr_number="$1"
-  local attempt payload state merged_at
-  for attempt in 1 2; do
-    payload="$(gh pr view "$pr_number" --json state,mergedAt 2>/dev/null || echo '{}')"
-    state="$(printf '%s' "$payload" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state",""))' 2>/dev/null || echo "")"
-    merged_at="$(printf '%s' "$payload" | python3 -c 'import json,sys; v=json.load(sys.stdin).get("mergedAt"); print(v or "")' 2>/dev/null || echo "")"
-    if [ "$state" = "MERGED" ]; then
-      if [ -n "$merged_at" ]; then
-        echo "==> Verified: PR #$pr_number merged at $merged_at"
-      else
-        echo "==> Verified: PR #$pr_number state=MERGED (mergedAt not yet populated by API)"
-      fi
-      return 0
-    fi
-    [ "$attempt" -eq 1 ] && sleep "${VERIFY_PR_MERGED_BACKOFF_SEC:-2}"
-  done
+  local merged_at
+  merged_at="$(gh_pr_view "$pr_number" --json mergedAt --jq '.mergedAt // empty' 2>/dev/null || echo "")"
+  if [ -n "$merged_at" ]; then
+    echo "==> Verified: PR #$pr_number merged at $merged_at"
+    return 0
+  fi
   return 1
 }
 
@@ -185,7 +174,7 @@ run_pr_body_protocol_preflight() {
   checker="$(find_pr_body_protocol_checker)" || return 0
   checker_rel="${checker#"$REPO_ROOT/"}"
 
-  if ! body="$(gh pr view "$pr_number" --json body --jq '.body // ""' 2>/dev/null)"; then
+  if ! body="$(gh_pr_view "$pr_number" --json body --jq '.body // ""' 2>/dev/null)"; then
     echo "ERROR: failed to read PR #$pr_number body for protocol preflight." >&2
     exit 1
   fi
@@ -469,6 +458,11 @@ if ! command -v gh >/dev/null 2>&1; then
 fi
 if ! DEFAULT_BRANCH="$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null)"; then
   echo "ERROR: Failed to resolve default branch via 'gh'. Is gh authenticated?" >&2
+  echo "       Run: gh auth status" >&2
+  exit 1
+fi
+if ! REPO_FULL_NAME="$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)"; then
+  echo "ERROR: Failed to resolve repository name via 'gh'. Is gh authenticated?" >&2
   echo "       Run: gh auth status" >&2
   exit 1
 fi
