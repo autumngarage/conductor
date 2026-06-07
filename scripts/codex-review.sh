@@ -2003,6 +2003,9 @@ reviewer_conductor_exec() {
     if conductor_timeout="$(conductor_inner_timeout "${REVIEW_TIMEOUT:-0}")"; then
       args+=(--timeout "$conductor_timeout")
     fi
+    if [ -n "${REVIEW_MAX_STALL_SEC:-}" ]; then
+      args+=(--max-stall-seconds "$REVIEW_MAX_STALL_SEC")
+    fi
     if [ -n "${REVIEW_CONDUCTOR_LOG_FILE:-}" ]; then
       args+=(--log-file "$REVIEW_CONDUCTOR_LOG_FILE")
     fi
