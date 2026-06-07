@@ -72,6 +72,9 @@ GEMINI_AUTH_ENV_VARS = (
     "GOOGLE_APPLICATION_CREDENTIALS",
 )
 GEMINI_TRUST_WORKSPACE_ENV = "GEMINI_CLI_TRUST_WORKSPACE"
+GEMINI_MUTATING_FILE_TOOL_NAMES = frozenset(
+    {"write_file", "Write", "replace", "Edit"}
+)
 # Default OAuth credentials file written by the CLI's first-run browser
 # flow. Override per-instance via the constructor for tests.
 GEMINI_DEFAULT_OAUTH_CREDS_PATH = Path.home() / ".gemini" / "oauth_creds.json"
@@ -95,6 +98,13 @@ def _extract_review_response_text(response: object) -> str:
         )
         return inner["response"]
     return response
+
+
+def _gemini_headless_env(*, thinking_budget: int | None) -> dict[str, str]:
+    env = {**os.environ, GEMINI_TRUST_WORKSPACE_ENV: "true"}
+    if thinking_budget:
+        env["GEMINI_THINKING_BUDGET"] = str(thinking_budget)
+    return env
 
 
 class GeminiProvider:
@@ -340,10 +350,7 @@ class GeminiProvider:
         ]
         if model and model != "auto":
             args.extend(["-m", model])
-        env_overrides: dict[str, str] = {}
-        if thinking_budget:
-            env_overrides["GEMINI_THINKING_BUDGET"] = str(thinking_budget)
-        proc_env = {**os.environ, **env_overrides} if env_overrides else None
+        proc_env = _gemini_headless_env(thinking_budget=thinking_budget)
         timeout = self._timeout_sec if timeout_sec is None else timeout_sec
         start = time.monotonic()
         tracker = AuthPromptTracker(self.name)
@@ -559,12 +566,7 @@ class GeminiProvider:
             args.extend(["--resume", resume_session_id])
         # Gemini CLI thinking budget support is evolving; pass via env var as
         # a forward-compatible hook. Ignored by versions that don't read it.
-        env_overrides: dict[str, str] = {}
-        if approval_mode == "yolo":
-            env_overrides[GEMINI_TRUST_WORKSPACE_ENV] = "true"
-        if thinking_budget:
-            env_overrides["GEMINI_THINKING_BUDGET"] = str(thinking_budget)
-        proc_env = {**os.environ, **env_overrides} if env_overrides else None
+        proc_env = _gemini_headless_env(thinking_budget=thinking_budget)
 
         if timeout_sec_override is _USE_DEFAULT:
             timeout = self._timeout_sec
@@ -636,6 +638,13 @@ class GeminiProvider:
                 raw={"stdout": stdout},
                 auth_prompts=tracker.prompts or None,
             )
+
+        if require_inline_response:
+            mutating_tool_attempts = _gemini_mutating_file_tool_attempts(data)
+            if mutating_tool_attempts:
+                raise ProviderHTTPError(
+                    _gemini_call_mutating_tool_message(mutating_tool_attempts)
+                )
 
         # Gemini's CLI exits 0 even when its internal tools (replace,
         # write_file, etc.) error mid-session. Without inspecting the JSON
@@ -714,19 +723,43 @@ class GeminiProvider:
 
 
 def _gemini_used_write_file(data: dict) -> bool:
+    return bool(_gemini_tool_attempts(data, GEMINI_WRITE_FILE_TOOL_NAMES))
+
+
+def _gemini_mutating_file_tool_attempts(data: dict) -> list[tuple[str, int]]:
+    return _gemini_tool_attempts(data, GEMINI_MUTATING_FILE_TOOL_NAMES)
+
+
+def _gemini_tool_attempts(
+    data: dict, tool_names: frozenset[str]
+) -> list[tuple[str, int]]:
     stats = data.get("stats") or {}
     tools = stats.get("tools") or {}
     by_name = tools.get("byName") or tools.get("by_name") or {}
     if not isinstance(by_name, dict):
-        return False
-    for name in GEMINI_WRITE_FILE_TOOL_NAMES:
+        return []
+    attempts: list[tuple[str, int]] = []
+    for name in sorted(tool_names):
         entry = by_name.get(name)
         if not isinstance(entry, dict):
             continue
-        count = entry.get("count") or entry.get("success") or 0
-        if isinstance(count, int) and count > 0:
-            return True
-    return False
+        count = _gemini_tool_attempt_count(entry)
+        if count > 0:
+            attempts.append((name, count))
+    attempts.sort(key=lambda pair: (-pair[1], pair[0]))
+    return attempts
+
+
+def _gemini_tool_attempt_count(entry: dict) -> int:
+    count = entry.get("count")
+    if isinstance(count, int) and count > 0:
+        return count
+    total = 0
+    for key in ("success", "fail"):
+        value = entry.get(key)
+        if isinstance(value, int) and value > 0:
+            total += value
+    return total
 
 
 def _gemini_tool_failures(data: dict) -> list[tuple[str, int]]:
@@ -762,4 +795,17 @@ def _gemini_tool_failure_message(failures: list[tuple[str, int]]) -> str:
         f"gemini agent reported tool failures ({summary}); "
         "the agent may have left partially-applied edits in the working tree. "
         "Inspect `git status --short` and revert as needed."
+    )
+
+
+def _gemini_call_mutating_tool_message(attempts: list[tuple[str, int]]) -> str:
+    summary = ", ".join(
+        f"{name}={count}" if count != 1 else name for name, count in attempts
+    )
+    return (
+        "gemini attempted mutating file-writing tool usage during "
+        f"`conductor call` ({summary}). Conductor call runs Gemini in "
+        "`--approval-mode plan` and requires inline output from a read-only "
+        "call; use `conductor exec --with gemini` for file-writing tasks. "
+        "Inspect `git status --short` before continuing."
     )
