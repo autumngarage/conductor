@@ -2210,6 +2210,7 @@ conductor_route_preflight_for_phase() {
   estimated_input_tokens=$((ROUTING_DIFF_LINE_COUNT * 20 + 1000))
   args=(route --json --kind "$subcommand" --prefer "${CONDUCTOR_PREFER:-best}" --effort "${CONDUCTOR_EFFORT:-high}"
     --estimated-input-tokens "$estimated_input_tokens" --estimated-output-tokens 500)
+  [ -n "${CONDUCTOR_WITH:-}" ] && args+=(--with "$CONDUCTOR_WITH")
   [ -n "$route_tags" ] && args+=(--tags "$route_tags")
   [ -n "$tools" ] && args+=(--tools "$tools")
   [ -n "$route_exclude" ] && args+=(--exclude "$route_exclude")

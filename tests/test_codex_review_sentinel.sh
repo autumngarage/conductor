@@ -71,4 +71,13 @@ case "$route_preflight_args" in
     ;;
 esac
 
+route_preflight_function="$(sed -n '/^conductor_route_preflight_for_phase()/,/^}/p' "$SCRIPT")"
+case "$route_preflight_function" in
+  *'args+=(--with "$CONDUCTOR_WITH")'*) ;;
+  *)
+    printf 'FAIL: pinned route preflight must pass --with "$CONDUCTOR_WITH" to conductor route.\n' >&2
+    exit 1
+    ;;
+esac
+
 printf 'ok\n'
