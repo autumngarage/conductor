@@ -337,6 +337,15 @@ def test_swarm_preflight_detects_duplicate_file_paths(tmp_path: Path) -> None:
     ]
 
 
+def test_swarm_preflight_preserves_hidden_directory_file_paths(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    brief = _brief(repo, "first.md", "Edit `.cortex/plans/alchemist.md`.")
+
+    plan = cli._swarm_preflight_plan((str(brief),), repo_root=repo)
+
+    assert plan["lanes"][0]["file_paths"] == [".cortex/plans/alchemist.md"]
+
+
 def test_swarm_preflight_detects_shared_subsystems(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     first = _brief(repo, "first.md", "Adjust swarm resume behavior.")

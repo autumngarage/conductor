@@ -7554,7 +7554,7 @@ def _swarm_preflight_lane(
     searchable_body = _SWARM_FENCED_CODE_BLOCK_RE.sub("", body)
     file_paths = sorted(
         {
-            match.group("path").strip("`'\"),.;:")
+            _swarm_trim_path_token(match.group("path"))
             for match in _SWARM_PREFLIGHT_PATH_RE.finditer(searchable_body)
         }
     )
@@ -7580,6 +7580,11 @@ def _swarm_preflight_lane(
         "issue_refs": issue_refs,
         "depends_on": depends_on,
     }
+
+
+def _swarm_trim_path_token(raw: str) -> str:
+    path = raw.strip("`'\"")
+    return path.rstrip("),.;:")
 
 
 def _swarm_preflight_duplicates(

@@ -127,13 +127,18 @@ def _scoped_paths(brief: str, agent_write_set: set[str]) -> set[str]:
     for match in PATH_TOKEN.finditer(brief):
         if match.end() < len(brief) and brief[match.end()] == "#":
             continue
-        path = match.group("path").strip("`'\".,);:")
+        path = _trim_path_token(match.group("path"))
         if path and not path.startswith(("../", "/")):
             paths.add(path)
     if paths:
         return paths
     paths = {path for path in agent_write_set if path}
     return paths
+
+
+def _trim_path_token(raw: str) -> str:
+    path = raw.strip("`'\"")
+    return path.rstrip(".,);:")
 
 
 def _matches_scope(path: str, scoped: set[str]) -> bool:
