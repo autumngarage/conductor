@@ -1670,6 +1670,128 @@ def test_ask_council_wall_clock_cap_returns_partial_error(mocker):
     assert council["cap_hit"]["model"] == "~google/gemini-pro-latest"
 
 
+def test_ask_council_wall_clock_cap_after_all_members_returns_degraded_partial(
+    mocker,
+):
+    _stub_all_configured(mocker, {"openrouter"})
+    calls = {"count": 0}
+
+    def monotonic() -> float:
+        calls["count"] += 1
+        return 2.0 if calls["count"] >= 9 else 0.0
+
+    mocker.patch("conductor.cli.time.monotonic", side_effect=monotonic)
+    call_mock = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        side_effect=[
+            ProviderError("HTTP 402: requested too many tokens"),
+            ProviderError("OpenRouter produced empty response content: finish_reason=length"),
+            _fake_response(
+                "openrouter",
+                "deepseek/deepseek-v4-pro",
+                text="usable DeepSeek answer",
+            ),
+            _fake_response("openrouter", "synthesis"),
+        ],
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "council",
+            "--effort",
+            "medium",
+            "--council-timeout",
+            "1",
+            "--brief",
+            "Debate this architecture decision.",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert call_mock.call_count == 3
+    payload = json.loads(result.stdout)
+    council = payload["raw"]["conductor_council"]
+    assert "Council partial answer (degraded)" in payload["text"]
+    assert "no synthesis model was called" in payload["text"]
+    assert "usable DeepSeek answer" in payload["text"]
+    assert "council member failed" not in payload["text"]
+    assert payload["usage"]["council_complete"] is False
+    assert payload["usage"]["council_failed_members"] == 2
+    assert council["complete"] is False
+    assert council["partial_synthesis"] is True
+    assert council["partial_synthesis_reason"] == "wall_clock_after_all_members"
+    assert council["partial_synthesis_source_models"] == ["deepseek/deepseek-v4-pro"]
+    assert council["synthesis_cost_usd"] is None
+    assert council["cap_hit"]["kind"] == "wall_clock"
+    assert council["cap_hit"]["stage"] == "after_member"
+    assert council["cap_hit"]["completed_member_calls"] == 3
+    assert council["cap_hit"]["skipped_member_models"] == []
+
+
+def test_ask_council_wall_clock_cap_before_synthesis_returns_degraded_partial(
+    mocker,
+):
+    _stub_all_configured(mocker, {"openrouter"})
+    calls = {"count": 0}
+
+    def monotonic() -> float:
+        calls["count"] += 1
+        return 2.0 if calls["count"] >= 8 else 0.0
+
+    mocker.patch("conductor.cli.time.monotonic", side_effect=monotonic)
+    call_mock = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        side_effect=[
+            _fake_response("openrouter", "member-a", text="first answer"),
+            _fake_response("openrouter", "member-b", text="second answer"),
+            _fake_response("openrouter", "member-c", text="third answer"),
+            _fake_response("openrouter", "synthesis"),
+        ],
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "council",
+            "--effort",
+            "medium",
+            "--council-timeout",
+            "1",
+            "--brief",
+            "Debate this architecture decision.",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert call_mock.call_count == 3
+    payload = json.loads(result.stdout)
+    council = payload["raw"]["conductor_council"]
+    assert "Council partial answer (degraded)" in payload["text"]
+    assert "first answer" in payload["text"]
+    assert "second answer" in payload["text"]
+    assert "third answer" in payload["text"]
+    assert payload["usage"]["council_complete"] is False
+    assert payload["usage"]["council_failed_members"] == 0
+    assert council["partial_synthesis"] is True
+    assert council["partial_synthesis_source_models"] == [
+        "member-a",
+        "member-b",
+        "member-c",
+    ]
+    assert council["cap_hit"]["stage"] == "before_synthesis"
+    assert council["cap_hit"]["completed_member_calls"] == 3
+    assert council["cap_hit"]["skipped_member_models"] == []
+
+
 def test_council_synthesis_prompt_handles_empty_member_text():
     from conductor.cli import _council_synthesis_prompt
 
