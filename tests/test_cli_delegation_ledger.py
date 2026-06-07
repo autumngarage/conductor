@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import pytest
 from click.testing import CliRunner
 
 from conductor.cli import main
+from conductor.delegation_ledger import COMMANDS
 from conductor.providers import CallResponse
 from conductor.router import RankedCandidate, RouteDecision
 
@@ -52,6 +54,34 @@ class FakeCouncilProvider:
     def call(self, *args, **kwargs):
         self.calls += 1
         return _response(provider="openrouter", model=kwargs.get("model") or "synth")
+
+
+@pytest.mark.parametrize("command", COMMANDS)
+def test_delegations_list_accepts_every_recorded_command_filter(
+    command, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+
+    result = CliRunner().invoke(
+        main,
+        ["delegations", "list", "--command", command, "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize("command", COMMANDS)
+def test_delegations_report_accepts_every_recorded_command_filter(
+    command, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+
+    result = CliRunner().invoke(
+        main,
+        ["delegations", "report", "--command", command, "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
 
 
 def _decision(provider: str = "codex") -> RouteDecision:
@@ -201,6 +231,31 @@ def test_research_command_records_research_ledger_event(monkeypatch):
     assert len(events) == 1
     assert events[0].command == "research"
     assert events[0].provider == "openrouter"
+    assert events[0].status == "ok"
+
+
+def test_text_review_command_records_text_review_ledger_event(monkeypatch):
+    events = []
+    monkeypatch.setenv("CONDUCTOR_INTERNAL_TELEMETRY", "0")
+    monkeypatch.setattr("conductor.cli.record_delegation", events.append)
+    monkeypatch.setattr(
+        "conductor.cli.pick",
+        lambda *args, **kwargs: ("claude", _decision("claude")),
+    )
+    monkeypatch.setattr(
+        "conductor.cli._invoke_with_fallback",
+        lambda *args, **kwargs: (_response(provider="claude", model="sonnet"), []),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["text-review", "review", "these", "instructions"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(events) == 1
+    assert events[0].command == "text-review"
+    assert events[0].provider == "claude"
     assert events[0].status == "ok"
 
 

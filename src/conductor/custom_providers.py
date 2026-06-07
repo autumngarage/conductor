@@ -28,6 +28,7 @@ import os
 import tomllib
 from pathlib import Path
 
+from conductor.provider_ids import BUILTIN_PROVIDER_IDS
 from conductor.providers.interface import QUALITY_TIERS
 from conductor.providers.shell import ShellProviderSpec
 
@@ -154,7 +155,7 @@ def _spec_from_dict(raw: dict, *, source_path: Path) -> ShellProviderSpec:
         raise CustomProviderError(
             f"custom providers file {source_path}: `name` must be a non-empty string."
         )
-    if name in _BUILTIN_NAMES:
+    if name in BUILTIN_PROVIDER_IDS:
         raise CustomProviderError(
             f"custom providers file {source_path}: `{name}` is a built-in provider "
             "identifier. Pick a different name for your custom provider."
@@ -212,19 +213,3 @@ def _write_spec(f, spec: ShellProviderSpec) -> None:
 
 def _escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
-
-
-# Built-in names that custom entries MUST NOT shadow. Kept here (and not
-# derived from providers/__init__._REGISTRY) to avoid a circular import —
-# the values change only when a new first-party provider ships.
-_BUILTIN_NAMES = frozenset(
-    {
-        "kimi",
-        "claude",
-        "codex",
-        "deepseek-chat",
-        "deepseek-reasoner",
-        "gemini",
-        "ollama",
-    }
-)

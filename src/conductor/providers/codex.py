@@ -1028,7 +1028,7 @@ class CodexProvider:
             task,
             model=model,
             effort=effort,
-            sandbox="danger-full-access",
+            sandbox="read-only",
             timeout_sec_override=(
                 timeout_sec if timeout_sec is not None else _USE_DEFAULT
             ),

@@ -7,7 +7,12 @@ from pathlib import Path
 from click.testing import CliRunner
 
 from conductor.cli import main
-from conductor.delegation_ledger import DelegationEvent, read_delegations, record_delegation
+from conductor.delegation_ledger import (
+    COMMANDS,
+    DelegationEvent,
+    read_delegations,
+    record_delegation,
+)
 
 
 def _event(**overrides) -> dict:
@@ -34,11 +39,11 @@ def _read_lines(path: Path) -> list[dict]:
 def test_schema_writes_all_commands_and_preserves_nulls(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
 
-    for command in ("ask", "call", "review", "exec", "council"):
+    for command in COMMANDS:
         record_delegation(_event(command=command))
 
     rows = _read_lines(tmp_path / "conductor" / "delegations.ndjson")
-    assert [row["command"] for row in rows] == ["ask", "call", "review", "exec", "council"]
+    assert [row["command"] for row in rows] == list(COMMANDS)
     for row in rows:
         for field in (
             "delegation_id",
