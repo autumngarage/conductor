@@ -59,6 +59,9 @@ from conductor._time_filter import parse_timestamp, since_cutoff
 from conductor.banner import print_caller_banner
 from conductor.brief_preprocessor import inject_auto_close
 from conductor.delegation_ledger import (
+    COMMANDS as DELEGATION_COMMANDS,
+)
+from conductor.delegation_ledger import (
     DelegationEvent,
     DelegationStatus,
     read_delegations,
@@ -113,6 +116,7 @@ from conductor.openrouter_stack_audit import (
 )
 from conductor.profiles import ProfileError, ProfileSpec, get_profile, load_profiles
 from conductor.provider_capabilities import capabilities_for
+from conductor.provider_ids import BUILTIN_PROVIDER_IDS
 from conductor.providers import (
     PROVIDER_RUNTIME_STATEFUL_AGENT,
     PROVIDER_RUNTIME_STATELESS_TOOL_LOOP,
@@ -4738,11 +4742,16 @@ AUTO_REFRESH_COMMANDS = frozenset(
     {
         "ask",
         "call",
+        "code",
+        "council",
         "doctor",
         "exec",
         "init",
         "refresh-consumers",
+        "research",
+        "review",
         "route",
+        "text-review",
         "update-all",
     }
 )
@@ -14745,7 +14754,7 @@ def delegations() -> None:
     "--command",
     "command_filter",
     default=None,
-    type=click.Choice(["ask", "call", "review", "exec", "council"]),
+    type=click.Choice(DELEGATION_COMMANDS),
 )
 @click.option("--provider", "provider_filter", default=None)
 @click.option("--include-members", is_flag=True, default=False)
@@ -14808,7 +14817,7 @@ def delegations_list(
     "--command",
     "command_filter",
     default=None,
-    type=click.Choice(["ask", "call", "review", "exec", "council"]),
+    type=click.Choice(DELEGATION_COMMANDS),
 )
 @click.option("--provider", "provider_filter", default=None)
 @click.option("--tag", "tag_filter", default=None, help="Only include events with this tag.")
@@ -15708,15 +15717,7 @@ def providers_add(
     # Guard against shadowing built-ins — the loader does the same check
     # when reading the file, but catching it here gives a friendlier error
     # before the file is touched.
-    if name in {
-        "kimi",
-        "claude",
-        "codex",
-        "deepseek-chat",
-        "deepseek-reasoner",
-        "gemini",
-        "ollama",
-    }:
+    if name in BUILTIN_PROVIDER_IDS:
         raise click.UsageError(
             f"`{name}` is a built-in provider identifier. Pick a different name."
         )

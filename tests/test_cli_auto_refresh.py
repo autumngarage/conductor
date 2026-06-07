@@ -307,6 +307,19 @@ def test_auto_refresh_skips_read_only_commands(monkeypatch):
         assert result.exit_code == 0, result.output
 
 
+def test_auto_refresh_covers_dispatch_job_verbs():
+    assert {
+        "ask",
+        "call",
+        "review",
+        "exec",
+        "research",
+        "text-review",
+        "code",
+        "council",
+    }.issubset(cli_mod.AUTO_REFRESH_COMMANDS)
+
+
 def test_auto_refresh_failure_logs_and_continues(tmp_path, monkeypatch):
     _isolate_user_scope(tmp_path, monkeypatch)
     monkeypatch.setattr(cli_mod, "__version__", "0.9.0")

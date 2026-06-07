@@ -348,13 +348,16 @@ def test_cli_health_probe_missing_binary(mocker, provider_cls, module_path):
 
 def test_claude_call_returns_normalized_response(mocker):
     mocker.patch("conductor.providers.claude.shutil.which", return_value="/usr/bin/claude")
-    mocker.patch(
+    captured = mocker.patch(
         "conductor.providers.claude.subprocess.run",
         return_value=_fake_completed(stdout=CLAUDE_JSON),
     )
 
     response = ClaudeProvider().call("hi")
 
+    args = captured.call_args.args[0]
+    assert "--permission-mode" in args
+    assert args[args.index("--permission-mode") + 1] == "plan"
     assert response.text == "hello from claude"
     assert response.provider == "claude"
     assert response.model == "sonnet"
@@ -1594,13 +1597,16 @@ def test_codex_startup_probe_reports_turn_failed_error_dict(tmp_path):
 
 def test_codex_call_parses_ndjson_and_usage(mocker):
     mocker.patch("conductor.providers.codex.shutil.which", return_value="/usr/bin/codex")
-    mocker.patch(
+    captured = mocker.patch(
         "conductor.providers.codex.subprocess.run",
         return_value=_fake_completed(stdout=CODEX_NDJSON),
     )
 
     response = CodexProvider().call("hi")
 
+    args = captured.call_args.args[0]
+    assert "--sandbox" in args
+    assert args[args.index("--sandbox") + 1] == "read-only"
     assert response.text == "hello from codex"
     assert response.provider == "codex"
     assert response.usage["input_tokens"] == 5

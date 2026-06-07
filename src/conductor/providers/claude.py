@@ -546,7 +546,7 @@ class ClaudeProvider:
             model=model,
             effort=effort,
             allowed_tools=None,
-            permission_mode=None,
+            permission_mode="plan",
             timeout_sec_override=(
                 timeout_sec if timeout_sec is not None else _USE_DEFAULT
             ),

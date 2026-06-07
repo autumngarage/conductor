@@ -28,7 +28,16 @@ if TYPE_CHECKING:
 
 SCHEMA_VERSION = 2
 LEDGER_FILENAME = "delegations.ndjson"
-COMMANDS = ("ask", "call", "review", "exec", "council")
+COMMANDS = (
+    "ask",
+    "call",
+    "review",
+    "exec",
+    "research",
+    "text-review",
+    "code",
+    "council",
+)
 STATUSES = ("ok", "error", "stalled", "timeout", "quota")
 
 DelegationStatus = Literal["ok", "error", "stalled", "timeout", "quota"]

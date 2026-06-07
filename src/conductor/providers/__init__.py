@@ -1,3 +1,4 @@
+from conductor.provider_ids import BUILTIN_PROVIDER_IDS
 from conductor.providers.claude import ClaudeProvider
 from conductor.providers.codex import CodexProvider
 from conductor.providers.deepseek import DeepSeekChatProvider, DeepSeekReasonerProvider
@@ -70,6 +71,14 @@ _BUILTIN_REGISTRY: dict[str, type] = {
     "ollama": OllamaProvider,
     "openrouter": OpenRouterProvider,
 }
+
+if frozenset(_BUILTIN_REGISTRY) != BUILTIN_PROVIDER_IDS:
+    missing = sorted(BUILTIN_PROVIDER_IDS - set(_BUILTIN_REGISTRY))
+    extra = sorted(set(_BUILTIN_REGISTRY) - BUILTIN_PROVIDER_IDS)
+    raise RuntimeError(
+        "built-in provider registry drifted from canonical provider IDs "
+        f"(missing={missing}, extra={extra})"
+    )
 
 
 def known_providers() -> list[str]:

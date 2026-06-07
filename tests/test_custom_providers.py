@@ -15,6 +15,7 @@ from conductor.custom_providers import (
     remove_spec,
     save_specs,
 )
+from conductor.provider_ids import BUILTIN_PROVIDER_IDS
 from conductor.providers import get_provider, known_providers
 from conductor.providers.interface import (
     ProviderConfigError,
@@ -134,10 +135,11 @@ def test_add_spec_rejects_duplicate_name():
     assert "already exists" in str(exc.value)
 
 
-def test_add_spec_rejects_builtin_name_shadowing(isolated_providers_file):
+@pytest.mark.parametrize("provider_name", sorted(BUILTIN_PROVIDER_IDS))
+def test_add_spec_rejects_builtin_name_shadowing(isolated_providers_file, provider_name):
     # Simulate someone writing the file by hand with a built-in name, then loading.
     isolated_providers_file.write_text(
-        '[[providers]]\nname = "claude"\nshell = "/bin/cat"\n'
+        f'[[providers]]\nname = "{provider_name}"\nshell = "/bin/cat"\n'
     )
     with pytest.raises(CustomProviderError) as exc:
         load_specs()
@@ -260,10 +262,11 @@ def test_cli_providers_add_writes_file():
     assert [s.name for s in specs] == ["cli-demo"]
 
 
-def test_cli_providers_add_rejects_builtin_name():
+@pytest.mark.parametrize("provider_name", sorted(BUILTIN_PROVIDER_IDS))
+def test_cli_providers_add_rejects_builtin_name(provider_name):
     result = CliRunner().invoke(
         main,
-        ["providers", "add", "--name", "claude", "--shell", "/bin/cat"],
+        ["providers", "add", "--name", provider_name, "--shell", "/bin/cat"],
     )
     assert result.exit_code != 0
     assert "built-in" in result.output.lower()
