@@ -350,7 +350,7 @@ if [ "$REMOTE_TOO" -eq 1 ] && [ "${#REMOTE_DELETABLE[@]}" -gt 0 ]; then
   for b in "${REMOTE_DELETABLE[@]}"; do
     if [ -n "$REPO_SLUG" ] && gh api -X DELETE "/repos/$REPO_SLUG/git/refs/heads/$b" >/dev/null 2>&1; then
       echo "    deleted remote: origin/$b"
-    elif git push origin --delete "$b" 2>&1; then
+    elif git push origin --delete -- "$b" 2>&1; then
       echo "    deleted remote (via git push fallback): origin/$b"
     else
       echo "    SKIPPED remote (both gh api and git push --delete failed): origin/$b" >&2

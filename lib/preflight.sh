@@ -205,6 +205,9 @@ touchstone_preflight_tool_fingerprint() {
 }
 
 touchstone_preflight_env_fingerprint() {
+  local dogfood_resolved_command
+
+  dogfood_resolved_command="$(touchstone_preflight_dogfood_command || true)"
   {
     printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_SCRIPT=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_SCRIPT:-}"
     printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_COMMAND=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_COMMAND:-}"
@@ -213,6 +216,7 @@ touchstone_preflight_env_fingerprint() {
     printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_SMOKE_COMMAND=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_SMOKE_COMMAND:-}"
     printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_FULL_COMMAND=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_FULL_COMMAND:-}"
     printf 'TOUCHSTONE_PREFLIGHT_DOGFOOD_COMMAND=%s\n' "${TOUCHSTONE_PREFLIGHT_DOGFOOD_COMMAND:-}"
+    printf 'TOUCHSTONE_PREFLIGHT_DOGFOOD_RESOLVED_COMMAND=%s\n' "$dogfood_resolved_command"
     printf 'TOUCHSTONE_PREFLIGHT_SKIP_DOGFOOD=%s\n' "${TOUCHSTONE_PREFLIGHT_SKIP_DOGFOOD:-}"
   } | touchstone_preflight_hash_stream
 }

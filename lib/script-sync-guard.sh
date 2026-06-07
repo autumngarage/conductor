@@ -81,11 +81,21 @@ touchstone_script_sync_guard_already_done() {
   [ "${TOUCHSTONE_SCRIPT_SYNC_GUARD_STAMP:-}" = "$expected_stamp" ]
 }
 
+touchstone_script_sync_guard_read_only_invocation() {
+  case "${1:-}" in
+    -h | --help | help) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 touchstone_script_sync_guard() {
   local script_path="${1:-}"
   shift || true
 
   if [ -z "$script_path" ]; then
+    return 0
+  fi
+  if touchstone_script_sync_guard_read_only_invocation "${1:-}"; then
     return 0
   fi
   if touchstone_script_sync_guard_truthy "${TOUCHSTONE_NO_SCRIPT_SYNC:-}" \

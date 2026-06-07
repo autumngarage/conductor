@@ -224,7 +224,7 @@ recommended_retry_provider() {
   local failed_csv="$1"
   local provider
 
-  for provider in codex claude gemini openrouter kimi deepseek-chat deepseek-reasoner; do
+  for provider in openrouter claude codex gemini kimi deepseek-chat deepseek-reasoner; do
     if ! csv_contains "$failed_csv" "$provider"; then
       printf '%s' "$provider"
       return 0
@@ -262,7 +262,7 @@ print_review_infra_retry_guidance() {
     echo "  failed/stalled provider(s): $failed_csv" >&2
   fi
   echo "  retry command: $retry_command" >&2
-  echo "  alternate route: TOUCHSTONE_CONDUCTOR_WITH=codex bash scripts/merge-pr.sh $PR_NUMBER" >&2
+  echo "  alternate route: TOUCHSTONE_CONDUCTOR_WITH=<configured-hosted-provider> bash scripts/merge-pr.sh $PR_NUMBER" >&2
 }
 
 BYPASS_REASON="$(trim "$(printf '%s' "$BYPASS_REASON" | tr '\r\n\t' '   ')")"
@@ -484,6 +484,11 @@ preflight_tool_fingerprint() {
 }
 
 preflight_env_fingerprint() {
+  local dogfood_resolved_command=""
+
+  if declare -F touchstone_preflight_dogfood_command >/dev/null 2>&1; then
+    dogfood_resolved_command="$(touchstone_preflight_dogfood_command || true)"
+  fi
   {
     printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_SCRIPT=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_SCRIPT:-}"
     printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_COMMAND=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_COMMAND:-}"
@@ -492,6 +497,7 @@ preflight_env_fingerprint() {
     printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_SMOKE_COMMAND=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_SMOKE_COMMAND:-}"
     printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_FULL_COMMAND=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_FULL_COMMAND:-}"
     printf 'TOUCHSTONE_PREFLIGHT_DOGFOOD_COMMAND=%s\n' "${TOUCHSTONE_PREFLIGHT_DOGFOOD_COMMAND:-}"
+    printf 'TOUCHSTONE_PREFLIGHT_DOGFOOD_RESOLVED_COMMAND=%s\n' "$dogfood_resolved_command"
     printf 'TOUCHSTONE_PREFLIGHT_SKIP_DOGFOOD=%s\n' "${TOUCHSTONE_PREFLIGHT_SKIP_DOGFOOD:-}"
   } | preflight_hash_stream
 }
@@ -921,7 +927,7 @@ cleanup_local_pr_branch_after_merge() {
   fi
 
   echo "==> Deleting local branch '$branch' after verified squash merge of $reviewed_head ..."
-  if git branch -D "$branch"; then
+  if git branch -D -- "$branch"; then
     echo "==> Local branch '$branch' deleted."
   else
     echo "WARNING: Could not delete local branch '$branch' after verified merge." >&2

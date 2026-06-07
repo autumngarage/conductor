@@ -152,23 +152,13 @@ pid_is_alive() {
   ps -p "$pid" >/dev/null 2>&1
 }
 
-pid_is_current_shell_parent() {
-  local pid="$1"
-
-  [ -n "$pid" ] || return 1
-  [ -n "${PPID:-}" ] || return 1
-  [ "$pid" = "$PPID" ]
-}
-
 classify_lock() {
   local reason="$1"
   local pid
 
   if [[ "$reason" =~ [Pp][Ii][Dd][[:space:]]+([0-9]+) ]]; then
     pid="${BASH_REMATCH[1]}"
-    if pid_is_current_shell_parent "$pid"; then
-      printf 'stale|%s|stale (pid %s is current shell parent)' "$pid" "$pid"
-    elif pid_is_alive "$pid"; then
+    if pid_is_alive "$pid"; then
       printf 'alive|%s|alive (pid %s)' "$pid" "$pid"
     else
       printf 'stale|%s|stale (pid %s dead)' "$pid" "$pid"
