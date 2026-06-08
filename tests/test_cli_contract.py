@@ -316,6 +316,8 @@ class TestFlagSurface:
         assert not missing, (
             f"Documented flags missing from 'conductor ask --help': {sorted(missing)}"
         )
+        assert "--tags" not in help_text
+        assert "--prefer" not in help_text
 
 
 # ---------------------------------------------------------------------------

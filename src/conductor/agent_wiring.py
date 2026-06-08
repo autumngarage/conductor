@@ -1019,9 +1019,9 @@ def wire_claude_code(
         {
             "name": "conductor-auto",
             "description": (
-                "Use when delegating but unsure which provider fits. Lets "
-                "conductor's auto-router pick by task tags via `conductor call "
-                "--auto --tags <…>`."
+                "Use when delegating but unsure which provider fits. Prefer "
+                "Conductor's semantic `conductor ask --kind ... --effort ...` "
+                "surface before lower-level router escape hatches."
             ),
             "tools": "Bash",
         },

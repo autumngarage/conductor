@@ -141,7 +141,7 @@ The canonical reference is `conductor call --help`. The contract-level commitmen
 | `--offline` / `--no-offline` | bool | stable | Force/clear local-only routing |
 | `--profile <name>` | string | stable | Apply named profile defaults |
 
-`conductor ask --help` is the canonical reference for the semantic API. Its stable default-path flags are: --kind, --effort, --cwd, --base, --commit, --uncommitted, --title, --brief, --brief-file, --issue, --issue-comment-limit, --task, --task-file, --log-file, --json, --verbose-route, --silent-route, --offline, --no-offline, --preflight, --no-preflight, and --allow-short-brief.
+`conductor ask --help` is the canonical reference for the semantic API. Its stable default-path flags are: --kind, --effort, --cwd, --base, --commit, --uncommitted, --title, --brief, --brief-file, --issue, --issue-comment-limit, --task, --task-file, --log-file, --json, --verbose-route, --silent-route, --offline, --no-offline, --preflight, --no-preflight, and --allow-short-brief. It intentionally does not expose router knobs such as `--tags` or `--prefer`; those belong to `call`, `exec`, `review`, and `route`.
 
 ## Output (`--json`)
 
