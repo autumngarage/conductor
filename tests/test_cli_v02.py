@@ -1832,7 +1832,7 @@ def test_ask_council_rejects_offline():
 # ---------------------------------------------------------------------------
 
 
-def test_review_auto_uses_semantic_priority_over_router_scoring(
+def test_review_auto_honors_router_defaults_within_semantic_stack(
     mocker, monkeypatch, tmp_path
 ):
     defaults = tmp_path / "router.toml"
@@ -1869,10 +1869,10 @@ def test_review_auto_uses_semantic_priority_over_router_scoring(
     )
 
     assert result.exit_code == 0, result.output
-    assert codex_review.called
-    assert not claude_review.called
-    assert codex_review.call_args.kwargs["base"] == "origin/main"
-    assert "→ codex" in result.stderr
+    assert claude_review.called
+    assert not codex_review.called
+    assert claude_review.call_args.kwargs["base"] == "origin/main"
+    assert "→ claude" in result.stderr
 
 
 def test_review_without_auto_or_with_uses_semantic_review_route(mocker, tmp_path):
