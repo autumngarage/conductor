@@ -122,21 +122,14 @@ Discover what's currently configured:
 
 ## Caveat: ollama is offline-only by default
 
-When you pick by capability tags (`--auto --tags …` or `--prefer cheapest`),
-conductor's auto-router excludes ollama at any plan position when online —
-the rule fires whether ollama would be the primary or a fallback. The goal
-is to prevent accidentally loading a 25 GB local model when frontier
-providers are reachable.
+Conductor's semantic routes exclude ollama at any plan position when online —
+the rule fires whether ollama would be the primary or a fallback. The goal is
+to prevent accidentally loading a 25 GB local model when frontier providers
+are reachable.
 
-Three ways to invoke ollama anyway:
+Two normal ways to invoke ollama anyway:
 
 - `conductor call --with ollama …` — explicit by name. Bypasses the rule.
-- `conductor call --auto --tags ollama …` — name-as-tag passthrough.
-  Conductor recognizes any provider name in `--tags` as an explicit
-  selection signal. (Note: ollama doesn't actually have a tag named
-  `ollama`; this is the special-case detection. `--tags local` or
-  `--tags cheap` alone — tags ollama legitimately has — does NOT
-  bypass the rule.)
 - `conductor call --offline …` — operator stated offline (or the
   offline-mode sticky flag fired on a network probe).
 
@@ -649,7 +642,8 @@ When invoked:
    For a quick factual ask, use `research` with `minimal` or `low` effort;
    do not invent a separate semantic kind.
 
-2. If the task does not fit the semantic API, decide which capability tags apply:
+2. If the task does not fit the semantic API, use a lower-level command only
+   as an expert escape hatch. Decide which capability tags apply:
    - `long-context` — task involves >50 KB of text
    - `web-search` — task needs fresh web information
    - `vision` — task involves images
@@ -659,10 +653,10 @@ When invoked:
    - `cheap` — user explicitly asked for a cheap run
    - `offline` — user explicitly asked for local-only
    Pick 1–3 tags; do NOT invent new ones.
-3. If the task is a code review and you are not using `ask`, use
-   Conductor's review cascade:
+3. If the task is a code review and you are not using `ask`, use Conductor's
+   review cascade. Omit router tags unless you are debugging routing:
 
-       conductor review --tags code-review,<tag> --base <base-ref> \\
+       conductor review --base <base-ref> \\
            --brief-file /tmp/conductor-review-brief.md --json
 
    Use this for PR/merge review. Do not use it for auto-fix work; fixes
@@ -673,8 +667,8 @@ When invoked:
        conductor call --auto --tags <tag1>,<tag2> --prefer <mode> \\
            --brief "<prompt>" --json
 
-   This is the fallback path, not the default path. Prefer `conductor ask`
-   whenever a semantic kind applies.
+   This is the expert fallback path, not the default path. Prefer
+   `conductor ask` whenever a semantic kind applies.
 
    For the prefer axis:
    - Default: `--prefer balanced` (what conductor does by default).

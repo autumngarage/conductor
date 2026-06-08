@@ -5131,11 +5131,6 @@ def main(ctx: click.Context) -> None:
         "Or pass an integer for an explicit thinking-token budget."
     ),
 )
-@click.option(
-    "--tags",
-    default=None,
-    help="Comma-separated task tags to add to the semantic route.",
-)
 @click.option("--cwd", default=None, help="Repository working directory for code/review.")
 @click.option(
     "--timeout",
@@ -5260,7 +5255,6 @@ def main(ctx: click.Context) -> None:
 def ask(
     kind: str | None,
     effort: str | None,
-    tags: str | None,
     cwd: str | None,
     timeout_sec: int | None,
     max_stall_sec: int | None,
@@ -5287,7 +5281,7 @@ def ask(
     allow_short_brief: bool,
     prompt_words: tuple[str, ...],
 ) -> None:
-    """Ask a question. With --kind, use the legacy semantic matrix surface."""
+    """Ask Conductor to route a semantic job by kind and effort."""
     if kind is None:
         kind = "research"
         if effort is None:
@@ -5310,7 +5304,7 @@ def ask(
     max_stall_is_default = _parameter_is_default("max_stall_sec")
     effort_value = _parse_effort(effort)
     plan = plan_for(kind, effort_value)
-    user_tags = tuple(_parse_csv(tags))
+    user_tags: tuple[str, ...] = ()
     if plan.kind == "review":
         plan = _with_review_semantic_tags(plan, user_tags)
     else:

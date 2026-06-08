@@ -1219,23 +1219,7 @@ def test_ask_network_probe_offline_keeps_ollama_fallback(mocker):
     assert "→ ollama" in result.stderr
 
 
-def test_ask_explicit_ollama_tag_online_still_requires_local_opt_in(mocker):
-    _stub_all_configured(mocker, {"openrouter", "ollama"})
-    mocker.patch(
-        "conductor.cli.get_network_profile",
-        return_value=NetworkProfile(50, "https://1.1.1.1", 1_000),
-    )
-    openrouter_call = mocker.patch.object(
-        OpenRouterProvider,
-        "call",
-        return_value=_fake_response("openrouter", "openrouter/auto"),
-    )
-    ollama_call = mocker.patch.object(
-        OllamaProvider,
-        "call",
-        return_value=_fake_response("ollama", "llama3.2"),
-    )
-
+def test_ask_rejects_router_tags():
     result = CliRunner().invoke(
         main,
         [
@@ -1248,61 +1232,22 @@ def test_ask_explicit_ollama_tag_online_still_requires_local_opt_in(mocker):
             "ollama,cheap",
             "--brief",
             "Keep local fallback available.",
-            "--json",
         ],
     )
 
-    assert result.exit_code == 0, result.output
-    assert openrouter_call.called
-    assert not ollama_call.called
-    assert "excluding ollama from fallback chain" in result.stderr
-    assert "CONDUCTOR_ALLOW_LOCAL_ONLINE=1" in result.stderr
-    payload = json.loads(result.stdout)
-    assert [candidate["provider"] for candidate in payload["semantic"]["candidates"]] == [
-        "openrouter",
-    ]
-    assert "ollama" in payload["semantic"]["tags"]
+    assert result.exit_code == 2
+    assert "No such option: --tags" in result.output
+    assert "--task" in result.output
 
 
-def test_ask_explicit_ollama_tag_env_opt_in_keeps_ollama_fallback(mocker, monkeypatch):
-    _stub_all_configured(mocker, {"openrouter", "ollama"})
-    monkeypatch.setenv("CONDUCTOR_ALLOW_LOCAL_ONLINE", "1")
-    openrouter_call = mocker.patch.object(
-        OpenRouterProvider,
-        "call",
-        return_value=_fake_response("openrouter", "openrouter/auto"),
-    )
-    ollama_call = mocker.patch.object(
-        OllamaProvider,
-        "call",
-        return_value=_fake_response("ollama", "llama3.2"),
-    )
-
-    result = CliRunner().invoke(
-        main,
-        [
-            "ask",
-            "--kind",
-            "research",
-            "--effort",
-            "low",
-            "--tags",
-            "ollama,cheap",
-            "--brief",
-            "Keep local fallback available.",
-            "--json",
-        ],
-    )
+def test_ask_help_exposes_only_kind_and_effort_as_semantic_knobs():
+    result = CliRunner().invoke(main, ["ask", "--help"])
 
     assert result.exit_code == 0, result.output
-    assert openrouter_call.called
-    assert not ollama_call.called
-    assert "excluding ollama from fallback chain" not in result.stderr
-    payload = json.loads(result.stdout)
-    assert [candidate["provider"] for candidate in payload["semantic"]["candidates"]] == [
-        "openrouter",
-        "ollama",
-    ]
+    assert "--kind" in result.output
+    assert "--effort" in result.output
+    assert "--tags" not in result.output
+    assert "--prefer" not in result.output
 
 
 def test_call_with_ollama_online_requires_local_opt_in(mocker):
@@ -2449,8 +2394,6 @@ def test_ask_review_uses_cheap_openrouter_stack_instead_of_gemini(mocker, tmp_pa
             str(repo),
             "--base",
             "HEAD~1",
-            "--tags",
-            "code-review,tool-use",
             "--brief",
             "Review this merge using the project reviewer guide.",
             "--json",
