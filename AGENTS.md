@@ -189,7 +189,7 @@ asks for one:
 - Repo-changing implementation/debugging:
   `conductor ask --kind code --effort high --brief-file /tmp/brief.md`.
 - Merge/PR/diff review:
-  `conductor ask --kind review --base <ref> --brief-file /tmp/review.md`.
+  `conductor ask --kind review --effort medium --base <ref> --brief-file /tmp/review.md`.
 - Architecture/product judgment needing multiple views:
   `conductor ask --kind council --effort medium --brief-file /tmp/brief.md`.
 - `conductor list` — show configured providers and their tags.

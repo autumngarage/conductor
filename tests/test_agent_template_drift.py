@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from conductor import _agent_templates as templates
 
 EXPECTED_TEMPLATE_COVERAGE = {
@@ -152,3 +154,26 @@ def test_ollama_offline_template_mentions_required_cli_surface():
 
 def test_conductor_auto_template_mentions_required_cli_surface():
     _assert_template_mentions_expected_tokens("conductor-auto")
+
+
+def test_generated_semantic_ask_examples_include_effort():
+    """Agent-facing semantic examples should preserve the kind+effort contract."""
+    surfaces = {
+        "delegation-guidance": templates.DELEGATION_GUIDANCE,
+        "agents-md-block": templates.AGENTS_MD_BLOCK,
+        "cursor-rule": templates.CURSOR_RULE_BODY,
+        "conductor-auto": templates.SUBAGENT_CONDUCTOR_AUTO,
+        "checked-in-agents-md": Path("AGENTS.md").read_text(encoding="utf-8"),
+        "checked-in-gemini-md": Path("GEMINI.md").read_text(encoding="utf-8"),
+        "checked-in-cursor-rule": Path(".cursor/rules/conductor-delegation.mdc").read_text(
+            encoding="utf-8"
+        ),
+    }
+
+    missing_effort = []
+    for surface, text in surfaces.items():
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if "conductor ask --kind" in line and "--effort" not in line:
+                missing_effort.append(f"{surface}:{lineno}: {line.strip()}")
+
+    assert not missing_effort
