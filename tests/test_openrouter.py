@@ -18,6 +18,7 @@ from conductor.providers.interface import (
     ProviderError,
     ProviderExecutionError,
     ProviderHTTPError,
+    ProviderStalledError,
     UnsupportedCapability,
 )
 from conductor.providers.kimi import KimiProvider
@@ -1065,9 +1066,16 @@ def test_exec_without_tools_passes_timeout_to_call(configured, mocker):
 def test_exec_with_tools_passes_remaining_timeout(configured, tmp_path, mocker):
     provider = OpenRouterProvider()
     observed_timeouts: list[float | None] = []
+    observed_timeout_kinds: list[str] = []
 
-    def _post_chat(payload: dict, *, timeout_sec: float | None = None) -> dict:
+    def _post_chat(
+        payload: dict,
+        *,
+        timeout_sec: float | None = None,
+        timeout_kind: str = "timeout",
+    ) -> dict:
         observed_timeouts.append(timeout_sec)
+        observed_timeout_kinds.append(timeout_kind)
         return {
             "model": "openai/gpt-5.5",
             "choices": [
@@ -1096,6 +1104,28 @@ def test_exec_with_tools_passes_remaining_timeout(configured, tmp_path, mocker):
     assert len(observed_timeouts) == 1
     assert observed_timeouts[0] is not None
     assert 0 < observed_timeouts[0] <= 60
+    assert observed_timeout_kinds == ["timeout"]
+
+
+def test_call_max_stall_timeout_raises_stalled(configured):
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(
+            side_effect=httpx.ReadTimeout(
+                "read timed out",
+                request=httpx.Request(
+                    "POST",
+                    "https://openrouter.ai/api/v1/chat/completions",
+                ),
+            )
+        )
+        with pytest.raises(ProviderStalledError) as exc:
+            OpenRouterProvider().call(
+                "Review this.",
+                model="model-a",
+                max_stall_sec=3,
+            )
+
+    assert "stalled after 3s" in str(exc.value)
 
 
 def test_exec_with_tools_empty_final_response_raises(configured, tmp_path):

@@ -42,6 +42,7 @@ from conductor.providers.interface import (
     ProviderError,
     ProviderExecutionError,
     ProviderHTTPError,
+    ProviderStalledError,
     UnsupportedCapability,
     resolve_effort_tokens,
 )
@@ -245,6 +246,7 @@ class OpenRouterProvider:
         payload: dict,
         *,
         timeout_sec: float | None = None,
+        timeout_kind: str = "timeout",
         max_tokens_retry_cap: int | None = None,
     ) -> dict:
         # OpenRouter only populates `usage.cost` (and other usage details) in
@@ -280,6 +282,10 @@ class OpenRouterProvider:
                     )
                     payload = retry_payload
         except httpx.TimeoutException as e:
+            if timeout_kind == "stall":
+                raise ProviderStalledError(
+                    f"{self.name} stalled after {timeout_sec:g}s without an upstream response"
+                ) from e
             raise ProviderHTTPError(
                 f"network error calling OpenRouter: {e}",
                 failure_reason="transient_network",
@@ -395,7 +401,6 @@ class OpenRouterProvider:
         max_stall_sec: int | None = None,
         resume_session_id: str | None = None,
     ) -> CallResponse:
-        _ = max_stall_sec
         if resume_session_id:
             raise UnsupportedCapability(
                 "openrouter has no session model — each OpenRouter API call is "
@@ -432,13 +437,16 @@ class OpenRouterProvider:
         attempts: list[dict[str, object]] = []
         start = time.monotonic()
         while True:
+            request_timeout_sec, timeout_kind = _request_timeout_budget(
+                start,
+                timeout_sec=timeout_sec,
+                max_stall_sec=max_stall_sec,
+                provider_name=self.name,
+            )
             body = self._post_chat(
                 payload,
-                timeout_sec=_remaining_timeout_sec(
-                    start,
-                    timeout_sec=timeout_sec,
-                    provider_name=self.name,
-                ),
+                timeout_sec=request_timeout_sec,
+                timeout_kind=timeout_kind,
                 max_tokens_retry_cap=max_tokens_cap,
             )
             text = _call_response_text(body)
@@ -611,13 +619,16 @@ class OpenRouterProvider:
             }
             if tools & {"Bash", "Edit", "Write"}:
                 payload["parallel_tool_calls"] = False
+            request_timeout_sec, timeout_kind = _request_timeout_budget(
+                start,
+                timeout_sec=timeout_sec,
+                max_stall_sec=max_stall_sec,
+                provider_name=self.name,
+            )
             body = self._post_chat(
                 payload,
-                timeout_sec=_remaining_timeout_sec(
-                    start,
-                    timeout_sec=timeout_sec,
-                    provider_name=self.name,
-                ),
+                timeout_sec=request_timeout_sec,
+                timeout_kind=timeout_kind,
             )
             final_body = body
             message = _first_message(body)
@@ -1665,6 +1676,30 @@ def _remaining_timeout_sec(
             provider=provider_name,
         )
     return remaining
+
+
+def _request_timeout_budget(
+    start: float,
+    *,
+    timeout_sec: int | None,
+    max_stall_sec: int | None,
+    provider_name: str,
+) -> tuple[float | None, str]:
+    remaining_timeout = _remaining_timeout_sec(
+        start,
+        timeout_sec=timeout_sec,
+        provider_name=provider_name,
+    )
+    if max_stall_sec is None:
+        return remaining_timeout, "timeout"
+    stall_budget = float(max_stall_sec)
+    if stall_budget <= 0:
+        raise ProviderStalledError(
+            f"{provider_name} stalled after {max_stall_sec:g}s without an upstream response"
+        )
+    if remaining_timeout is None or stall_budget < remaining_timeout:
+        return stall_budget, "stall"
+    return remaining_timeout, "timeout"
 
 
 def _call_response_text(body: dict) -> str:
