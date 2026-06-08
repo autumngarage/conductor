@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import textwrap
 from pathlib import Path
@@ -295,6 +297,90 @@ def test_codex_review_wrapper_prefers_source_checkout_conductor(tmp_path: Path) 
     invocations = uv_args.read_text(encoding="utf-8").splitlines()
     assert any(line.startswith("run conductor doctor") for line in invocations)
     assert any(line.startswith("run conductor review ") for line in invocations)
+
+
+def test_codex_review_trusted_config_temp_failure_fails_closed(
+    tmp_path: Path,
+) -> None:
+    repo, env = _make_review_repo(tmp_path)
+    fakes = tmp_path / "fakes"
+    fakes.mkdir()
+    mktemp = fakes / "mktemp"
+    mktemp.write_text(
+        "#!/usr/bin/env bash\nprintf 'mktemp unavailable\\n' >&2\nexit 1\n",
+        encoding="utf-8",
+    )
+    mktemp.chmod(0o755)
+
+    script = Path(__file__).resolve().parent.parent / "scripts" / "codex-review.sh"
+    result = subprocess.run(
+        ["bash", str(script)],
+        cwd=repo,
+        env={
+            **env,
+            "PATH": f"{fakes}:{os.environ.get('PATH', '')}",
+            "CODEX_REVIEW_BASE": "HEAD",
+            "CODEX_REVIEW_PR_NUMBER": "1",
+            "CODEX_REVIEW_TEST_PRINT_CONFIG": "1",
+            "NO_COLOR": "1",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "failed to create temporary file for trusted review file" in result.stderr
+    assert "HEAD:.codex-review.toml" in result.stderr
+    assert "CONFIG_FILE=" not in result.stdout
+
+
+def test_codex_review_trusted_config_show_failure_fails_closed(
+    tmp_path: Path,
+) -> None:
+    repo, env = _make_review_repo(tmp_path)
+    real_git = shutil.which("git")
+    assert real_git is not None
+    fakes = tmp_path / "fakes"
+    fakes.mkdir()
+    git = fakes / "git"
+    git.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env bash
+            if [ "$1" = "show" ]; then
+              printf 'simulated git show failure\\n' >&2
+              exit 42
+            fi
+            exec {shlex.quote(real_git)} "$@"
+            """
+        ),
+        encoding="utf-8",
+    )
+    git.chmod(0o755)
+
+    script = Path(__file__).resolve().parent.parent / "scripts" / "codex-review.sh"
+    result = subprocess.run(
+        ["bash", str(script)],
+        cwd=repo,
+        env={
+            **env,
+            "PATH": f"{fakes}:{os.environ.get('PATH', '')}",
+            "CODEX_REVIEW_BASE": "HEAD",
+            "CODEX_REVIEW_PR_NUMBER": "1",
+            "CODEX_REVIEW_TEST_PRINT_CONFIG": "1",
+            "NO_COLOR": "1",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "simulated git show failure" in result.stderr
+    assert "failed to materialize trusted review file" in result.stderr
+    assert "HEAD:.codex-review.toml" in result.stderr
+    assert "CONFIG_FILE=" not in result.stdout
 
 
 def test_codex_review_wrapper_passes_configured_max_stall(tmp_path: Path) -> None:

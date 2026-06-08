@@ -275,14 +275,19 @@ resolve_trusted_review_file() {
   if [ -n "${CODEX_REVIEW_PR_NUMBER:-}" ] && [ -n "${CODEX_REVIEW_BASE:-}" ]; then
     for rel in "$@"; do
       if git cat-file -e "${CODEX_REVIEW_BASE}:${rel}" 2>/dev/null; then
-        tmp="$(mktemp -t touchstone-trusted-review.XXXXXX)" || return 0
-        if git show "${CODEX_REVIEW_BASE}:${rel}" >"$tmp" 2>/dev/null; then
+        if ! tmp="$(mktemp -t touchstone-trusted-review.XXXXXX)"; then
+          echo "ERROR: failed to create temporary file for trusted review file ${CODEX_REVIEW_BASE}:${rel}" >&2
+          return 1
+        fi
+        if git show "${CODEX_REVIEW_BASE}:${rel}" >"$tmp"; then
           TRUSTED_REVIEW_TMP_FILES+=("$tmp")
           RESOLVED_REVIEW_FILE_LABEL="$rel"
           printf '%s\n' "$tmp"
           return 0
         fi
         rm -f "$tmp"
+        echo "ERROR: failed to materialize trusted review file ${CODEX_REVIEW_BASE}:${rel}" >&2
+        return 1
       fi
     done
     return 0
