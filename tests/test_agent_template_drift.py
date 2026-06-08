@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from conductor import _agent_templates as templates
@@ -177,3 +178,31 @@ def test_generated_semantic_ask_examples_include_effort():
                 missing_effort.append(f"{surface}:{lineno}: {line.strip()}")
 
     assert not missing_effort
+
+
+def test_generated_semantic_ask_examples_do_not_pin_providers():
+    """Provider/model pinning must stay on lower-level commands, not ask."""
+    surfaces = {
+        "delegation-guidance": templates.DELEGATION_GUIDANCE,
+        "agents-md-block": templates.AGENTS_MD_BLOCK,
+        "cursor-rule": templates.CURSOR_RULE_BODY,
+        "conductor-auto": templates.SUBAGENT_CONDUCTOR_AUTO,
+        "checked-in-agents-md": Path("AGENTS.md").read_text(encoding="utf-8"),
+        "checked-in-gemini-md": Path("GEMINI.md").read_text(encoding="utf-8"),
+        "checked-in-cursor-rule": Path(".cursor/rules/conductor-delegation.mdc").read_text(
+            encoding="utf-8"
+        ),
+    }
+    invalid_command = re.compile(r"conductor ask\b[^\n`]*(?:--with|--model)\b")
+
+    invalid_examples = []
+    missing_escape_hatch = []
+    for surface, text in surfaces.items():
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if invalid_command.search(line):
+                invalid_examples.append(f"{surface}:{lineno}: {line.strip()}")
+        if "conductor call --with openrouter" not in text:
+            missing_escape_hatch.append(surface)
+
+    assert not invalid_examples
+    assert not missing_escape_hatch

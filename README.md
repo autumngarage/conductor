@@ -109,6 +109,9 @@ expected output, and validation. Conductor only sees the brief you pass
 plus any files the delegated provider can inspect; it does not inherit
 the caller's conversation context. Existing `--task` / `--task-file`
 flags remain supported as compatibility aliases.
+Do not combine `conductor ask` with provider/model flags such as `--with`
+or `--model`; when a provider or model is explicitly requested, use the
+lower-level `conductor call --with ...` escape hatch instead.
 Headless orchestrators can run repo-changing work with
 `conductor exec --brief-file /tmp/brief.md`.
 

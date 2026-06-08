@@ -35,6 +35,10 @@ context, scope, constraints, expected output, and validation.
 Default to `conductor ask`; use provider-specific `call` / `exec` only
 when the user explicitly asks for a provider or the semantic API does not
 fit.
+Do not attach `--with` or `--model` to `conductor ask`; provider/model
+overrides belong to lower-level commands, for example:
+
+    conductor call --with openrouter --brief-file /tmp/brief.md
 
 For longer running tool-using sessions:
 

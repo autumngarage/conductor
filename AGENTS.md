@@ -200,6 +200,10 @@ output, and validation; use `--brief-file` for nontrivial `exec` tasks.
 Default to `conductor ask`; use provider-specific `call` / `exec` only
 when the user explicitly asks for a provider or the semantic API does not
 fit.
+Do not attach `--with` or `--model` to `conductor ask`; provider/model
+overrides belong to lower-level commands, for example:
+
+    conductor call --with openrouter --brief-file /tmp/brief.md
 
 Default routing is flat-rate-first when the job contract allows it, then
 OpenRouter as metered overflow. `review` means code diff/PR review;

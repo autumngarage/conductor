@@ -49,6 +49,10 @@ and not squeezed through shell quoting.
 Default to semantic routing. Choose only `kind` and `effort`; let
 Conductor choose providers and models unless the user explicitly asks for
 a specific provider.
+Never combine `conductor ask` with provider/model flags such as `--with`
+or `--model`. If the user explicitly names a provider or model, use the
+lower-level command for that job, for example
+`conductor call --with openrouter --brief-file /tmp/brief.md`.
 
 Use this decision ladder; pick the first line that fits:
 
@@ -82,7 +86,8 @@ Use `council` when the user wants multiple perspectives. Council always
 routes through OpenRouter and asks multiple models independently before a
 synthesis pass. Do not route council to Codex, Claude, Gemini CLI, or Ollama.
 
-Manual provider calls are the escape hatch, not the default:
+Manual provider calls are the explicit provider/model escape hatch, not
+the default:
 
     conductor call --with <provider> --brief "..."
 
@@ -542,6 +547,10 @@ output, and validation; use `--brief-file` for nontrivial `exec` tasks.
 Default to `conductor ask`; use provider-specific `call` / `exec` only
 when the user explicitly asks for a provider or the semantic API does not
 fit.
+Do not attach `--with` or `--model` to `conductor ask`; provider/model
+overrides belong to lower-level commands, for example:
+
+    conductor call --with openrouter --brief-file /tmp/brief.md
 
 Default routing is flat-rate-first when the job contract allows it, then
 OpenRouter as metered overflow. `review` means code diff/PR review;
@@ -594,6 +603,10 @@ context, scope, constraints, expected output, and validation.
 Default to `conductor ask`; use provider-specific `call` / `exec` only
 when the user explicitly asks for a provider or the semantic API does not
 fit.
+Do not attach `--with` or `--model` to `conductor ask`; provider/model
+overrides belong to lower-level commands, for example:
+
+    conductor call --with openrouter --brief-file /tmp/brief.md
 
 For longer running tool-using sessions:
 
@@ -631,6 +644,11 @@ When invoked:
 
        conductor ask --kind <kind> --effort <minimal|low|medium|high|max> \\
            --brief-file /tmp/conductor-brief.md --json
+
+   `conductor ask` is only the semantic kind+effort surface. Do not add
+   `--with`, `--model`, `--tags`, or `--prefer` to it. If the user
+   explicitly names a provider or model, use a lower-level command such as
+   `conductor call --with openrouter --brief-file /tmp/conductor-brief.md --json`.
 
    Use `review` only for code diffs, PRs, merges, and commits. Use
    `text-review` for text-only critique. `text-review` runs in call mode,
