@@ -1240,6 +1240,44 @@ def test_ask_rejects_router_tags():
     assert "--task" in result.output
 
 
+def test_ask_rejects_provider_override_flags():
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "research",
+            "--effort",
+            "medium",
+            "--with",
+            "openrouter",
+            "--brief",
+            "Use OpenRouter.",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "No such option: --with" in result.output
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "research",
+            "--effort",
+            "medium",
+            "--model",
+            "openrouter/auto",
+            "--brief",
+            "Use this model.",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "No such option: --model" in result.output
+
+
 def test_ask_help_exposes_only_kind_and_effort_as_semantic_knobs():
     result = CliRunner().invoke(main, ["ask", "--help"])
 
@@ -1248,6 +1286,8 @@ def test_ask_help_exposes_only_kind_and_effort_as_semantic_knobs():
     assert "--effort" in result.output
     assert "--tags" not in result.output
     assert "--prefer" not in result.output
+    assert "--with" not in result.output
+    assert "--model" not in result.output
 
 
 def test_call_with_ollama_online_requires_local_opt_in(mocker):

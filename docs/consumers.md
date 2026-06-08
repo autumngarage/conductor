@@ -39,7 +39,7 @@ conductor exec --auto --permission-profile <read-only|patch|full> [options]
 conductor exec --with <provider> --permission-profile <read-only|patch|full> [options]
 ```
 
-Use `conductor ask` when the caller knows the semantic kind but does not want to reason about providers. It applies Conductor's deterministic `kind × effort` matrix, then delegates to `call`, `exec`, `review`, or council fan-out internally. Provider/model/tag/tool overrides intentionally stay on the lower-level `call`, `exec`, and `review` commands.
+Use `conductor ask` when the caller knows the semantic kind but does not want to reason about providers. It applies Conductor's deterministic `kind × effort` matrix, then delegates to `call`, `exec`, `review`, or council fan-out internally. Provider/model/tag/tool overrides intentionally stay on the lower-level `call`, `exec`, and `review` commands. Do not combine `ask` with `--with` or `--model`; when the user explicitly requests a provider or model, use the lower-level command for that job, for example `conductor call --with openrouter --brief-file /tmp/brief.md`.
 
 Usually, exactly one of `--auto` or `--with` is required for `call` and `exec`. `review` is auto-routed by default when `--with` is absent; `--auto` remains accepted for compatibility. `--auto` runs the router using `--tags`, `--prefer`, and `--exclude` to pick a configured provider; `--with` bypasses the router for direct provider use. `--offline` is the exception for `call` and `exec`: it may be used without `--auto` or `--with`, sets the sticky offline flag, and rewrites the call to `--with ollama`. Passing `--offline --with <non-ollama>` is an error. `--no-offline` clears the sticky flag, then normal `--auto` / `--with` rules apply.
 
@@ -141,7 +141,7 @@ The canonical reference is `conductor call --help`. The contract-level commitmen
 | `--offline` / `--no-offline` | bool | stable | Force/clear local-only routing |
 | `--profile <name>` | string | stable | Apply named profile defaults |
 
-`conductor ask --help` is the canonical reference for the semantic API. Its stable default-path flags are: --kind, --effort, --cwd, --base, --commit, --uncommitted, --title, --brief, --brief-file, --issue, --issue-comment-limit, --task, --task-file, --log-file, --json, --verbose-route, --silent-route, --offline, --no-offline, --preflight, --no-preflight, and --allow-short-brief. It intentionally does not expose router knobs such as `--tags` or `--prefer`; those belong to `call`, `exec`, `review`, and `route`.
+`conductor ask --help` is the canonical reference for the semantic API. Its stable default-path flags are: --kind, --effort, --cwd, --base, --commit, --uncommitted, --title, --brief, --brief-file, --issue, --issue-comment-limit, --task, --task-file, --log-file, --json, --verbose-route, --silent-route, --offline, --no-offline, --preflight, --no-preflight, and --allow-short-brief. It intentionally does not expose router knobs such as `--tags` or `--prefer`, or provider/model override knobs such as `--with` or `--model`; those belong to `call`, `exec`, `review`, and `route`.
 
 ## Output (`--json`)
 
