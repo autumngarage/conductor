@@ -1874,25 +1874,14 @@ def _apply_semantic_priority_to_decision(
     decision: RouteDecision,
     plan: SemanticPlan,
 ) -> RouteDecision:
-    """Make the semantic candidate order the dispatch order after router filters."""
-    priority = {provider: idx for idx, provider in enumerate(_semantic_priority(plan))}
-    ranked = tuple(
-        sorted(decision.ranked, key=lambda candidate: priority.get(candidate.name, len(priority)))
-    )
-    if not ranked:
-        return decision
-    winner = ranked[0]
-    return replace(
-        decision,
-        provider=winner.name,
-        thinking_budget=winner.estimated_thinking_tokens,
-        tier=winner.tier,
-        matched_tags=winner.matched_tags,
-        ranked=ranked,
-        estimated_input_tokens=winner.estimated_input_tokens,
-        estimated_output_tokens=winner.estimated_output_tokens,
-        estimated_thinking_tokens=winner.estimated_thinking_tokens,
-    )
+    """Preserve router scoring; semantic priority is already the tie-breaker.
+
+    The semantic plan defines the allowed provider/model stack, and
+    ``pick(..., priority=_semantic_priority(plan))`` uses that order to break
+    true score ties. Re-sorting here would erase user intent from flags such as
+    ``--tags cheap``, ``--tags long-context``, or ``--prefer cheapest``.
+    """
+    return decision
 
 
 def _requires_strong_code_provider(plan: SemanticPlan) -> bool:

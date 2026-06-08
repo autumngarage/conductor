@@ -4660,6 +4660,66 @@ def test_route_review_json_selects_openrouter_fallback(mocker):
     assert not call_mock.called
 
 
+def test_route_review_json_respects_semantic_tag_scoring(mocker):
+    _stub_all_configured(mocker, {"codex", "claude", "openrouter"})
+    mocker.patch.object(CodexProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(ClaudeProvider, "review_configured", return_value=(True, None))
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "route",
+            "--kind",
+            "review",
+            "--tags",
+            "cheap",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["selected_provider"] == "openrouter"
+    assert [entry["provider"] for entry in payload["candidates"][:3]] == [
+        "openrouter",
+        "codex",
+        "claude",
+    ]
+    assert payload["decision"]["ranked"][0]["matched_tags"] == [
+        "cheap",
+        "code-review",
+    ]
+
+
+def test_route_review_json_respects_prefer_cheapest(mocker):
+    _stub_all_configured(mocker, {"codex", "claude", "openrouter"})
+    mocker.patch.object(CodexProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(ClaudeProvider, "review_configured", return_value=(True, None))
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "route",
+            "--kind",
+            "review",
+            "--prefer",
+            "cheapest",
+            "--estimated-input-tokens",
+            "60000",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["selected_provider"] == "claude"
+    assert [entry["provider"] for entry in payload["candidates"][:3]] == [
+        "claude",
+        "openrouter",
+        "codex",
+    ]
+
+
 def test_route_review_json_reports_all_candidates_excluded(mocker):
     _stub_all_configured(mocker, {"openrouter"})
 
