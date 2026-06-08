@@ -77,7 +77,7 @@ repos:
     hooks:
       - id: touchstone-validate
         name: Touchstone project validation
-        entry: /usr/bin/env bash scripts/touchstone-run.sh validate
+        entry: /usr/bin/env TOUCHSTONE_VALIDATE_SKIP_FEATURE_PUSH=1 bash scripts/touchstone-run.sh validate
         language: system
         stages: [pre-push]
         always_run: true

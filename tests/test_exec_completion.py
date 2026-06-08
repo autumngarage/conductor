@@ -156,6 +156,16 @@ def test_tests_requested_with_test_path_change_is_not_flagged() -> None:
     assert missing == []
 
 
+def test_hidden_tests_like_directory_is_not_normalized_to_tests() -> None:
+    missing = detect_missing_deliverables(
+        "Implement it.\n\n## Tests\nAdd regression coverage.",
+        changed_paths=(".tests/helper.py", "src/conductor/foo.py"),
+        recent_tool_calls=[],
+    )
+
+    assert [item.kind for item in missing] == ["tests"]
+
+
 def test_read_only_test_recommendations_are_text_output_not_required_edits() -> None:
     brief = """
 Goal:

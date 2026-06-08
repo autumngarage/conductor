@@ -42,6 +42,7 @@ from conductor.providers.interface import (
     ProviderError,
     ProviderExecutionError,
     ProviderHTTPError,
+    ProviderStalledError,
     UnsupportedCapability,
     resolve_effort_tokens,
 )
@@ -73,9 +74,21 @@ OPENROUTER_MAX_TOKENS_BY_EFFORT = {
     "high": 4_096,
     "max": 8_192,
 }
+_OPENROUTER_BOUNDED_MAX_TOKEN_TAGS = frozenset(
+    {"code-review", "text-review", "council"}
+)
 _OPENROUTER_MAX_TOKENS_AFFORDABILITY_RE = re.compile(
     r"requested up to\s+(?P<requested>[\d,]+)\s+tokens.*?"
     r"can only afford\s+(?P<affordable>[\d,]+)",
+    re.IGNORECASE | re.DOTALL,
+)
+_OPENROUTER_AFFORDABLE_MAX_TOKENS_RE = re.compile(
+    r"(?:can only afford|can afford(?: up to)?|affordable(?:\s+max_tokens|\s+tokens)?(?:\s+is|:)?)"
+    r"[^\d]{0,40}(?P<affordable>[\d,]+)",
+    re.IGNORECASE | re.DOTALL,
+)
+_OPENROUTER_REQUESTED_MAX_TOKENS_RE = re.compile(
+    r"(?:requested(?: up to)?|max_tokens[^\d]{0,40})(?P<requested>[\d,]+)",
     re.IGNORECASE | re.DOTALL,
 )
 _TERMINAL_REVIEW_ANSWER_PROMPT = (
@@ -228,7 +241,14 @@ class OpenRouterProvider:
             return False, f"OpenRouter returned HTTP {resp.status_code}: {resp.text[:200]}"
         return True, None
 
-    def _post_chat(self, payload: dict, *, timeout_sec: float | None = None) -> dict:
+    def _post_chat(
+        self,
+        payload: dict,
+        *,
+        timeout_sec: float | None = None,
+        timeout_kind: str = "timeout",
+        max_tokens_retry_cap: int | None = None,
+    ) -> dict:
         # OpenRouter only populates `usage.cost` (and other usage details) in
         # the response when the request opts in via `usage: {include: true}`.
         # Without it, multi-turn exec/review sessions log per-iteration cost
@@ -246,6 +266,7 @@ class OpenRouterProvider:
                     resp.status_code,
                     resp.text,
                     payload,
+                    max_tokens_cap=max_tokens_retry_cap,
                 )
                 if retry_payload is not None:
                     _LOG.info(
@@ -261,6 +282,10 @@ class OpenRouterProvider:
                     )
                     payload = retry_payload
         except httpx.TimeoutException as e:
+            if timeout_kind == "stall":
+                raise ProviderStalledError(
+                    f"{self.name} stalled after {timeout_sec:g}s without an upstream response"
+                ) from e
             raise ProviderHTTPError(
                 f"network error calling OpenRouter: {e}",
                 failure_reason="transient_network",
@@ -376,7 +401,6 @@ class OpenRouterProvider:
         max_stall_sec: int | None = None,
         resume_session_id: str | None = None,
     ) -> CallResponse:
-        _ = max_stall_sec
         if resume_session_id:
             raise UnsupportedCapability(
                 "openrouter has no session model — each OpenRouter API call is "
@@ -388,6 +412,7 @@ class OpenRouterProvider:
         # catalog refresh failure.
         self._resolve_key()
         thinking_budget = resolve_effort_tokens(effort, self.effort_to_thinking)
+        task_tag_set = _normalized_task_tags(task_tags)
         target_payload, selected_model = self._completion_target_payload(
             model=model,
             models=models,
@@ -402,21 +427,27 @@ class OpenRouterProvider:
             **target_payload,
             "messages": [{"role": "user", "content": task}],
         }
-        if max_tokens is not None:
-            payload["max_tokens"] = max(1, max_tokens)
-        else:
-            payload["max_tokens"] = _max_tokens_for_effort(effort)
+        max_tokens_cap = _max_tokens_cap_for_task(effort, task_tag_set)
+        payload["max_tokens"] = _max_tokens_for_request(
+            max_tokens=max_tokens,
+            effort=effort,
+            task_tags=task_tag_set,
+        )
 
         attempts: list[dict[str, object]] = []
         start = time.monotonic()
         while True:
+            request_timeout_sec, timeout_kind = _request_timeout_budget(
+                start,
+                timeout_sec=timeout_sec,
+                max_stall_sec=max_stall_sec,
+                provider_name=self.name,
+            )
             body = self._post_chat(
                 payload,
-                timeout_sec=_remaining_timeout_sec(
-                    start,
-                    timeout_sec=timeout_sec,
-                    provider_name=self.name,
-                ),
+                timeout_sec=request_timeout_sec,
+                timeout_kind=timeout_kind,
+                max_tokens_retry_cap=max_tokens_cap,
             )
             text = _call_response_text(body)
             if text.strip():
@@ -588,13 +619,16 @@ class OpenRouterProvider:
             }
             if tools & {"Bash", "Edit", "Write"}:
                 payload["parallel_tool_calls"] = False
+            request_timeout_sec, timeout_kind = _request_timeout_budget(
+                start,
+                timeout_sec=timeout_sec,
+                max_stall_sec=max_stall_sec,
+                provider_name=self.name,
+            )
             body = self._post_chat(
                 payload,
-                timeout_sec=_remaining_timeout_sec(
-                    start,
-                    timeout_sec=timeout_sec,
-                    provider_name=self.name,
-                ),
+                timeout_sec=request_timeout_sec,
+                timeout_kind=timeout_kind,
             )
             final_body = body
             message = _first_message(body)
@@ -1427,6 +1461,44 @@ def _max_tokens_for_effort(effort: str | int) -> int:
     )
 
 
+def _max_tokens_for_request(
+    *,
+    max_tokens: int | None,
+    effort: str | int,
+    task_tags: set[str],
+) -> int:
+    effort_cap = _max_tokens_for_effort(effort)
+    if max_tokens is None:
+        return effort_cap
+
+    requested = max(1, max_tokens)
+    if _max_tokens_cap_for_task(effort, task_tags) is None:
+        return requested
+
+    bounded = min(requested, effort_cap)
+    if bounded < requested:
+        _LOG.info(
+            "clamping OpenRouter max_tokens for bounded task: "
+            "tags=%s requested=%s bounded=%s",
+            sorted(task_tags),
+            requested,
+            bounded,
+        )
+    return bounded
+
+
+def _max_tokens_cap_for_task(effort: str | int, task_tags: set[str]) -> int | None:
+    if task_tags & _OPENROUTER_BOUNDED_MAX_TOKEN_TAGS:
+        return _max_tokens_for_effort(effort)
+    return None
+
+
+def _normalized_task_tags(
+    task_tags: list[str] | tuple[str, ...] | None,
+) -> set[str]:
+    return {str(tag).strip().lower() for tag in (task_tags or ()) if str(tag).strip()}
+
+
 def _openrouter_models_wire_list(models: tuple[str, ...] | list[str]) -> list[str]:
     return list(models[:OPENROUTER_MODELS_ARRAY_MAX])
 
@@ -1493,6 +1565,8 @@ def _max_tokens_affordability_retry_payload(
     status_code: int,
     response_text: str,
     payload: dict,
+    *,
+    max_tokens_cap: int | None = None,
 ) -> dict | None:
     if status_code != 402:
         return None
@@ -1504,18 +1578,33 @@ def _max_tokens_affordability_retry_payload(
         return None
     if current <= affordable:
         return None
+    retry_max_tokens = max(1, affordable)
+    if max_tokens_cap is not None:
+        retry_max_tokens = min(retry_max_tokens, max_tokens_cap)
+    if retry_max_tokens >= current:
+        return None
     retry_payload = dict(payload)
-    retry_payload["max_tokens"] = max(1, affordable)
+    retry_payload["max_tokens"] = retry_max_tokens
     return retry_payload
 
 
 def _parse_max_tokens_affordability(response_text: str) -> tuple[int | None, int | None]:
     match = _OPENROUTER_MAX_TOKENS_AFFORDABILITY_RE.search(response_text)
-    if match is None:
-        return None, None
+    if match is not None:
+        return (
+            _positive_int(match.group("requested")),
+            _positive_int(match.group("affordable")),
+        )
+
+    requested_match = _OPENROUTER_REQUESTED_MAX_TOKENS_RE.search(response_text)
+    affordable_match = _OPENROUTER_AFFORDABLE_MAX_TOKENS_RE.search(response_text)
     return (
-        _positive_int(match.group("requested")),
-        _positive_int(match.group("affordable")),
+        _positive_int(requested_match.group("requested")) if requested_match else None,
+        (
+            _positive_int(affordable_match.group("affordable"))
+            if affordable_match
+            else None
+        ),
     )
 
 
@@ -1532,10 +1621,15 @@ def _positive_int(value: object) -> int | None:
 def _openrouter_http_failure_reason(status_code: int, response_text: str) -> str:
     if status_code in {401, 403, 429}:
         return "auth_quota"
+    lowered = response_text.lower()
+    if status_code == 402 and any(
+        token in lowered
+        for token in ("credit", "credits", "billing", "quota", "balance")
+    ):
+        return "insufficient_credits"
     if 500 <= status_code <= 599:
         return "provider_outage"
     if 400 <= status_code <= 499:
-        lowered = response_text.lower()
         if any(token in lowered for token in ("quota", "rate limit", "credit", "billing")):
             return "auth_quota"
         return "usage_config_error"
@@ -1582,6 +1676,30 @@ def _remaining_timeout_sec(
             provider=provider_name,
         )
     return remaining
+
+
+def _request_timeout_budget(
+    start: float,
+    *,
+    timeout_sec: int | None,
+    max_stall_sec: int | None,
+    provider_name: str,
+) -> tuple[float | None, str]:
+    remaining_timeout = _remaining_timeout_sec(
+        start,
+        timeout_sec=timeout_sec,
+        provider_name=provider_name,
+    )
+    if max_stall_sec is None:
+        return remaining_timeout, "timeout"
+    stall_budget = float(max_stall_sec)
+    if stall_budget <= 0:
+        raise ProviderStalledError(
+            f"{provider_name} stalled after {max_stall_sec:g}s without an upstream response"
+        )
+    if remaining_timeout is None or stall_budget < remaining_timeout:
+        return stall_budget, "stall"
+    return remaining_timeout, "timeout"
 
 
 def _call_response_text(body: dict) -> str:

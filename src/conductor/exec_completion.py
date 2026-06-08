@@ -254,7 +254,9 @@ def _brief_requests_tests(brief: str) -> bool:
 
 def _has_test_path_change(changed_paths: Iterable[str]) -> bool:
     for raw_path in changed_paths:
-        path = raw_path.replace("\\", "/").lstrip("./")
+        path = raw_path.replace("\\", "/")
+        if path.startswith("./"):
+            path = path[2:]
         name = Path(path).name
         if path.startswith("tests/") or path.startswith("test/"):
             return True

@@ -3272,6 +3272,53 @@ def test_gemini_call_appends_inline_response_contract(mocker):
     assert "write_file" in prompt
 
 
+def test_gemini_call_uses_read_only_approval_mode(mocker):
+    mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
+    run_mock = mocker.patch(
+        "conductor.providers.gemini.subprocess.run",
+        return_value=_fake_completed(stdout=GEMINI_JSON),
+    )
+
+    GeminiProvider().call("hi")
+
+    args = run_mock.call_args.args[0]
+    assert "--approval-mode" in args
+    assert args[args.index("--approval-mode") + 1] == "plan"
+
+
+def test_gemini_call_sets_headless_workspace_trust_env(mocker, monkeypatch):
+    mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
+    monkeypatch.setenv(GEMINI_TRUST_WORKSPACE_ENV, "false")
+    run_mock = mocker.patch(
+        "conductor.providers.gemini.subprocess.run",
+        return_value=_fake_completed(stdout=GEMINI_JSON),
+    )
+
+    GeminiProvider().call("hi")
+
+    env = run_mock.call_args.kwargs["env"]
+    assert env[GEMINI_TRUST_WORKSPACE_ENV] == "true"
+
+
+def test_gemini_call_rejects_mutating_file_tool_attempt(mocker):
+    mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
+    mocker.patch(
+        "conductor.providers.gemini.subprocess.run",
+        return_value=_fake_completed(stdout=GEMINI_TOOL_FAILURE_JSON),
+    )
+
+    with pytest.raises(ProviderHTTPError) as exc:
+        GeminiProvider().call("answer inline")
+
+    message = str(exc.value)
+    assert "conductor call" in message
+    assert "mutating file-writing tool" in message
+    assert "replace" in message
+    assert "Edit" in message
+    assert "inline output" in message
+    assert "git status" in message
+
+
 def test_gemini_call_rejects_saved_write_file_placeholder(mocker):
     mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
     mocker.patch(
@@ -3370,14 +3417,17 @@ def test_gemini_review_uses_code_review_extension_command(mocker, monkeypatch):
     mocker.patch("conductor.providers.gemini.shutil.which", return_value="/usr/bin/gemini")
     _strip_gemini_auth_env(monkeypatch)
     monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    monkeypatch.setenv(GEMINI_TRUST_WORKSPACE_ENV, "false")
     mocker.patch(
         "conductor.providers.gemini.subprocess.run",
         return_value=_fake_completed(stdout='[{"name":"code-review"}]'),
     )
     fake = _FakePopen(stdout_schedule=[(0, GEMINI_JSON)])
+    captured: dict[str, dict[str, str] | None] = {}
 
     def factory(args, **kwargs):
         fake.args = args
+        captured["env"] = kwargs.get("env")
         return fake
 
     mocker.patch(
@@ -3395,6 +3445,8 @@ def test_gemini_review_uses_code_review_extension_command(mocker, monkeypatch):
     assert "Use the reviewer guide." in prompt
     assert "--approval-mode" in fake.args
     assert fake.args[fake.args.index("--approval-mode") + 1] == "plan"
+    assert captured["env"] is not None
+    assert captured["env"][GEMINI_TRUST_WORKSPACE_ENV] == "true"
     assert response.provider == "gemini"
     assert response.text == "hello from gemini"
 

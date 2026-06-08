@@ -64,6 +64,17 @@ VALID_PREFER_MODES: tuple[str, ...] = ("best", "cheapest", "fastest", "balanced"
 class NoConfiguredProvider(ProviderError):  # noqa: N818  — public API name; preserved from v0.1
     """Raised when no provider in the registry is configured enough to call."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        skipped: list[tuple[str, str]] | tuple[tuple[str, str], ...] = (),
+        context: dict[str, object] | None = None,
+    ) -> None:
+        self.skipped = tuple(skipped)
+        self.context = dict(context or {})
+        super().__init__(message)
+
 
 class InvalidRouterRequest(ProviderError):  # noqa: N818  — public API name, symmetry with NoConfiguredProvider
     """Raised when the caller passes an invalid combination (e.g. unknown prefer mode)."""
@@ -131,6 +142,7 @@ _REVIEW_DEGRADING_OUTCOMES = frozenset(
     {
         "5xx",
         "empty-response",
+        "insufficient-credits",
         "network",
         "output-contract",
         "provider-error",
@@ -195,6 +207,10 @@ def reset_review_health_cache(name: str | None = None) -> None:
 
 def _health_filter(name: str, *, kind: str | None = None) -> str | None:
     """Return None if the provider passes, else a skip reason."""
+    if kind == "review":
+        review_reason = _persistent_review_health_filter(name)
+        if review_reason is not None:
+            return review_reason
     h = _HEALTH.get(name)
     if h is not None:
         now = time.monotonic()
@@ -203,8 +219,6 @@ def _health_filter(name: str, *, kind: str | None = None) -> str | None:
             return f"rate-limited {int(now - h.last_rate_limited_at)}s ago (cooldown: {wait}s)"
         if h.last_auth_failed_at:
             return "auth failed earlier this session"
-    if kind == "review":
-        return _persistent_review_health_filter(name)
     return None
 
 
@@ -647,17 +661,20 @@ def pick(
         )
 
     if not ranked:
+        context = {
+            "prefer": prefer,
+            "tools": sorted(tools_set),
+            "attachments_required": attachments_required,
+            "exclude": sorted(exclude_set),
+        }
         raise NoConfiguredProvider(
             format_no_provider_error(
                 "no provider satisfies the routing request.",
                 skipped,
-                context={
-                    "prefer": prefer,
-                    "tools": sorted(tools_set),
-                    "attachments_required": attachments_required,
-                    "exclude": sorted(exclude_set),
-                },
-            )
+                context=context,
+            ),
+            skipped=skipped,
+            context=context,
         )
 
     tag_default_applied: dict[str, str] = {}

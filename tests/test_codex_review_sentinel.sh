@@ -71,4 +71,53 @@ case "$route_preflight_args" in
     ;;
 esac
 
+route_preflight_function="$(sed -n '/^conductor_route_preflight_for_phase()/,/^}/p' "$SCRIPT")"
+case "$route_preflight_function" in
+  *'args+=(--with "$CONDUCTOR_WITH")'*) ;;
+  *)
+    printf 'FAIL: pinned route preflight must pass --with "$CONDUCTOR_WITH" to conductor route.\n' >&2
+    exit 1
+    ;;
+esac
+
+exec_harness="$(mktemp)"
+exec_args_file="$(mktemp)"
+trap 'rm -f "$exec_harness" "$exec_args_file"' EXIT
+{
+  sed -n '/^conductor_should_use_semantic_review()/,/^}/p' "$SCRIPT"
+  sed -n '/^conductor_effective_with_for_phase()/,/^}/p' "$SCRIPT"
+  sed -n '/^conductor_subcommand_for_mode()/,/^}/p' "$SCRIPT"
+  sed -n '/^conductor_tools_for_mode()/,/^}/p' "$SCRIPT"
+  sed -n '/^conductor_inner_timeout()/,/^}/p' "$SCRIPT"
+  sed -n '/^reviewer_conductor_exec()/,/^}/p' "$SCRIPT"
+  cat <<'HARNESS'
+conductor() {
+  printf '%s\n' "$*" >"$EXEC_ARGS_FILE"
+  cat >/dev/null
+  printf 'CODEX_REVIEW_FIXED\n'
+}
+
+REVIEW_MODE=fix
+REVIEW_PHASE=fix
+REVIEW_TIMEOUT=120
+REVIEW_MAX_STALL_SEC=17
+CONDUCTOR_WITH=codex
+CONDUCTOR_EFFORT=high
+REVIEW_CONDUCTOR_LOG_FILE=/tmp/touchstone-review-conductor.log
+CODEX_REVIEW_PR_NUMBER=
+
+reviewer_conductor_exec "fix prompt" >/dev/null
+HARNESS
+} >"$exec_harness"
+
+EXEC_ARGS_FILE="$exec_args_file" bash "$exec_harness"
+exec_args="$(cat "$exec_args_file")"
+case "$exec_args" in
+  exec\ *'--max-stall-seconds 17'*) ;;
+  *)
+    printf 'FAIL: fix-phase conductor exec must pass REVIEW_MAX_STALL_SEC as --max-stall-seconds.\nargs: %s\n' "$exec_args" >&2
+    exit 1
+    ;;
+esac
+
 printf 'ok\n'

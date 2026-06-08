@@ -1409,6 +1409,7 @@ def _is_retryable(err: Exception) -> tuple[bool, str]:
     if isinstance(err, ProviderHTTPError) and err.failure_reason:
         reason_categories = {
             "auth_quota": "rate-limit",
+            "insufficient_credits": "rate-limit",
             "malformed_response": "provider-error",
             "provider_outage": "5xx",
             "transient_network": "network",
@@ -1431,6 +1432,21 @@ def _is_retryable(err: Exception) -> tuple[bool, str]:
     if isinstance(err, ProviderHTTPError):
         return True, "transport"
     return False, "other"
+
+
+def _review_health_outcome(err: Exception, category: str) -> str:
+    """Return the review circuit-breaker outcome for a provider failure."""
+    if isinstance(err, ProviderHTTPError):
+        if err.failure_reason == "insufficient_credits":
+            return "insufficient-credits"
+        if err.status_code == 402:
+            text = f"{err.upstream_body or ''} {err}".lower()
+            if any(
+                token in text
+                for token in ("credit", "credits", "billing", "quota", "balance")
+            ):
+                return "insufficient-credits"
+    return category
 
 
 def _format_fallback_error_detail(err: Exception) -> str:
@@ -1821,6 +1837,10 @@ def _build_review_route_decision(
             health_kind="review",
         )
     except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
+        if isinstance(e, NoConfiguredProvider):
+            for name, reason in e.skipped:
+                if "recent review" in reason:
+                    review_reasons.setdefault(name, reason)
         raise _ReviewRouteSelectionError(e, review_reasons) from e
     return _apply_semantic_priority_to_decision(decision, plan), review_reasons, plan
 
@@ -1874,25 +1894,14 @@ def _apply_semantic_priority_to_decision(
     decision: RouteDecision,
     plan: SemanticPlan,
 ) -> RouteDecision:
-    """Make the semantic candidate order the dispatch order after router filters."""
-    priority = {provider: idx for idx, provider in enumerate(_semantic_priority(plan))}
-    ranked = tuple(
-        sorted(decision.ranked, key=lambda candidate: priority.get(candidate.name, len(priority)))
-    )
-    if not ranked:
-        return decision
-    winner = ranked[0]
-    return replace(
-        decision,
-        provider=winner.name,
-        thinking_budget=winner.estimated_thinking_tokens,
-        tier=winner.tier,
-        matched_tags=winner.matched_tags,
-        ranked=ranked,
-        estimated_input_tokens=winner.estimated_input_tokens,
-        estimated_output_tokens=winner.estimated_output_tokens,
-        estimated_thinking_tokens=winner.estimated_thinking_tokens,
-    )
+    """Preserve router scoring; semantic priority is already the tie-breaker.
+
+    The semantic plan defines the allowed provider/model stack, and
+    ``pick(..., priority=_semantic_priority(plan))`` uses that order to break
+    true score ties. Re-sorting here would erase user intent from flags such as
+    ``--tags cheap``, ``--tags long-context``, or ``--prefer cheapest``.
+    """
+    return decision
 
 
 def _requires_strong_code_provider(plan: SemanticPlan) -> bool:
@@ -3092,7 +3101,11 @@ def _invoke_review_with_fallback(
                 quarantined_contract_errors.append(e)
             if category == "rate-limit":
                 mark_rate_limited(candidate.name)
-            mark_outcome(candidate.name, category, kind="review")
+            mark_outcome(
+                candidate.name,
+                _review_health_outcome(e, category),
+                kind="review",
+            )
             last_exc = e
             fallback_summary = fallback_summary.with_attempt(
                 _fallback_attempt_from_error(
@@ -3326,18 +3339,28 @@ def _invoke_council(
                 "model": response.model,
             }
         )
-        _raise_if_council_cap_hit(
+        partial_response = _return_complete_wall_clock_partial_or_raise(
             plan=plan,
             caps=caps,
             effort=effort,
             rounds=rounds,
             member_responses=member_responses,
-            synthesis=None,
             synthesis_models=synthesis_models,
             stage="after_member",
             model=model,
             elapsed_ms=_council_elapsed_ms(started_at),
         )
+        if partial_response is not None:
+            _record_response_delegation(
+                "council",
+                partial_response,
+                effort=effort,
+                semantic_plan=plan,
+                delegation_id=parent_delegation_id,
+                council_role="parent",
+                members=member_events,
+            )
+            return partial_response
 
     if not any(_council_member_succeeded(response) for response in member_responses):
         errors = "; ".join(
@@ -3347,18 +3370,28 @@ def _invoke_council(
         raise ProviderError(f"council failed: all member calls failed ({errors})")
 
     elapsed_ms = _council_elapsed_ms(started_at)
-    _raise_if_council_cap_hit(
+    partial_response = _return_complete_wall_clock_partial_or_raise(
         plan=plan,
         caps=caps,
         effort=effort,
         rounds=rounds,
         member_responses=member_responses,
-        synthesis=None,
         synthesis_models=synthesis_models,
         stage="before_synthesis",
         model=",".join(synthesis_models),
         elapsed_ms=elapsed_ms,
     )
+    if partial_response is not None:
+        _record_response_delegation(
+            "council",
+            partial_response,
+            effort=effort,
+            semantic_plan=plan,
+            delegation_id=parent_delegation_id,
+            council_role="parent",
+            members=member_events,
+        )
+        return partial_response
     if not silent:
         click.echo(
             "[conductor] council synthesis: " + ",".join(synthesis_models),
@@ -3460,6 +3493,17 @@ def _council_member_succeeded(response: CallResponse) -> bool:
     return "conductor_council_member_error" not in (response.raw or {})
 
 
+def _council_member_has_usable_content(response: CallResponse) -> bool:
+    if not _council_member_succeeded(response):
+        return False
+    text = getattr(response, "text", None)
+    if text is None:
+        return False
+    if not isinstance(text, str):
+        text = str(text)
+    return bool(text.strip())
+
+
 def _openrouter_council_provider(
     *,
     provider: OpenRouterProvider,
@@ -3525,6 +3569,129 @@ def _raise_if_council_cap_hit(
     if cap_hit is None:
         return
 
+    response = _council_cap_response(
+        plan=plan,
+        caps=caps,
+        effort=effort,
+        rounds=rounds,
+        member_responses=member_responses,
+        synthesis=synthesis,
+        synthesis_models=synthesis_models,
+        elapsed_ms=elapsed_ms,
+        cap_hit=cap_hit,
+        text=_council_partial_text(member_responses, cap_hit),
+        model=_council_partial_model(member_responses, model),
+    )
+    raise CouncilCapError(response)
+
+
+def _return_complete_wall_clock_partial_or_raise(
+    *,
+    plan: SemanticPlan,
+    caps: CouncilCaps,
+    effort: str | int,
+    rounds: int,
+    member_responses: list[CallResponse],
+    synthesis_models: tuple[str, ...],
+    stage: str,
+    model: str,
+    elapsed_ms: int,
+) -> CallResponse | None:
+    cap_hit = _council_cap_hit_payload(
+        plan=plan,
+        caps=caps,
+        member_responses=member_responses,
+        synthesis=None,
+        stage=stage,
+        model=model,
+        elapsed_ms=elapsed_ms,
+    )
+    if cap_hit is None:
+        return None
+    if not _council_cap_can_return_complete_wall_clock_partial(cap_hit, member_responses):
+        raise CouncilCapError(
+            _council_cap_response(
+                plan=plan,
+                caps=caps,
+                effort=effort,
+                rounds=rounds,
+                member_responses=member_responses,
+                synthesis=None,
+                synthesis_models=synthesis_models,
+                elapsed_ms=elapsed_ms,
+                cap_hit=cap_hit,
+                text=_council_partial_text(member_responses, cap_hit),
+                model=_council_partial_model(member_responses, model),
+            )
+        )
+
+    usable = _council_usable_member_responses(member_responses)
+    source_models = [response.model for _idx, response in usable]
+    response = _council_cap_response(
+        plan=plan,
+        caps=caps,
+        effort=effort,
+        rounds=rounds,
+        member_responses=member_responses,
+        synthesis=None,
+        synthesis_models=synthesis_models,
+        elapsed_ms=elapsed_ms,
+        cap_hit=cap_hit,
+        text=_council_complete_wall_clock_partial_text(usable, cap_hit),
+        model=_council_partial_model(member_responses, model),
+    )
+    raw = dict(response.raw or {})
+    council_raw = dict(raw.get("conductor_council") or {})
+    council_raw.update(
+        {
+            "partial_synthesis": True,
+            "partial_synthesis_reason": "wall_clock_after_all_members",
+            "partial_synthesis_source_models": source_models,
+        }
+    )
+    raw["conductor_council"] = council_raw
+    return _response_with_council_health(replace(response, raw=raw))
+
+
+def _council_cap_can_return_complete_wall_clock_partial(
+    cap_hit: dict[str, object],
+    member_responses: list[CallResponse],
+) -> bool:
+    if cap_hit.get("kind") != "wall_clock":
+        return False
+    completed = cap_hit.get("completed_member_calls")
+    total = cap_hit.get("total_member_calls")
+    if not isinstance(completed, int) or not isinstance(total, int):
+        return False
+    if total <= 0 or completed != total:
+        return False
+    return any(_council_member_has_usable_content(response) for response in member_responses)
+
+
+def _council_usable_member_responses(
+    member_responses: list[CallResponse],
+) -> list[tuple[int, CallResponse]]:
+    return [
+        (idx, response)
+        for idx, response in enumerate(member_responses, start=1)
+        if _council_member_has_usable_content(response)
+    ]
+
+
+def _council_cap_response(
+    *,
+    plan: SemanticPlan,
+    caps: CouncilCaps,
+    effort: str | int,
+    rounds: int,
+    member_responses: list[CallResponse],
+    synthesis: CallResponse | None,
+    synthesis_models: tuple[str, ...],
+    elapsed_ms: int,
+    cap_hit: dict[str, object],
+    text: str,
+    model: str,
+) -> CallResponse:
     raw, usage, cost_usd = _council_response_metadata(
         plan=plan,
         caps=caps,
@@ -3537,15 +3704,15 @@ def _raise_if_council_cap_hit(
         cap_hit=cap_hit,
     )
     response = CallResponse(
-        text=_council_partial_text(member_responses, cap_hit),
+        text=text,
         provider="openrouter",
-        model=_council_partial_model(member_responses, model),
+        model=model,
         duration_ms=elapsed_ms,
         usage=usage,
         cost_usd=cost_usd,
         raw=raw,
     )
-    raise CouncilCapError(_response_with_council_health(response))
+    return _response_with_council_health(response)
 
 
 def _council_cap_hit_payload(
@@ -3880,6 +4047,23 @@ def _council_partial_text(
 
     lines.append("Partial member responses:")
     for idx, response in enumerate(member_responses, start=1):
+        lines.append(
+            f"\n## Member {idx}: {response.model}\n\n{_council_member_response_text(response)}"
+        )
+    return "\n".join(lines)
+
+
+def _council_complete_wall_clock_partial_text(
+    usable_member_responses: list[tuple[int, CallResponse]],
+    cap_hit: dict[str, object],
+) -> str:
+    lines = [
+        "Council partial answer (degraded): wall-clock cap fired after all "
+        "member calls completed, so no synthesis model was called.",
+        _format_council_cap_hit(cap_hit) + ".",
+        "Usable member responses:",
+    ]
+    for idx, response in usable_member_responses:
         lines.append(
             f"\n## Member {idx}: {response.model}\n\n{_council_member_response_text(response)}"
         )
@@ -7554,7 +7738,7 @@ def _swarm_preflight_lane(
     searchable_body = _SWARM_FENCED_CODE_BLOCK_RE.sub("", body)
     file_paths = sorted(
         {
-            match.group("path").strip("`'\"),.;:")
+            _swarm_trim_path_token(match.group("path"))
             for match in _SWARM_PREFLIGHT_PATH_RE.finditer(searchable_body)
         }
     )
@@ -7580,6 +7764,11 @@ def _swarm_preflight_lane(
         "issue_refs": issue_refs,
         "depends_on": depends_on,
     }
+
+
+def _swarm_trim_path_token(raw: str) -> str:
+    path = raw.strip("`'\"")
+    return path.rstrip("),.;:")
 
 
 def _swarm_preflight_duplicates(

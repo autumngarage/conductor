@@ -18,6 +18,7 @@ from conductor.providers.interface import (
     ProviderError,
     ProviderExecutionError,
     ProviderHTTPError,
+    ProviderStalledError,
     UnsupportedCapability,
 )
 from conductor.providers.kimi import KimiProvider
@@ -229,6 +230,7 @@ def test_call_none_response_without_fallback_includes_response_shape(configured)
     ("status_code", "body", "expected_reason"),
     [
         (429, "rate limit exceeded", "auth_quota"),
+        (402, "insufficient credits. Please add credits to continue.", "insufficient_credits"),
         (400, "invalid model request", "usage_config_error"),
         (503, "service unavailable", "provider_outage"),
     ],
@@ -524,6 +526,73 @@ def test_call_honors_explicit_max_tokens(configured):
     assert captured["payload"]["max_tokens"] == 333
 
 
+@pytest.mark.parametrize(
+    "task_tags",
+    [
+        ["code-review"],
+        ["text-review"],
+        ["council"],
+    ],
+)
+def test_call_clamps_explicit_max_tokens_for_bounded_review_tasks(
+    configured,
+    task_tags,
+):
+    """Regression for #515: review/council routes pass aggregate or user caps
+    through ``max_tokens``. OpenRouter prices that whole ceiling, so bounded
+    review-style tasks must not request 65k output tokens for one call."""
+    captured: dict[str, object] = {}
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "model": "openai/gpt-5.5",
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {},
+            },
+        )
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        OpenRouterProvider().call(
+            "Review this.",
+            model="openai/gpt-5.5",
+            effort="medium",
+            task_tags=task_tags,
+            max_tokens=65_536,
+        )
+
+    assert captured["payload"]["max_tokens"] == 2048
+
+
+def test_call_preserves_large_explicit_max_tokens_for_unbounded_tasks(configured):
+    captured: dict[str, object] = {}
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "model": "openai/gpt-5.5",
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {},
+            },
+        )
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        OpenRouterProvider().call(
+            "Draft a long report.",
+            model="openai/gpt-5.5",
+            task_tags=["research"],
+            max_tokens=65_536,
+        )
+
+    assert captured["payload"]["max_tokens"] == 65_536
+
+
 def test_call_retries_openrouter_credit_402_with_affordable_max_tokens(configured):
     requests: list[dict] = []
 
@@ -563,6 +632,49 @@ def test_call_retries_openrouter_credit_402_with_affordable_max_tokens(configure
     assert response.text == "ok"
     assert requests[0]["max_tokens"] == 2048
     assert requests[1]["max_tokens"] == 1688
+
+
+def test_call_retries_bounded_402_with_affordable_max_tokens(configured):
+    requests: list[dict] = []
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        requests.append(payload)
+        if len(requests) == 1:
+            return httpx.Response(
+                402,
+                json={
+                    "error": {
+                        "message": (
+                            "max_tokens 8192 exceeds the current balance; "
+                            "affordable max_tokens: 4,096"
+                        ),
+                        "code": 402,
+                    }
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "model": "openai/gpt-5.5",
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {},
+            },
+        )
+
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(side_effect=_record)
+        response = OpenRouterProvider().call(
+            "Review this.",
+            model="openai/gpt-5.5",
+            effort="max",
+            task_tags=["code-review"],
+            max_tokens=65_536,
+        )
+
+    assert response.text == "ok"
+    assert requests[0]["max_tokens"] == 8192
+    assert requests[1]["max_tokens"] == 4096
 
 
 def test_exec_with_tools_retries_credit_402_with_affordable_max_tokens(
@@ -954,9 +1066,16 @@ def test_exec_without_tools_passes_timeout_to_call(configured, mocker):
 def test_exec_with_tools_passes_remaining_timeout(configured, tmp_path, mocker):
     provider = OpenRouterProvider()
     observed_timeouts: list[float | None] = []
+    observed_timeout_kinds: list[str] = []
 
-    def _post_chat(payload: dict, *, timeout_sec: float | None = None) -> dict:
+    def _post_chat(
+        payload: dict,
+        *,
+        timeout_sec: float | None = None,
+        timeout_kind: str = "timeout",
+    ) -> dict:
         observed_timeouts.append(timeout_sec)
+        observed_timeout_kinds.append(timeout_kind)
         return {
             "model": "openai/gpt-5.5",
             "choices": [
@@ -985,6 +1104,28 @@ def test_exec_with_tools_passes_remaining_timeout(configured, tmp_path, mocker):
     assert len(observed_timeouts) == 1
     assert observed_timeouts[0] is not None
     assert 0 < observed_timeouts[0] <= 60
+    assert observed_timeout_kinds == ["timeout"]
+
+
+def test_call_max_stall_timeout_raises_stalled(configured):
+    with respx.mock(base_url="https://openrouter.ai/api/v1") as router:
+        router.post("/chat/completions").mock(
+            side_effect=httpx.ReadTimeout(
+                "read timed out",
+                request=httpx.Request(
+                    "POST",
+                    "https://openrouter.ai/api/v1/chat/completions",
+                ),
+            )
+        )
+        with pytest.raises(ProviderStalledError) as exc:
+            OpenRouterProvider().call(
+                "Review this.",
+                model="model-a",
+                max_stall_sec=3,
+            )
+
+    assert "stalled after 3s" in str(exc.value)
 
 
 def test_exec_with_tools_empty_final_response_raises(configured, tmp_path):

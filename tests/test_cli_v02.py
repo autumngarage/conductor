@@ -1670,6 +1670,128 @@ def test_ask_council_wall_clock_cap_returns_partial_error(mocker):
     assert council["cap_hit"]["model"] == "~google/gemini-pro-latest"
 
 
+def test_ask_council_wall_clock_cap_after_all_members_returns_degraded_partial(
+    mocker,
+):
+    _stub_all_configured(mocker, {"openrouter"})
+    calls = {"count": 0}
+
+    def monotonic() -> float:
+        calls["count"] += 1
+        return 2.0 if calls["count"] >= 9 else 0.0
+
+    mocker.patch("conductor.cli.time.monotonic", side_effect=monotonic)
+    call_mock = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        side_effect=[
+            ProviderError("HTTP 402: requested too many tokens"),
+            ProviderError("OpenRouter produced empty response content: finish_reason=length"),
+            _fake_response(
+                "openrouter",
+                "deepseek/deepseek-v4-pro",
+                text="usable DeepSeek answer",
+            ),
+            _fake_response("openrouter", "synthesis"),
+        ],
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "council",
+            "--effort",
+            "medium",
+            "--council-timeout",
+            "1",
+            "--brief",
+            "Debate this architecture decision.",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert call_mock.call_count == 3
+    payload = json.loads(result.stdout)
+    council = payload["raw"]["conductor_council"]
+    assert "Council partial answer (degraded)" in payload["text"]
+    assert "no synthesis model was called" in payload["text"]
+    assert "usable DeepSeek answer" in payload["text"]
+    assert "council member failed" not in payload["text"]
+    assert payload["usage"]["council_complete"] is False
+    assert payload["usage"]["council_failed_members"] == 2
+    assert council["complete"] is False
+    assert council["partial_synthesis"] is True
+    assert council["partial_synthesis_reason"] == "wall_clock_after_all_members"
+    assert council["partial_synthesis_source_models"] == ["deepseek/deepseek-v4-pro"]
+    assert council["synthesis_cost_usd"] is None
+    assert council["cap_hit"]["kind"] == "wall_clock"
+    assert council["cap_hit"]["stage"] == "after_member"
+    assert council["cap_hit"]["completed_member_calls"] == 3
+    assert council["cap_hit"]["skipped_member_models"] == []
+
+
+def test_ask_council_wall_clock_cap_before_synthesis_returns_degraded_partial(
+    mocker,
+):
+    _stub_all_configured(mocker, {"openrouter"})
+    calls = {"count": 0}
+
+    def monotonic() -> float:
+        calls["count"] += 1
+        return 2.0 if calls["count"] >= 8 else 0.0
+
+    mocker.patch("conductor.cli.time.monotonic", side_effect=monotonic)
+    call_mock = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        side_effect=[
+            _fake_response("openrouter", "member-a", text="first answer"),
+            _fake_response("openrouter", "member-b", text="second answer"),
+            _fake_response("openrouter", "member-c", text="third answer"),
+            _fake_response("openrouter", "synthesis"),
+        ],
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "council",
+            "--effort",
+            "medium",
+            "--council-timeout",
+            "1",
+            "--brief",
+            "Debate this architecture decision.",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert call_mock.call_count == 3
+    payload = json.loads(result.stdout)
+    council = payload["raw"]["conductor_council"]
+    assert "Council partial answer (degraded)" in payload["text"]
+    assert "first answer" in payload["text"]
+    assert "second answer" in payload["text"]
+    assert "third answer" in payload["text"]
+    assert payload["usage"]["council_complete"] is False
+    assert payload["usage"]["council_failed_members"] == 0
+    assert council["partial_synthesis"] is True
+    assert council["partial_synthesis_source_models"] == [
+        "member-a",
+        "member-b",
+        "member-c",
+    ]
+    assert council["cap_hit"]["stage"] == "before_synthesis"
+    assert council["cap_hit"]["completed_member_calls"] == 3
+    assert council["cap_hit"]["skipped_member_models"] == []
+
+
 def test_council_synthesis_prompt_handles_empty_member_text():
     from conductor.cli import _council_synthesis_prompt
 
@@ -1710,7 +1832,7 @@ def test_ask_council_rejects_offline():
 # ---------------------------------------------------------------------------
 
 
-def test_review_auto_uses_semantic_priority_over_router_scoring(
+def test_review_auto_honors_router_defaults_within_semantic_stack(
     mocker, monkeypatch, tmp_path
 ):
     defaults = tmp_path / "router.toml"
@@ -1747,10 +1869,10 @@ def test_review_auto_uses_semantic_priority_over_router_scoring(
     )
 
     assert result.exit_code == 0, result.output
-    assert codex_review.called
-    assert not claude_review.called
-    assert codex_review.call_args.kwargs["base"] == "origin/main"
-    assert "→ codex" in result.stderr
+    assert claude_review.called
+    assert not codex_review.called
+    assert claude_review.call_args.kwargs["base"] == "origin/main"
+    assert "→ claude" in result.stderr
 
 
 def test_review_without_auto_or_with_uses_semantic_review_route(mocker, tmp_path):
@@ -2093,6 +2215,56 @@ def test_review_auto_no_viable_json_reports_excluded_reasons(mocker):
     assert excluded["codex"]["reason_code"] == "missing_credentials"
     assert excluded["claude"]["reason_code"] == "missing_credentials"
     assert excluded["openrouter"]["reason_code"] == "missing_credentials"
+
+
+def test_review_auto_openrouter_402_marks_review_health_before_retry(mocker):
+    from conductor.providers.interface import ProviderHTTPError
+
+    _stub_all_configured(mocker, {"openrouter"})
+    openrouter_call = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        side_effect=ProviderHTTPError(
+            "OpenRouter returned HTTP 402: insufficient credits",
+            failure_reason="insufficient_credits",
+            provider="openrouter",
+            status_code=402,
+            upstream_body="insufficient credits",
+        ),
+    )
+
+    first = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--json",
+            "--brief",
+            "Review this merge. End with CODEX_REVIEW_CLEAN or BLOCKED.",
+        ],
+    )
+
+    assert first.exit_code == 1
+    payload = json.loads(first.stdout)
+    assert payload["attempts"][0]["provider"] == "openrouter"
+    assert payload["attempts"][0]["status"] == "rate-limit"
+    assert payload["attempts"][0]["failure_code"] == "rate_limited"
+    assert openrouter_call.call_count == 1
+
+    second = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--json",
+            "--brief",
+            "Review this merge. End with CODEX_REVIEW_CLEAN or BLOCKED.",
+        ],
+    )
+
+    assert second.exit_code == 2
+    assert openrouter_call.call_count == 1
+    assert "insufficient-credits" in second.output
 
 
 def test_review_auto_output_contract_failure_falls_through_to_next_provider(mocker):
@@ -4536,6 +4708,66 @@ def test_route_review_json_selects_openrouter_fallback(mocker):
     excluded = {entry["provider"]: entry for entry in payload["excluded"]}
     assert excluded["gemini"]["reason_code"] == "missing_native_review_extension"
     assert not call_mock.called
+
+
+def test_route_review_json_respects_semantic_tag_scoring(mocker):
+    _stub_all_configured(mocker, {"codex", "claude", "openrouter"})
+    mocker.patch.object(CodexProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(ClaudeProvider, "review_configured", return_value=(True, None))
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "route",
+            "--kind",
+            "review",
+            "--tags",
+            "cheap",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["selected_provider"] == "openrouter"
+    assert [entry["provider"] for entry in payload["candidates"][:3]] == [
+        "openrouter",
+        "codex",
+        "claude",
+    ]
+    assert payload["decision"]["ranked"][0]["matched_tags"] == [
+        "cheap",
+        "code-review",
+    ]
+
+
+def test_route_review_json_respects_prefer_cheapest(mocker):
+    _stub_all_configured(mocker, {"codex", "claude", "openrouter"})
+    mocker.patch.object(CodexProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(ClaudeProvider, "review_configured", return_value=(True, None))
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "route",
+            "--kind",
+            "review",
+            "--prefer",
+            "cheapest",
+            "--estimated-input-tokens",
+            "60000",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["selected_provider"] == "claude"
+    assert [entry["provider"] for entry in payload["candidates"][:3]] == [
+        "claude",
+        "openrouter",
+        "codex",
+    ]
 
 
 def test_route_review_json_reports_all_candidates_excluded(mocker):

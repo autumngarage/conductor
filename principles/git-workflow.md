@@ -81,7 +81,12 @@ If the project has AI review configured (see `.touchstone-review.toml` for polic
 
 **AI review is advisory.** It does not replace deterministic checks (lint, tests, type checking). It catches semantic bugs and policy violations that automated tools miss; it does not guarantee correctness.
 
-**Fail-open by default.** When the review infrastructure fails — timeout, missing Conductor CLI, no provider configured, or unparseable reviewer output — the hook allows the push rather than blocking it. This is the correct trade-off: a Conductor outage during a critical week should not freeze all merges. The cost is that the AI safety net is absent during those events, so each fail-open event is made explicitly visible:
+**Feature-branch hooks fail open; merge gates fail closed.** When review
+infrastructure fails during a local feature-branch push — timeout, missing
+Conductor CLI, no provider configured, or unparseable reviewer output — the hook
+allows the push rather than blocking it. This keeps a Conductor outage from
+freezing ordinary branch updates. The cost is that the AI safety net is absent
+during those events, so each fail-open event is made explicitly visible:
 
 - A `[fail-open:<code>]` line is written to stderr naming exactly why the safety net opened.
 - A structured entry is appended to `~/.touchstone-review-log` for audit and skip-rate monitoring.
@@ -103,7 +108,8 @@ Behavior:
 - Auto-fixes only low-risk findings (typos, missing imports, missing null checks, adding logging to empty exception handlers, named constants for unexplained magic numbers); anything that changes business logic or retry/error-handling semantics is reported as a finding for the author to address before merge
 - Blocks merge for unsafe findings (high-scrutiny paths)
 - Loops up to `max_iterations` times (default 3)
-- Fails open on infra errors with a visible `[fail-open:<code>]` stderr line and an audit log entry (see codes above), unless the project config sets `on_error = "fail-closed"`
+- Feature-branch review hooks fail open on infra errors with a visible `[fail-open:<code>]` stderr line and an audit log entry (see codes above), unless the project config sets `on_error = "fail-closed"`
+- `open-pr.sh --auto-merge` / `merge-pr.sh` fail closed when merge-gate review cannot complete. A fail-open hook marker is audit evidence, not merge authorization.
 
 ### Scope-aware preflight
 
@@ -120,7 +126,15 @@ run in diff mode unless changed `tests/test-*.sh` files can be executed
 directly; use `bash lib/preflight.sh --all-files` for repo-wide audits.
 `TOUCHSTONE_NO_PREFLIGHT=1` remains the emergency escape hatch.
 
-If the reviewer itself wedges after the branch has already recorded a clean review iteration, use `scripts/merge-pr.sh <pr-number> --bypass-with-disclosure="<reason>"` instead of dropping to raw `gh pr merge`. The bypass refuses fresh branches, prints a visible warning, comments on the PR with the reason, and adds a `Reviewer-bypass: <reason>` trailer to the squash commit when GitHub accepts the supplied merge body. This is for a stalled reviewer gate on an already-reviewed branch, not for bypassing substantive findings.
+If the reviewer itself wedges after the branch has already recorded a clean
+review iteration for the same branch head and merge base, use
+`scripts/merge-pr.sh <pr-number> --bypass-with-disclosure="<reason>"` instead
+of dropping to raw `gh pr merge`. The bypass refuses fresh branches, prints a
+visible warning, comments on the PR with the reason, and adds a
+`Reviewer-bypass: <reason>` trailer to the squash commit when GitHub accepts the
+supplied merge body. This is for a stalled reviewer gate on an already-reviewed
+branch, not for bypassing substantive findings or provider outages before a
+clean review completed.
 
 Prefer a different model or provider for AI review than the one that authored the change, when Conductor has one available. Deterministic checks — format, lint, typecheck, tests, and project-specific validators — still run before AI review; model diversity complements those checks, it does not replace them.
 

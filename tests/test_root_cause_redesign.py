@@ -188,6 +188,29 @@ def test_exec_boundary_commits_only_in_scope_dirty_paths(tmp_path: Path) -> None
     assert "?? AGENTS.md" in _git(repo, "status", "--short")
 
 
+def test_exec_boundary_preserves_hidden_directory_scope(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_repo(repo)
+    (repo / ".cortex" / "plans").mkdir(parents=True)
+
+    snapshot = capture_exec_boundary_snapshot(str(repo))
+    target = repo / ".cortex" / "plans" / "alchemist.md"
+    target.write_text("plan\n", encoding="utf-8")
+
+    result = enforce_exec_boundary(
+        snapshot,
+        brief="Update `.cortex/plans/alchemist.md` and commit it.",
+        agent_write_set={".cortex/plans/alchemist.md"},
+    )
+
+    assert result.status == "committed"
+    assert result.committed_paths == (".cortex/plans/alchemist.md",)
+    assert _git(repo, "show", "--name-only", "--format=", "HEAD").splitlines() == [
+        ".cortex/plans/alchemist.md"
+    ]
+
+
 def test_apply_exec_commit_boundary_uses_logged_write_scope(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
