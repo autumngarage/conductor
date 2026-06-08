@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from conductor import _agent_templates as templates
 
 EXPECTED_TEMPLATE_COVERAGE = {
@@ -161,6 +163,11 @@ def test_generated_semantic_ask_examples_include_effort():
         "agents-md-block": templates.AGENTS_MD_BLOCK,
         "cursor-rule": templates.CURSOR_RULE_BODY,
         "conductor-auto": templates.SUBAGENT_CONDUCTOR_AUTO,
+        "checked-in-agents-md": Path("AGENTS.md").read_text(encoding="utf-8"),
+        "checked-in-gemini-md": Path("GEMINI.md").read_text(encoding="utf-8"),
+        "checked-in-cursor-rule": Path(".cursor/rules/conductor-delegation.mdc").read_text(
+            encoding="utf-8"
+        ),
     }
 
     missing_effort = []
