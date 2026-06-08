@@ -90,14 +90,15 @@ conductor call --with openrouter --brief "Use this provider explicitly."
 conductor call --with openrouter --model provider/model-id --brief "..."
 
 # Get the full response as JSON (for scripting)
-conductor ask --kind research --brief "ping" --json
+conductor ask --kind research --effort minimal --brief "ping" --json
 
 # Read-only code review uses the semantic review cascade by default
 conductor review --base origin/main --brief-file /tmp/review.md
 
-# Legacy semantic API remains available during the migration
+# Semantic delegation: kind says the job, effort says the budget
 conductor ask --kind research --effort medium --brief-file /tmp/brief.md
 conductor ask --kind text-review --effort medium --brief-file /tmp/brief.md
+conductor ask --kind review --effort medium --base origin/main --brief-file /tmp/review.md
 conductor ask --kind code --effort high --brief-file /tmp/brief.md
 conductor ask --kind council --effort medium --brief-file /tmp/brief.md
 ```
@@ -120,7 +121,7 @@ Shipped:
 - `conductor call --with <id> --brief "..."` — manual mode for any provider.
 - `conductor call --auto [--tags a,b,c] --brief "..."` — rule-based router picks the best configured provider for the task's tags.
 - `conductor swarm --brief a.md --brief b.md --provider codex --max-parallel 2 --json` — first-class multi-task coding supervisor with isolated worktrees and structured per-task results.
-- `conductor review --base <ref> --brief-file <path>` — code review uses the same semantic review cascade as `ask --kind review`: Codex native review, then Claude native review, then an OpenRouter hosted review prompt. Use `--with <provider>` to hard-pin one provider.
+- `conductor review --base <ref> --brief-file <path>` — code review uses the same semantic review cascade as `ask --kind review --effort medium`: Codex native review, then Claude native review, then an OpenRouter hosted review prompt. Use `--with <provider>` to hard-pin one provider.
 - `conductor list [--json]` — shows every provider with ready/not-ready status, default model, and capability tags.
 - `conductor smoke <id>` / `conductor smoke --all [--json]` — proves a provider's auth + endpoint work (cheapest round-trip that exercises the full path).
 - `conductor doctor [--json]` — diagnostic report: which providers are configured, which env vars are set, what's in the macOS Keychain.

@@ -63,7 +63,7 @@ Use this decision ladder; pick the first line that fits:
 - Repo-changing implementation/debugging:
   `conductor ask --kind code --effort high --brief-file /tmp/brief.md`
 - Merge/PR/diff review:
-  `conductor ask --kind review --base origin/main --brief-file /tmp/review.md`
+  `conductor ask --kind review --effort medium --base origin/main --brief-file /tmp/review.md`
 - Architecture/product judgment needing multiple views:
   `conductor ask --kind council --effort medium --brief-file /tmp/brief.md`
 
@@ -88,12 +88,12 @@ Manual provider calls are the escape hatch, not the default:
 
 Read-only code review using Conductor's review cascade:
 
-    conductor ask --kind review --base origin/main \\
+    conductor ask --kind review --effort medium --base origin/main \\
         --brief-file /tmp/review-brief.md
 
 Pipe content in as the brief:
 
-    cat long-file.md | conductor ask --kind research --brief "Summarize."
+    cat long-file.md | conductor ask --kind research --effort minimal --brief "Summarize."
 
 Multi-turn agent session with tools:
 
@@ -106,7 +106,7 @@ whitelist; profiles route only to providers that honor that whitelist.
 
 Get JSON for scripting / piping into other tools:
 
-    conductor ask --kind research --brief "..." --json
+    conductor ask --kind research --effort minimal --brief "..." --json
 
 ## Provider Pinning
 
@@ -531,7 +531,7 @@ asks for one:
 - Repo-changing implementation/debugging:
   `conductor ask --kind code --effort high --brief-file /tmp/brief.md`.
 - Merge/PR/diff review:
-  `conductor ask --kind review --base <ref> --brief-file /tmp/review.md`.
+  `conductor ask --kind review --effort medium --base <ref> --brief-file /tmp/review.md`.
 - Architecture/product judgment needing multiple views:
   `conductor ask --kind council --effort medium --brief-file /tmp/brief.md`.
 - `conductor list` — show configured providers and their tags.
@@ -582,11 +582,11 @@ Use it when:
 - Repo-changing implementation/debugging:
   `conductor ask --kind code --effort high --brief-file /tmp/brief.md`.
 - Merge/PR/diff review:
-  `conductor ask --kind review --base <ref> --brief-file /tmp/review.md`.
+  `conductor ask --kind review --effort medium --base <ref> --brief-file /tmp/review.md`.
 - You want multiple model perspectives:
   `conductor ask --kind council --effort medium --brief-file /tmp/brief.md`.
 - You want a code review cascade:
-  `conductor ask --kind review --base origin/main --brief-file /tmp/review.md`.
+  `conductor ask --kind review --effort medium --base origin/main --brief-file /tmp/review.md`.
 
 Conductor does not inherit your conversation context. Write a complete
 brief before delegating; for `exec`, prefer `--brief-file` with goal,

@@ -741,16 +741,22 @@ def test_wire_cursor_writes_managed_rule_file():
     assert "description:" in text
     assert "managed-by: conductor v0.4.2" in text
     assert "Conductor delegation" in text
-    assert "conductor ask --kind review --base origin/main" in text
+    assert "conductor ask --kind review --effort medium --base origin/main" in text
     assert "conductor review --base origin/main" not in text
     assert aw.is_managed_file(path)
 
 
 def test_generated_review_guidance_uses_canonical_semantic_command():
     """Agent-facing generated guidance should not drift across surfaces."""
-    assert "conductor ask --kind review --base origin/main" in templates.DELEGATION_GUIDANCE
+    assert (
+        "conductor ask --kind review --effort medium --base origin/main"
+        in templates.DELEGATION_GUIDANCE
+    )
     assert "conductor review --base origin/main" not in templates.DELEGATION_GUIDANCE
-    assert "conductor ask --kind review --base origin/main" in templates.CURSOR_RULE_BODY
+    assert (
+        "conductor ask --kind review --effort medium --base origin/main"
+        in templates.CURSOR_RULE_BODY
+    )
     assert "conductor review --base origin/main" not in templates.CURSOR_RULE_BODY
 
 

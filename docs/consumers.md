@@ -43,7 +43,7 @@ Use `conductor ask` when the caller knows the semantic kind but does not want to
 
 Usually, exactly one of `--auto` or `--with` is required for `call` and `exec`. `review` is auto-routed by default when `--with` is absent; `--auto` remains accepted for compatibility. `--auto` runs the router using `--tags`, `--prefer`, and `--exclude` to pick a configured provider; `--with` bypasses the router for direct provider use. `--offline` is the exception for `call` and `exec`: it may be used without `--auto` or `--with`, sets the sticky offline flag, and rewrites the call to `--with ollama`. Passing `--offline --with <non-ollama>` is an error. `--no-offline` clears the sticky flag, then normal `--auto` / `--with` rules apply.
 
-Use `conductor review` for code review. Its auto route uses the same semantic review cascade as `conductor ask --kind review`: Codex `codex review`, Claude Code `/review`, then an OpenRouter hosted review prompt. Use `conductor ask --kind text-review` or `conductor text-review` for prose, docs, prompt, or instruction review with no diff tooling. Use `conductor exec` for engineering or auto-fix tasks that may edit files.
+Use `conductor review` for code review. Its auto route uses the same semantic review cascade as `conductor ask --kind review --effort medium`: Codex `codex review`, Claude Code `/review`, then an OpenRouter hosted review prompt. Use `conductor ask --kind text-review --effort medium` or `conductor text-review` for prose, docs, prompt, or instruction review with no diff tooling. Use `conductor exec` for engineering or auto-fix tasks that may edit files.
 
 ## Semantic matrix
 
@@ -107,7 +107,7 @@ Current enforcement support:
 | `gemini` | No | Gemini CLI exec approval mode is not a Conductor tool whitelist |
 | custom shell providers | No | The shell command owns its own behavior |
 
-If the workflow needs code diff review with no file mutation, prefer `conductor review` or `conductor ask --kind review`. If it needs prose, docs, prompt, instruction, issue, or Cortex/Touchstone text review, prefer `conductor text-review` or `conductor ask --kind text-review`. Use `exec --permission-profile read-only` only for agentic inspection workflows that need the multi-turn exec machinery.
+If the workflow needs code diff review with no file mutation, prefer `conductor review` or `conductor ask --kind review --effort medium`. If it needs prose, docs, prompt, instruction, issue, or Cortex/Touchstone text review, prefer `conductor text-review` or `conductor ask --kind text-review --effort medium`. Use `exec --permission-profile read-only` only for agentic inspection workflows that need the multi-turn exec machinery.
 
 `conductor exec --help` is the canonical reference for agentic code/edit mode. Its stable exec-specific flags are: --tools, --permission-profile, --sandbox, --cwd, --log-file, --preflight, --no-preflight, and --allow-short-brief. `--sandbox` remains parseable for compatibility but fails loudly because exec is unsandboxed unless a provider can enforce a `--permission-profile`.
 
@@ -270,13 +270,14 @@ Agents that do not need provider-level control should prefer `ask`:
 ```bash
 conductor ask --kind research --effort medium --brief-file /tmp/brief.md --json
 conductor ask --kind text-review --effort medium --brief-file /tmp/brief.md --json
+conductor ask --kind review --effort medium --base origin/main --brief-file /tmp/review.md --json
 conductor ask --kind code --effort high --brief-file /tmp/brief.md --json
 conductor ask --kind council --effort medium --brief-file /tmp/brief.md --json
 ```
 
 `council` is multi-call OpenRouter fan-out. For budget-sensitive routine delegation, use `research`, `text-review`, or `code`; council's compatibility cap overrides are intentionally hidden so normal callers see the outcome and degradation reason rather than a set of magic numbers to tune.
 
-For merge review, Touchstone should continue to use `conductor review` or `conductor ask --kind review`; both must trigger the review cascade, not generic code chat. For Touchstone/Cortex prose or doctrine review, use `text-review` so simple text critique does not pay the native code-review cost.
+For merge review, Touchstone should continue to use `conductor review` or `conductor ask --kind review --effort medium`; both must trigger the review cascade, not generic code chat. For Touchstone/Cortex prose or doctrine review, use `text-review` so simple text critique does not pay the native code-review cost.
 
 ## Versioning policy
 
