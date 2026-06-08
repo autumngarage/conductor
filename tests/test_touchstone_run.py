@@ -26,11 +26,17 @@ def _path_with_fake_bin(fake_bin: Path) -> str:
     return os.pathsep.join([str(fake_bin), *[path for path in system_dirs if Path(path).is_dir()]])
 
 
-def _run_validate(repo: Path, fake_bin: Path) -> subprocess.CompletedProcess[str]:
+def _run_validate(
+    repo: Path,
+    fake_bin: Path,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     env = {
         **os.environ,
         "PATH": _path_with_fake_bin(fake_bin),
     }
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         ["bash", str(SCRIPT), "validate"],
         cwd=repo,
@@ -115,6 +121,69 @@ def test_conductor_refresh_hook_checks_optional_cli_before_invoking() -> None:
     assert "command -v conductor" in text
     assert "command -v uv" in text
     assert "conductor-refresh: skipping because neither conductor nor uv is installed" in normalized
+
+
+def test_pre_push_validate_hook_enables_feature_branch_skip() -> None:
+    text = PRE_COMMIT_CONFIG.read_text(encoding="utf-8")
+
+    assert "id: touchstone-validate" in text
+    assert "TOUCHSTONE_VALIDATE_SKIP_FEATURE_PUSH=1 bash scripts/touchstone-run.sh validate" in text
+
+
+def test_validate_skips_feature_branch_pre_push_when_enabled(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+
+    result = _run_validate(
+        repo,
+        fake_bin,
+        {
+            "PRE_COMMIT_REMOTE_BRANCH": "refs/heads/fix/pre-push-fast",
+            "PRE_COMMIT_REMOTE_NAME": "origin",
+            "TOUCHSTONE_VALIDATE_SKIP_FEATURE_PUSH": "1",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "feature-branch pre-push validate skipped" in result.stdout
+    assert "generic project has no default 'lint' command" not in result.stdout
+
+
+def test_validate_does_not_skip_default_branch_pre_push(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+
+    result = _run_validate(
+        repo,
+        fake_bin,
+        {
+            "PRE_COMMIT_REMOTE_BRANCH": "refs/heads/main",
+            "PRE_COMMIT_REMOTE_NAME": "origin",
+            "TOUCHSTONE_VALIDATE_SKIP_FEATURE_PUSH": "1",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "feature-branch pre-push validate skipped" not in result.stdout
+    assert "generic project has no default 'lint' command" in result.stdout
 
 
 def test_validate_affected_runs_focused_python_targets(tmp_path: Path) -> None:

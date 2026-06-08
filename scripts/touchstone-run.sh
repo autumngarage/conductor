@@ -808,6 +808,10 @@ map_affected_path_to_tests() {
       add_affected_named_tests tests/test_issue_claim_workflow.py
       return 0
       ;;
+    .pre-commit-config.yaml)
+      add_affected_named_tests tests/test_touchstone_run.py
+      return 0
+      ;;
     src/conductor/cli.py)
       add_affected_named_tests \
         tests/test_cli.py \

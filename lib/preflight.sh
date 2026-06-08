@@ -635,7 +635,7 @@ touchstone_preflight_changed_path_full_reason() {
       printf 'unclassified CI workflow changed: %s\n' "$path"
       return 0
       ;;
-    .touchstone-config | .pre-commit-config.yaml | .markdownlint.json)
+    .touchstone-config)
       printf 'CI or repository tooling config changed: %s\n' "$path"
       return 0
       ;;
@@ -727,6 +727,9 @@ touchstone_preflight_affected_path() {
       return 0
       ;;
     .github/workflows/issue-claim-check.yml)
+      return 0
+      ;;
+    .pre-commit-config.yaml | .markdownlint.json)
       return 0
       ;;
     .touchstone-version | .touchstone-manifest)

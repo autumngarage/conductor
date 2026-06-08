@@ -79,6 +79,15 @@ def test_validation_workflow_still_forces_full_lane(tmp_path: Path) -> None:
     assert lane == "full\tCI validation workflow changed: .github/workflows/validate.yml"
 
 
+def test_pre_commit_config_uses_affected_lane(tmp_path: Path) -> None:
+    lane = _run_lane(tmp_path, [".pre-commit-config.yaml", "tests/test_touchstone_run.py"])
+
+    assert lane == (
+        "affected\tall changed paths are target-scoped and "
+        "validate_affected_command is configured"
+    )
+
+
 def test_dependency_manifest_still_forces_full_lane(tmp_path: Path) -> None:
     lane = _run_lane(tmp_path, ["pyproject.toml", "src/conductor/router.py"])
 
