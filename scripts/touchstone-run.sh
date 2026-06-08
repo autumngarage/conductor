@@ -8,6 +8,7 @@
 #   bash scripts/touchstone-run.sh typecheck
 #   bash scripts/touchstone-run.sh build
 #   bash scripts/touchstone-run.sh test
+#   bash scripts/touchstone-run.sh validate-affected
 #   bash scripts/touchstone-run.sh validate
 #
 set -euo pipefail
@@ -319,6 +320,26 @@ run_shell_command() {
     -u CODEX_REVIEW_FINDINGS_HISTORY_FILE \
     -u CODEX_REVIEW_SUPPRESS_LEGACY_WARNINGS \
     bash -c "$command"
+}
+
+shell_join() {
+  local arg first=true
+
+  for arg in "$@"; do
+    if [ "$first" = true ]; then
+      first=false
+    else
+      printf ' '
+    fi
+    printf '%q' "$arg"
+  done
+}
+
+run_shell_argv() {
+  local command
+
+  command="$(shell_join "$@")"
+  run_shell_command "$command"
 }
 
 configured_command_for_action() {
@@ -719,6 +740,221 @@ run_validate() {
   run_action test
 }
 
+affected_contains() {
+  local needle="$1"
+  shift
+  local item
+
+  for item in "$@"; do
+    [ "$item" = "$needle" ] && return 0
+  done
+  return 1
+}
+
+add_affected_python_file() {
+  local path="$1"
+
+  [ -f "$path" ] || return 0
+  if [ "${#AFFECTED_PYTHON_FILES[@]}" -eq 0 ] \
+    || ! affected_contains "$path" "${AFFECTED_PYTHON_FILES[@]}"; then
+    AFFECTED_PYTHON_FILES+=("$path")
+  fi
+}
+
+add_affected_pytest_file() {
+  local path="$1"
+
+  [ -f "$path" ] || return 0
+  if [ "${#AFFECTED_PYTEST_FILES[@]}" -eq 0 ] \
+    || ! affected_contains "$path" "${AFFECTED_PYTEST_FILES[@]}"; then
+    AFFECTED_PYTEST_FILES+=("$path")
+  fi
+}
+
+add_affected_shell_test() {
+  local path="$1"
+
+  [ -f "$path" ] || return 0
+  if [ "${#AFFECTED_SHELL_TESTS[@]}" -eq 0 ] \
+    || ! affected_contains "$path" "${AFFECTED_SHELL_TESTS[@]}"; then
+    AFFECTED_SHELL_TESTS+=("$path")
+  fi
+}
+
+add_affected_named_tests() {
+  local path
+
+  for path in "$@"; do
+    case "$path" in
+      tests/*.sh) add_affected_shell_test "$path" ;;
+      *) add_affected_pytest_file "$path" ;;
+    esac
+  done
+}
+
+map_affected_path_to_tests() {
+  local path="$1" base test_guess
+
+  case "$path" in
+    tests/test_*.py)
+      add_affected_pytest_file "$path"
+      return 0
+      ;;
+    tests/*.sh)
+      add_affected_shell_test "$path"
+      return 0
+      ;;
+    .github/workflows/issue-claim-check.yml)
+      add_affected_named_tests tests/test_issue_claim_workflow.py
+      return 0
+      ;;
+    src/conductor/cli.py)
+      add_affected_named_tests \
+        tests/test_cli.py \
+        tests/test_cli_auto.py \
+        tests/test_cli_contract.py \
+        tests/test_cli_v02.py \
+        tests/test_review_cascade.py
+      return 0
+      ;;
+    src/conductor/router.py | src/conductor/router_defaults.py)
+      add_affected_named_tests tests/test_router.py tests/test_cli_v02.py tests/test_review_cascade.py
+      return 0
+      ;;
+    src/conductor/credentials.py)
+      add_affected_named_tests tests/test_credentials.py
+      return 0
+      ;;
+    src/conductor/exec_boundary.py)
+      add_affected_named_tests tests/test_root_cause_redesign.py
+      return 0
+      ;;
+    src/conductor/exec_completion.py)
+      add_affected_named_tests tests/test_exec_completion.py
+      return 0
+      ;;
+    src/conductor/agent_wiring.py | src/conductor/_agent_templates.py)
+      add_affected_named_tests tests/test_agent_wiring.py tests/test_agent_template_drift.py
+      return 0
+      ;;
+    src/conductor/openrouter_model_stacks.py)
+      add_affected_named_tests tests/test_agent_wiring.py tests/test_openrouter.py
+      return 0
+      ;;
+    src/conductor/providers/openrouter.py)
+      add_affected_named_tests tests/test_openrouter.py tests/test_review_cascade.py
+      return 0
+      ;;
+    src/conductor/providers/claude.py | src/conductor/providers/codex.py | src/conductor/providers/gemini.py)
+      add_affected_named_tests tests/test_adapters_subprocess.py tests/test_review_cascade.py
+      return 0
+      ;;
+    src/conductor/providers/*.py)
+      base="$(basename "$path" .py)"
+      test_guess="tests/test_${base}.py"
+      add_affected_named_tests tests/test_adapters_subprocess.py "$test_guess"
+      return 0
+      ;;
+    scripts/codex-review.sh | scripts/conductor-review.sh)
+      add_affected_named_tests tests/test_codex_review_sentinel.py tests/test_codex_review_sentinel.sh
+      return 0
+      ;;
+    scripts/merge-pr.sh)
+      add_affected_named_tests \
+        tests/test_merge_pr_bypass_contract.py \
+        tests/test_merge_pr_worktree_handling.py \
+        tests/test-merge-pr-worktree-handling.sh
+      return 0
+      ;;
+    scripts/open-pr.sh)
+      add_affected_named_tests tests/test_open_pr_verify_merged.py tests/test-open-pr-verify-merged.sh
+      return 0
+      ;;
+    scripts/worker.sh | lib/worker-state.sh)
+      add_affected_named_tests tests/test_cli_swarm.py
+      return 0
+      ;;
+    scripts/touchstone-run.sh)
+      add_affected_named_tests tests/test_touchstone_run.py
+      return 0
+      ;;
+    lib/preflight.sh | lib/preflight-scope.sh)
+      add_affected_named_tests tests/test_preflight_lane.py
+      return 0
+      ;;
+    scripts/branch-guard.sh)
+      add_affected_named_tests tests/test_branch_guard.py
+      return 0
+      ;;
+    *.py)
+      base="$(basename "$path" .py)"
+      test_guess="tests/test_${base}.py"
+      add_affected_named_tests "$test_guess"
+      if [ -f "$test_guess" ]; then
+        return 0
+      fi
+      AFFECTED_NEEDS_FULL_PYTEST=true
+      warn "affected validate has no focused pytest mapping for $path; falling back to full pytest"
+      return 0
+      ;;
+  esac
+
+  return 0
+}
+
+run_validate_affected() {
+  local changed_paths_file="${TOUCHSTONE_PREFLIGHT_CHANGED_PATHS_FILE:-}"
+  local path python_bin
+  local -a AFFECTED_PYTHON_FILES=()
+  local -a AFFECTED_PYTEST_FILES=()
+  local -a AFFECTED_SHELL_TESTS=()
+  local AFFECTED_NEEDS_FULL_PYTEST=false
+
+  if [ -z "$changed_paths_file" ] || [ ! -f "$changed_paths_file" ]; then
+    warn "affected validate missing TOUCHSTONE_PREFLIGHT_CHANGED_PATHS_FILE; running full validate"
+    run_validate
+    return $?
+  fi
+
+  while IFS= read -r path || [ -n "$path" ]; do
+    [ -n "$path" ] || continue
+    case "$path" in
+      *.py) add_affected_python_file "$path" ;;
+    esac
+    map_affected_path_to_tests "$path"
+  done <"$changed_paths_file"
+
+  if [ "${#AFFECTED_PYTHON_FILES[@]}" -gt 0 ]; then
+    if command -v ruff >/dev/null 2>&1; then
+      run_shell_argv ruff check "${AFFECTED_PYTHON_FILES[@]}"
+    else
+      ok "ruff not installed; skipped"
+    fi
+  else
+    ok "affected validate: no changed Python files for ruff"
+  fi
+
+  if python_bin="$(find_python_bin)"; then
+    if [ "$AFFECTED_NEEDS_FULL_PYTEST" = true ]; then
+      run_shell_argv "$python_bin" -m pytest
+    elif [ "${#AFFECTED_PYTEST_FILES[@]}" -gt 0 ]; then
+      run_shell_argv "$python_bin" -m pytest "${AFFECTED_PYTEST_FILES[@]}"
+    else
+      ok "affected validate: no focused pytest targets"
+    fi
+  else
+    ok "python not found; skipped"
+  fi
+
+  if [ "${#AFFECTED_SHELL_TESTS[@]}" -gt 0 ]; then
+    for path in "${AFFECTED_SHELL_TESTS[@]}"; do
+      run_shell_argv bash "$path"
+    done
+  else
+    ok "affected validate: no shell test targets"
+  fi
+}
+
 print_detection() {
   local profile package_manager monorepo targets
 
@@ -764,6 +1000,7 @@ case "$ACTION" in
   -h | --help) usage ;;
   detect) print_detection ;;
   lint | typecheck | build | test) run_action "$ACTION" ;;
+  validate-affected) run_validate_affected ;;
   validate) run_validate ;;
   *)
     echo "ERROR: unknown touchstone-run action '$ACTION'" >&2

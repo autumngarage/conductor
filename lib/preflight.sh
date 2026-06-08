@@ -620,7 +620,22 @@ touchstone_preflight_changed_path_full_reason() {
       printf 'dependency manifest or lockfile changed: %s\n' "$path"
       return 0
       ;;
-    .github/workflows/* | .touchstone-config | .pre-commit-config.yaml | .markdownlint.json)
+    .github/workflows/issue-claim-check.yml)
+      return 1
+      ;;
+    .github/workflows/validate.yml | .github/workflows/ci.yml | .github/workflows/test.yml | .github/workflows/tests.yml)
+      printf 'CI validation workflow changed: %s\n' "$path"
+      return 0
+      ;;
+    .github/workflows/release.yml)
+      printf 'release workflow changed: %s\n' "$path"
+      return 0
+      ;;
+    .github/workflows/*)
+      printf 'unclassified CI workflow changed: %s\n' "$path"
+      return 0
+      ;;
+    .touchstone-config | .pre-commit-config.yaml | .markdownlint.json)
       printf 'CI or repository tooling config changed: %s\n' "$path"
       return 0
       ;;
@@ -656,10 +671,6 @@ touchstone_preflight_changed_path_full_reason() {
       printf 'migration path changed: %s\n' "$path"
       return 0
       ;;
-    src/* | lib/* | app/* | server/* | cmd/* | internal/* | pkg/*)
-      printf 'shared runtime path changed: %s\n' "$path"
-      return 0
-      ;;
   esac
 
   return 1
@@ -689,6 +700,42 @@ touchstone_preflight_full_validation_reason() {
 touchstone_preflight_affected_path() {
   case "$1" in
     apps/*/* | packages/*/* | services/*/*)
+      return 0
+      ;;
+    src/*.py)
+      return 0
+      ;;
+    app/*.py)
+      return 0
+      ;;
+    server/*.py)
+      return 0
+      ;;
+    cmd/*.py)
+      return 0
+      ;;
+    internal/*.py)
+      return 0
+      ;;
+    pkg/*.py)
+      return 0
+      ;;
+    tests/*.py | tests/*.sh)
+      return 0
+      ;;
+    scripts/*.sh | scripts/*.py | lib/*.sh | bin/*)
+      return 0
+      ;;
+    .github/workflows/issue-claim-check.yml)
+      return 0
+      ;;
+    .touchstone-version | .touchstone-manifest)
+      return 0
+      ;;
+    AGENTS.md | CLAUDE.md | GEMINI.md | TOUCHSTONE.md | README.md | CHANGELOG.md)
+      return 0
+      ;;
+    docs/* | principles/* | audits/* | feedback/* | .cortex/* | .cursor/rules/*)
       return 0
       ;;
   esac
@@ -777,6 +824,20 @@ touchstone_preflight_validation_lane() {
       return 0
       ;;
   esac
+}
+
+touchstone_preflight_default_affected_command() {
+  local repo_root="$1"
+
+  [ -f "$repo_root/scripts/touchstone-run.sh" ] || return 1
+  if [ -f "$repo_root/pyproject.toml" ] \
+    || [ -f "$repo_root/uv.lock" ] \
+    || [ -f "$repo_root/requirements.txt" ]; then
+    printf 'bash scripts/touchstone-run.sh validate-affected\n'
+    return 0
+  fi
+
+  return 1
 }
 
 touchstone_preflight_run_validate_command() {
@@ -971,6 +1032,9 @@ touchstone_preflight_validate() {
 
     repo_root="$(pwd)"
     affected_command="${TOUCHSTONE_PREFLIGHT_VALIDATE_AFFECTED_COMMAND:-$(touchstone_preflight_validate_command_from_config "$repo_root" validate_affected_command affected_validate_command validate_command_affected || true)}"
+    if [ -z "$affected_command" ]; then
+      affected_command="$(touchstone_preflight_default_affected_command "$repo_root" || true)"
+    fi
     smoke_command="${TOUCHSTONE_PREFLIGHT_VALIDATE_SMOKE_COMMAND:-$(touchstone_preflight_validate_command_from_config "$repo_root" validate_smoke_command smoke_validate_command validate_command_smoke || true)}"
     full_command="${TOUCHSTONE_PREFLIGHT_VALIDATE_FULL_COMMAND:-$(touchstone_preflight_validate_command_from_config "$repo_root" validate_full_command full_validate_command validate_command_full || true)}"
     lane_info="$(touchstone_preflight_validation_lane "$repo_root" "$affected_command" "$smoke_command")"
