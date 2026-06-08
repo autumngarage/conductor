@@ -1409,6 +1409,7 @@ def _is_retryable(err: Exception) -> tuple[bool, str]:
     if isinstance(err, ProviderHTTPError) and err.failure_reason:
         reason_categories = {
             "auth_quota": "rate-limit",
+            "insufficient_credits": "rate-limit",
             "malformed_response": "provider-error",
             "provider_outage": "5xx",
             "transient_network": "network",
@@ -1431,6 +1432,21 @@ def _is_retryable(err: Exception) -> tuple[bool, str]:
     if isinstance(err, ProviderHTTPError):
         return True, "transport"
     return False, "other"
+
+
+def _review_health_outcome(err: Exception, category: str) -> str:
+    """Return the review circuit-breaker outcome for a provider failure."""
+    if isinstance(err, ProviderHTTPError):
+        if err.failure_reason == "insufficient_credits":
+            return "insufficient-credits"
+        if err.status_code == 402:
+            text = f"{err.upstream_body or ''} {err}".lower()
+            if any(
+                token in text
+                for token in ("credit", "credits", "billing", "quota", "balance")
+            ):
+                return "insufficient-credits"
+    return category
 
 
 def _format_fallback_error_detail(err: Exception) -> str:
@@ -1821,6 +1837,10 @@ def _build_review_route_decision(
             health_kind="review",
         )
     except (NoConfiguredProvider, InvalidRouterRequest, MutedProvidersError) as e:
+        if isinstance(e, NoConfiguredProvider):
+            for name, reason in e.skipped:
+                if "recent review" in reason:
+                    review_reasons.setdefault(name, reason)
         raise _ReviewRouteSelectionError(e, review_reasons) from e
     return _apply_semantic_priority_to_decision(decision, plan), review_reasons, plan
 
@@ -3081,7 +3101,11 @@ def _invoke_review_with_fallback(
                 quarantined_contract_errors.append(e)
             if category == "rate-limit":
                 mark_rate_limited(candidate.name)
-            mark_outcome(candidate.name, category, kind="review")
+            mark_outcome(
+                candidate.name,
+                _review_health_outcome(e, category),
+                kind="review",
+            )
             last_exc = e
             fallback_summary = fallback_summary.with_attempt(
                 _fallback_attempt_from_error(

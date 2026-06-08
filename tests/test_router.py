@@ -428,6 +428,20 @@ def test_recent_review_output_contract_failure_is_skipped_across_processes(mocke
     assert "recent review output-contract failure" in skipped["codex"]
 
 
+def test_recent_review_insufficient_credits_skips_provider_across_processes(mocker):
+    from conductor import router
+
+    _stub_configured(mocker, {"codex": True, "openrouter": True})
+    mark_outcome("openrouter", "insufficient-credits", kind="review")
+    router._HEALTH.clear()
+
+    provider, decision = pick(["code-review"], prefer="best", health_kind="review")
+
+    assert provider.name == "codex"
+    skipped = dict(decision.candidates_skipped)
+    assert "recent review insufficient-credits failure" in skipped["openrouter"]
+
+
 def test_review_circuit_breaker_does_not_affect_non_review_routes(mocker):
     from conductor import router
 

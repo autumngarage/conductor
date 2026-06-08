@@ -1610,10 +1610,15 @@ def _positive_int(value: object) -> int | None:
 def _openrouter_http_failure_reason(status_code: int, response_text: str) -> str:
     if status_code in {401, 403, 429}:
         return "auth_quota"
+    lowered = response_text.lower()
+    if status_code == 402 and any(
+        token in lowered
+        for token in ("credit", "credits", "billing", "quota", "balance")
+    ):
+        return "insufficient_credits"
     if 500 <= status_code <= 599:
         return "provider_outage"
     if 400 <= status_code <= 499:
-        lowered = response_text.lower()
         if any(token in lowered for token in ("quota", "rate limit", "credit", "billing")):
             return "auth_quota"
         return "usage_config_error"

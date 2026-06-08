@@ -229,6 +229,7 @@ def test_call_none_response_without_fallback_includes_response_shape(configured)
     ("status_code", "body", "expected_reason"),
     [
         (429, "rate limit exceeded", "auth_quota"),
+        (402, "insufficient credits. Please add credits to continue.", "insufficient_credits"),
         (400, "invalid model request", "usage_config_error"),
         (503, "service unavailable", "provider_outage"),
     ],

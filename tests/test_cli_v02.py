@@ -2217,6 +2217,56 @@ def test_review_auto_no_viable_json_reports_excluded_reasons(mocker):
     assert excluded["openrouter"]["reason_code"] == "missing_credentials"
 
 
+def test_review_auto_openrouter_402_marks_review_health_before_retry(mocker):
+    from conductor.providers.interface import ProviderHTTPError
+
+    _stub_all_configured(mocker, {"openrouter"})
+    openrouter_call = mocker.patch.object(
+        OpenRouterProvider,
+        "call",
+        side_effect=ProviderHTTPError(
+            "OpenRouter returned HTTP 402: insufficient credits",
+            failure_reason="insufficient_credits",
+            provider="openrouter",
+            status_code=402,
+            upstream_body="insufficient credits",
+        ),
+    )
+
+    first = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--json",
+            "--brief",
+            "Review this merge. End with CODEX_REVIEW_CLEAN or BLOCKED.",
+        ],
+    )
+
+    assert first.exit_code == 1
+    payload = json.loads(first.stdout)
+    assert payload["attempts"][0]["provider"] == "openrouter"
+    assert payload["attempts"][0]["status"] == "rate-limit"
+    assert payload["attempts"][0]["failure_code"] == "rate_limited"
+    assert openrouter_call.call_count == 1
+
+    second = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--json",
+            "--brief",
+            "Review this merge. End with CODEX_REVIEW_CLEAN or BLOCKED.",
+        ],
+    )
+
+    assert second.exit_code == 2
+    assert openrouter_call.call_count == 1
+    assert "insufficient-credits" in second.output
+
+
 def test_review_auto_output_contract_failure_falls_through_to_next_provider(mocker):
     _stub_all_configured(mocker, {"codex", "claude"})
     mocker.patch.object(CodexProvider, "review_configured", return_value=(True, None))
