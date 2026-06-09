@@ -210,6 +210,7 @@ PROFILE_PRECEDENCE_TEXT = (
     "Resolution order: profile defaults < CONDUCTOR_* env vars < explicit CLI flags."
 )
 DEFAULT_EXEC_MAX_STALL_SEC = 360
+GEMINI_CALL_DEFAULT_TIMEOUT_SEC = 540
 MIN_EXEC_BRIEF_CHARS = 300
 DEFAULT_EXEC_MAX_ITERATIONS = 10
 EXEC_MAX_ITERATION_MULTIPLIERS = {
@@ -466,6 +467,19 @@ def _scale_dispatch_defaults(
         resolved_max_stall = None if scaled_stall is None else math.ceil(scaled_stall)
 
     return resolved_timeout, resolved_max_stall
+
+
+def _materialize_call_timeout_default(
+    *,
+    provider_id: str | None,
+    timeout_sec: int | None,
+    timeout_is_default: bool,
+) -> int | None:
+    if not timeout_is_default:
+        return timeout_sec
+    if provider_id == "gemini":
+        return GEMINI_CALL_DEFAULT_TIMEOUT_SEC
+    return timeout_sec
 
 
 def _cap_default_auto_fallback_stall(
@@ -860,6 +874,45 @@ def _warn_if_text_only_research_grounding_requested(plan: SemanticPlan, body: st
         "path:line citations or grounded code references. Use "
         "`conductor ask --kind code --effort high` or `conductor exec` when the "
         "answer must inspect files.",
+        err=True,
+    )
+
+
+_GEMINI_WEB_SOURCE_CITATION_PATTERNS = (
+    re.compile(
+        r"(?is)\b(?:cite|cites|citation|citations|references?)\b"
+        r".{0,80}\b(?:sources?|urls?|links?)\b"
+    ),
+    re.compile(
+        r"(?is)\b(?:sources?|urls?|links?)\b"
+        r".{0,80}\b(?:cite|cites|citation|citations|references?|verified|grounded|fact[- ]?check)\b"
+    ),
+    re.compile(
+        r"(?is)\b(?:verified|grounded|fact[- ]?check|live)\b"
+        r".{0,80}\b(?:sources?|urls?|links?|citations?)\b"
+    ),
+)
+
+
+def _brief_requests_web_source_citations(body: str) -> bool:
+    return any(
+        pattern.search(body) for pattern in _GEMINI_WEB_SOURCE_CITATION_PATTERNS
+    )
+
+
+def _warn_if_gemini_source_citations_requested(
+    *,
+    provider_id: str | None,
+    body: str,
+) -> None:
+    if provider_id != "gemini":
+        return
+    if not _brief_requests_web_source_citations(body):
+        return
+    click.echo(
+        "[conductor] warning: Gemini web-search source URLs are "
+        "provider-generated and not verified by Conductor. Check cited links "
+        "before relying on factual claims.",
         err=True,
     )
 
@@ -5139,9 +5192,11 @@ def main(ctx: click.Context) -> None:
     type=int,
     hidden=True,
     help=(
-        "Wall-clock timeout in seconds for review/exec provider calls. "
-        "Unbounded by default. Review-tagged auto routes derive their own "
-        "provider budget. Council uses --council-timeout for its total cap."
+        "Wall-clock timeout in seconds for provider calls. "
+        "Unbounded by default except Gemini CLI call mode, which defaults "
+        "to 540s and scales on slow networks. Review-tagged auto routes "
+        "derive their own provider budget. Council uses --council-timeout "
+        "for its total cap."
     ),
 )
 @click.option(
@@ -5552,6 +5607,12 @@ def ask(
         click.echo(f"conductor: {e}", err=True)
         sys.exit(2)
 
+    if plan.mode == "call":
+        timeout_sec = _materialize_call_timeout_default(
+            provider_id=decision.provider,
+            timeout_sec=timeout_sec,
+            timeout_is_default=timeout_is_default,
+        )
     timeout_sec, max_stall_sec = _scale_dispatch_defaults(
         provider_id=decision.provider,
         timeout_sec=timeout_sec,
@@ -5572,6 +5633,10 @@ def ask(
         session_log = _start_exec_session_log(log_file=log_file, resume_session_id=None)
         _emit_session_route_decision(session_log, decision)
     _warn_if_text_only_research_grounding_requested(plan, body)
+    _warn_if_gemini_source_citations_requested(
+        provider_id=decision.provider,
+        body=body,
+    )
     print_caller_banner(decision.provider, silent=silent_route or as_json)
     _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
     token_warning = _semantic_tool_context_warning(
@@ -6051,8 +6116,9 @@ def council_cmd(
     default=None,
     type=int,
     help=(
-        "Wall-clock timeout in seconds. Unbounded by default. Review-tagged "
-        "auto routes derive their own provider budget."
+        "Wall-clock timeout in seconds. Unbounded by default except Gemini "
+        "CLI call mode, which defaults to 540s and scales on slow networks. "
+        "Review-tagged auto routes derive their own provider budget."
     ),
 )
 @click.option(
@@ -6261,6 +6327,11 @@ def call(
             click.echo(exclusion_message, err=True)
         print_caller_banner(decision.provider, silent=silent_route or as_json)
         _emit_route_log(decision, verbose=verbose_route, silent=silent_route or as_json)
+        timeout_sec = _materialize_call_timeout_default(
+            provider_id=decision.provider,
+            timeout_sec=timeout_sec,
+            timeout_is_default=timeout_is_default,
+        )
         timeout_sec, max_stall_sec = _scale_dispatch_defaults(
             provider_id=decision.provider,
             timeout_sec=timeout_sec,
@@ -6288,6 +6359,10 @@ def call(
                 candidate_count=len(decision.ranked),
             )
         max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
+        _warn_if_gemini_source_citations_requested(
+            provider_id=decision.provider,
+            body=body,
+        )
 
         try:
             response, fallbacks = _invoke_with_fallback(
@@ -6349,6 +6424,11 @@ def call(
             click.echo(f"conductor: {e}", err=True)
             sys.exit(2)
         print_caller_banner(provider_id, silent=silent_route or as_json)
+        timeout_sec = _materialize_call_timeout_default(
+            provider_id=provider_id,
+            timeout_sec=timeout_sec,
+            timeout_is_default=timeout_is_default,
+        )
         timeout_sec, max_stall_sec = _scale_dispatch_defaults(
             provider_id=provider_id,
             timeout_sec=timeout_sec,
@@ -6357,6 +6437,10 @@ def call(
             max_stall_is_default=max_stall_is_default,
         )
         max_stall_sec = _normalize_max_stall_sec(max_stall_sec)
+        _warn_if_gemini_source_citations_requested(
+            provider_id=provider_id,
+            body=body,
+        )
         try:
             if isinstance(provider, OpenRouterProvider):
                 response = provider.call(
