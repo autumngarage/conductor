@@ -89,6 +89,7 @@ def test_kimi_call_uses_preset_openrouter_model(monkeypatch):
         "messages": [{"role": "user", "content": "hi"}],
         "reasoning": {"effort": "medium"},
         "max_tokens": 2048,
+        "max_completion_tokens": 2048,
         "usage": {"include": True},
     }
 

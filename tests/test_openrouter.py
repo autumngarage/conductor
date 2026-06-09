@@ -430,6 +430,7 @@ def test_call_sends_reasoning_effort_and_openrouter_headers(configured):
         "messages": [{"role": "user", "content": "hi"}],
         "reasoning": {"effort": "xhigh"},
         "max_tokens": 8192,
+        "max_completion_tokens": 8192,
         "usage": {"include": True},
     }
 
@@ -719,8 +720,10 @@ def test_exec_with_tools_retries_credit_402_with_affordable_max_tokens(
 
     assert response.text == "done"
     assert requests[0]["max_tokens"] == 2048
+    assert requests[0]["max_completion_tokens"] == 2048
     assert requests[0]["tools"][0]["function"]["name"] == "Read"
     assert requests[1]["max_tokens"] == 1688
+    assert requests[1]["max_completion_tokens"] == 1688
     assert requests[1]["tools"][0]["function"]["name"] == "Read"
 
 
@@ -760,6 +763,7 @@ def test_call_sends_ordered_models_stack(configured):
         "messages": [{"role": "user", "content": "hi"}],
         "reasoning": {"effort": "low"},
         "max_tokens": 1024,
+        "max_completion_tokens": 1024,
         "usage": {"include": True},
     }
     assert len(captured["payload"]["models"]) <= OPENROUTER_MODELS_ARRAY_MAX
@@ -811,6 +815,7 @@ def test_call_without_model_invokes_selector_and_builds_payload(configured, mock
         "messages": [{"role": "user", "content": "hi"}],
         "reasoning": {"effort": "medium"},
         "max_tokens": 2048,
+        "max_completion_tokens": 2048,
         "usage": {"include": True},
     }
     assert response.model == "google/gemini-flash-1.5"
@@ -1073,7 +1078,9 @@ def test_exec_with_tools_passes_remaining_timeout(configured, tmp_path, mocker):
         *,
         timeout_sec: float | None = None,
         timeout_kind: str = "timeout",
+        max_tokens_retry_cap: int | None = None,
     ) -> dict:
+        assert max_tokens_retry_cap == 2048
         observed_timeouts.append(timeout_sec)
         observed_timeout_kinds.append(timeout_kind)
         return {
