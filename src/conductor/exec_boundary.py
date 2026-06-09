@@ -76,8 +76,10 @@ def enforce_exec_boundary(
     if not dirty:
         return ExecBoundaryResult("clean", scoped_paths=tuple(sorted(scoped)))
 
-    in_scope = tuple(sorted(path for path in dirty if _matches_scope(path, scoped)))
-    out_of_scope = tuple(sorted(path for path in dirty if path not in in_scope))
+    in_scope_paths = {path for path in dirty if _matches_scope(path, scoped)}
+    out_of_scope_paths = dirty - in_scope_paths
+    in_scope = tuple(sorted(in_scope_paths))
+    out_of_scope = tuple(sorted(out_of_scope_paths))
     warnings: list[str] = []
     if out_of_scope:
         warnings.append(
@@ -167,14 +169,24 @@ def _dirty_paths(worktree: Path) -> list[str]:
         idx += 1
         if not entry:
             continue
-        status = entry[:2]
-        path = entry[3:] if len(entry) > 3 else ""
-        if (status.startswith("R") or status.startswith("C")) and idx < len(entries):
+        status, path = _status_entry_path(entry)
+        if status.strip().startswith(("R", "C")) and idx < len(entries):
             path = entries[idx]
             idx += 1
         if path:
             paths.append(path)
     return sorted(dict.fromkeys(paths))
+
+
+def _status_entry_path(entry: str) -> tuple[str, str]:
+    if len(entry) >= 3 and entry[2] == " ":
+        return entry[:2], entry[3:]
+    status, separator, path = entry.partition(" ")
+    if separator:
+        return status, path
+    if len(entry) > 2:
+        return entry[:2], entry[2:]
+    return entry, ""
 
 
 def _git_stdout(worktree: Path, args: list[str]) -> str | None:

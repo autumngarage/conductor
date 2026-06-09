@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from conductor import exec_boundary as exec_boundary_module
 from conductor.cli import (
     _apply_exec_commit_boundary,
     _invoke_with_fallback,
@@ -16,7 +17,11 @@ from conductor.cli import (
     _response_with_council_health,
     main,
 )
-from conductor.exec_boundary import capture_exec_boundary_snapshot, enforce_exec_boundary
+from conductor.exec_boundary import (
+    ExecBoundarySnapshot,
+    capture_exec_boundary_snapshot,
+    enforce_exec_boundary,
+)
 from conductor.provider_capabilities import capabilities_for
 from conductor.providers import (
     CallResponse,
@@ -186,6 +191,46 @@ def test_exec_boundary_commits_only_in_scope_dirty_paths(tmp_path: Path) -> None
         "src/app.py"
     ]
     assert "?? AGENTS.md" in _git(repo, "status", "--short")
+
+
+def test_exec_boundary_preserves_single_column_dirty_status_paths(mocker) -> None:
+    repo = Path("/repo")
+
+    def fake_git_stdout(_worktree: Path, args: list[str]) -> str | None:
+        if args == ["status", "--porcelain", "-z", "--untracked-files=all"]:
+            return (
+                "M src/cortex/hosted/ask_ledger.py\0"
+                "M tests/test_hosted_ask_ledger.py\0"
+            )
+        if args == ["rev-parse", "--short", "HEAD"]:
+            return "abc123"
+        return None
+
+    git_run = mocker.patch.object(exec_boundary_module, "_git_run", return_value=None)
+    mocker.patch.object(exec_boundary_module, "_git_stdout", side_effect=fake_git_stdout)
+
+    result = enforce_exec_boundary(
+        ExecBoundarySnapshot(worktree=repo, head="before"),
+        brief=(
+            "Fix `src/cortex/hosted/ask_ledger.py` and "
+            "`tests/test_hosted_ask_ledger.py`."
+        ),
+        agent_write_set=set(),
+    )
+
+    assert result.status == "committed"
+    assert result.committed_paths == (
+        "src/cortex/hosted/ask_ledger.py",
+        "tests/test_hosted_ask_ledger.py",
+    )
+    assert result.out_of_scope_paths == ()
+    assert result.warnings == ()
+    assert git_run.call_args_list[0].args[1] == [
+        "add",
+        "--",
+        "src/cortex/hosted/ask_ledger.py",
+        "tests/test_hosted_ask_ledger.py",
+    ]
 
 
 def test_exec_boundary_preserves_hidden_directory_scope(tmp_path: Path) -> None:
