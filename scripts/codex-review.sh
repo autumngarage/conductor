@@ -1951,6 +1951,35 @@ conductor_inner_timeout() {
   printf '%s\n' "$((wrapper_timeout - grace))"
 }
 
+conductor_review_should_isolate_worktree() {
+  local phase="${1:-review}"
+  local subcommand="${2:-review}"
+
+  [ "$phase" = "review" ] || return 1
+  [ "$subcommand" = "review" ] || return 1
+  [ -n "${CODEX_REVIEW_PR_NUMBER:-}" ] || return 1
+  ! is_truthy "${TOUCHSTONE_REVIEW_DISABLE_ISOLATED_WORKTREE:-false}"
+}
+
+conductor_create_isolated_review_worktree() {
+  local path
+
+  path="$(mktemp -d "${TMPDIR:-/tmp}/touchstone-review-worktree.XXXXXX")" || return 1
+  if ! git worktree add --detach -q "$path" HEAD >/dev/null 2>&1; then
+    rm -rf "$path"
+    return 1
+  fi
+  printf '%s' "$path"
+}
+
+conductor_remove_isolated_review_worktree() {
+  local path="${1:-}"
+
+  [ -n "$path" ] || return 0
+  git worktree remove --force "$path" >/dev/null 2>&1 || rm -rf "$path"
+  git worktree prune >/dev/null 2>&1 || true
+}
+
 reviewer_conductor_exec() {
   local prompt="$1"
   local phase="${REVIEW_PHASE:-review}"
@@ -1959,6 +1988,7 @@ reviewer_conductor_exec() {
   local tools
   local effective_with
   local conductor_timeout
+  local review_cwd=""
 
   # REVIEW_MODE + REVIEW_PHASE → Conductor job shape. The default phase uses
   # Conductor's semantic review command and lets Conductor own routing policy.
@@ -1985,6 +2015,21 @@ reviewer_conductor_exec() {
     fi
     if [ -n "${REVIEW_MAX_STALL_SEC:-}" ]; then
       args+=(--max-stall-seconds "$REVIEW_MAX_STALL_SEC")
+    fi
+    if conductor_review_should_isolate_worktree "$phase" "$subcommand"; then
+      if ! review_cwd="$(conductor_create_isolated_review_worktree)"; then
+        echo "[conductor] review isolation failed: could not create temporary worktree" >&2
+        return 1
+      fi
+      echo "[conductor] review isolation: using temporary worktree $review_cwd" >&2
+      args+=(--cwd "$review_cwd")
+      (
+        trap 'rc=$?; conductor_remove_isolated_review_worktree "$review_cwd"; exit $rc' EXIT
+        trap 'exit 143' TERM INT
+        printf '%s' "$prompt" \
+          | CODEX_REVIEW_IN_PROGRESS=1 conductor review "${args[@]}"
+      )
+      return $?
     fi
     printf '%s' "$prompt" \
       | CODEX_REVIEW_IN_PROGRESS=1 conductor review "${args[@]}"
