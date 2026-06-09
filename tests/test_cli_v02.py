@@ -26,6 +26,7 @@ from click.testing import CliRunner
 
 from conductor import offline_mode
 from conductor.cli import (
+    GEMINI_CALL_DEFAULT_TIMEOUT_SEC,
     _estimate_review_input_tokens,
     _estimate_text_tokens,
     _resolve_exec_max_iterations,
@@ -304,6 +305,105 @@ def test_call_auto_effort_max_flows_to_provider(mocker):
     assert "effort=max" in result.stderr
 
 
+def test_call_with_gemini_default_timeout_is_scaled(mocker):
+    _stub_all_configured(mocker, {"gemini"})
+    mocker.patch(
+        "conductor.cli.get_network_profile",
+        return_value=NetworkProfile(
+            105,
+            "https://generativelanguage.googleapis.com",
+            1_000,
+        ),
+    )
+    call_mock = mocker.patch.object(
+        GeminiProvider,
+        "call",
+        return_value=_fake_response("gemini", "gemini-2.5-pro"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "call",
+            "--with",
+            "gemini",
+            "--task",
+            "Find recent background and summarize it inline.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert call_mock.call_args.kwargs["timeout_sec"] == (
+        GEMINI_CALL_DEFAULT_TIMEOUT_SEC * 2
+    )
+    assert "timeouts scaled 2" in result.stderr
+
+
+def test_call_with_gemini_explicit_timeout_is_not_scaled(mocker):
+    _stub_all_configured(mocker, {"gemini"})
+    mocker.patch(
+        "conductor.cli.get_network_profile",
+        return_value=NetworkProfile(
+            105,
+            "https://generativelanguage.googleapis.com",
+            1_000,
+        ),
+    )
+    call_mock = mocker.patch.object(
+        GeminiProvider,
+        "call",
+        return_value=_fake_response("gemini", "gemini-2.5-pro"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "call",
+            "--with",
+            "gemini",
+            "--timeout",
+            "600",
+            "--task",
+            "Find recent background and summarize it inline.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert call_mock.call_args.kwargs["timeout_sec"] == 600
+
+
+def test_call_with_gemini_warns_on_source_citation_brief(mocker):
+    _stub_all_configured(mocker, {"gemini"})
+    mocker.patch(
+        "conductor.cli.get_network_profile",
+        return_value=NetworkProfile(
+            None,
+            "https://generativelanguage.googleapis.com",
+            1_000,
+        ),
+    )
+    mocker.patch.object(
+        GeminiProvider,
+        "call",
+        return_value=_fake_response("gemini", "gemini-2.5-pro"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "call",
+            "--with",
+            "gemini",
+            "--task",
+            "Fact-check this claim and cite source URLs for each verdict.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Gemini web-search source URLs" in result.stderr
+    assert "not verified by Conductor" in result.stderr
+
+
 def test_call_auto_exclude_skips_named_provider(mocker):
     _stub_all_configured(mocker, {"claude", "codex"})
     codex_call = mocker.patch.object(CodexProvider, "call", return_value=_fake_response("codex"))
@@ -562,6 +662,41 @@ def test_text_review_command_uses_text_only_flat_rate_route(mocker):
         {"provider": "gemini", "models": []},
         {"provider": "openrouter", "models": []},
     ]
+
+
+def test_ask_text_review_gemini_default_timeout_is_scaled(mocker):
+    _stub_all_configured(mocker, {"gemini"})
+    mocker.patch(
+        "conductor.cli.get_network_profile",
+        return_value=NetworkProfile(
+            105,
+            "https://generativelanguage.googleapis.com",
+            1_000,
+        ),
+    )
+    call_mock = mocker.patch.object(
+        GeminiProvider,
+        "call",
+        return_value=_fake_response("gemini", "gemini-2.5-pro"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ask",
+            "--kind",
+            "text-review",
+            "--brief",
+            "Review these project instructions for clarity.",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert call_mock.call_args.kwargs["timeout_sec"] == (
+        GEMINI_CALL_DEFAULT_TIMEOUT_SEC * 2
+    )
+    assert "timeouts scaled 2" in result.stderr
 
 
 def test_ask_text_review_rejects_code_review_targets(mocker):
