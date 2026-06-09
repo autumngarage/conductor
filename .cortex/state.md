@@ -1,10 +1,10 @@
 ---
-Generated: 2026-06-09T13:00:19-04:00
+Generated: 2026-06-09T13:11:18-04:00
 Generator: cortex refresh-state v1.6.4
 Sources:
-  - HEAD sha: 8330f52471f0999291df352bf217541adc5f0186
+  - HEAD sha: 37b28b4e428c312e8981dfffa71b4a43bbf4068e
   - .cortex/plans/*.md (2 files)
-  - .cortex/journal/*.md (35 entries, 2026-04-24..2026-06-09)
+  - .cortex/journal/*.md (36 entries, 2026-04-24..2026-06-09)
   - .cortex/doctrine/*.md (7 entries)
   - .cortex/templates/**/*.md (12 templates)
   - docs/case-studies/*.md (0 case studies)
@@ -50,6 +50,7 @@ Sources-hash:
   .cortex/journal/2026-06-06-flat-rate-first-conductor-vision.md: 8f91e74d1b86d041951648d0946950743fe222c150b5c693fd5f3cae57fe31e0
   .cortex/journal/2026-06-06-touchstone-help-sync-bug.md: c143da43e9e87b178e9f24aa231f2f324245499c75fdfb971ced81ce6f99d4df
   .cortex/journal/2026-06-09-pr-552-merged.md: 7e82f0e78bb8de3c79837ad885d87db49571f22f97baa72bd3d152c9ad8070c0
+  .cortex/journal/2026-06-09-pr-556-merged.md: 931d96515a124aad4e1f3a74e6ac6364f8e1d4e4b0120783cf99d2f9e46ef9bc
   .cortex/journal/2026-06-09-pr-merged-1203.md: 1182fed509bdb93acdb2e1d0371911afe25f9570cc82175d79f87ccb998c4253
   .cortex/journal/2026-06-09-pr-merged-1218.md: 4d01ea63aef643bbf326f43e366712732c001fec6b3f0801a22350f26397d2bb
   .cortex/journal/2026-06-09-release-v0.10.36.md: 05a018e0ebf4df37d173418cf09177f882bf58d757ee4b0eeff1ff25799ab2bd
@@ -67,7 +68,7 @@ Sources-hash:
   .cortex/templates/journal/release.md: 9a6bc59219156e48b419fb170c7c50ff557767def8672ef20568df3e14eadbd0
   .cortex/templates/journal/sentinel-cycle.md: 2945e2d94af4ec9848584b4b3e9cea7060d2968dd42e78faf21fb6f859137476
   .cortex/templates/plans/template.md: d8156cfa3b86acd2a1fbb36cff07cae37d99f3adee7f72b14b7b16e645c51b44
-Corpus: 35 Journal entries, 2 Plans, 7 Doctrine entries, 12 Templates, 0 Case studies
+Corpus: 36 Journal entries, 2 Plans, 7 Doctrine entries, 12 Templates, 0 Case studies
 Omitted:
   []
 Incomplete:
@@ -108,6 +109,7 @@ Spec: 0.5.0
 - **2026-05-18** — PR #482 merged - normalize duplicate review sentinels (`.cortex/journal/2026-05-18-pr-482-merged.md`, Type: pr-merged)
 - **2026-05-18** — Release v0.10.29 - duplicate review sentinel hotfix (`.cortex/journal/2026-05-18-release-v0.10.29.md`, Type: release)
 - **2026-06-09** — PR #552 merged — fix: harden gemini call defaults (`.cortex/journal/2026-06-09-pr-552-merged.md`, Type: pr-merged)
+- **2026-06-09** — PR #556 merged - fix: cap openrouter completion tokens (`.cortex/journal/2026-06-09-pr-556-merged.md`, Type: pr-merged)
 - **2026-06-09** — PR #548 merged — fix: preserve exec boundary dirty paths (`.cortex/journal/2026-06-09-pr-merged-1203.md`, Type: pr-merged)
 - **2026-06-09** — PR #550 merged — fix: isolate merge review worktrees (`.cortex/journal/2026-06-09-pr-merged-1218.md`, Type: pr-merged)
 - **2026-06-09** — Release v0.10.36 - reliability hotfix rollup (`.cortex/journal/2026-06-09-release-v0.10.36.md`, Type: release)
