@@ -253,7 +253,9 @@ class OpenRouterProvider:
         # the response when the request opts in via `usage: {include: true}`.
         # Without it, multi-turn exec/review sessions log per-iteration cost
         # as None and the aggregated delegation cost under-reports by ~10x.
-        payload = {**payload, "usage": {"include": True}}
+        payload = _with_openrouter_token_budget_aliases(
+            {**payload, "usage": {"include": True}}
+        )
         try:
             timeout = self._timeout_sec if timeout_sec is None else timeout_sec
             with provider_http_client(timeout=timeout) as client:
@@ -427,12 +429,15 @@ class OpenRouterProvider:
             **target_payload,
             "messages": [{"role": "user", "content": task}],
         }
-        max_tokens_cap = _max_tokens_cap_for_task(effort, task_tag_set)
-        payload["max_tokens"] = _max_tokens_for_request(
+        max_tokens_value = _max_tokens_for_request(
             max_tokens=max_tokens,
             effort=effort,
             task_tags=task_tag_set,
         )
+        payload["max_tokens"] = max_tokens_value
+        max_tokens_cap = _max_tokens_cap_for_task(effort, task_tag_set)
+        if max_tokens is None:
+            max_tokens_cap = max_tokens_value
 
         attempts: list[dict[str, object]] = []
         start = time.monotonic()
@@ -610,12 +615,13 @@ class OpenRouterProvider:
         start = time.monotonic()
         while iteration < iteration_cap:
             iteration += 1
+            max_tokens_value = _max_tokens_for_effort(effort)
             payload: dict = {
                 **target_payload,
                 "messages": messages,
                 "tools": tool_specs,
                 "tool_choice": "auto",
-                "max_tokens": _max_tokens_for_effort(effort),
+                "max_tokens": max_tokens_value,
             }
             if tools & {"Bash", "Edit", "Write"}:
                 payload["parallel_tool_calls"] = False
@@ -629,6 +635,7 @@ class OpenRouterProvider:
                 payload,
                 timeout_sec=request_timeout_sec,
                 timeout_kind=timeout_kind,
+                max_tokens_retry_cap=max_tokens_value,
             )
             final_body = body
             message = _first_message(body)
@@ -1487,6 +1494,27 @@ def _max_tokens_for_request(
     return bounded
 
 
+def _with_openrouter_token_budget_aliases(payload: dict) -> dict:
+    max_tokens = _positive_int(payload.get("max_tokens"))
+    max_completion_tokens = _positive_int(payload.get("max_completion_tokens"))
+    if max_tokens is None and max_completion_tokens is None:
+        return payload
+
+    updated = dict(payload)
+    if max_tokens is None:
+        updated["max_tokens"] = max_completion_tokens
+    elif max_completion_tokens is None:
+        updated["max_completion_tokens"] = max_tokens
+    return updated
+
+
+def _set_openrouter_token_budget(payload: dict, value: int) -> dict:
+    updated = dict(payload)
+    updated["max_tokens"] = value
+    updated["max_completion_tokens"] = value
+    return updated
+
+
 def _max_tokens_cap_for_task(effort: str | int, task_tags: set[str]) -> int | None:
     if task_tags & _OPENROUTER_BOUNDED_MAX_TOKEN_TAGS:
         return _max_tokens_for_effort(effort)
@@ -1583,9 +1611,7 @@ def _max_tokens_affordability_retry_payload(
         retry_max_tokens = min(retry_max_tokens, max_tokens_cap)
     if retry_max_tokens >= current:
         return None
-    retry_payload = dict(payload)
-    retry_payload["max_tokens"] = retry_max_tokens
-    return retry_payload
+    return _set_openrouter_token_budget(payload, retry_max_tokens)
 
 
 def _parse_max_tokens_affordability(response_text: str) -> tuple[int | None, int | None]:

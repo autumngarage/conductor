@@ -103,6 +103,7 @@ def test_deepseek_chat_call_uses_preset_openrouter_model(monkeypatch):
         "model": DEEPSEEK_CHAT_MODEL,
         "messages": [{"role": "user", "content": "hi"}],
         "max_tokens": 2048,
+        "max_completion_tokens": 2048,
         "usage": {"include": True},
     }
 
