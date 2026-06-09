@@ -984,6 +984,53 @@ esac
 exit 1
 '''
 
+FAKE_CONDUCTOR_REVIEW_MUTATES_CWD = '''
+#!/usr/bin/env bash
+case "$1" in
+  --version)
+    echo "conductor 0.10.99"
+    exit 0
+    ;;
+  doctor)
+    if [ "$2" = "--json" ]; then
+      echo '{"configured": true}'
+      exit 0
+    fi
+    ;;
+  route)
+    for arg in "$@"; do
+      if [ "$arg" = "--help" ]; then
+        exit 0
+      fi
+    done
+    echo '{"selected_provider":"codex","provider":"codex"}'
+    exit 0
+    ;;
+  review)
+    cwd="$PWD"
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --cwd)
+          cwd="$2"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    git -C "$cwd" checkout -q --detach HEAD~1
+    echo "reviewer mutation" >> "$cwd/README"
+    git -C "$cwd" -c user.name=t -c user.email=t@t add README
+    git -C "$cwd" -c user.name=t -c user.email=t@t commit -q -m "unauthorized review commit"
+    echo "Looks fine."
+    echo "CODEX_REVIEW_CLEAN"
+    exit 0
+    ;;
+esac
+exit 1
+'''
+
 # Codex writes a file (simulating a partial edit) then exits non-zero
 # without ever emitting CODEX_REVIEW_FIXED. In fix mode the cascade must
 # discard this partial edit before falling through, otherwise claude would
@@ -1189,6 +1236,65 @@ def test_cascade_exhausted_blocks_when_fail_closed(tmp_path: Path) -> None:
     assert result.returncode == 1, f"stdout={result.stdout}\nstderr={result.stderr}"
     assert "All reviewers in the cascade failed" in result.stdout
     assert "blocking push" in result.stderr or "blocking push" in result.stdout
+
+
+def test_merge_gate_conductor_review_uses_isolated_worktree(tmp_path: Path) -> None:
+    """A merge-gate read-only Conductor review may use stateful native providers.
+
+    Provider-side branch switches or commits must land in a disposable worktree,
+    not in the source PR checkout that the merge gate will later merge or fix.
+    """
+    repo = _make_repo(tmp_path)
+    _write_config(repo, ["conductor"], on_error="fail-closed", mode="fix")
+    head_before = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    fakes = tmp_path / "fakes"
+    fakes.mkdir()
+    _write_executable(fakes / "conductor", FAKE_CONDUCTOR_REVIEW_MUTATES_CWD)
+
+    result = _run_script(
+        repo,
+        fakes,
+        extra_env={"CODEX_REVIEW_MODE": "fix", "CODEX_REVIEW_PR_NUMBER": "357"},
+    )
+
+    assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+    assert "review isolation: using temporary worktree" in result.stdout
+    assert subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip() == head_before
+    assert subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip() == "main"
+    assert subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout == ""
+    assert "touchstone-review-worktree" not in subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "reviewer mutation" not in (repo / "README").read_text(encoding="utf-8")
 
 
 def test_fix_mode_discards_partial_edits_before_fallthrough(tmp_path: Path) -> None:
