@@ -24,7 +24,7 @@ import pytest
 import respx
 from click.testing import CliRunner
 
-from conductor import offline_mode
+from conductor import __version__, offline_mode
 from conductor.cli import (
     GEMINI_CALL_DEFAULT_TIMEOUT_SEC,
     _estimate_review_input_tokens,
@@ -269,6 +269,7 @@ def test_call_auto_prefer_best_routes_to_frontier(mocker):
     assert "[conductor] best" in result.stderr
     assert "→ claude" in result.stderr
     assert "tier: frontier" in result.stderr
+    assert f"conductor={__version__.split('+', 1)[0]}" in result.stderr
 
 
 def test_call_auto_route_json_includes_prompt_size_estimate(mocker):

@@ -4666,11 +4666,12 @@ def _format_route_log_line(decision: RouteDecision) -> str:
     """Single-line route summary for stderr observability."""
     tags_matched = ",".join(decision.matched_tags) or "none"
     effort_str = decision.effort if isinstance(decision.effort, str) else f"{decision.effort}tok"
+    conductor_version = __version__.split("+", 1)[0]
     return (
         f"[conductor] {decision.prefer} (effort={effort_str}) → {decision.provider} "
         f"(tier: {decision.tier} · matched: {tags_matched} · "
         f"est: {decision.estimated_input_tokens:,} in/"
-        f"{decision.estimated_output_tokens:,} out)"
+        f"{decision.estimated_output_tokens:,} out · conductor={conductor_version})"
     )
 
 
@@ -4826,6 +4827,7 @@ def _emit_session_route_decision(
             "estimated_input_tokens": decision.estimated_input_tokens,
             "estimated_output_tokens": decision.estimated_output_tokens,
             "estimated_thinking_tokens": decision.estimated_thinking_tokens,
+            "conductor_version": __version__,
             "tag_default_applied": decision.tag_default_applied,
             "tag_default_considered": [
                 {"tag": tag, "provider": provider, "status": status}
