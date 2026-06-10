@@ -1,10 +1,10 @@
 ---
-Generated: 2026-06-09T22:23:40-04:00
+Generated: 2026-06-09T22:33:25-04:00
 Generator: cortex refresh-state v1.6.4
 Sources:
-  - HEAD sha: 9f7cb8e1172c9d1328f9879fa4900c66b79ed41e
+  - HEAD sha: 65a259a0db29bc5e0eb0cd4eaaaf47843544fa5d
   - .cortex/plans/*.md (2 files)
-  - .cortex/journal/*.md (41 entries, 2026-04-24..2026-06-10)
+  - .cortex/journal/*.md (42 entries, 2026-04-24..2026-06-10)
   - .cortex/doctrine/*.md (7 entries)
   - .cortex/templates/**/*.md (12 templates)
   - docs/case-studies/*.md (0 case studies)
@@ -59,6 +59,7 @@ Sources-hash:
   .cortex/journal/2026-06-10-pr-567-merged.md: bdb6dffb94e3d8c55ce4edc1518f1a9701e8cba73f89a458effa8139bb21ff79
   .cortex/journal/2026-06-10-pr-571-merged.md: 4b1800b39d7345797b9172044d8b4a47acd630a6f89649a69ca481743b3c2eea
   .cortex/journal/2026-06-10-pr-574-merged.md: 39bc45458589ab11255102991eda9cec6d9b3ff4145ef3be4fa95f68dcd192f0
+  .cortex/journal/2026-06-10-release-v0.10.38.md: a50de988d9ea742a3ad5f81eecc2aa4d98a6bf5f96266a2cc497d55c79cd6f3e
   .cortex/plans/conductor-blindspots.md: 69b7cec18f5893a5edfe83e3d095eb9ae7e57d5e9e117adf73e417f31ebe11a0
   .cortex/plans/root-cause-roadmap.md: c5e34c7dbe620747b74c68b6b184a21c056b1ce05d60bdca463d0d530763b1c1
   .cortex/templates/README.md: 695aa2e623bd7f4e698dae471bded0cde354da0c1d8589266660ceb1be8efad1
@@ -73,7 +74,7 @@ Sources-hash:
   .cortex/templates/journal/release.md: 9a6bc59219156e48b419fb170c7c50ff557767def8672ef20568df3e14eadbd0
   .cortex/templates/journal/sentinel-cycle.md: 2945e2d94af4ec9848584b4b3e9cea7060d2968dd42e78faf21fb6f859137476
   .cortex/templates/plans/template.md: d8156cfa3b86acd2a1fbb36cff07cae37d99f3adee7f72b14b7b16e645c51b44
-Corpus: 41 Journal entries, 2 Plans, 7 Doctrine entries, 12 Templates, 0 Case studies
+Corpus: 42 Journal entries, 2 Plans, 7 Doctrine entries, 12 Templates, 0 Case studies
 Omitted:
   []
 Incomplete:
@@ -123,6 +124,7 @@ Spec: 0.5.0
 - **2026-06-10** — PR #567 merged - reject blocked reviews without findings (`.cortex/journal/2026-06-10-pr-567-merged.md`, Type: pr-merged)
 - **2026-06-10** — PR #571 merged - emit review fix classification (`.cortex/journal/2026-06-10-pr-571-merged.md`, Type: pr-merged)
 - **2026-06-10** — PR #574 merged - warn on legacy routing controls (`.cortex/journal/2026-06-10-pr-574-merged.md`, Type: pr-merged)
+- **2026-06-10** — Release v0.10.38 - review-loop and routing migration hardening (`.cortex/journal/2026-06-10-release-v0.10.38.md`, Type: release)
 
 ## Stale-now / handle-later
 
