@@ -2679,6 +2679,7 @@ handle_error() {
   case "$reason" in
     timeout*) fail_open_code="FAIL_OPEN_TIMEOUT" ;;
     "malformed sentinel") fail_open_code="FAIL_OPEN_PARSE_ERROR" ;;
+    "blocked without actionable findings") fail_open_code="FAIL_OPEN_PARSE_ERROR" ;;
     "provider unavailable:"*) fail_open_code="FAIL_OPEN_PROVIDER_UNAVAILABLE" ;;
     *) fail_open_code="FAIL_OPEN_REVIEWER_ERROR" ;;
   esac
@@ -2697,6 +2698,8 @@ handle_error() {
     echo "[fail-open:${fail_open_code}] ${reason} — AI review bypassed, push proceeds" >&2
     if [ "$reason" = "malformed sentinel" ]; then
       echo "[fail-open:${fail_open_code}] missing sentinel — review verdict is untrustworthy; push allowed by policy" >&2
+    elif [ "$reason" = "blocked without actionable findings" ]; then
+      echo "[fail-open:${fail_open_code}] blocked verdict had no actionable findings — review verdict is untrustworthy; push allowed by policy" >&2
     fi
     echo "==> ERROR ($reason) — not blocking push (on_error=fail-open)."
     echo "    Set on_error = \"fail-closed\" in ${CONFIG_DISPLAY_NAME:-.touchstone-review.toml} to block on errors."
@@ -3262,6 +3265,13 @@ extract_findings_block() {
     return 0
   fi
   printf '%s\n' "$1" | awk '/^- / { print; found = 1 } /^$/ { if (found) exit }'
+}
+
+actionable_findings_count() {
+  local findings_block count
+  findings_block="$(extract_findings_block "$1")"
+  count="$(printf '%s\n' "$findings_block" | grep -c '^- ' || true)"
+  printf '%s' "${count:-0}"
 }
 
 write_review_findings() {
@@ -4833,13 +4843,25 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
   fi
 
   while :; do
+    fallback_reason=""
     LAST_SENTINEL="$(printf '%s\n' "$OUTPUT" | extract_review_sentinel)"
     case "$LAST_SENTINEL" in
-      CODEX_REVIEW_CLEAN | CODEX_REVIEW_FIXED | CODEX_REVIEW_BLOCKED) break ;;
+      CODEX_REVIEW_CLEAN | CODEX_REVIEW_FIXED)
+        break
+        ;;
+      CODEX_REVIEW_BLOCKED)
+        REVIEW_FINDINGS_COUNT="$(actionable_findings_count "$OUTPUT")"
+        if [ "$REVIEW_FINDINGS_COUNT" -gt 0 ] 2>/dev/null; then
+          break
+        fi
+        fallback_reason="blocked without actionable findings"
+        ;;
+      *)
+        fallback_reason="malformed sentinel"
+        ;;
     esac
 
-    LAST_LINE="$(printf '%s\n' "$OUTPUT" | awk 'NF { line = $0 } END { print line }' | tr -d '\r')"
-    if try_review_fallback_retry "malformed sentinel" "$REVIEW_ATTEMPT_HEAD_BEFORE" "$REVIEW_ATTEMPT_STATUS_BEFORE"; then
+    if try_review_fallback_retry "$fallback_reason" "$REVIEW_ATTEMPT_HEAD_BEFORE" "$REVIEW_ATTEMPT_STATUS_BEFORE"; then
       EXIT="$FALLBACK_REVIEW_EXIT"
       OUTPUT="$(cat "$REVIEW_OUTPUT_FILE" 2>/dev/null || true)"
       print_route_log
@@ -4867,6 +4889,20 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
     fi
     break
   done
+
+  if [ "$LAST_SENTINEL" = "CODEX_REVIEW_BLOCKED" ]; then
+    REVIEW_FINDINGS_COUNT="$(actionable_findings_count "$OUTPUT")"
+    if [ "$REVIEW_FINDINGS_COUNT" -eq 0 ] 2>/dev/null; then
+      phase "blocked without actionable findings"
+      echo "==> $REVIEWER_LABEL emitted BLOCKED without actionable findings."
+      echo "    Treating as malformed review output; not entering auto-fix."
+      printf '%s\n' "$OUTPUT" | sed 's/^/    /'
+      REVIEW_EXIT_REASON="blocked-no-findings"
+      append_review_diagnostic_event "blocked-no-findings" "blocked without actionable findings"
+      print_summary
+      handle_error "blocked without actionable findings"
+    fi
+  fi
 
   if [ "$LAST_SENTINEL" = "CODEX_REVIEW_BLOCKED" ] && mode_allows_fix; then
     run_fix_phase_for_blocked_review "$OUTPUT" || true

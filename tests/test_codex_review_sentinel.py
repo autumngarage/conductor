@@ -556,6 +556,204 @@ def test_codex_review_wrapper_blocks_reviewer_error_when_fail_closed(
     assert "blocking push (on_error=fail-closed)" in result.stderr
 
 
+def test_codex_review_wrapper_rejects_blocked_without_actionable_findings(
+    tmp_path: Path,
+) -> None:
+    repo, env = _make_review_repo(tmp_path)
+    fakes = tmp_path / "fakes"
+    fakes.mkdir()
+    conductor_args = tmp_path / "conductor-args.txt"
+    summary_file = tmp_path / "review-summary.json"
+    conductor = fakes / "conductor"
+    conductor.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            printf '%s\\n' "$*" >> "${FAKE_CONDUCTOR_ARGS:?}"
+            case "$1" in
+              doctor)
+                printf '{"configured": true}\\n'
+                ;;
+              review)
+                cat >/dev/null
+                printf 'No blocking issues found, but I am not comfortable approving.\\n'
+                printf 'CODEX_REVIEW_BLOCKED\\n'
+                ;;
+              exec)
+                cat >/dev/null
+                printf 'fix phase should not run\\n' >> README
+                printf 'CODEX_REVIEW_FIXED\\n'
+                ;;
+              *)
+                exit 1
+                ;;
+            esac
+            """
+        ),
+        encoding="utf-8",
+    )
+    conductor.chmod(0o755)
+
+    script = Path(__file__).resolve().parent.parent / "scripts" / "codex-review.sh"
+    result = subprocess.run(
+        ["bash", str(script)],
+        cwd=repo,
+        env={
+            **env,
+            "PATH": f"{fakes}:{os.environ.get('PATH', '')}",
+            "CODEX_REVIEW_BASE": "HEAD~1",
+            "CODEX_REVIEW_MODE": "fix",
+            "CODEX_REVIEW_ON_ERROR": "fail-closed",
+            "CODEX_REVIEW_DISABLE_CACHE": "1",
+            "CODEX_REVIEW_TIMEOUT": "5",
+            "CODEX_REVIEW_SUMMARY_FILE": str(summary_file),
+            "TOUCHSTONE_CONDUCTOR_FALLBACK_RETRY": "false",
+            "FAKE_CONDUCTOR_ARGS": str(conductor_args),
+            "NO_COLOR": "1",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "emitted BLOCKED without actionable findings" in result.stdout
+    assert "not entering auto-fix" in result.stdout
+    assert "blocking push (on_error=fail-closed)" in result.stderr
+
+    conductor_invocations = conductor_args.read_text(encoding="utf-8").splitlines()
+    assert any(line.startswith("review ") for line in conductor_invocations)
+    assert not any(line.startswith("exec ") for line in conductor_invocations)
+
+    summary = json.loads(summary_file.read_text(encoding="utf-8"))
+    assert summary["exit_reason"] == "blocked-no-findings"
+    assert summary["findings"] == 0
+    assert summary["review_status"] == "review_not_completed"
+
+    head_subject = subprocess.run(
+        ["git", "log", "-1", "--format=%s"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert head_subject == "config"
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert status == ""
+
+
+def test_codex_review_wrapper_retries_blocked_without_actionable_findings(
+    tmp_path: Path,
+) -> None:
+    repo, env = _make_review_repo(tmp_path)
+    fakes = tmp_path / "fakes"
+    fakes.mkdir()
+    conductor_args = tmp_path / "conductor-args.txt"
+    summary_file = tmp_path / "review-summary.json"
+    conductor = fakes / "conductor"
+    conductor.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            printf '%s\\n' "$*" >> "${FAKE_CONDUCTOR_ARGS:?}"
+            case "$1" in
+              doctor)
+                printf '{"configured": true}\\n'
+                ;;
+              review)
+                cat >/dev/null
+                case " $* " in
+                  *" --exclude "*codex*)
+                    printf '[conductor] review tried providers: gemini (success)\\n' >&2
+                    printf 'LGTM\\nCODEX_REVIEW_CLEAN\\n'
+                    ;;
+                  *)
+                    printf '[conductor] review tried providers: codex (success)\\n' >&2
+                    printf 'No blocking issues found, but I am not comfortable approving.\\n'
+                    printf 'CODEX_REVIEW_BLOCKED\\n'
+                    ;;
+                esac
+                ;;
+              exec)
+                cat >/dev/null
+                printf 'fix phase should not run\\n' >> README
+                printf 'CODEX_REVIEW_FIXED\\n'
+                ;;
+              *)
+                exit 1
+                ;;
+            esac
+            """
+        ),
+        encoding="utf-8",
+    )
+    conductor.chmod(0o755)
+
+    script = Path(__file__).resolve().parent.parent / "scripts" / "codex-review.sh"
+    result = subprocess.run(
+        ["bash", str(script)],
+        cwd=repo,
+        env={
+            **env,
+            "PATH": f"{fakes}:{os.environ.get('PATH', '')}",
+            "CODEX_REVIEW_BASE": "HEAD~1",
+            "CODEX_REVIEW_MODE": "fix",
+            "CODEX_REVIEW_ON_ERROR": "fail-closed",
+            "CODEX_REVIEW_DISABLE_CACHE": "1",
+            "CODEX_REVIEW_TIMEOUT": "5",
+            "CODEX_REVIEW_SUMMARY_FILE": str(summary_file),
+            "FAKE_CONDUCTOR_ARGS": str(conductor_args),
+            "NO_COLOR": "1",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (
+        "Review infrastructure/noncompliance failure: blocked without actionable findings"
+        in result.stdout
+    )
+    assert "Retrying once with auto-routing" in result.stdout
+    assert "ALL CLEAR" in result.stdout
+
+    conductor_invocations = conductor_args.read_text(encoding="utf-8").splitlines()
+    review_invocations = [
+        line for line in conductor_invocations if line.startswith("review ")
+    ]
+    assert len(review_invocations) == 2
+    assert "--exclude" in review_invocations[1]
+    assert "codex" in review_invocations[1]
+    assert not any(line.startswith("exec ") for line in conductor_invocations)
+
+    summary = json.loads(summary_file.read_text(encoding="utf-8"))
+    assert summary["exit_reason"] == "clean"
+    assert summary["findings"] == 0
+    assert summary["fallback_attempted"] is True
+    assert summary["fallback_primary_provider"] == "codex"
+    assert summary["fallback_retry_provider"] == "gemini"
+    assert summary["fallback_reason"] == "blocked without actionable findings"
+
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert status == ""
+
+
 def test_codex_review_wrapper_requires_conductor_review_command(
     tmp_path: Path,
 ) -> None:
