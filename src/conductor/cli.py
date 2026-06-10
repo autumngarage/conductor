@@ -966,6 +966,102 @@ def _resolve_layered_value(
     return profile_value
 
 
+def _parameter_is_commandline(name: str) -> bool:
+    ctx = click.get_current_context(silent=True)
+    if ctx is None:
+        return False
+    return ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE
+
+
+def _legacy_layered_control_source(
+    *,
+    param_name: str,
+    flag: str,
+    cli_value: object,
+    env_key: str,
+    profile_value: str | None = None,
+) -> str | None:
+    if cli_value is not None and _parameter_is_commandline(param_name):
+        return flag
+    if os.environ.get(env_key) is not None:
+        return env_key
+    if profile_value is not None:
+        return f"profile.{param_name}"
+    return None
+
+
+def _emit_legacy_auto_routing_warning(
+    *,
+    command: str,
+    auto: bool,
+    tags: str | None,
+    prefer: str | None,
+    effort: str | None,
+    exclude: str | None,
+    profile_spec: ProfileSpec | None,
+    warn_effort: bool,
+    silent: bool,
+) -> None:
+    if silent:
+        return
+
+    controls: list[str] = []
+    if auto and _parameter_is_commandline("auto"):
+        controls.append("--auto")
+
+    layered_controls = (
+        ("tags", "--tags", tags, "CONDUCTOR_TAGS", profile_spec.tags if profile_spec else None),
+        (
+            "prefer",
+            "--prefer",
+            prefer,
+            "CONDUCTOR_PREFER",
+            profile_spec.prefer if profile_spec else None,
+        ),
+        (
+            "exclude",
+            "--exclude",
+            exclude,
+            "CONDUCTOR_EXCLUDE",
+            None,
+        ),
+    )
+    for param_name, flag, value, env_key, profile_value in layered_controls:
+        source = _legacy_layered_control_source(
+            param_name=param_name,
+            flag=flag,
+            cli_value=value,
+            env_key=env_key,
+            profile_value=profile_value,
+        )
+        if source is not None:
+            controls.append(source)
+
+    if warn_effort:
+        source = _legacy_layered_control_source(
+            param_name="effort",
+            flag="--effort",
+            cli_value=effort,
+            env_key="CONDUCTOR_EFFORT",
+            profile_value=profile_spec.effort if profile_spec else None,
+        )
+        if source is not None:
+            controls.append(source)
+
+    if not controls:
+        return
+
+    unique_controls = ", ".join(dict.fromkeys(controls))
+    click.echo(
+        f"[conductor] deprecation: legacy auto-routing controls on `conductor {command}` "
+        f"are deprecated for the v0.11 compatibility window and will be removed in v0.12 "
+        f"({unique_controls}). Use job verbs like `conductor ask`, `conductor code`, "
+        "`conductor research`, and `conductor review` for default routing; keep "
+        "`--with <provider>` only for explicit lower-level provider pins.",
+        err=True,
+    )
+
+
 def _load_named_profile(name: str | None) -> ProfileSpec | None:
     if name is None:
         return None
@@ -6292,6 +6388,18 @@ def call(
         )
     if provider_id and not auto:
         _enforce_local_provider_opt_in(provider_id, offline_requested=offline is True)
+    if auto:
+        _emit_legacy_auto_routing_warning(
+            command="call",
+            auto=auto,
+            tags=tags,
+            prefer=prefer,
+            effort=effort,
+            exclude=exclude,
+            profile_spec=profile_spec,
+            warn_effort=True,
+            silent=silent_route or as_json,
+        )
 
     brief_input = _read_task(
         task,
@@ -6741,6 +6849,18 @@ def review(
     review_target_count = sum(1 for value in (base, commit, uncommitted) if value)
     if review_target_count > 1:
         raise click.UsageError("use only one of --base, --commit, or --uncommitted.")
+    if auto_route:
+        _emit_legacy_auto_routing_warning(
+            command="review",
+            auto=auto,
+            tags=tags,
+            prefer=prefer,
+            effort=effort,
+            exclude=exclude,
+            profile_spec=profile_spec,
+            warn_effort=True,
+            silent=silent_route or as_json,
+        )
 
     brief_input = _read_task(
         task,
@@ -11473,6 +11593,18 @@ def exec_cmd(
         )
     if provider_id and not auto:
         _enforce_local_provider_opt_in(provider_id, offline_requested=offline is True)
+    if auto:
+        _emit_legacy_auto_routing_warning(
+            command="exec",
+            auto=auto,
+            tags=tags,
+            prefer=prefer,
+            effort=effort,
+            exclude=exclude,
+            profile_spec=profile_spec,
+            warn_effort=True,
+            silent=silent_route or as_json,
+        )
 
     brief_files = tuple(brief_file)
     if auto_phase and len(brief_files) > 1:
