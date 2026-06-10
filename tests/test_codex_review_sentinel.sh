@@ -82,7 +82,8 @@ esac
 
 exec_harness="$(mktemp)"
 exec_args_file="$(mktemp)"
-trap 'rm -f "$exec_harness" "$exec_args_file"' EXIT
+validate_harness="$(mktemp)"
+trap 'rm -f "$exec_harness" "$exec_args_file" "$validate_harness"' EXIT
 {
   sed -n '/^conductor_should_use_semantic_review()/,/^}/p' "$SCRIPT"
   sed -n '/^conductor_effective_with_for_phase()/,/^}/p' "$SCRIPT"
@@ -119,5 +120,60 @@ case "$exec_args" in
     exit 1
     ;;
 esac
+
+# ── validate_fix_classification regression tests ──────────────────────────
+{
+  printf 'REVIEWER_LABEL=test-reviewer\n'
+  sed -n '/^fix_classification_kind()/,/^}/p' "$SCRIPT"
+  sed -n '/^validate_fix_classification()/,/^}/p' "$SCRIPT"
+  cat <<'HARNESS'
+
+assert_validate() {
+  local name="$1" input="$2" should_pass="$3" actual
+  if validate_fix_classification "$input" >/dev/null 2>&1; then
+    actual="pass"
+  else
+    actual="fail"
+  fi
+  if [ "$actual" != "$should_pass" ]; then
+    printf 'FAIL: validate_fix_classification: %s\nexpected: %s  got: %s\n' "$name" "$should_pass" "$actual" >&2
+    exit 1
+  fi
+}
+
+assert_validate "missing classification" \
+  $'Some output\nCODEX_REVIEW_FIXED' \
+  fail
+
+assert_validate "malformed kind" \
+  $'FIX_CLASSIFICATION: bogus-kind; findings-addressed: 1\nCODEX_REVIEW_FIXED' \
+  fail
+
+assert_validate "missing findings addressed" \
+  $'FIX_CLASSIFICATION: substantive\nCODEX_REVIEW_FIXED' \
+  fail
+
+assert_validate "malformed findings addressed" \
+  $'FIX_CLASSIFICATION: substantive; findings-addressed: many\nCODEX_REVIEW_FIXED' \
+  fail
+
+assert_validate "duplicate classification lines" \
+  $'FIX_CLASSIFICATION: substantive; findings-addressed: 1\nFIX_CLASSIFICATION: style-only; findings-addressed: 0\nCODEX_REVIEW_FIXED' \
+  fail
+
+assert_validate "valid substantive" \
+  $'FIX_CLASSIFICATION: substantive; findings-addressed: 2\nCODEX_REVIEW_FIXED' \
+  pass
+
+assert_validate "valid style-only" \
+  $'FIX_CLASSIFICATION: style-only; findings-addressed: 0\nCODEX_REVIEW_FIXED' \
+  pass
+
+assert_validate "valid mixed" \
+  $'FIX_CLASSIFICATION: mixed; findings-addressed: 1\nCODEX_REVIEW_FIXED' \
+  pass
+HARNESS
+} >"$validate_harness"
+bash "$validate_harness"
 
 printf 'ok\n'

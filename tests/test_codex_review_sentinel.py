@@ -814,6 +814,89 @@ def test_codex_review_wrapper_requires_conductor_review_command(
     assert "reviewer exit 2" in result.stdout
 
 
+def test_codex_review_wrapper_emits_fix_classification_for_fixed_batch(
+    tmp_path: Path,
+) -> None:
+    repo, env = _make_review_repo(tmp_path)
+    fakes = tmp_path / "fakes"
+    fakes.mkdir()
+    conductor_args = tmp_path / "conductor-args.txt"
+    conductor = fakes / "conductor"
+    conductor.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            printf '%s\\n' "$*" >> "${FAKE_CONDUCTOR_ARGS:?}"
+            case "$1" in
+              doctor)
+                printf '{"configured": true}\\n'
+                ;;
+              review)
+                cat >/dev/null
+                if grep -q 'fixed by fake conductor' README; then
+                  printf 'LGTM\\nCODEX_REVIEW_CLEAN\\n'
+                else
+                  printf -- '- README:1 - missing fake fix [fixable]\\n'
+                  printf 'CODEX_REVIEW_BLOCKED\\n'
+                fi
+                ;;
+              exec)
+                cat >/dev/null
+                printf 'fixed by fake conductor\\n' >> README
+                printf 'Applied README:1.\\n'
+                printf 'FIX_CLASSIFICATION: substantive; findings-addressed: 1\\n'
+                printf 'CODEX_REVIEW_FIXED\\n'
+                ;;
+              *)
+                exit 1
+                ;;
+            esac
+            """
+        ),
+        encoding="utf-8",
+    )
+    conductor.chmod(0o755)
+
+    script = Path(__file__).resolve().parent.parent / "scripts" / "codex-review.sh"
+    result = subprocess.run(
+        ["bash", str(script)],
+        cwd=repo,
+        env={
+            **env,
+            "PATH": f"{fakes}:{os.environ.get('PATH', '')}",
+            "CODEX_REVIEW_BASE": "HEAD~1",
+            "CODEX_REVIEW_MODE": "fix",
+            "CODEX_REVIEW_MAX_ITERATIONS": "2",
+            "CODEX_REVIEW_DISABLE_CACHE": "1",
+            "CODEX_REVIEW_TIMEOUT": "5",
+            "FAKE_CONDUCTOR_ARGS": str(conductor_args),
+            "NO_COLOR": "1",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (
+        "[conductor] exec fix-classification: substantive (findings-addressed: 1)"
+        in result.stdout
+    )
+    assert "ALL CLEAR" in result.stdout
+    conductor_invocations = conductor_args.read_text(encoding="utf-8").splitlines()
+    assert any(line.startswith("exec ") for line in conductor_invocations)
+
+    head_subject = subprocess.run(
+        ["git", "log", "-1", "--format=%s"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert head_subject == "fix: address Conductor review findings (auto, fix, iter 1)"
+
+
 def test_codex_review_wrapper_blocks_below_minimum_conductor_version(
     tmp_path: Path,
 ) -> None:

@@ -1731,6 +1731,18 @@ Output contract — strict:
 - Emit CODEX_REVIEW_FIXED if you changed files.
 - Emit CODEX_REVIEW_BLOCKED if any blocker remains unsafe or unclear to fix.
 - Do not emit CODEX_REVIEW_CLEAN from the fix phase.
+- If you emit CODEX_REVIEW_FIXED, include exactly one machine-readable line
+  before the final sentinel:
+  FIX_CLASSIFICATION: substantive|style-only|mixed; findings-addressed: N
+
+Classification rules:
+- substantive: every edit directly repairs one or more listed findings.
+- style-only: no edit repairs a listed finding; the edit is formatting,
+  naming, idiom, equivalent refactoring, or another preference.
+- mixed: at least one edit repairs a finding and at least one edit is
+  style-only.
+- findings-addressed: count of distinct read-only findings repaired by this
+  edit batch. Use 0 for style-only.
 
 The LAST line of your output must be exactly CODEX_REVIEW_FIXED or CODEX_REVIEW_BLOCKED.
 FIX_PROMPT_EOF
@@ -3272,6 +3284,82 @@ actionable_findings_count() {
   findings_block="$(extract_findings_block "$1")"
   count="$(printf '%s\n' "$findings_block" | grep -c '^- ' || true)"
   printf '%s' "${count:-0}"
+}
+
+fix_classification_kind() {
+  printf '%s\n' "$1" | awk '
+    BEGIN { kind = "unknown" }
+    {
+      lower = tolower($0)
+      if (lower ~ /^[[:space:]]*fix_classification:[[:space:]]*/) {
+        if (lower ~ /fix_classification:[[:space:]]*style-only/) {
+          kind = "style-only"
+        } else if (lower ~ /fix_classification:[[:space:]]*substantive/) {
+          kind = "substantive"
+        } else if (lower ~ /fix_classification:[[:space:]]*mixed/) {
+          kind = "mixed"
+        } else {
+          kind = "unknown"
+        }
+      }
+    }
+    END { print kind }
+  '
+}
+
+fix_classification_findings_addressed() {
+  printf '%s\n' "$1" | awk '
+    BEGIN { addressed = "" }
+    {
+      lower = tolower($0)
+      if (lower ~ /^[[:space:]]*fix_classification:[[:space:]]*/ &&
+          lower ~ /findings-addressed:[[:space:]]*[0-9]+/) {
+        sub(/^.*findings-addressed:[[:space:]]*/, "", lower)
+        sub(/[^0-9].*$/, "", lower)
+        addressed = lower
+      }
+    }
+    END {
+      if (addressed == "") {
+        print 0
+      } else {
+        print addressed
+      }
+    }
+  '
+}
+
+emit_fix_classification() {
+  local fix_output="$1"
+  local kind findings_addressed
+  kind="$(fix_classification_kind "$fix_output")"
+  findings_addressed="$(fix_classification_findings_addressed "$fix_output")"
+  echo "[conductor] exec fix-classification: $kind (findings-addressed: $findings_addressed)"
+}
+
+validate_fix_classification() {
+  local fix_output="$1"
+  local line_count
+  line_count="$(printf '%s\n' "$fix_output" | grep -ic '^[[:space:]]*fix_classification:[[:space:]]*' || true)"
+  if [ "$line_count" -eq 0 ]; then
+    echo "==> $REVIEWER_LABEL emitted CODEX_REVIEW_FIXED without a FIX_CLASSIFICATION line."
+    echo "    Fix output must include exactly one: FIX_CLASSIFICATION: substantive|style-only|mixed; findings-addressed: N"
+    echo "    Refusing to auto-commit malformed fix output."
+    return 1
+  fi
+  if [ "$line_count" -gt 1 ]; then
+    echo "==> $REVIEWER_LABEL emitted CODEX_REVIEW_FIXED with $line_count FIX_CLASSIFICATION lines (expected exactly 1)."
+    echo "    Duplicate classification lines produce ambiguous results; refusing to auto-commit."
+    return 1
+  fi
+  if ! printf '%s\n' "$fix_output" \
+    | grep -Eiq '^[[:space:]]*fix_classification:[[:space:]]*(substantive|style-only|mixed)[[:space:]]*;[[:space:]]*findings-addressed:[[:space:]]*[0-9]+[[:space:]]*$'; then
+    echo "==> $REVIEWER_LABEL emitted a malformed FIX_CLASSIFICATION line."
+    echo "    Expected: FIX_CLASSIFICATION: substantive|style-only|mixed; findings-addressed: N"
+    echo "    Refusing to auto-commit malformed fix output."
+    return 1
+  fi
+  return 0
 }
 
 write_review_findings() {
@@ -4973,6 +5061,11 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
         echo "    Inspect the working-tree diff before deciding whether to keep or discard them."
         exit 1
       fi
+
+      if ! validate_fix_classification "$OUTPUT"; then
+        exit 1
+      fi
+      emit_fix_classification "$OUTPUT"
 
       phase "applying fixes"
       printf "\n  ${C_YELLOW}🔧 Auto-fixing...${C_RESET}\n\n"
