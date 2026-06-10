@@ -4696,7 +4696,12 @@ def _format_usage_line(response: CallResponse) -> str:
 
 def _format_route_ranking(decision: RouteDecision) -> list[str]:
     """Verbose ranking table for --verbose-route."""
-    lines = [f"[conductor] route decision (prefer={decision.prefer}, effort={decision.effort}):"]
+    conductor_version = __version__.split("+", 1)[0]
+    lines = [
+        "[conductor] route decision "
+        f"(prefer={decision.prefer}, effort={decision.effort}, "
+        f"conductor={conductor_version}):"
+    ]
     if decision.tag_default_considered:
         for tag, provider, status in decision.tag_default_considered:
             picked_note = ""

@@ -509,8 +509,9 @@ def test_call_verbose_route_prints_full_ranking(mocker):
     )
 
     assert result.exit_code == 0
-    # Verbose mode emits the ranking table.
+    # Verbose mode emits the ranking table with the conductor version marker.
     assert "route decision" in result.stderr
+    assert f"conductor={__version__.split('+', 1)[0]}" in result.stderr
     assert "1. claude" in result.stderr
     assert "codex" in result.stderr
     assert "ollama" in result.stderr
