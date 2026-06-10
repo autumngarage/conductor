@@ -306,6 +306,72 @@ def test_call_auto_effort_max_flows_to_provider(mocker):
     assert "effort=max" in result.stderr
 
 
+def test_call_auto_legacy_routing_controls_warn(mocker):
+    _stub_all_configured(mocker, {"claude"})
+    mocker.patch.object(ClaudeProvider, "call", return_value=_fake_response("claude"))
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "call",
+            "--auto",
+            "--prefer",
+            "best",
+            "--effort",
+            "high",
+            "--tags",
+            "cheap",
+            "--exclude",
+            "ollama",
+            "--task",
+            "hi",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "legacy auto-routing controls" in result.stderr
+    for token in ("--auto", "--prefer", "--effort", "--tags", "--exclude"):
+        assert token in result.stderr
+    assert "conductor ask" in result.stderr
+    assert "conductor code" in result.stderr
+
+
+def test_call_auto_env_legacy_routing_controls_warn(mocker, monkeypatch):
+    _stub_all_configured(mocker, {"claude"})
+    monkeypatch.setenv("CONDUCTOR_PREFER", "best")
+    mocker.patch.object(ClaudeProvider, "call", return_value=_fake_response("claude"))
+
+    result = CliRunner().invoke(main, ["call", "--auto", "--task", "hi"])
+
+    assert result.exit_code == 0, result.output
+    assert "legacy auto-routing controls" in result.stderr
+    assert "CONDUCTOR_PREFER" in result.stderr
+
+
+def test_call_auto_legacy_warning_suppressed_for_json(mocker):
+    _stub_all_configured(mocker, {"claude"})
+    mocker.patch.object(ClaudeProvider, "call", return_value=_fake_response("claude"))
+
+    result = CliRunner().invoke(
+        main,
+        ["call", "--auto", "--prefer", "best", "--task", "hi", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    json.loads(result.stdout)
+    assert "legacy auto-routing controls" not in result.stderr
+
+
+def test_call_with_provider_pin_does_not_warn_legacy_routing(mocker):
+    _stub_all_configured(mocker, {"claude"})
+    mocker.patch.object(ClaudeProvider, "call", return_value=_fake_response("claude"))
+
+    result = CliRunner().invoke(main, ["call", "--with", "claude", "--task", "hi"])
+
+    assert result.exit_code == 0, result.output
+    assert "legacy auto-routing controls" not in result.stderr
+
+
 def test_call_with_gemini_default_timeout_is_scaled(mocker):
     _stub_all_configured(mocker, {"gemini"})
     mocker.patch(
@@ -1997,6 +2063,41 @@ def test_review_auto_honors_router_defaults_within_semantic_stack(
     assert "→ claude" in result.stderr
 
 
+def test_review_legacy_routing_controls_warn(mocker):
+    _stub_all_configured(mocker, {"codex"})
+    mocker.patch.object(CodexProvider, "review_configured", return_value=(True, None))
+    mocker.patch.object(
+        CodexProvider,
+        "review",
+        return_value=_fake_response("codex", "codex-review"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "--auto",
+            "--prefer",
+            "best",
+            "--effort",
+            "high",
+            "--tags",
+            "cheap",
+            "--exclude",
+            "openrouter",
+            "--base",
+            "origin/main",
+            "--brief",
+            "Review this merge.",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "legacy auto-routing controls" in result.stderr
+    for token in ("--auto", "--prefer", "--effort", "--tags", "--exclude"):
+        assert token in result.stderr
+
+
 def test_review_without_auto_or_with_uses_semantic_review_route(mocker, tmp_path):
     brief = tmp_path / "review.md"
     brief.write_text("Review this merge using the project reviewer guide.", encoding="utf-8")
@@ -2948,6 +3049,38 @@ def test_exec_auto_routes_to_tool_capable_provider(mocker):
     assert exec_mock.called
     # kimi would be skipped by the tools filter (supported_tools=frozenset()).
     assert "→ claude" in result.stderr
+
+
+def test_exec_auto_legacy_routing_controls_warn(mocker):
+    _stub_all_configured(mocker, {"claude", "codex"})
+    exec_mock = mocker.patch.object(ClaudeProvider, "exec", return_value=_fake_response("claude"))
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "exec",
+            "--auto",
+            "--prefer",
+            "best",
+            "--effort",
+            "high",
+            "--tags",
+            "coding",
+            "--exclude",
+            "codex",
+            "--tools",
+            "Read",
+            "--no-preflight",
+            "--task",
+            "do it",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert exec_mock.called
+    assert "legacy auto-routing controls" in result.stderr
+    for token in ("--auto", "--prefer", "--effort", "--tags", "--exclude"):
+        assert token in result.stderr
 
 
 def test_exec_unknown_tool_errors_with_hint():

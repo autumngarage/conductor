@@ -18,14 +18,16 @@ Regression tests cover the high-risk pieces of this surface, including JSON auto
 ## Invocation forms
 
 ```bash
-# Auto-routed by tag preference
-conductor call --auto --tags <tag1,tag2> [options]
-
 # Semantic intent routing
 conductor ask --kind <research|code|review|text-review|council> --effort <level> [options]
+conductor code --brief-file task.md
+conductor research "summarize this paper"
 
 # Explicit provider
 conductor call --with <provider> [options]
+
+# Legacy compatibility auto-routing (deprecated during v0.11; removed in v0.12)
+conductor call --auto --tags <tag1,tag2> [options]
 
 # Force the local provider
 conductor call --offline [options]
@@ -41,7 +43,7 @@ conductor exec --with <provider> --permission-profile <read-only|patch|full> [op
 
 Use `conductor ask` when the caller knows the semantic kind but does not want to reason about providers. It applies Conductor's deterministic `kind × effort` matrix, then delegates to `call`, `exec`, `review`, or council fan-out internally. Provider/model/tag/tool overrides intentionally stay on the lower-level `call`, `exec`, and `review` commands. Do not combine `ask` with `--with` or `--model`; when the user explicitly requests a provider or model, use the lower-level command for that job, for example `conductor call --with openrouter --brief-file /tmp/brief.md`.
 
-Usually, exactly one of `--auto` or `--with` is required for `call` and `exec`. `review` is auto-routed by default when `--with` is absent; `--auto` remains accepted for compatibility. `--auto` runs the router using `--tags`, `--prefer`, and `--exclude` to pick a configured provider; `--with` bypasses the router for direct provider use. `--offline` is the exception for `call` and `exec`: it may be used without `--auto` or `--with`, sets the sticky offline flag, and rewrites the call to `--with ollama`. Passing `--offline --with <non-ollama>` is an error. `--no-offline` clears the sticky flag, then normal `--auto` / `--with` rules apply.
+Usually, exactly one of `--auto` or `--with` is required for `call` and `exec`. `review` is auto-routed by default when `--with` is absent; `--auto` remains accepted for compatibility. `--auto` runs the router using `--tags`, `--prefer`, and `--exclude` to pick a configured provider; `--with` bypasses the router for direct provider use. The legacy auto-routing controls on `call`, `review`, and `exec` (`--auto`, `--tags`, `--prefer`, `--exclude`, auto-route `--effort`, and the matching `CONDUCTOR_TAGS`, `CONDUCTOR_PREFER`, `CONDUCTOR_EFFORT`, and `CONDUCTOR_EXCLUDE` environment variables) are deprecated during the v0.11 compatibility window and emit stderr warnings outside `--json` / `--silent-route`. Use the job verbs (`ask`, `code`, `research`, `review`, `text-review`, `council`) for default routing; keep `--with <provider>` only as the lower-level explicit provider-pin escape hatch. `--offline` is the exception for `call` and `exec`: it may be used without `--auto` or `--with`, sets the sticky offline flag, and rewrites the call to `--with ollama`. Passing `--offline --with <non-ollama>` is an error. `--no-offline` clears the sticky flag, then normal `--auto` / `--with` rules apply.
 
 Use `conductor review` for code review. Its auto route uses the same semantic review cascade as `conductor ask --kind review --effort medium`: Codex `codex review`, Claude Code `/review`, then an OpenRouter hosted review prompt. Use `conductor ask --kind text-review --effort medium` or `conductor text-review` for prose, docs, prompt, or instruction review with no diff tooling. Use `conductor exec` for engineering or auto-fix tasks that may edit files.
 
@@ -120,13 +122,13 @@ The canonical reference is `conductor call --help`. The contract-level commitmen
 | Flag | Type | Stability | Notes |
 |---|---|---|---|
 | `--with <provider>` | string | stable | One of: kimi, claude, codex, deepseek-chat, deepseek-reasoner, gemini, ollama, openrouter |
-| `--auto` | bool | stable | Mutually exclusive with `--with` |
-| `--tags <csv>` | string | stable | For `--auto` routing |
-| `--prefer <mode>` | string | stable | One of: best, cheapest, fastest, balanced. Default: balanced |
-| `--effort <level>` | string \| int | stable | One of: minimal, low, medium, high, max. Or integer token budget. Default: medium |
+| `--auto` | bool | deprecated v0.11 | Compatibility auto-router entrypoint; use semantic job verbs for default routing |
+| `--tags <csv>` | string | deprecated v0.11 for auto-route | Compatibility auto-router tags |
+| `--prefer <mode>` | string | deprecated v0.11 for auto-route | One of: best, cheapest, fastest, balanced. Use job verbs instead of tuning the route |
+| `--effort <level>` | string \| int | stable; deprecated v0.11 for auto-route | One of: minimal, low, medium, high, max. Or integer token budget. Default: medium |
 | `--timeout <sec>` | int | stable | Wall-clock timeout. Unbounded by default. When set explicitly, value is honored as-is (no scaling) |
 | `--max-stall-seconds <sec>` | int | stable | Streaming CLI stall watchdog. Default: 360, scaled up on slow networks unless explicitly set. `0` disables |
-| `--exclude <csv>` | string | stable | Providers to skip in `--auto` |
+| `--exclude <csv>` | string | deprecated v0.11 for auto-route | Providers to skip in compatibility auto-routing |
 | `--brief <text>` | string | stable | Inline delegation brief / prompt |
 | `--brief-file <path>` | string | stable | File path, `-` for stdin |
 | `--issue <N\|owner/repo#N>` | string | stable | GitHub issue seed brief via `gh` |
