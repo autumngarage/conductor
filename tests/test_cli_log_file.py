@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from click.testing import CliRunner
 
+from conductor import __version__
 from conductor.cli import main
 from conductor.providers import (
     CallResponse,
@@ -200,6 +201,7 @@ def test_exec_log_file_writes_structured_ndjson_for_auto_route(
     assert "usage" in kinds
     route_event = next(event for event in events if event["event"] == "route_decision")
     assert route_event["data"]["provider"] == "claude"
+    assert route_event["data"]["conductor_version"] == __version__
     usage_event = next(event for event in events if event["event"] == "usage")
     assert usage_event["data"]["usage"]["output_tokens"] == 4
 
