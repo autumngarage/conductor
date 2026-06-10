@@ -3337,6 +3337,31 @@ emit_fix_classification() {
   echo "[conductor] exec fix-classification: $kind (findings-addressed: $findings_addressed)"
 }
 
+validate_fix_classification() {
+  local fix_output="$1"
+  local line_count
+  line_count="$(printf '%s\n' "$fix_output" | grep -ic '^[[:space:]]*fix_classification:[[:space:]]*' || true)"
+  if [ "$line_count" -eq 0 ]; then
+    echo "==> $REVIEWER_LABEL emitted CODEX_REVIEW_FIXED without a FIX_CLASSIFICATION line."
+    echo "    Fix output must include exactly one: FIX_CLASSIFICATION: substantive|style-only|mixed; findings-addressed: N"
+    echo "    Refusing to auto-commit malformed fix output."
+    return 1
+  fi
+  if [ "$line_count" -gt 1 ]; then
+    echo "==> $REVIEWER_LABEL emitted CODEX_REVIEW_FIXED with $line_count FIX_CLASSIFICATION lines (expected exactly 1)."
+    echo "    Duplicate classification lines produce ambiguous results; refusing to auto-commit."
+    return 1
+  fi
+  if ! printf '%s\n' "$fix_output" \
+    | grep -Eiq '^[[:space:]]*fix_classification:[[:space:]]*(substantive|style-only|mixed)[[:space:]]*;[[:space:]]*findings-addressed:[[:space:]]*[0-9]+[[:space:]]*$'; then
+    echo "==> $REVIEWER_LABEL emitted a malformed FIX_CLASSIFICATION line."
+    echo "    Expected: FIX_CLASSIFICATION: substantive|style-only|mixed; findings-addressed: N"
+    echo "    Refusing to auto-commit malformed fix output."
+    return 1
+  fi
+  return 0
+}
+
 write_review_findings() {
   local findings_text="$1"
   local branch findings_dir findings_file findings_block
@@ -5037,6 +5062,9 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
         exit 1
       fi
 
+      if ! validate_fix_classification "$OUTPUT"; then
+        exit 1
+      fi
       emit_fix_classification "$OUTPUT"
 
       phase "applying fixes"
