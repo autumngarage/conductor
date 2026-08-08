@@ -12,8 +12,6 @@ principles/engineering-principles.md
 principles/file-upstream-bugs.md
 principles/git-workflow.md
 principles/pre-implementation-checklist.md
-scripts/conductor-review.sh
-scripts/codex-review.sh
 scripts/branch-guard.sh
 scripts/emergency-disclosure.sh
 scripts/cortex-pr-merged-hook.sh
